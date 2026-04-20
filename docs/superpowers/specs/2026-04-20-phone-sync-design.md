@@ -18,11 +18,16 @@ Mirror Android notifications between two personal phones (Android 14+, API 34–
 
 Non-goals (v1): SMS bridging, clipboard sync, file transfer, media-session control, desktop client, third-party pairing (only the user's own two devices).
 
+**Phase 1 MVP vs Phase 2 polish:**
+
+- **Phase 1 MVP display**: title + text + small icon + large icon. Mirror renders as basic `NotificationCompat.Builder` notification. `big_text`, `sub_text`, `template`, `messages[]` are captured in the packet schema but NOT reconstructed on the receiver.
+- **Phase 2**: MessagingStyle reconstruction (chat threading), BigTextStyle, BigPictureStyle rendering on receiver.
+
 ---
 
 ## 2. High-Level Architecture
 
-```
+```text
  Phone A                              Phone B
  ┌────────────────────────┐          ┌────────────────────────┐
  │ NotificationListener   │          │ NotificationListener   │
@@ -47,6 +52,7 @@ Non-goals (v1): SMS bridging, clipboard sync, file transfer, media-session contr
 ```
 
 **Two transports, one protocol:**
+
 - **LAN transport** — Android NSD discovery, TLS socket, direct peer connection. Used when both devices are on same network and discovery succeeds.
 - **Relay transport** — persistent TLS WebSocket to home/cloud relay. Always available as fallback. Relay triggers FCM high-priority data message to wake a Dozed recipient.
 
@@ -69,6 +75,10 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
 }
 ```
 
+### 3.0 Icon Transfer Optimization
+
+Icons are hashed (SHA-256 of PNG bytes) and cached by hash on receivers. On `notif.update` or `notif.post` for an app whose icon bytes already exist on the peer, the sender omits `*_icon_png` and sends only `*_icon_hash`. Receiver looks up the hash in its icon cache; if missing (cache eviction), it NACKs via `icon.request(hash)` and sender re-transmits. Small icons capped at 96×96, large icons at 256×256 before PNG encode.
+
 ### 3.1 `notif.post` / `notif.update`
 
 ```json
@@ -89,8 +99,10 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
   "is_clearable": true,
   "is_ongoing": false,
   "priority": "default",
-  "small_icon_png": "<base64 rendered bitmap>",
-  "large_icon_png": "<base64 bitmap or null>",
+  "small_icon_png": "<base64 rendered bitmap, omitted on update if hash unchanged>",
+  "small_icon_hash": "<sha256 hex, always present>",
+  "large_icon_png": "<base64 bitmap or null, omitted on update if hash unchanged>",
+  "large_icon_hash": "<sha256 hex, null if no icon>",
   "actions": [
     {
       "title": "Reply",
@@ -103,6 +115,8 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
 ```
 
 `canon_id = package + ":" + id + ":" + (tag or "")` — stable cross-device identity.
+
+**Known limitation — id=0 collisions.** Some apps reuse `id=0` with differing tags, and some use neither distinguishing field (e.g., ongoing foreground-service notifications). For identical `(package, id, tag)` from the same origin, last-write-wins — a new `notif.post` supersedes any prior mirror. Distinct apps cannot collide because `package` is included. Logged as a known-limitation in README; reconsidered in v2 if real-world collisions appear.
 
 ### 3.2 `notif.cancel`
 
@@ -128,10 +142,14 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
 ### 4.1 `PhoneSyncNotificationListener : NotificationListenerService`
 
 - `onNotificationPosted(sbn)` → convert to `notif.post`/`notif.update`, hand to `OutboundQueue`.
-- `onNotificationRemoved(sbn, rankingMap, reason)` → filter:
-  - reason ∈ {1, 2, 3, 8, 9} → emit `notif.cancel` with `reason=user_swipe` / `app_cancel`.
-  - reason ∈ {10, 11} → **suppress** (we just cancelled it locally in response to a peer).
-- Maintains `mirroredKeys: Set<String>` — notifications posted locally *because of* a peer event. Dismissing one of these does NOT re-emit as a new post-event; it triggers an origin-side cancel back to the peer that sourced it.
+- `onNotificationRemoved(sbn, rankingMap, reason)` → combined condition filter:
+  - `canon_id ∈ pendingPeerCancel` → **suppress** and clear the entry. This set contains `canon_id`s we just called `cancelNotification` on in response to a peer's `notif.cancel`. Only suppresses the exact cancel we triggered; unrelated reason-10 events from other apps are NOT suppressed.
+  - Else, reason ∈ {1, 2, 3} (REASON_CLICK, REASON_CANCEL, REASON_CANCEL_ALL) → emit `notif.cancel` with `reason=user_swipe`.
+  - Else, reason ∈ {8, 9} (REASON_APP_CANCEL, REASON_APP_CANCEL_ALL) → emit `notif.cancel` with `reason=app_cancel`.
+  - Else (4, 6, 12, 13, 14, and any unhandled reason-10 from other listeners) → do not emit.
+- Maintains two maps:
+  - `mirroredFromPeer: Map<canonId, originDeviceId>` — notifications this device posted *because of* a peer event. Dismissal of such a notification triggers an origin-side cancel back to the originating peer (not a new post-event).
+  - `pendingPeerCancel: Set<canonId>` — canon_ids on which we just invoked `cancelNotification` after receiving a peer's cancel. Used to suppress the single resulting reason-10 callback. Entries auto-expire after 5s to prevent leakage if the callback never fires.
 
 ### 4.2 `SyncService : Service` (foreground, type `remoteMessaging`)
 
@@ -141,8 +159,9 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
 
 ### 4.3 `LanTransport`
 
-- `NsdManager.registerService(_phonesync._tcp)` advertises self.
-- Discovery resolves peer → open TLS socket (client cert from pair step) → frame JSON lines.
+- `NsdManager.registerService(_phonesync._tcp)` advertises self; TXT record includes `device_id` and a short `pair_fingerprint` (first 8 bytes of SHA-256 of peer's encryption pubkey).
+- **Peer selection:** on discovery, only services whose `device_id` matches the paired `peer.device_id` AND whose `pair_fingerprint` matches the stored peer pubkey are accepted. All others ignored. Multi-device expansion (v2) will iterate the paired set.
+- Open TLS socket (client cert from pair step) → frame length-prefixed JSON.
 - Drops to idle if peer unreachable for 30s. Does NOT drive retries — relay is the source of truth for reachability.
 
 ### 4.4 `RelayTransport`
@@ -160,9 +179,17 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
 ### 4.6 `Crypto`
 
 - libsodium via Lazysodium-Android.
-- Encryption: X25519 keypair, `crypto_box_seal` — anonymous authenticated encryption to peer's pubkey. Private key generated in Android Keystore with StrongBox attestation when available.
+- Encryption: **`crypto_box_easy`** (X25519 + XSalsa20-Poly1305, authenticated). Sender encrypts with own secret + peer's public; recipient decrypts and verifies sender authenticity cryptographically. `crypto_box_seal` is explicitly rejected because it is anonymous and provides no sender authentication.
+- Nonce: 24 random bytes per message, prepended to ciphertext.
 - Signing: Ed25519 keypair for JWT relay auth.
-- Keys never leave device.
+- Both keypairs stored in Android Keystore (StrongBox attestation when available). Keys never leave device.
+
+### 4.6.1 Replay Protection
+
+- Every inbound packet's `msg_id` (UUID v4) is checked against a local `seenMessageIds` Room table before decryption-ack is granted.
+- Duplicate `msg_id` → silently drop.
+- TTL on the dedup table: 48h (2× relay offline queue TTL). Evicted on schedule.
+- Inbound packets carrying `ts` older than 48h are also rejected as stale.
 
 ### 4.7 `Pairing`
 
@@ -172,9 +199,11 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
 
 ### 4.8 `ReplyBridge`
 
-- When peer sends `notif.reply`, look up stored `actionId → PendingIntent` map for that `canon_id`.
-- Build `Intent`, fill `RemoteInput` result via `RemoteInput.addResultsToIntent`, fire PendingIntent.
-- Map entry TTL = lifetime of the source notification; cleared on cancel.
+- **`action_id` generation (origin side):** when building the outbound `notif.post`, iterate `notification.actions[]` and assign each a UUID v4 as `action_id`. Store `(canon_id, action_id) → (PendingIntent, RemoteInput)` in an in-memory map keyed off the service lifecycle.
+- **Invalidation:** on every `notif.post` (including updates to the same `canon_id`), old `action_id`s for that `canon_id` are discarded and new ones minted. On `notif.cancel` for that `canon_id`, all its `action_id` entries are dropped. A stale `action_id` from the peer → reply drops with a `reply.failed` event sent back (Phone B shows a toast).
+- **Reply execution (origin side):** look up `(canon_id, action_id)` → build `Intent`, fill via `RemoteInput.addResultsToIntent(remoteInputs, intent, bundle)`, fire `PendingIntent.send(context, 0, intent)`.
+- **Peer side:** when mirroring, the Phone B notification is posted with reconstructed `Action` objects whose `PendingIntent` targets a local `ReplyReceiver` BroadcastReceiver. The receiver captures the typed text and emits `notif.reply` back to origin with the stored `action_id`.
+- Map entry lifetime: tied to source notification; TTL safety net of 1h for orphans.
 
 ---
 
@@ -217,6 +246,7 @@ Scenario: WhatsApp notification posted on Phone A.
 6. Phone B: its own local swipe already removed the notification in step 3. Done.
 
 Reverse (swipe on A first):
+
 1. User swipes on A → `reason=1` → emit `notif.cancel`.
 2. Phone B receives → looks up local `canon_id=X` → calls `cancelNotification`.
 3. Phone B listener fires `reason=10` → suppressed. Done.
@@ -250,14 +280,16 @@ Mirror-of-mirror never happens because `mirroredFromPeer` tagging makes Phone B'
 ## 9. Build Sequence (Phase Order)
 
 1. **Relay (Go)** — WebSocket + BoltDB + pair endpoints. Run on laptop via docker-compose. No FCM yet.
-2. **Android: listener + packet + relay transport** — post/update/cancel over relay only. Hardcoded pair config. Verify round-trip.
-3. **Pairing flow + crypto** — QR-code pair, libsodium E2EE, JWT auth.
-4. **Loop avoidance + dismissal sync** — reason-code filtering, mirroredFromPeer map.
-5. **LAN transport** — NSD discovery, TLS socket, transport selection.
+2. **Android: listener + packet + relay transport** — post/update/cancel over relay only. Hardcoded pair config. Verify round-trip. MVP display (title/text/icons only).
+3. **Pairing flow + crypto** — QR-code pair, libsodium `crypto_box_easy` E2EE, Ed25519 JWT auth, msg_id replay protection.
+4. **Loop avoidance + dismissal sync** — reason-code filtering, `mirroredFromPeer` + `pendingPeerCancel` maps.
+5. **LAN transport** — NSD discovery, TLS socket, transport selection (LAN preferred when peer fingerprint matches).
 6. **FCM integration** — Firebase project, relay-side FCM Admin SDK, Android `FirebaseMessagingService`.
-7. **Reply bridge** — RemoteInput passthrough.
-8. **Reliability UX** — OEM onboarding, permission nags, connection-state UI.
-9. **Cloud deploy migration path** — Fly.io target, env-var-driven config swap.
+7. **Reply bridge** — RemoteInput passthrough with action_id lifecycle.
+8. **Icon cache + hash-elide optimization** — receiver-side icon cache, `icon.request` NACK.
+9. **Reliability UX** — OEM onboarding (dontkillmyapp links), permission nags, connection-state UI.
+10. **Phase 2 styles** — MessagingStyle, BigTextStyle, BigPictureStyle reconstruction on receiver.
+11. **Cloud deploy migration path** — Fly.io target, env-var-driven config swap.
 
 Each phase is a standalone working increment, reviewable, mergeable.
 
@@ -265,7 +297,7 @@ Each phase is a standalone working increment, reviewable, mergeable.
 
 ## 10. Repo Layout
 
-```
+```text
 phone-sync/
 ├── android/            # Android Studio project
 │   ├── app/
