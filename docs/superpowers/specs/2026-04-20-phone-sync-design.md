@@ -318,7 +318,11 @@ Runs as a tray/menubar app on macOS, Windows, Linux. Receiver-only in v1.
 - `crypto::{box_easy_seal, box_easy_open}` — `sodiumoxide` wrapper, wrapped keys stored in OS keychain (macOS Keychain, Windows Credential Manager, libsecret on Linux) via `keyring` crate. Same Keystore-wrap pattern as Android.
 - `relay_ws` — `tokio-tungstenite` WebSocket client. Auto-reconnect with backoff. JWT auth via Ed25519.
 - `lan_discovery` — `mdns-sd` crate, daily-rotated ad-id, same derivation as Android.
-- `notifier` — `tauri-plugin-notification` for native OS notifications; on user action (click/dismiss), invoke local handler that emits `notif.cancel` back to origin.
+- `notifier` — native OS notifications per platform:
+  - **macOS** — `UNUserNotificationCenter` via `tauri-plugin-notification`. Click + dismiss callbacks reliable.
+  - **Linux** — `org.freedesktop.Notifications` via `tauri-plugin-notification` or `notify-rust`. `ActionInvoked` and `NotificationClosed` signals reliable; `reason` field distinguishes user-close from app-close.
+  - **Windows** — `tauri-plugin-notification` wraps UWP toasts but **does not reliably surface per-notification dismiss events back to Rust**. For v1 we bypass the plugin on Windows and call `winrt::Windows::UI::Notifications::ToastNotification` directly, subscribing to the `Dismissed` event handler per notification. This adds a thin Rust shim (`src-tauri/src/windows_toast.rs`). Click callbacks work via the plugin; dismiss callbacks route through the shim. Without this, Windows dismiss-sync silently fails.
+  - All platforms: on user action (click/dismiss), invoke local handler that applies the `pendingPeerCancel` tag check, then emits `notif.cancel` back to origin if user-initiated.
 - `reply_capture` — platform status:
   - **macOS** — `UNNotificationAction` with `UNTextInputNotificationAction` supports inline reply cleanly via `UNUserNotificationCenterDelegate.didReceive`. Working.
   - **Windows** — Toast inline reply via `ToastContentBuilder` + `InputType.Text` is available in the UWP API, **but `tauri-plugin-notification` does not currently expose reply text back to Rust** (as of April 2026). Options: (a) bypass the Tauri plugin and call `winrt::Windows::UI::Notifications` directly from a small Rust/C++ shim, or (b) treat Windows like Linux and show a fallback Tauri mini-window with a text box. **v1 ships with the fallback window on Windows.** Native inline reply on Windows is Phase 2.
