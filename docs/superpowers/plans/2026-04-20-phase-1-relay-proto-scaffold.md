@@ -185,6 +185,8 @@ cd relay && go test ./internal/server/
 
 Expected: FAIL — `undefined: New`.
 
+> **TDD note:** A compile-error "red" is acceptable at the type/contract layer — the test cannot run until the type exists. Standard red/green (assertion failure) applies once types are present; later tasks follow that pattern.
+
 - [ ] **Step 4: Implement server skeleton**
 
 Create `relay/internal/server/server.go`:
@@ -293,15 +295,34 @@ cd relay && go get github.com/gorilla/websocket
 
 - [ ] **Step 2: Write failing WS echo test**
 
-Append to `relay/internal/server/server_test.go`:
+Overwrite `relay/internal/server/server_test.go` with the merged content below (Go does not allow two top-level `import` blocks in one file — merge, don't append):
 
 ```go
+package server
+
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 
 	"github.com/gorilla/websocket"
 )
+
+func TestHealthEndpoint(t *testing.T) {
+	srv := New()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	expected := `{"status":"ok"}`
+	if rec.Body.String() != expected {
+		t.Fatalf("expected body %q, got %q", expected, rec.Body.String())
+	}
+}
 
 func TestWebSocketEcho(t *testing.T) {
 	srv := New()
@@ -598,6 +619,8 @@ services:
     container_name: phone-sync-relay
     environment:
       LISTEN_ADDR: ":8080"
+    ports:
+      - "8080:8080"  # Expose for local dev & Android emulator; remove when fronted by Caddy in prod.
     volumes:
       - relay-data:/data
     restart: unless-stopped
@@ -647,25 +670,67 @@ relay.local {
 cd deploy && docker compose build relay
 docker compose up -d relay
 sleep 2
-curl -sf http://localhost:8080/health || echo "FAIL — check docker compose logs relay"
+curl -sf http://localhost:8080/health
 docker compose down
 ```
 
-Expected: `{"status":"ok"}`.
-
-Note: `ports:` not exposed in compose — use `docker compose exec` or add a temp port mapping for local access:
-
-```bash
-cd deploy && docker run --rm -p 8080:8080 phone-sync-relay
-# in another shell:
-curl -sf http://localhost:8080/health
-```
+Expected: `{"status":"ok"}`. (Port 8080 is mapped in the compose file above.)
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add relay/Dockerfile relay/.dockerignore deploy/
 git commit -m "feat(deploy): Dockerfile + docker-compose + Caddy"
+```
+
+---
+
+## Task 5.5: Makefile — canonicalize proto sync
+
+**Files:**
+
+- Create: `Makefile`
+
+- [ ] **Step 1: Write top-level Makefile**
+
+Create `Makefile` at repo root:
+
+```makefile
+.PHONY: sync-proto relay-test relay-build proto-diff
+
+sync-proto:
+	mkdir -p relay/internal/server/schemas
+	cp proto/*.schema.json relay/internal/server/schemas/
+
+# Fails if relay's embedded schemas drift from canonical proto/.
+proto-diff:
+	diff -q proto/ relay/internal/server/schemas/ | grep -v '^Only in proto' ; \
+	for f in proto/*.schema.json ; do \
+		diff -q $$f relay/internal/server/schemas/$$(basename $$f) || exit 1 ; \
+	done
+
+relay-test: sync-proto
+	cd relay && go test ./... -race -count=1
+
+relay-build: sync-proto
+	cd relay && go build -o ../bin/relay ./cmd/relay
+```
+
+- [ ] **Step 2: Verify**
+
+```bash
+make sync-proto
+make proto-diff    # should exit 0
+echo "change" >> proto/ping.schema.json
+make proto-diff    # should exit 1
+git checkout proto/ping.schema.json
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add Makefile
+git commit -m "chore: Makefile with sync-proto + proto-diff drift check"
 ```
 
 ---
@@ -904,66 +969,10 @@ Create `relay/internal/server/validator.go`:
 package server
 
 import (
-	"embed"
-	"fmt"
-	"io/fs"
-
-	"github.com/santhosh-tekuri/jsonschema/v5"
-)
-
-//go:embed schemas/*.schema.json
-var schemaFS embed.FS
-
-type Validator struct {
-	envelope *jsonschema.Schema
-}
-
-func NewValidator() (*Validator, error) {
-	compiler := jsonschema.NewCompiler()
-	err := fs.WalkDir(schemaFS, "schemas", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		b, err := schemaFS.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return compiler.AddResource(path, bytesReader(b))
-	})
-	if err != nil {
-		return nil, err
-	}
-	env, err := compiler.Compile("schemas/packet.schema.json")
-	if err != nil {
-		return nil, fmt.Errorf("compile envelope: %w", err)
-	}
-	return &Validator{envelope: env}, nil
-}
-
-func (v *Validator) ValidateEnvelope(raw []byte) error {
-	var any interface{}
-	if err := jsonUnmarshal(raw, &any); err != nil {
-		return fmt.Errorf("parse: %w", err)
-	}
-	return v.envelope.Validate(any)
-}
-
-// helpers kept tiny for readability
-import_helpers_here := 0
-_ = import_helpers_here
-```
-
-The tail lines are placeholders — replace with proper imports. Final `validator.go`:
-
-```go
-package server
-
-import (
 	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
@@ -1005,16 +1014,12 @@ func (v *Validator) ValidateEnvelope(raw []byte) error {
 	}
 	return v.envelope.Validate(doc)
 }
-
-// keep io import used (silence unused) — can be removed once not needed:
-var _ io.Reader = (*bytes.Reader)(nil)
 ```
 
-Copy schemas into relay's embed path:
+Copy schemas into relay's embed path via the canonical Makefile target (added in Task 5.5):
 
 ```bash
-mkdir -p relay/internal/server/schemas
-cp proto/*.schema.json relay/internal/server/schemas/
+make sync-proto
 ```
 
 - [ ] **Step 6: Wire validator into /ws**
@@ -1075,41 +1080,89 @@ func New() *Server {
 }
 ```
 
-- [ ] **Step 7: Update existing WS echo test to use valid envelope**
+- [ ] **Step 7: Update existing WS echo test + add invalid-envelope test**
 
-Modify the test payload in `TestWebSocketEcho`:
+Overwrite `relay/internal/server/server_test.go` (full file, keeping `TestHealthEndpoint` unchanged):
 
 ```go
-valid := `{"v":1,"type":"ping","msg_id":"11111111-1111-4111-8111-111111111111","origin_device":"devA","ts":1713600000000}`
-if err := c.WriteMessage(websocket.TextMessage, []byte(valid)); err != nil { ... }
-_, msg, err := c.ReadMessage()
-if string(msg) != valid {
-    t.Fatalf("expected echo, got %q", string(msg))
+package server
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gorilla/websocket"
+)
+
+const validEnvelope = `{"v":1,"type":"ping","msg_id":"11111111-1111-4111-8111-111111111111","origin_device":"devA","ts":1713600000000}`
+
+func TestHealthEndpoint(t *testing.T) {
+	srv := New()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	expected := `{"status":"ok"}`
+	if rec.Body.String() != expected {
+		t.Fatalf("expected body %q, got %q", expected, rec.Body.String())
+	}
 }
-```
 
-- [ ] **Step 8: Add test for invalid-envelope rejection**
-
-Append to `server_test.go`:
-
-```go
-func TestWebSocketRejectsInvalid(t *testing.T) {
+func TestWebSocketEcho(t *testing.T) {
 	srv := New()
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
+
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer c.Close()
-	_ = c.WriteMessage(websocket.TextMessage, []byte(`{"garbage":true}`))
-	_, msg, _ := c.ReadMessage()
+
+	if err := c.WriteMessage(websocket.TextMessage, []byte(validEnvelope)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, msg, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(msg) != validEnvelope {
+		t.Fatalf("expected echo, got %q", string(msg))
+	}
+}
+
+func TestWebSocketRejectsInvalid(t *testing.T) {
+	srv := New()
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"garbage":true}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, msg, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
 	if !strings.Contains(string(msg), "invalid envelope") {
 		t.Fatalf("expected error reply, got %q", string(msg))
 	}
 }
 ```
+
+- [ ] **Step 8: Add validator unit tests** (covered in Step 3 above; skip if already green)
 
 - [ ] **Step 9: Run all tests**
 
@@ -1144,13 +1197,13 @@ Run from repo root:
 
 ```bash
 cd /Users/moaieen.kirmani/Documents/projects/Learn/phone-sync
-npx create-expo-app@latest mobile --template blank-typescript
+npx create-expo-app@latest mobile --template default
 ```
 
-Note: this creates a template. If the template differs from expectations, remove and re-scaffold:
+`--template default` in SDK 52+ is TypeScript with Expo Router pre-configured and includes a `(tabs)` example. Remove the example to keep scope clean:
 
 ```bash
-rm -rf mobile/node_modules mobile/.expo
+rm -rf mobile/app/\(tabs\) mobile/app/+not-found.tsx mobile/components mobile/constants mobile/hooks mobile/scripts
 ```
 
 - [ ] **Step 2: Install Expo Router**
@@ -1287,11 +1340,9 @@ Overwrite `mobile/modules/phone-sync-core/android/src/main/java/expo/modules/pho
 ```kotlin
 package expo.modules.phonesynccore
 
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -1299,6 +1350,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class PhoneSyncCoreModule : Module() {
     private val client = OkHttpClient.Builder()
@@ -1309,37 +1361,54 @@ class PhoneSyncCoreModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("PhoneSyncCore")
 
-        AsyncFunction("ping") { relayUrl: String, promise: expo.modules.kotlin.Promise ->
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    val request = Request.Builder().url(relayUrl).build()
-                    val msgId = UUID.randomUUID().toString()
-                    val envelope = """{"v":1,"type":"ping","msg_id":"$msgId","origin_device":"mobile","ts":${System.currentTimeMillis()}}"""
-                    val ws = client.newWebSocket(request, object : WebSocketListener() {
-                        override fun onOpen(webSocket: WebSocket, response: Response) {
-                            webSocket.send(envelope)
-                        }
-
-                        override fun onMessage(webSocket: WebSocket, text: String) {
-                            webSocket.close(1000, "done")
-                            promise.resolve(text)
-                        }
-
-                        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                            promise.reject("PING_FAILED", t.message ?: "unknown", t)
-                        }
-                    })
-                    // shut the client's exec pool down after a window if nothing came back
-                    kotlinx.coroutines.delay(10_000)
-                    ws.cancel()
-                } catch (e: Exception) {
-                    promise.reject("PING_ERROR", e.message ?: "unknown", e)
-                }
+        AsyncFunction("ping") { relayUrl: String, promise: Promise ->
+            val settled = AtomicBoolean(false)
+            fun resolve(value: String) {
+                if (settled.compareAndSet(false, true)) promise.resolve(value)
             }
+            fun reject(code: String, msg: String, t: Throwable?) {
+                if (settled.compareAndSet(false, true)) promise.reject(code, msg, t)
+            }
+
+            val request = Request.Builder().url(relayUrl).build()
+            val msgId = UUID.randomUUID().toString()
+            val envelope = """{"v":1,"type":"ping","msg_id":"$msgId","origin_device":"mobile","ts":${System.currentTimeMillis()}}"""
+
+            val ws = client.newWebSocket(request, object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    webSocket.send(envelope)
+                }
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    resolve(text)
+                    webSocket.close(1000, "done")
+                }
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    reject("PING_FAILED", t.message ?: "unknown", t)
+                }
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    // Safety net: if closed without onMessage, surface a failure.
+                    reject("PING_CLOSED", "closed before message (code=$code reason=$reason)", null)
+                }
+            })
+
+            // Timeout fallback — no delay coroutine, no cancel against already-closed socket.
+            // OkHttp's readTimeout above will trigger onFailure if nothing arrives.
+            // We also explicitly cancel on timeout via a scheduled task:
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (!settled.get()) {
+                    ws.cancel()
+                    reject("PING_TIMEOUT", "no response within 10s", null)
+                }
+            }, 10_000)
         }
     }
 }
 ```
+
+**Why this shape:**
+- `AtomicBoolean settled` guarantees `promise.resolve/reject` fires at most once, preventing bridge crashes on any ordering of `onMessage` / `onFailure` / `onClosed` / timeout.
+- No `delay(...)` coroutine + no `ws.cancel()` on an already-closed socket.
+- `postDelayed` on main looper schedules the timeout safely; it only cancels if still unsettled.
 
 - [ ] **Step 4: Add OkHttp to module's Gradle**
 
@@ -1672,10 +1741,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - name: Sync proto into relay embed
-        run: |
-          mkdir -p internal/server/schemas
-          cp ../proto/*.schema.json internal/server/schemas/
+      - name: Sync proto (canonical via Makefile)
+        working-directory: .
+        run: make sync-proto
+      - name: Proto drift check
+        working-directory: .
+        run: make proto-diff
       - run: go mod download
       - run: go vet ./...
       - run: go test ./... -race -count=1
@@ -1685,10 +1756,8 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v4
-      - name: Sync proto into relay embed
-        run: |
-          mkdir -p relay/internal/server/schemas
-          cp proto/*.schema.json relay/internal/server/schemas/
+      - name: Sync proto (canonical via Makefile)
+        run: make sync-proto
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
