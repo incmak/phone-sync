@@ -75,7 +75,9 @@ The app selects LAN when available, falls back to relay. Both sides publish live
 
 NotificationListenerService is a system-bound service — it must be implemented in Kotlin. No RN or Expo module exists that exposes the full NLS API (read, cancel, snooze, reason codes). The service also must stay alive in the OS binding regardless of whether a JS engine is running. Therefore:
 
-- **Core** (NLS, SyncService foreground service, LanTransport, RelayTransport, FcmReceiver, Crypto, ReplyBridge) — implemented as a **custom Expo Native Module** in Kotlin, packaged under `mobile/modules/phone-sync-core/`. Runs independently of the RN JS runtime; survives app-process death as long as the OS holds the NLS binding.
+- **Core** (NLS, SyncService foreground service, LanTransport, RelayTransport, FcmReceiver, Crypto, ReplyBridge) — implemented as a **custom Expo Native Module** in Kotlin, packaged under `mobile/modules/phone-sync-core/`.
+- **Process-lifecycle reality check:** the Kotlin module lives in the **same process** as the RN JS engine. When the OEM battery manager kills the app, both die together. What survives is the *system's intent to re-bind the NLS* — when a new notification arrives, Android restarts the app process and re-binds the listener. Crucially, all in-memory state (`mirroredFromPeer`, `pendingPeerCancel`, outbound queue tail) is lost on process death.
+- **Persistence requirement:** `mirroredFromPeer` and outbound-queue entries are persisted to Room on write. `pendingPeerCancel` is in-memory only (tombstones are short-lived and losing them risks at most one duplicate echo — not a correctness bug). Reconnection on restart rehydrates transport state from Room.
 - **UI shell** (pairing QR scan, settings, app allowlist/denylist, reliability onboarding, connection state, history) — standard Expo Router + React Native. Talks to the native module via its exported interface.
 - **iOS** — module stubbed (returns feature-unavailable). All RN UI works on iOS but the core-sync is no-op. Documented as Android-only for v1.
 
@@ -197,9 +199,11 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
 
 ### 4.2 `SyncService : Service` (foreground, type `remoteMessaging`)
 
-- Owns transport lifecycle. Always running while the listener is enabled.
-- State machine: `LAN_CONNECTED` → `RELAY_CONNECTED` → `OFFLINE_QUEUED`.
-- Persistent notification: "Phone-Sync active — connected via LAN".
+- Owns transport lifecycle. Runs in one of two modes (user-selectable, see §6.1):
+  - **Lazy FGS (default)** — FGS promoted while actively transmitting; demoted to a regular bound service + socket released after 5 min idle. Woken by FCM high-priority pings.
+  - **Always Connected** — FGS always promoted, WebSocket held open. Opt-in for users who prioritize latency over battery.
+- State machine: `LAN_CONNECTED` → `RELAY_CONNECTED` → `OFFLINE_QUEUED` → `IDLE_DEMOTED` (lazy mode only).
+- Persistent notification (while FGS promoted): "Phone-Sync active — connected via LAN/Relay".
 
 **AndroidManifest.xml entries (required, API 34+):**
 
@@ -237,7 +241,7 @@ Android 8+ silently drops notifications posted without a registered channel.
 ### 4.4 `RelayTransport`
 
 - OkHttp WebSocket, URL from paired config.
-- Auth: JWT signed with device's Ed25519 signing key (separate keypair from encryption key), presented on connect.
+- Auth: JWT signed with device's Ed25519 signing key (separate keypair from encryption key), presented on connect. **Relay verifies the JWT signature against the `sign_pubkey` stored in the pair record at pairing time — not against any arbitrary Ed25519 key.** The pair record is the trust anchor.
 - Exponential backoff reconnect (1s → 60s cap), keepalive ping every 30s.
 - Outbound queue with disk persistence (Room) for offline bursts.
 
@@ -315,7 +319,10 @@ Runs as a tray/menubar app on macOS, Windows, Linux. Receiver-only in v1.
 - `relay_ws` — `tokio-tungstenite` WebSocket client. Auto-reconnect with backoff. JWT auth via Ed25519.
 - `lan_discovery` — `mdns-sd` crate, daily-rotated ad-id, same derivation as Android.
 - `notifier` — `tauri-plugin-notification` for native OS notifications; on user action (click/dismiss), invoke local handler that emits `notif.cancel` back to origin.
-- `reply_capture` — on platforms supporting inline reply (macOS 10.9+ via NSUserNotification, Windows Action Center): capture typed text, emit `notif.reply`. Linux libnotify has no inline reply — show a small Tauri window with a text box as fallback.
+- `reply_capture` — platform status:
+  - **macOS** — `UNNotificationAction` with `UNTextInputNotificationAction` supports inline reply cleanly via `UNUserNotificationCenterDelegate.didReceive`. Working.
+  - **Windows** — Toast inline reply via `ToastContentBuilder` + `InputType.Text` is available in the UWP API, **but `tauri-plugin-notification` does not currently expose reply text back to Rust** (as of April 2026). Options: (a) bypass the Tauri plugin and call `winrt::Windows::UI::Notifications` directly from a small Rust/C++ shim, or (b) treat Windows like Linux and show a fallback Tauri mini-window with a text box. **v1 ships with the fallback window on Windows.** Native inline reply on Windows is Phase 2.
+  - **Linux** — `libnotify` has no inline reply; use a Tauri fallback window.
 - `icon_cache` — LRU on-disk cache, same hash protocol.
 - `pair_client` — QR code **scanner** (camera via `nokhwa` crate) OR manual entry (paste QR payload as text for headless/servers).
 
@@ -330,7 +337,15 @@ Runs as a tray/menubar app on macOS, Windows, Linux. Receiver-only in v1.
 
 - User clicks the OS notification → OS dismisses it → our `NotificationHandler` callback fires → emit `notif.cancel(reason=user_click)` to origin.
 - User clicks "Clear all" in OS notification center → each cleared notification fires its dismiss callback individually (all platforms). Emit one cancel per.
-- Origin sends `notif.cancel` → Rust calls platform-specific close (macOS `UNUserNotificationCenter.removeDeliveredNotifications`, Windows `ToastNotifier.Hide`, Linux `org.freedesktop.Notifications.CloseNotification`). Same tombstone + loop-avoidance logic as Android.
+- Origin sends `notif.cancel` → Rust calls platform-specific close (macOS `UNUserNotificationCenter.removeDeliveredNotifications`, Windows `ToastNotifier.Hide`, Linux `org.freedesktop.Notifications.CloseNotification`).
+
+**Desktop loop avoidance — no OS reason codes, so we use explicit tagging:**
+
+Unlike Android's `REASON_LISTENER_CANCEL`, desktop OSes fire the dismiss callback identically for user- and programmatic-closes (e.g., macOS `userNotificationCenter(_:didDismissNotification:)` has no reason parameter). We use the same `pendingPeerCancel` tombstone approach but distinguish by **caller-side flagging** rather than OS-provided reason codes:
+
+- Maintain `pendingPeerCancel: Set<canonId>` with 30s TTL.
+- On receiving peer `notif.cancel`: insert `canon_id` into the set → invoke platform close API → when the dismiss callback fires, check membership → if present, consume the entry and suppress the echo; if absent, it's user-initiated, emit cancel to peer.
+- Race window: a real user dismissal between "insert-into-set" and "OS close callback" would be mis-suppressed. Mitigation: insert-into-set happens immediately before the OS call (microseconds); tombstone self-clears on first hit; 30s TTL bounds stalled-callback cases.
 
 **LAN discovery on desktop:** desktop advertises as well (same `_phonesync._tcp`). Phone ↔ desktop direct WebSocket over TLS when on same LAN.
 
@@ -345,7 +360,7 @@ Runs as a tray/menubar app on macOS, Windows, Linux. Receiver-only in v1.
 
 ### 5.1 Responsibilities
 
-- Authenticate WebSocket connections via Ed25519-signed JWT.
+- Authenticate WebSocket connections via Ed25519-signed JWT. **JWT signature verified against the `sign_pubkey` stored in the pair record** (not just any valid Ed25519 signature — the relay looks up the sender's `device_id`, fetches their stored `sign_pubkey`, verifies the JWT signs to it). Prevents a relay operator or attacker holding a valid Ed25519 key from impersonating a paired device.
 - Route messages between paired device pairs only. No cross-pair leakage.
 - Persist undelivered messages to BoltDB (24h TTL). On peer reconnect, flush queue.
 - On receive while peer offline: trigger FCM high-priority `{event_id}` ping via Firebase Admin SDK (coalesced to ≤1 ping per 10s per receiver to respect FCM budget).
@@ -388,16 +403,16 @@ Scenario: WhatsApp notification posted on Phone A.
 
 1. Phone A listener fires `onNotificationPosted` → emits `notif.post(canon_id=X, origin=A)`.
 2. Phone B receives → posts local notification, records `mirroredFromPeer[X] = A`.
-3. User swipes on Phone B → `onNotificationRemoved(reason=1)`. `mirroredFromPeer[X]` exists → emit `notif.cancel(canon_id=X, origin=B)`.
-4. Phone A receives `notif.cancel` → calls `cancelNotification(keyForX)`.
-5. Phone A listener fires `onNotificationRemoved(reason=10)` → **suppressed** (listener-cancel, not user-swipe). No rebroadcast.
+3. User swipes on Phone B → `onNotificationRemoved(reason=2, REASON_CANCEL)`. `mirroredFromPeer[X]` exists → emit `notif.cancel(canon_id=X, origin=B, reason=user_swipe)`. (If user *tapped* instead: `reason=1, REASON_CLICK` → `reason=user_click`.)
+4. Phone A receives `notif.cancel` → adds X to `pendingPeerCancel` → calls `cancelNotification(keyForX)`.
+5. Phone A listener fires `onNotificationRemoved(reason=10, REASON_LISTENER_CANCEL)` → `X ∈ pendingPeerCancel` → **suppressed**. No rebroadcast. Tombstone expires after 30s.
 6. Phone B: its own local swipe already removed the notification in step 3. Done.
 
 Reverse (swipe on A first):
 
-1. User swipes on A → `reason=1` → emit `notif.cancel`.
-2. Phone B receives → looks up local `canon_id=X` → calls `cancelNotification`.
-3. Phone B listener fires `reason=10` → suppressed. Done.
+1. User swipes on A → `reason=2` → emit `notif.cancel(reason=user_swipe)`.
+2. Phone B receives → adds X to `pendingPeerCancel` → calls `cancelNotification`.
+3. Phone B listener fires `reason=10` → `X ∈ pendingPeerCancel` → suppressed. Done.
 
 Mirror-of-mirror never happens because `mirroredFromPeer` tagging makes Phone B's locally-posted mirror not a new post-event.
 
