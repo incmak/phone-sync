@@ -269,7 +269,7 @@ Mirror-of-mirror never happens because `mirroredFromPeer` tagging makes Phone B'
 
 ## 8. Testing Strategy
 
-- **Unit** (Kotlin, JUnit5 + MockK): packet serialization, loop-avoidance logic, `crypto_box_seal` roundtrip, reason-code filter truth table.
+- **Unit** (Kotlin, JUnit5 + MockK): packet serialization, loop-avoidance logic, `crypto_box_easy` roundtrip, reason-code filter truth table.
 - **Unit** (Go): relay routing, JWT auth, FCM ping trigger, BoltDB queue flush.
 - **Integration**: Android instrumentation test with two emulated `NotificationListenerService` instances talking via an in-process relay.
 - **E2E manual**: two physical devices, scripted scenarios in `docs/test-scenarios.md` (WhatsApp post, dismiss, reply, update, ongoing, group cancel, offline→online flush, Doze wake via FCM).
