@@ -77,7 +77,7 @@ NotificationListenerService is a system-bound service — it must be implemented
 
 - **Core** (NLS, SyncService foreground service, LanTransport, RelayTransport, FcmReceiver, Crypto, ReplyBridge) — implemented as a **custom Expo Native Module** in Kotlin, packaged under `mobile/modules/phone-sync-core/`.
 - **Process-lifecycle reality check:** the Kotlin module lives in the **same process** as the RN JS engine. When the OEM battery manager kills the app, both die together. What survives is the *system's intent to re-bind the NLS* — when a new notification arrives, Android restarts the app process and re-binds the listener. Crucially, all in-memory state (`mirroredFromPeer`, `pendingPeerCancel`, outbound queue tail) is lost on process death.
-- **Persistence requirement:** `mirroredFromPeer` and outbound-queue entries are persisted to Room on write. `pendingPeerCancel` is in-memory only (tombstones are short-lived and losing them risks at most one duplicate echo — not a correctness bug). Reconnection on restart rehydrates transport state from Room.
+- **Persistence requirement:** `mirroredFromPeer`, `localIdToCanonId`, and outbound-queue entries are persisted to Room on write. `pendingPeerCancel` is in-memory only. Eviction of `mirroredFromPeer`/`localIdToCanonId` on `notif.cancel` / local dismiss / 7-day TTL sweep (see §4.1). Reconnection on restart rehydrates transport state from Room.
 - **UI shell** (pairing QR scan, settings, app allowlist/denylist, reliability onboarding, connection state, history) — standard Expo Router + React Native. Talks to the native module via its exported interface.
 - **iOS** — module stubbed (returns feature-unavailable). All RN UI works on iOS but the core-sync is no-op. Documented as Android-only for v1.
 
@@ -126,7 +126,7 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
   "app_name": "WhatsApp",
   "channel_id": "messages_chat",
   "channel_name": "Messages",
-  "channel_importance": 4,
+  "channel_importance": 3,
   "visibility": "public",
   "is_group_summary": false,
   "group_key": null,
@@ -143,7 +143,6 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
   ],
   "is_clearable": true,
   "is_ongoing": false,
-  "priority": "default",
   "small_icon_png": "<base64 rendered bitmap, omitted on update if hash unchanged>",
   "small_icon_hash": "<sha256 hex, always present>",
   "large_icon_png": "<base64 bitmap or null, omitted on update if hash unchanged>",
@@ -186,16 +185,30 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
 
 ### 4.1 `PhoneSyncNotificationListener : NotificationListenerService`
 
-- `onNotificationPosted(sbn)` → convert to `notif.post`/`notif.update`, hand to `OutboundQueue`.
-- `onNotificationRemoved(sbn, rankingMap, reason)` → combined condition filter:
+**Critical self-loop prevention:** Phone B's NLS observes EVERY notification on the device, including mirrors Phone B itself posted via `NotificationManager.notify()`. Without filters, the NLS would fire `onNotificationPosted` for the mirror and emit `notif.post` back to Phone A — infinite loop. Two mechanisms prevent this:
+
+1. **Self-package filter** — `onNotificationPosted` and `onNotificationRemoved` both early-return when `sbn.packageName == context.packageName` (i.e., the mirror was posted by Phone-Sync itself).
+2. **Local↔origin ID mapping** — when Phone B posts a mirror, the mirror gets a Phone-Sync-chosen local `(id, tag)` under `com.phonesync`. Phone B maintains `localIdToCanonId: Map<(localId, localTag), canonId>` keyed by Phone-Sync's local identifiers, populated at post time. This map enables round-trip lookups despite the self-package filter (below).
+
+**Callbacks:**
+
+- `onNotificationPosted(sbn)`:
+  - If `sbn.packageName == ownPackage` → return (do not emit; it's our own mirror).
+  - Else → convert to `notif.post`/`notif.update`, hand to `OutboundQueue`.
+- `onNotificationRemoved(sbn, rankingMap, reason)`:
+  - If `sbn.packageName == ownPackage`: the user dismissed a mirror. Look up `canon_id = localIdToCanonId[(sbn.id, sbn.tag)]`. If missing (map lost to process death), skip — the origin will see its own notification lifecycle independently. If present, apply the reason-code logic below to emit `notif.cancel` to the ORIGIN device (tracked in `mirroredFromPeer[canon_id]`), then delete the entry from both maps.
+  - Else (`sbn.packageName != ownPackage`, i.e., a real notification on this device): apply the combined reason-code filter below to emit cancels to the peer.
   - `canon_id ∈ pendingPeerCancel` → **suppress** and clear the entry. This set contains `canon_id`s we just called `cancelNotification` on in response to a peer's `notif.cancel`. Only suppresses the exact cancel we triggered; unrelated reason-10 events from other apps are NOT suppressed.
   - Else, reason == 1 (REASON_CLICK) → emit `notif.cancel` with `reason=user_click`.
   - Else, reason ∈ {2, 3} (REASON_CANCEL, REASON_CANCEL_ALL) → emit `notif.cancel` with `reason=user_swipe`.
   - Else, reason ∈ {8, 9} (REASON_APP_CANCEL, REASON_APP_CANCEL_ALL) → emit `notif.cancel` with `reason=app_cancel`.
   - Else (4, 6, 12, 13, 14, and any unhandled reason-10 from other listeners) → do not emit.
-- Maintains two maps:
-  - `mirroredFromPeer: Map<canonId, originDeviceId>` — notifications this device posted *because of* a peer event. Dismissal of such a notification triggers an origin-side cancel back to the originating peer (not a new post-event).
-  - `pendingPeerCancel: Set<canonId>` — canon_ids on which we just invoked `cancelNotification` after receiving a peer's cancel. Used to suppress the single resulting reason-10 callback. Entries kept as **tombstones with 30s TTL** (was 5s, racy under load) — costs ~nothing memory-wise and prevents spurious echo cancels if the system delays the listener callback.
+- Maintains three maps:
+  - `mirroredFromPeer: Map<canonId, originDeviceId>` (persisted to Room) — notifications this device posted *because of* a peer event. Needed to route cancel-on-mirror-dismiss back to the originating peer.
+  - `localIdToCanonId: Map<(localId, localTag), canonId>` (persisted to Room) — reverse lookup from Phone-Sync's own chosen local id/tag (under `com.phonesync`) back to the origin's `canon_id`. Populated when posting a mirror. Required because `onNotificationRemoved` for a self-mirror yields only the local id/tag, not the origin canon_id. Without this map, the lookup into `mirroredFromPeer` would fail.
+  - `pendingPeerCancel: Set<canonId>` (in-memory, tombstones with 30s TTL) — canon_ids on which we just invoked `cancelNotification` after receiving a peer's cancel. Suppresses the single resulting reason-10 echo. Losing this on process death is tolerable: at worst, one duplicate cancel echoes back, which the peer's own `pendingPeerCancel` or `mirroredFromPeer`-absence check absorbs.
+- **Eviction rules:**
+  - `mirroredFromPeer[canon_id]` and `localIdToCanonId[(localId, localTag)]` are removed when: (a) peer sends `notif.cancel` for that `canon_id`, (b) the local user dismisses the mirror, (c) 7-day TTL sweep (bounds unbounded growth if origin never sends cancel and user never dismisses).
 
 ### 4.2 `SyncService : Service` (foreground, type `remoteMessaging`)
 
@@ -228,7 +241,7 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
 
 Android 8+ silently drops notifications posted without a registered channel.
 
-- **Phase 1:** single channel `mirrored_notifications` with importance `IMPORTANCE_HIGH`. All mirrors go here. Simple, one-channel UI toggle for the user.
+- **Phase 1:** single channel `mirrored_notifications` with importance **`IMPORTANCE_DEFAULT`** (NOT `HIGH`). Rationale: `IMPORTANCE_HIGH` produces heads-up popups and bypasses DND on many OEMs — surprising behavior that overrides the user's quiet hours. `DEFAULT` still shows in tray with sound (if user has enabled sound for the channel). Users who want heads-up can elevate the channel in system settings. All mirrors go here.
 - **Phase 2:** mirror the origin's channel — the packet carries `channel_id`, `channel_name`, `channel_importance` (see §3.1). On receipt, receiver calls `getOrCreateChannel(origin_device + ":" + channel_id)` with mirrored importance. Preserves per-channel user muting.
 
 ### 4.3 `LanTransport`
@@ -268,6 +281,7 @@ Android Keystore cannot directly hold X25519 keys usable by libsodium (Keystore 
 - Duplicate `msg_id` → silently drop.
 - TTL on the dedup table: 48h (2× relay offline queue TTL). Evicted on schedule.
 - **Staleness check uses `relay_ts` (relay-stamped) not `ts` (origin clock).** Origin clocks may be wrong; packets older than 48h by relay stamp are rejected. LAN direct packets carry no relay stamp → only `msg_id` dedup applies, which is sufficient for replay defense on LAN.
+- **Trust model for `relay_ts`:** the stamp is applied by the relay **outside** the E2EE envelope and is NOT authenticated. A malicious or compromised relay can forge it to "un-stale" old packets. This is acceptable because **`msg_id` dedup is the primary replay defense** (applied regardless of timestamp); `relay_ts` is a secondary advisory check. A relay forging `relay_ts` gains nothing an attacker who can already replay packets wouldn't gain — and replays are caught by dedup.
 
 ### 4.7 `Pairing`
 
@@ -295,7 +309,7 @@ Android's `Notification.Builder.setGroup(key)` + `setGroupSummary(true)` creates
 
 Sensitive notifications (banking OTPs, password resets, 2FA codes) should not auto-mirror.
 
-- **Phase 1:** user-configurable **app allowlist/denylist** UI. Default behavior: denylist includes common OTP-y apps (banks, authenticators) — shown to user on first run for confirmation. Per-app toggle. Stored locally (not synced).
+- **Phase 1:** user-configurable **app allowlist/denylist** UI. Default denylist is **hard-coded in the APK** (shipped as a JSON asset in `mobile/assets/default-denylist.json`, not remotely fetched). Contents: common OTP-sensitive apps — bank apps, `com.google.android.apps.authenticator2`, `com.authy.authy`, `com.microsoft.azure.authenticator`, `com.cisco.duo`, `org.telegram.messenger` (for banking OTPs), password managers. Shown to user on first run for confirmation; user-editable thereafter. Updates require an app release. Stored locally, not synced between phones.
 - **Phase 1 also:** respect `Notification.VISIBILITY_SECRET` — never mirror. Respect `FLAG_NO_CLEAR` — mirror but mark non-dismissable.
 - **Phase 2:** per-channel opt-out (e.g., mirror WhatsApp messages but not WhatsApp calls).
 
@@ -373,7 +387,7 @@ Unlike Android's `REASON_LISTENER_CANCEL`, desktop OSes fire the dismiss callbac
 
 ### 5.1.1 Rate Limiting
 
-- Per-device WebSocket: 60 messages/sec sustained, 200 burst. Excess → 429 + disconnect.
+- Per-device WebSocket: 60 messages/sec sustained, 200 burst. Excess → WebSocket close code **1008 (Policy Violation)** with reason `rate-limit-exceeded`. (HTTP 429 is not valid after WebSocket upgrade.)
 - Per-IP pairing: 5 `/pair/init` per hour. Prevents pair-token enumeration.
 - Per-device pair lifetime cap: 10 active pairs. Unpair required before adding more.
 
@@ -405,20 +419,21 @@ Unlike Android's `REASON_LISTENER_CANCEL`, desktop OSes fire the dismiss callbac
 
 Scenario: WhatsApp notification posted on Phone A.
 
-1. Phone A listener fires `onNotificationPosted` → emits `notif.post(canon_id=X, origin=A)`.
-2. Phone B receives → posts local notification, records `mirroredFromPeer[X] = A`.
-3. User swipes on Phone B → `onNotificationRemoved(reason=2, REASON_CANCEL)`. `mirroredFromPeer[X]` exists → emit `notif.cancel(canon_id=X, origin=B, reason=user_swipe)`. (If user *tapped* instead: `reason=1, REASON_CLICK` → `reason=user_click`.)
-4. Phone A receives `notif.cancel` → adds X to `pendingPeerCancel` → calls `cancelNotification(keyForX)`.
-5. Phone A listener fires `onNotificationRemoved(reason=10, REASON_LISTENER_CANCEL)` → `X ∈ pendingPeerCancel` → **suppressed**. No rebroadcast. Tombstone expires after 30s.
+1. Phone A listener fires `onNotificationPosted(sbn)`. `sbn.packageName != ownPackage` (it's WhatsApp, not Phone-Sync), so emit `notif.post(canon_id=X="devA:com.whatsapp:42:tag", origin=A)`.
+2. Phone B receives `notif.post`. Posts local mirror via `NotificationManager.notify(localId=7001, localTag="mirror")`. Records `mirroredFromPeer[X] = A` and `localIdToCanonId[(7001, "mirror")] = X`.
+2a. **Phone B's own NLS fires `onNotificationPosted(sbn)` for the mirror** — `sbn.packageName == ownPackage` → **early return**. No outbound emission. Loop prevented.
+3. User swipes the mirror on Phone B → `onNotificationRemoved(sbn, reason=2, REASON_CANCEL)`. `sbn.packageName == ownPackage` branch fires: look up `canon_id = localIdToCanonId[(7001, "mirror")] = X`. Emit `notif.cancel(canon_id=X, origin=B, reason=user_swipe)`. Delete entries from both maps. (If user *tapped* instead: `reason=1, REASON_CLICK` → `reason=user_click`.)
+4. Phone A receives `notif.cancel` → adds X to `pendingPeerCancel` (30s tombstone) → calls `cancelNotification(keyForX)`.
+5. Phone A listener fires `onNotificationRemoved(reason=10, REASON_LISTENER_CANCEL)`. `sbn.packageName != ownPackage` branch: `X ∈ pendingPeerCancel` → **suppressed** + consume tombstone. No rebroadcast.
 6. Phone B: its own local swipe already removed the notification in step 3. Done.
 
 Reverse (swipe on A first):
 
-1. User swipes on A → `reason=2` → emit `notif.cancel(reason=user_swipe)`.
-2. Phone B receives → adds X to `pendingPeerCancel` → calls `cancelNotification`.
-3. Phone B listener fires `reason=10` → `X ∈ pendingPeerCancel` → suppressed. Done.
+1. User swipes WhatsApp on A → `reason=2` → emit `notif.cancel(reason=user_swipe)`.
+2. Phone B receives → adds X to `pendingPeerCancel` → calls `cancelNotification(keyForLocalMirror)`.
+3. Phone B listener fires `onNotificationRemoved(reason=10)`. `sbn.packageName == ownPackage` branch: look up canon_id via `localIdToCanonId`; `X ∈ pendingPeerCancel` → **suppressed** + consume tombstone + delete map entries. Done.
 
-Mirror-of-mirror never happens because `mirroredFromPeer` tagging makes Phone B's locally-posted mirror not a new post-event.
+Mirror-of-mirror is prevented by the self-package filter in step 2a, not by `mirroredFromPeer` alone.
 
 ---
 
@@ -447,7 +462,7 @@ Mirror-of-mirror never happens because `mirroredFromPeer` tagging makes Phone B'
 
 **CPU/memory:**
 
-- libsodium operations on main thread of SyncService's coroutine scope. Average encrypt/decrypt: <1ms. No thread pool.
+- libsodium operations run on `Dispatchers.Default` within SyncService's coroutine scope (never on `Dispatchers.Main`). Average encrypt/decrypt: <1ms. No dedicated thread pool.
 - Icon cache disk I/O on `Dispatchers.IO`. Evictions batched (every 100 writes).
 - Room writes debounced (50ms) for burst coalescing.
 
@@ -483,8 +498,9 @@ Mirror-of-mirror never happens because `mirroredFromPeer` tagging makes Phone B'
 - **Clock skew** — `ts` is origin's clock; not used for ordering or staleness. Ordering is by per-device monotonic sequence number on the relay WebSocket channel. Staleness uses relay-stamped `relay_ts` (see §4.6.1).
 - **Icon size** — Bitmaps capped at 96×96 PNG before embedding. Large icon omitted if >8KB after encode.
 - **Reply PendingIntent expired** — If origin no longer has the source notification (app cleared it), reply attempt logs warning and sends `reply.failed` back to peer; Phone B shows toast.
-- **Unpair flow** — Either device can unpair → sends `unpair` packet, clears peer pubkeys, tells relay to delete pair.
+- **Unpair flow** — Either device can unpair → sends `unpair` packet, clears peer pubkeys, tells relay to delete pair, **and rotates its own X25519 encryption keypair + Ed25519 signing keypair** before any re-pairing. Rotation prevents identity linkage across consecutive pairings and gives a coarse form of forward secrecy (a compromise of current keys cannot decrypt post-unpair captures).
 - **FCM high-priority quota** — Android enforces a per-app high-priority message budget in aggressive Doze / App Standby Bucket **rare**. Bursts of 50+ notifications while peer is Dozed may see delayed wake for later messages. Mitigation: relay coalesces pings (send at most 1 ping per 10s; receiver pulls queued events on wake). Documented limit, not fully avoidable on unrooted devices.
+- **LAN-only + Dozed receiver (no FCM path)** — Lazy FGS re-promotion on API 31+ requires a high-priority FCM data message to grant the `startForeground()` background-start exemption; without it, `startForeground()` throws `ForegroundServiceStartNotAllowedException`. A LAN-direct TCP wake carries no such exemption. If the receiver is Dozed AND internet egress is unavailable (home WiFi with no internet, GMS absent / de-Googled ROMs, or firewalled networks), the receiver cannot re-promote FGS and cannot reliably process the inbound mirror. **Mitigations:** (a) document as a known limitation; (b) surface "Always Connected" mode in settings with copy explaining it as the only reliable option on GMS-less / offline-LAN networks; (c) long-term (v2): evaluate a non-GMS push path (UnifiedPush / ntfy) as an alternative wake mechanism.
 
 ---
 
