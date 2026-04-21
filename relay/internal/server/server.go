@@ -22,4 +22,5 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.router.Get("/health", s.handleHealth)
+	s.router.Get("/ws", s.handleWebSocket)
 }
