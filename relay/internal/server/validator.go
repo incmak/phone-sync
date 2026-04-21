@@ -15,6 +15,8 @@ var schemaFS embed.FS
 
 type Validator struct {
 	envelope *jsonschema.Schema
+	enc      *jsonschema.Schema // encrypted outer envelope
+	ack      *jsonschema.Schema // inner ack cleartext shape
 }
 
 // schemaBaseURL must match the $id prefix used in /proto/*.schema.json.
@@ -51,7 +53,15 @@ func NewValidator() (*Validator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("compile envelope: %w", err)
 	}
-	return &Validator{envelope: env}, nil
+	enc, err := compiler.Compile(schemaBaseURL + "envelope-encrypted.schema.json")
+	if err != nil {
+		return nil, fmt.Errorf("compile enc envelope: %w", err)
+	}
+	ack, err := compiler.Compile(schemaBaseURL + "ack.schema.json")
+	if err != nil {
+		return nil, fmt.Errorf("compile ack: %w", err)
+	}
+	return &Validator{envelope: env, enc: enc, ack: ack}, nil
 }
 
 // ValidateEnvelope unmarshals raw JSON and validates it against the packet schema.
@@ -62,4 +72,24 @@ func (v *Validator) ValidateEnvelope(raw []byte) error {
 		return fmt.Errorf("parse: %w", err)
 	}
 	return v.envelope.Validate(doc)
+}
+
+// ValidateEncEnvelope validates raw JSON against the encrypted outer envelope schema
+// (envelope-encrypted.schema.json). Call this when type=="enc" is confirmed.
+func (v *Validator) ValidateEncEnvelope(raw []byte) error {
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	return v.enc.Validate(doc)
+}
+
+// ValidateAck validates raw JSON against the ack inner cleartext schema (ack.schema.json).
+// Call this on the decrypted payload when the outer type=="ack".
+func (v *Validator) ValidateAck(raw []byte) error {
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	return v.ack.Validate(doc)
 }
