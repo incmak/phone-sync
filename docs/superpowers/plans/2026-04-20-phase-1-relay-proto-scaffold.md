@@ -600,8 +600,9 @@ Dockerfile
 .dockerignore
 *.md
 .git
-internal/server/schemas/
 ```
+
+(Do NOT list `internal/server/schemas/` here. The build context is the repo root, so paths in `.dockerignore` are relative to repo root; adding `internal/server/schemas/` would either be a no-op at the wrong path or, worse, exclude files we need. Gitignore already prevents the synced schemas from being committed — the Dockerfile regenerates them at build time via `make sync-proto`.)
 
 - [ ] **Step 2: Write docker-compose**
 
@@ -673,12 +674,23 @@ docker compose down
 
 Expected: `{"status":"ok"}`. (Port 8080 is mapped in the compose file above.)
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Commit (split — compose first, Dockerfile after prereqs land)**
+
+Commit the compose files now; defer the Dockerfile commit to after Tasks 4.5 and 6:
 
 ```bash
-git add relay/Dockerfile relay/.dockerignore deploy/
-git commit -m "feat(deploy): Dockerfile + docker-compose + Caddy"
+git add deploy/
+git commit -m "feat(deploy): docker-compose + Caddy"
 ```
+
+Then after Tasks 4.5 (Makefile) and 6 (proto schemas) complete — come back and run Step 3 (build + smoke test), then:
+
+```bash
+git add relay/Dockerfile relay/.dockerignore
+git commit -m "feat(relay): Dockerfile multi-stage build with proto sync"
+```
+
+This avoids a broken commit in history where the Dockerfile exists but its build prereqs don't.
 
 ---
 
@@ -912,7 +924,7 @@ git commit -m "feat(proto): v1 JSON Schema — envelope, notif.post, notif.cance
 - [ ] **Step 1: Add JSON Schema validator**
 
 ```bash
-cd relay && go get github.com/santhosh-tekuri/jsonschema/v5
+cd relay && go get github.com/santhosh-tekuri/jsonschema/v6
 ```
 
 - [ ] **Step 2: Populate the embed path**
@@ -975,8 +987,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"strings"
 
-	"github.com/santhosh-tekuri/jsonschema/v5"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 //go:embed schemas/*.schema.json
@@ -985,6 +998,10 @@ var schemaFS embed.FS
 type Validator struct {
 	envelope *jsonschema.Schema
 }
+
+// Schema $id values in /proto/*.schema.json use the base "https://phone-sync.local/schemas/".
+// The compiler requires resource URIs to match the $id so intra-schema $ref resolution works.
+const schemaBaseURL = "https://phone-sync.local/schemas/"
 
 func NewValidator() (*Validator, error) {
 	compiler := jsonschema.NewCompiler()
@@ -996,12 +1013,17 @@ func NewValidator() (*Validator, error) {
 		if err != nil {
 			return err
 		}
-		return compiler.AddResource(path, bytes.NewReader(b))
+		var raw interface{}
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+		filename := strings.TrimPrefix(path, "schemas/")
+		return compiler.AddResource(schemaBaseURL+filename, raw)
 	})
 	if err != nil {
 		return nil, err
 	}
-	env, err := compiler.Compile("schemas/packet.schema.json")
+	env, err := compiler.Compile(schemaBaseURL + "packet.schema.json")
 	if err != nil {
 		return nil, fmt.Errorf("compile envelope: %w", err)
 	}
@@ -1015,7 +1037,12 @@ func (v *Validator) ValidateEnvelope(raw []byte) error {
 	}
 	return v.envelope.Validate(doc)
 }
+
+// Keep bytes imported in case future schemas need stream readers:
+var _ = bytes.NewReader
 ```
+
+**Note:** uses `santhosh-tekuri/jsonschema/v6` (current line as of 2026). v6 requires the `compiler.AddResource(url, decodedJSON)` signature where the URL must match the schema's `$id`. The `/proto/*.schema.json` files use `$id: "https://phone-sync.local/schemas/<name>"` — the resource URL passed to `AddResource` must match byte-for-byte or `$ref` resolution breaks.
 
 (Schemas are already in place via Step 2's `make sync-proto`.)
 
@@ -1191,7 +1218,9 @@ npx create-expo-app@latest mobile --template default
 rm -rf mobile/app/\(tabs\) mobile/app/+not-found.tsx mobile/components mobile/constants mobile/hooks mobile/scripts
 ```
 
-- [ ] **Step 2: Install Expo Router**
+- [ ] **Step 2: (Skipped on SDK 52 default template)**
+
+The `--template default` scaffold already bundles Expo Router, safe-area-context, screens, linking, constants, and status-bar at correct SDK-compatible versions. Do NOT re-run `expo install` for these — it's a no-op at best and can downgrade transitive deps. If using a minimal template instead (`blank-typescript`), run:
 
 ```bash
 cd mobile && npx expo install expo-router react-native-safe-area-context react-native-screens expo-linking expo-constants expo-status-bar
@@ -1457,7 +1486,27 @@ public class PhoneSyncCoreModule: Module {
 }
 ```
 
-- [ ] **Step 7: Typecheck**
+- [ ] **Step 7: Register the module as a local dependency**
+
+`create-expo-module --local` creates the module directory but does NOT automatically wire it into the app's `package.json`. Without this, `expo prebuild` will NOT link the Kotlin module and `requireNativeModule('PhoneSyncCore')` throws at runtime.
+
+Add to `mobile/package.json` dependencies:
+
+```json
+{
+  "dependencies": {
+    "phone-sync-core": "file:./modules/phone-sync-core"
+  }
+}
+```
+
+Then:
+
+```bash
+cd mobile && npm install
+```
+
+- [ ] **Step 8: Typecheck**
 
 ```bash
 cd mobile && npx tsc --noEmit
@@ -1465,12 +1514,16 @@ cd mobile && npx tsc --noEmit
 
 Expected: no errors (module resolves via `requireNativeModule`).
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add mobile/modules/ mobile/app.json mobile/package.json
+git add mobile/modules/ mobile/app.json mobile/package.json mobile/package-lock.json
 git commit -m "feat(mobile): custom Expo Native Module phone-sync-core with Kotlin ping() over WS"
 ```
+
+- [ ] **Step 10: (Optional) Instrumented test scaffold for the Kotlin module**
+
+Phase 1 smoke-tests the round-trip end-to-end (Task 12) but has no unit test for the Kotlin module's internal race behavior (AtomicBoolean settle guard, Handler.removeCallbacks on resolve, abnormal-close path). Phase 1 accepts this gap — the Task 12 manual test catches the happy path and Phase 2 work adds Robolectric/instrumented tests for the full SyncService. Noted as a known coverage gap; do not add tests now.
 
 ---
 
@@ -1744,7 +1797,7 @@ jobs:
       - run: go vet ./...
       - run: go test ./... -race -count=1
 
-  docker:
+  docker-and-smoke:
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -1757,21 +1810,7 @@ jobs:
           push: false
           load: true
           tags: phone-sync-relay:ci
-
-  smoke:
-    runs-on: ubuntu-latest
-    needs: docker
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: relay/Dockerfile
-          push: false
-          load: true
-          tags: phone-sync-relay:ci
-      - name: Run container and hit /health
+      - name: Smoke test — run container and hit /health
         run: |
           docker run -d --name relay -p 8080:8080 phone-sync-relay:ci
           sleep 2
@@ -1779,6 +1818,8 @@ jobs:
           docker logs relay
           docker rm -f relay
 ```
+
+Note: `load: true` images live only in the runner that built them, so the smoke step runs in the same job as the build (combined as `docker-and-smoke`). Splitting into two jobs would force a rebuild or a `docker save`/artifact round-trip for no benefit.
 
 - [ ] **Step 2: Write mobile workflow**
 
