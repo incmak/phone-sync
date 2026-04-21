@@ -223,6 +223,15 @@ class TwinotifyCoreModule : Module() {
             }
         }
 
+        AsyncFunction("awaitPairSig") { relayUrl: String, pairToken: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val sig = co.twinotify.core.pairing.PairNotifyClient.awaitSig(relayUrl, pairToken)
+                    promise.resolve(Base64.getEncoder().encodeToString(sig))
+                } catch (e: Throwable) { promise.reject("PAIR_NOTIFY", e.message ?: "err", e) }
+            }
+        }
+
         AsyncFunction("deviceBCompletePairing") { relayUrl: String, pairToken: String, sigB64: String, promise: Promise ->
             moduleScope.launch {
                 try {

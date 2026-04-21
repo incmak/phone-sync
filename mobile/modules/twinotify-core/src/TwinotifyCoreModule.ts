@@ -23,6 +23,7 @@ declare class TwinotifyCoreModuleType extends NativeModule<{ onSyncStatus: (evt:
   startPairInitiator(relayUrl: string): Promise<string>;
   computeFingerprint(encPubkeyB64: string, signPubkeyB64: string): Promise<string>;
   deviceASignConfirmation(pairToken: string, bEncB64: string, bSignB64: string): Promise<string>;
+  awaitPairSig(relayUrl: string, pairToken: string): Promise<string>;
   deviceBCompletePairing(relayUrl: string, pairToken: string, confirmationSigB64: string): Promise<void>;
   storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string): Promise<void>;
   mintAuthJwt(): Promise<string>;

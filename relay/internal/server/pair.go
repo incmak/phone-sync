@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -112,6 +113,20 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.pairStore.DeletePending(req.PairToken)
+
+	// Push confirmation_sig to Device A's pair-notify subscription (best-effort).
+	pairSigFrame, err := json.Marshal(map[string]any{
+		"v":                1,
+		"type":             "pair.sig",
+		"pair_token":       req.PairToken,
+		"confirmation_sig": req.ConfirmationSig,
+	})
+	if err != nil {
+		log.Printf("pair.sig marshal: %v", err)
+	} else {
+		s.pairHub.Push(req.PairToken, pairSigFrame)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"pair_id":"` + cp.PairID + `"}`))

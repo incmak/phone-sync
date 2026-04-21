@@ -15,6 +15,7 @@ type Server struct {
 	validator *Validator
 	pairStore *store.PairStore
 	jtiCache  *JTICache
+	pairHub   *PairHub
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -28,6 +29,7 @@ func NewWithStore(b *store.Bolt) *Server {
 		validator: v,
 		pairStore: store.NewPairStore(b),
 		jtiCache:  NewJTICache(60 * time.Second),
+		pairHub:   NewPairHub(),
 	}
 	s.routes()
 	return s
@@ -53,5 +55,6 @@ func (s *Server) routes() {
 	s.router.Get("/health", s.handleHealth)
 	s.router.Post("/pair/init", s.handlePairInit)
 	s.router.Post("/pair/complete", s.handlePairComplete)
+	s.router.Get("/pair/notify", s.handlePairNotify)
 	s.router.With(s.authMiddleware).Get("/ws", s.handleWebSocket)
 }

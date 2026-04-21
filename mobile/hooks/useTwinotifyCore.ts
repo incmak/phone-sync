@@ -14,6 +14,8 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.computeFingerprint(encB64, signB64),
     deviceASignConfirmation: (pairToken: string, bEncB64: string, bSignB64: string): Promise<string> =>
       TwinotifyCoreModule.deviceASignConfirmation(pairToken, bEncB64, bSignB64),
+    awaitPairSig: (relayUrl: string, pairToken: string): Promise<string> =>
+      TwinotifyCoreModule.awaitPairSig(relayUrl, pairToken),
     deviceBCompletePairing: (relayUrl: string, pairToken: string, sigB64: string): Promise<void> =>
       TwinotifyCoreModule.deviceBCompletePairing(relayUrl, pairToken, sigB64),
     storePeerPubkeys: (encB64: string, signB64: string, peerDeviceId: string): Promise<void> =>
