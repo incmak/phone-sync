@@ -9,7 +9,7 @@ export default function Home() {
   async function handlePing() {
     setStatus('pinging…');
     try {
-      const res = await pingRelay(url);
+      const res = await pingRelay(url, false);
       setStatus(`ok: ${res}`);
     } catch (e: unknown) {
       setStatus(`error: ${e instanceof Error ? e.message : String(e)}`);
