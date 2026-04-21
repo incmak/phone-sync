@@ -87,7 +87,7 @@ Tradeoff accepted: every NLS-side change requires rebuilding the custom native m
 
 - **Expo does not target desktop natively.** Expo Web produces a website, not a tray-aware native app with OS notification access. Rejected.
 - **Electron** works but ships Chromium (~150MB), high idle RAM, battery-hostile on laptops. Rejected for a background-running client.
-- **Tauri**: Rust core, system webview for UI, single ~5–10MB binary, tray-icon support, native OS notifications via `tauri-plugin-notification` and `notify-rust`. Rust side handles WebSocket, crypto (libsodium via `sodiumoxide` crate), and OS-notification bridging. React/TS UI shared in structure (but not code) with the mobile app.
+- **Tauri**: Rust core, system webview for UI, single ~5–10MB binary, tray-icon support, native OS notifications via `tauri-plugin-notification` and `notify-rust`. Rust side handles WebSocket, crypto (libsodium via `dryoc` crate), and OS-notification bridging. React/TS UI shared in structure (but not code) with the mobile app.
 
 ### 2.1.3 Shared Protocol, Duplicated Implementations
 
@@ -102,7 +102,7 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
 ```json
 {
   "v": 1,
-  "type": "notif.post" | "notif.update" | "notif.cancel" | "notif.reply" | "ping" | "pong" | "ack",
+  "type": "notif.post" | "notif.update" | "notif.cancel" | "notif.reply" | "reply.failed" | "icon.request" | "ping" | "pong" | "ack",
   "msg_id": "uuid",
   "origin_device": "device-id",
   "ts": 1713600000000,
@@ -168,6 +168,30 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
 { "canon_id": "devA:com.whatsapp:42:tag", "reason": "user_swipe" }
 ```
 
+### 3.2.1 `icon.request`
+
+Receiver → sender NACK when a `notif.post`/`notif.update` arrived with an `*_icon_hash` but no `*_icon_png` body and the receiver's local cache does not have the bytes for that hash.
+
+```json
+{ "hash": "<sha256 hex>" }
+```
+
+Sender responds with a fresh `notif.post` for the same `canon_id` with `*_icon_png` present.
+
+### 3.2.2 `reply.failed`
+
+Origin → receiver when a `notif.reply` arrived but the `(canon_id, action_id)` map entry is missing (origin's map was cleared by process death, or action_id is stale after a notification update).
+
+```json
+{
+  "canon_id": "devA:com.whatsapp:42:tag",
+  "action_id": "uuid",
+  "reason": "stale_action_id" | "notification_gone" | "map_lost"
+}
+```
+
+Receiver surfaces a toast: "Reply couldn't be sent — open the conversation on the origin device."
+
 ### 3.3 `notif.reply`
 
 ```json
@@ -196,8 +220,8 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
   - If `sbn.packageName == ownPackage` → return (do not emit; it's our own mirror).
   - Else → convert to `notif.post`/`notif.update`, hand to `OutboundQueue`.
 - `onNotificationRemoved(sbn, rankingMap, reason)`:
-  - If `sbn.packageName == ownPackage`: the user dismissed a mirror. Look up `canon_id = localIdToCanonId[(sbn.id, sbn.tag)]`. If missing (map lost to process death), skip — the origin will see its own notification lifecycle independently. If present, apply the reason-code logic below to emit `notif.cancel` to the ORIGIN device (tracked in `mirroredFromPeer[canon_id]`), then delete the entry from both maps.
-  - Else (`sbn.packageName != ownPackage`, i.e., a real notification on this device): apply the combined reason-code filter below to emit cancels to the peer.
+  - If `sbn.packageName == ownPackage`: the removal is on a mirror we posted. **First check `pendingPeerCancel`** — if the mirror's `canon_id` (looked up via `localIdToCanonId`) is in the set, this is the echo of a cancel WE invoked in response to the origin's cancel — suppress + consume tombstone + delete map entries. If NOT in `pendingPeerCancel`, the user dismissed locally: apply reason-code filter, emit `notif.cancel` to origin (tracked in `mirroredFromPeer[canon_id]`), delete map entries. If `localIdToCanonId` lookup misses (process death lost the map before persistence flushed), skip — origin's state drifts one notification, recovered at next update.
+  - Else (`sbn.packageName != ownPackage`): a real notification on this device. Apply the combined reason-code filter below.
   - `canon_id ∈ pendingPeerCancel` → **suppress** and clear the entry. This set contains `canon_id`s we just called `cancelNotification` on in response to a peer's `notif.cancel`. Only suppresses the exact cancel we triggered; unrelated reason-10 events from other apps are NOT suppressed.
   - Else, reason == 1 (REASON_CLICK) → emit `notif.cancel` with `reason=user_click`.
   - Else, reason ∈ {2, 3} (REASON_CANCEL, REASON_CANCEL_ALL) → emit `notif.cancel` with `reason=user_swipe`.
@@ -228,6 +252,11 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+<!-- LAN discovery (NsdManager) -->
+<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+    android:usesPermissionFlags="neverForLocation" />
+<!-- Android 16+ will require this for NsdManager + local sockets -->
+<uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
 <service
     android:name=".SyncService"
@@ -242,26 +271,30 @@ Icons are hashed (SHA-256 of PNG bytes) and cached by hash on both ends.
 Android 8+ silently drops notifications posted without a registered channel.
 
 - **Phase 1:** single channel `mirrored_notifications` with importance **`IMPORTANCE_DEFAULT`** (NOT `HIGH`). Rationale: `IMPORTANCE_HIGH` produces heads-up popups and bypasses DND on many OEMs — surprising behavior that overrides the user's quiet hours. `DEFAULT` still shows in tray with sound (if user has enabled sound for the channel). Users who want heads-up can elevate the channel in system settings. All mirrors go here.
-- **Phase 2:** mirror the origin's channel — the packet carries `channel_id`, `channel_name`, `channel_importance` (see §3.1). On receipt, receiver calls `getOrCreateChannel(origin_device + ":" + channel_id)` with mirrored importance. Preserves per-channel user muting.
+- **Phase 2:** mirror the origin's channel — the packet carries `channel_id`, `channel_name`, `channel_importance` (see §3.1). Receiver constructs the local channel ID as **`"mirror__" + origin_device + "__" + channel_id`** (double-underscore delimiter prevents collision with origin channel IDs containing `:`). Channel name displayed as `"[origin_device] channel_name"` in system settings. Creates with mirrored importance. Preserves per-channel user muting.
 
 ### 4.3 `LanTransport`
 
-- `NsdManager.registerService(_phonesync._tcp)` advertises self. TXT record includes a **daily-rotated advertising ID** (HKDF(pair_secret, "ad-id", date)) rather than the raw `device_id` — prevents passive LAN observers from correlating the same device across days. Both peers compute the expected ad-id for today from the shared pair secret.
-- **Peer selection:** on discovery, only services whose advertising ID matches the expected derivation are accepted. All others ignored. Multi-device expansion (v2) will iterate the paired set and try all derivations.
-- Open TLS socket (client cert from pair step) → frame length-prefixed JSON.
+- `NsdManager.registerService(_phonesync._tcp)` advertises self. TXT record includes a **daily-rotated advertising ID** (HKDF(pair_secret, "ad-id", utc_epoch_day)) rather than the raw `device_id` — prevents passive LAN observers from correlating the same device across days.
+- **Clock-skew tolerance:** each peer advertises THREE ad-ids simultaneously — yesterday's, today's, and tomorrow's (derived from `utc_epoch_day - 1`, `utc_epoch_day`, `utc_epoch_day + 1`). Peer selection accepts any of the three. Prevents silent DoS when device clocks straddle UTC midnight or drift by hours.
+- **Peer selection:** on discovery, only services whose advertising ID matches one of the expected ±1-day derivations are accepted. All others ignored. Multi-device expansion (v2) will iterate the paired set and try all derivations.
+- Open TLS socket → frame length-prefixed JSON. **TLS peer cert must be pinned to the pairing pubkeys:** each device's TLS self-signed cert embeds its `enc_pubkey` in the SubjectPublicKeyInfo, and the peer verifies the presented cert's SPKI matches the stored peer `enc_pubkey` from the pair record. Without pinning, a LAN attacker with a self-signed cert could complete TLS, forward E2EE ciphertext transparently, and gain traffic-analysis capability. With pinning, the TLS identity is tied to the same trust anchor as the E2EE layer.
 - Drops to idle if peer unreachable for 30s. Does NOT drive retries — relay is the source of truth for reachability.
 
 ### 4.4 `RelayTransport`
 
 - OkHttp WebSocket, URL from paired config.
 - Auth: JWT signed with device's Ed25519 signing key (separate keypair from encryption key), presented on connect. **Relay verifies the JWT signature against the `sign_pubkey` stored in the pair record at pairing time — not against any arbitrary Ed25519 key.** The pair record is the trust anchor.
+- **JWT replay protection:** each JWT carries a fresh `jti` (UUID v4) and short `exp` (60s). Relay maintains a `seenJti` cache (in-memory, bounded to `exp` window, evicted on expiry). Duplicate `jti` within window → 401. Prevents captured-JWT replay (e.g., from relay logs after a breach or hostile network snapshot).
 - Exponential backoff reconnect (1s → 60s cap), keepalive ping every 30s.
 - Outbound queue with disk persistence (Room) for offline bursts.
 
 ### 4.5 `FcmReceiver : FirebaseMessagingService`
 
 - Received payload: `{"event_id":"..."}`. No notification content.
-- On receipt: if WebSocket not connected, wake `SyncService`, force reconnect, fetch event by ID.
+- On receipt: **check `RemoteMessage.getPriority()` — if `PRIORITY_NORMAL` (FCM silently downgraded the message due to abuse heuristics), skip FGS promotion and fall back to lazy reconnect**. Only `PRIORITY_HIGH` grants the `startForeground()` background-start exemption. The "~10s" figure commonly cited refers to the separate FGS-notification-hidden rule; the exemption itself has no formally documented duration but is reliably sufficient for a single reconnect.
+- If priority is HIGH: wake `SyncService`, promote FGS, force reconnect, fetch event by ID.
+- If priority is NORMAL: queue the event_id locally; next time the app is foregrounded or next FGS-exempt event arrives, fetch.
 
 ### 4.6 `Crypto`
 
@@ -272,8 +305,10 @@ Android Keystore cannot directly hold X25519 keys usable by libsodium (Keystore 
 - **Ed25519 signing keypair** (for JWT relay auth) — generated with `crypto_sign_keypair()`; same wrapping pattern.
 - **Runtime access** — when encrypting/decrypting a packet, app unseals the wrapped secret key via Keystore → passes raw bytes to libsodium `crypto_box_easy` → zeros the raw bytes in memory immediately after. Keys live as raw bytes only for the duration of a single operation.
 - Encryption: `crypto_box_easy` (X25519 + XSalsa20-Poly1305, authenticated). Sender encrypts with own secret + peer's public; recipient decrypts and verifies sender authenticity. `crypto_box_seal` is rejected because it is anonymous and provides no sender authentication.
-- Nonce: 24 random bytes per message, prepended to ciphertext.
+- **Nonce: hybrid monotonic counter + random prefix.** 24-byte nonce = 16 random bytes (generated once per session on app start) || 8-byte big-endian counter. Counter is persisted atomically to Room (`nonce_counter` table, single-row) and incremented BEFORE every encrypt; write is fsync'd before ciphertext leaves the device. Rationale: pure-random 24-byte nonces have negligible collision probability in a single CSPRNG lifetime, but **a device restored from backup can replay CSPRNG state** and produce colliding nonces — catastrophic for XSalsa20-Poly1305 (leaks plaintext XOR, breaks MAC). The counter guarantees uniqueness even after state restoration; the random prefix prevents cross-session counter collision if Room is wiped. On Room corruption / first-launch detection: regenerate the random prefix AND reset counter to 0.
 - **Keystore wraps, it does not hold the libsodium key itself. "Stored in Keystore" elsewhere in this doc means "wrapped by a Keystore-protected master key."**
+- **At-rest storage:** wrapped secret keys persisted via **Jetpack DataStore with androidx.datastore:datastore-tink** (AEAD), NOT `EncryptedSharedPreferences` (the entire `androidx.security:security-crypto` library is deprecated as of v1.1.0 with no further releases planned).
+- **Forward secrecy posture (v1):** long-term static X25519 keypairs. A passive adversary who later compromises either device's wrapped secret key can decrypt historical captured ciphertext. Documented limitation. Signal-style Double Ratchet deferred to v2. The nonce hybrid above protects against backup-restore nonce reuse but does NOT provide forward secrecy.
 
 ### 4.6.1 Replay Protection
 
@@ -283,11 +318,15 @@ Android Keystore cannot directly hold X25519 keys usable by libsodium (Keystore 
 - **Staleness check uses `relay_ts` (relay-stamped) not `ts` (origin clock).** Origin clocks may be wrong; packets older than 48h by relay stamp are rejected. LAN direct packets carry no relay stamp → only `msg_id` dedup applies, which is sufficient for replay defense on LAN.
 - **Trust model for `relay_ts`:** the stamp is applied by the relay **outside** the E2EE envelope and is NOT authenticated. A malicious or compromised relay can forge it to "un-stale" old packets. This is acceptable because **`msg_id` dedup is the primary replay defense** (applied regardless of timestamp); `relay_ts` is a secondary advisory check. A relay forging `relay_ts` gains nothing an attacker who can already replay packets wouldn't gain — and replays are caught by dedup.
 
-### 4.7 `Pairing`
+### 4.7 `Pairing` (two-sided confirmation)
 
-- Device A: generate keypairs → create QR code containing `{relay_url, device_id, enc_pubkey, sign_pubkey, pair_token}` where `pair_token` is a short-lived one-time secret registered with the relay.
-- Device B: scan QR → send own pubkeys + `pair_token` to relay → relay binds the pair.
-- Both devices show SHA-256 fingerprint of `enc_pubkey || sign_pubkey` (concatenated) — user confirms they match. Binding both pubkeys in the fingerprint prevents MITM swap of the signing key for relay impersonation. After confirmation, pair is marked trusted; `pair_token` invalidated.
+- Device A: generate keypairs → register `{pair_token, A_enc_pubkey, A_sign_pubkey}` with relay via `POST /pair/init` → display QR containing `{relay_url, A_device_id, A_enc_pubkey, A_sign_pubkey, pair_token}`.
+- Device B: scan QR → verify QR fingerprint SHA-256(`A_enc_pubkey || A_sign_pubkey`) matches what Device B will display → `POST /pair/complete` with `{pair_token, B_device_id, B_enc_pubkey, B_sign_pubkey}`.
+- **Relay holds the pair in `pending` state; does NOT finalize yet.** Relay pushes B's pubkeys to Device A (via the open WebSocket Device A established during `/pair/init`).
+- **Device A displays SHA-256(`B_enc_pubkey || B_sign_pubkey`).** User compares with what Device B is showing for A's keys. Both users tap confirm on both devices.
+- Both confirmations (signed with respective signing keys) sent back to relay → relay marks pair `trusted` → `pair_token` invalidated.
+- **Why two-sided:** prevents MITM at `/pair/complete` where an attacker with the QR (shoulder-surfed, screen-recorded) could race Device B to submit attacker's pubkeys. With one-sided confirmation, user on Device A would see legit fingerprint (from legit Device B) while the *relay* is bound to attacker's keys if the attacker races first. Two-sided: both devices must cryptographically confirm they agree on each other's pubkeys before binding.
+- `pair_token` is cryptographically bound to the pubkeys it accompanies via Device A's signature (`sig_A(pair_token || B_enc_pubkey || B_sign_pubkey)`) at confirmation time, so the relay rejects any pubkey substitution even if the token leaks.
 
 ### 4.7.1 Mirror Tap Behavior (Content Intent)
 
@@ -309,8 +348,14 @@ Android's `Notification.Builder.setGroup(key)` + `setGroupSummary(true)` creates
 
 Sensitive notifications (banking OTPs, password resets, 2FA codes) should not auto-mirror.
 
-- **Phase 1:** user-configurable **app allowlist/denylist** UI. Default denylist is **hard-coded in the APK** (shipped as a JSON asset in `mobile/assets/default-denylist.json`, not remotely fetched). Contents: common OTP-sensitive apps — bank apps, `com.google.android.apps.authenticator2`, `com.authy.authy`, `com.microsoft.azure.authenticator`, `com.cisco.duo`, `org.telegram.messenger` (for banking OTPs), password managers. Shown to user on first run for confirmation; user-editable thereafter. Updates require an app release. Stored locally, not synced between phones.
-- **Phase 1 also:** respect `Notification.VISIBILITY_SECRET` — never mirror. Respect `FLAG_NO_CLEAR` — mirror but mark non-dismissable.
+- **Phase 1:** user-configurable **app allowlist/denylist** UI. Default denylist is **hard-coded in the APK** (`mobile/assets/default-denylist.json`). Contents: common OTP-sensitive apps — bank apps, `com.google.android.apps.authenticator2`, `com.authy.authy`, `com.microsoft.azure.authenticator`, `com.cisco.duo`, `org.telegram.messenger`, password managers. Shown to user on first run.
+- **Denylist integrity check:** at app startup, compute SHA-256 of the loaded denylist JSON and compare against a hard-coded hash constant compiled into the Kotlin source. On mismatch (repackaged APK removed the denylist), abort app start with a visible error — prevents a tampered build silently mirroring OTP apps.
+- **Phase 1 exclusions — never mirrored:**
+  - `Notification.VISIBILITY_SECRET` notifications.
+  - Notifications with `category == CATEGORY_CAR_EMERGENCY | CATEGORY_CAR_INFORMATION | CATEGORY_CAR_WARNING` (Android Auto side-channel).
+  - Notifications whose package is the current Android Auto projection app (`com.google.android.projection.gearhead`).
+  - `FLAG_NO_CLEAR` notifications are mirrored but marked non-dismissable on Phone B.
+- **Receiver-side visibility default:** mirrored notifications posted with `VISIBILITY_PRIVATE` (hides sensitive text on Phone B's lock screen by default). User can elevate per-channel in Phase 2.
 - **Phase 2:** per-channel opt-out (e.g., mirror WhatsApp messages but not WhatsApp calls).
 
 ### 4.8 `ReplyBridge`
@@ -320,6 +365,7 @@ Sensitive notifications (banking OTPs, password resets, 2FA codes) should not au
 - **Reply execution (origin side):** look up `(canon_id, action_id)` → build `Intent`, fill via `RemoteInput.addResultsToIntent(remoteInputs, intent, bundle)`, fire `PendingIntent.send(context, 0, intent)`.
 - **Peer side:** when mirroring, the Phone B notification is posted with reconstructed `Action` objects whose `PendingIntent` targets a local `ReplyReceiver` BroadcastReceiver. The receiver captures the typed text and emits `notif.reply` back to origin with the stored `action_id`.
 - Map entry lifetime: tied to source notification; TTL safety net of 1h for orphans.
+- **Persistence gap:** the `(canon_id, action_id) → (PendingIntent, RemoteInput)` map is in-memory only (PendingIntents are process-local handles and cannot be persisted). On OEM kill + NLS re-bind, the map is lost. A reply attempt for a notification that existed before the kill emits `reply.failed` (see §3.2.2). Documented limitation; recovery = user taps the notification on origin to restore its PendingIntent in a fresh app process.
 
 ---
 
@@ -329,7 +375,7 @@ Runs as a tray/menubar app on macOS, Windows, Linux. Receiver-only in v1.
 
 **Components (Rust side, `src-tauri/`):**
 
-- `crypto::{box_easy_seal, box_easy_open}` — `sodiumoxide` wrapper, wrapped keys stored in OS keychain (macOS Keychain, Windows Credential Manager, libsecret on Linux) via `keyring` crate. Same Keystore-wrap pattern as Android.
+- `crypto::{box_easy_seal, box_easy_open}` — `dryoc` wrapper, wrapped keys stored in OS keychain (macOS Keychain, Windows Credential Manager, libsecret on Linux) via `keyring` crate. Same Keystore-wrap pattern as Android.
 - `relay_ws` — `tokio-tungstenite` WebSocket client. Auto-reconnect with backoff. JWT auth via Ed25519.
 - `lan_discovery` — `mdns-sd` crate, daily-rotated ad-id, same derivation as Android.
 - `notifier` — native OS notifications per platform:
@@ -486,6 +532,23 @@ Mirror-of-mirror is prevented by the self-package filter in step 2a, not by `mir
 - Tauri app is tray-only, no UI process unless window open. ~20MB RAM idle, ~0% CPU idle.
 - Rust WebSocket uses OS select/epoll; no polling.
 - Pause reconnect attempts when laptop is on battery AND screen locked >5min (user toggle).
+
+---
+
+## 6.2 Threat Model — Documented Scope & Limitations
+
+**Out of scope (documented in README):**
+
+- **Rooted / OS-compromised devices.** An attacker with root on either phone can extract the Keystore master key (call Keystore API as app UID), read DataStore contents, dump process memory, or intercept NotificationListenerService callbacks. App-layer cryptography cannot defend against OS compromise. Users mirroring banking OTPs on rooted devices accept this risk.
+- **Forward secrecy across key compromise.** Long-term X25519 keypairs mean a later compromise of either device's wrapped secret key decrypts all historical captured ciphertext. Deferred to v2 (Signal Double Ratchet). Mitigation: unpair rotates keys; limited window of exposure going forward.
+- **Malicious apps on paired phones with NLS grant.** Any app granted notification-access already sees all notifications — phone-sync doesn't change that attack surface.
+- **Android Keystore attestation.** We don't verify StrongBox attestation certificates; assume device's Keystore is trustworthy at install time.
+
+**Known metadata leaks (not content, but patterns):**
+
+- **Relay operator** sees: `device_id`, connect timestamps, byte counts, message rate. Cannot see content (E2EE ciphertext only). Enough to infer activity patterns, online hours, notification density.
+- **FCM (Google)** sees: push frequency from relay to each device. Ping payload is opaque event_id (not notification content). Google learns "Device A messaged Device B at time T" metadata.
+- Users who treat notification metadata as sensitive should self-host the relay AND accept FCM leakage as an inherent cost of Doze-reliable wake.
 
 ---
 
