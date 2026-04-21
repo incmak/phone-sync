@@ -295,7 +295,7 @@ cd relay && go test ./internal/server/ -run TestWebSocketEcho
 
 Expected: FAIL — 404 or connection refused on `/ws`.
 
-- [ ] **Step 4: Implement WS handler with safety limits**
+- [ ] **Step 4: Implement WS handler with safety limits (no validator yet — added in Task 7)**
 
 Create `relay/internal/server/ws.go`:
 
@@ -361,10 +361,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
-		if err := s.validator.ValidateEnvelope(msg); err != nil {
-			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"error":"invalid envelope"}`))
-			continue
-		}
+		// Task 7 replaces this line with envelope validation via s.validator.
 		_ = conn.WriteMessage(websocket.TextMessage, msg)
 	}
 }
@@ -546,7 +543,7 @@ git commit -m "feat(relay): bbolt KV wrapper with Put/Get/Delete"
 
 ---
 
-## Task 5: Dockerfile + docker-compose
+## Task 4: Dockerfile + docker-compose
 
 **Files:**
 
@@ -558,10 +555,10 @@ git commit -m "feat(relay): bbolt KV wrapper with Put/Get/Delete"
 **Prerequisites for the Docker BUILD step (Step 3):**
 
 - Tasks 1–4 complete (go.mod + go.sum exist, all deps downloaded).
-- Task 5.5 complete (Makefile with `sync-proto` target exists — Dockerfile runs `make sync-proto`).
+- Task 4.5 complete (Makefile with `sync-proto` target exists — Dockerfile runs `make sync-proto`).
 - Task 6 complete (`proto/*.schema.json` files exist — `make sync-proto` copies them).
 
-Writing the Dockerfile + compose files (Steps 0–2) and committing (Step 4) can happen now. The build+smoke test (Step 3) must wait until Tasks 5.5 and 6 finish. Step 3 is marked with a blocker note below.
+Writing the Dockerfile + compose files (Steps 0–2) and committing (Step 4) can happen now. The build+smoke test (Step 3) must wait until Tasks 4.5 and 6 finish. Step 3 is marked with a blocker note below.
 
 - [ ] **Step 0: Ensure go.sum is clean**
 
@@ -664,7 +661,7 @@ relay.local {
 }
 ```
 
-- [ ] **Step 3: Build and smoke test locally** — **BLOCKED until Tasks 5.5 and 6 complete.** Defer and revisit.
+- [ ] **Step 3: Build and smoke test locally** — **BLOCKED until Tasks 4.5 and 6 complete.** Defer and revisit.
 
 ```bash
 cd deploy && docker compose build relay
@@ -685,7 +682,7 @@ git commit -m "feat(deploy): Dockerfile + docker-compose + Caddy"
 
 ---
 
-## Task 5.5: Makefile + gitignore-based single source of truth for proto
+## Task 4.5: Makefile + gitignore-based single source of truth for proto
 
 **Approach:** `/proto/*.schema.json` is the ONLY committed copy. `relay/internal/server/schemas/` is gitignored and regenerated on demand by `make sync-proto`. This eliminates drift entirely — there's nothing to drift *from* because only one copy is ever tracked.
 
@@ -920,7 +917,7 @@ cd relay && go get github.com/santhosh-tekuri/jsonschema/v5
 
 - [ ] **Step 2: Populate the embed path**
 
-**Prerequisite:** Task 5.5 (Makefile) must be complete. Run:
+**Prerequisite:** Task 4.5 (Makefile) must be complete. Run:
 
 ```bash
 make sync-proto
@@ -1022,48 +1019,12 @@ func (v *Validator) ValidateEnvelope(raw []byte) error {
 
 (Schemas are already in place via Step 2's `make sync-proto`.)
 
-- [ ] **Step 6: Wire validator into /ws**
+- [ ] **Step 6: Wire validator into /ws (surgical — preserves safety limits from Task 2)**
 
-Modify `relay/internal/server/ws.go`:
-
-```go
-package server
-
-import (
-	"log"
-	"net/http"
-
-	"github.com/gorilla/websocket"
-)
-
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("upgrade: %v", err)
-		return
-	}
-	defer conn.Close()
-	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			return
-		}
-		if err := s.validator.ValidateEnvelope(msg); err != nil {
-			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"error":"invalid envelope"}`))
-			continue
-		}
-		_ = conn.WriteMessage(websocket.TextMessage, msg)
-	}
-}
-```
-
-Modify `relay/internal/server/server.go`:
+**Modify `relay/internal/server/server.go`** — add `validator` field and wire into `New()`:
 
 ```go
+// package + chi imports unchanged
 type Server struct {
 	router    *chi.Mux
 	validator *Validator
@@ -1078,7 +1039,30 @@ func New() *Server {
 	s.routes()
 	return s
 }
+
+// Handler() and routes() unchanged.
 ```
+
+**Modify `relay/internal/server/ws.go`** — single-line edit. Find this block inside the `for { ... }` loop:
+
+```go
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		// Task 7 replaces this line with envelope validation via s.validator.
+		_ = conn.WriteMessage(websocket.TextMessage, msg)
+```
+
+Replace with:
+
+```go
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		if err := s.validator.ValidateEnvelope(msg); err != nil {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"error":"invalid envelope"}`))
+			continue
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, msg)
+```
+
+**Do NOT rewrite the rest of `ws.go` — `SetReadLimit`, `SetReadDeadline`, `SetPongHandler`, the ping goroutine, and the `CheckOrigin` TODO all remain from Task 2.**
 
 - [ ] **Step 7: Update existing WS echo test + add invalid-envelope test**
 
