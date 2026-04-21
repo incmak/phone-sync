@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/phonesync/relay/internal/store"
@@ -13,6 +14,7 @@ type Server struct {
 	router    *chi.Mux
 	validator *Validator
 	pairStore *store.PairStore
+	jtiCache  *JTICache
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -25,6 +27,7 @@ func NewWithStore(b *store.Bolt) *Server {
 		router:    chi.NewRouter(),
 		validator: v,
 		pairStore: store.NewPairStore(b),
+		jtiCache:  NewJTICache(60 * time.Second),
 	}
 	s.routes()
 	return s
@@ -48,7 +51,7 @@ func (s *Server) Handler() http.Handler { return s.router }
 
 func (s *Server) routes() {
 	s.router.Get("/health", s.handleHealth)
-	s.router.Get("/ws", s.handleWebSocket)
 	s.router.Post("/pair/init", s.handlePairInit)
 	s.router.Post("/pair/complete", s.handlePairComplete)
+	s.router.With(s.authMiddleware).Get("/ws", s.handleWebSocket)
 }
