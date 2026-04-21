@@ -16,14 +16,21 @@ import kotlinx.coroutines.runBlocking
 
 class TwinotifyNotificationListener : NotificationListenerService() {
 
+    companion object {
+        @Volatile private var installedSink: OutboundSink? = null
+        fun installSink(s: OutboundSink) { installedSink = s }
+        fun currentSink(): OutboundSink = installedSink ?: LoggingOutboundSink
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var dao: NotificationMapDao
     private lateinit var denylist: Set<String>
     private lateinit var originDevice: String
 
-    // Overridable for tests — normal operation uses the module's sink.
-    // Task 4 will wire a real OutboundQueue-backed sink. For now, logging.
-    internal var sink: OutboundSink = LoggingOutboundSink
+    // Resolves the sink on each event so SyncService.installSink() takes effect
+    // without requiring the listener to restart.
+    internal val sink: OutboundSink
+        get() = installedSink ?: LoggingOutboundSink
 
     override fun onCreate() {
         super.onCreate()

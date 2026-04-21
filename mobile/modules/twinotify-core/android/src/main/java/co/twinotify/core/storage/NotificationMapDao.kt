@@ -48,4 +48,7 @@ abstract class NotificationMapDao {
     // FK CASCADE handles local_to_canon child rows automatically.
     @Query("DELETE FROM mirrored_from_peer WHERE createdTs < :cutoffMs")
     abstract suspend fun sweepExpired(cutoffMs: Long)
+
+    @Query("SELECT localId, localTag FROM local_to_canon WHERE canonId = :canonId LIMIT 1")
+    abstract suspend fun lookupLocalByCanonId(canonId: String): LocalIdTagPair?
 }

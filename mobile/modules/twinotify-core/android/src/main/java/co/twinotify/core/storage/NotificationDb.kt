@@ -4,7 +4,22 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS outbound_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                ciphertextB64 TEXT NOT NULL,
+                nonceB64 TEXT NOT NULL,
+                msgId TEXT NOT NULL,
+                createdTs INTEGER NOT NULL
+            )
+        """.trimIndent())
+    }
+}
 
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
@@ -19,14 +34,15 @@ object NotificationDb {
                 super.onOpen(db)
                 db.execSQL("PRAGMA foreign_keys = ON")
             }
-        }).build().also { instance = it }
+        }).addMigrations(MIGRATION_1_2).build().also { instance = it }
     }
 }
 
-// TODO(phase-3/task-4): add OutboundEvent::class here + bump version to 2 +
-// add Migration(1,2). Task 4 (SyncService) introduces OutboundEvent for the
-// outbound message queue.
-@Database(entities = [MirroredFromPeer::class, LocalIdToCanonId::class], version = 1)
+@Database(
+    entities = [MirroredFromPeer::class, LocalIdToCanonId::class, OutboundEvent::class],
+    version = 2,
+)
 abstract class NotificationDbImpl : RoomDatabase() {
     abstract fun notificationMapDao(): NotificationMapDao
+    abstract fun outboundEventDao(): OutboundEventDao
 }

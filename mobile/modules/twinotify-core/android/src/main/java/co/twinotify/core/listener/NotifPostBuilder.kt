@@ -34,11 +34,10 @@ object NotifPostBuilder {
     private const val SMALL_ICON_PX = 96
     private const val LARGE_ICON_PX = 256
     private const val ANDROID_AUTO_PKG = "com.google.android.projection.gearhead"
-    private val CAR_CATEGORIES = setOf(
-        Notification.CATEGORY_CAR_EMERGENCY,
-        Notification.CATEGORY_CAR_INFORMATION,
-        Notification.CATEGORY_CAR_WARNING,
-    )
+    // String values match Notification.CATEGORY_CAR_EMERGENCY/_INFORMATION/_WARNING (API 21+).
+    // Literals used so we don't depend on SDK-stub resolution in non-device build environments;
+    // the Android framework treats these strings as the stable contract for notif.category.
+    private val CAR_CATEGORIES = setOf("car_emergency", "car_information", "car_warning")
 
     /**
      * @return NotifPostJson, or null if privacy filter drops it.
