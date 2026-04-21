@@ -3,13 +3,14 @@ package server
 import (
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 const (
-	maxMessageSize = 1 << 20 // 1 MB — notif.post with base64 icons should fit comfortably
+	maxMessageSize = 1 << 20
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	writeWait      = 10 * time.Second
@@ -34,6 +35,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
+	var writeMu sync.Mutex
+	writeMsg := func(mt int, data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
+		return conn.WriteMessage(mt, data)
+	}
+
 	stopPinger := make(chan struct{})
 	defer close(stopPinger)
 	go func() {
@@ -42,8 +51,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-ticker.C:
-				_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				if err := writeMsg(websocket.PingMessage, nil); err != nil {
 					return
 				}
 			case <-stopPinger:
@@ -58,7 +66,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
-		// Task 7 replaces this line with envelope validation via s.validator.
-		_ = conn.WriteMessage(websocket.TextMessage, msg)
+		// Task 7 replaces this line with envelope validation via s.validator, then calls writeMsg.
+		_ = writeMsg(websocket.TextMessage, msg)
 	}
 }
