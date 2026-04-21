@@ -9,10 +9,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+
 const validEnvelope = `{"v":1,"type":"ping","msg_id":"11111111-1111-4111-8111-111111111111","origin_device":"devA","ts":1713600000000}`
 
 func TestHealthEndpoint(t *testing.T) {
-	srv := New()
+	srv := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -26,14 +27,10 @@ func TestHealthEndpoint(t *testing.T) {
 }
 
 func TestWebSocketEcho(t *testing.T) {
-	srv := New()
+	srv := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
-	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	c := dialWSAuthed(t, ts, srv)
 	defer c.Close()
 	if err := c.WriteMessage(websocket.TextMessage, []byte(validEnvelope)); err != nil {
 		t.Fatalf("write: %v", err)
@@ -48,14 +45,10 @@ func TestWebSocketEcho(t *testing.T) {
 }
 
 func TestWebSocketRejectsInvalid(t *testing.T) {
-	srv := New()
+	srv := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
-	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	c := dialWSAuthed(t, ts, srv)
 	defer c.Close()
 	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"garbage":true}`)); err != nil {
 		t.Fatalf("write: %v", err)
