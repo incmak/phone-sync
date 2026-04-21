@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Twinotify — Design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body { background: #f0eee9; font-family: "Inter", system-ui, sans-serif; }
+  #root { height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="tokens.jsx"></script>
+<script type="text/babel" src="primitives.jsx"></script>
+<script type="text/babel" src="screens.jsx"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+
+<script type="text/babel">
+
+// Tweak defaults — written to disk via __edit_mode_set_keys.
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "accent": "mint",
+  "role": "A",
+  "connection": "lan",
+  "theme": "light"
+}/*EDITMODE-END*/;
+
+// Phone frame wrapping a screen in a rounded device shell.
+function Phone({ ctx, children, id }) {
+  const t = ctx.theme;
+  return (
+    <div data-screen-label={id} style={{
+      width: PHONE_W, height: PHONE_H, borderRadius: 44,
+      background: t.bg, overflow: 'hidden',
+      boxShadow: t.dark
+        ? '0 1px 0 rgba(255,255,255,0.04) inset, 0 30px 80px rgba(0,0,0,0.4), 0 0 0 1px #000'
+        : '0 1px 0 rgba(255,255,255,0.8) inset, 0 30px 80px rgba(26,23,19,0.15), 0 0 0 1px #d4cfc4',
+      position: 'relative', display: 'flex', flexDirection: 'column',
+    }}>
+      {children}
+    </div>
+  );
+}
+
+// ═════════════════════ PROTOTYPE ═════════════════════
+function Prototype({ hue, dark, role, connection, setRole, setConnection }) {
+  const theme = React.useMemo(() => twTheme({ hue, dark }), [hue, dark]);
+  window.__twTheme = theme;
+  const [screen, setScreen] = React.useState(() => {
+    try { return localStorage.getItem('tw.screen') || 'home'; } catch { return 'home'; }
+  });
+  const go = (s) => {
+    setScreen(s);
+    try { localStorage.setItem('tw.screen', s); } catch {}
+  };
+
+  const ctx = { theme, go, screen, role, setRole, connection, setConnection };
+
+  const map = {
+    'on-welcome': ScreenWelcome,
+    'on-how':     ScreenHow,
+    'on-role':    ScreenRole,
+    'on-relay':   ScreenRelay,
+    'on-perms':   ScreenPerms,
+    'on-oem':     ScreenOEM,
+    'on-ready':   ScreenReady,
+    'pair-qr':    ScreenPairQR,
+    'pair-scan':  ScreenPairScan,
+    'pair-fp':    ScreenPairFP,
+    'pair-success': ScreenPairSuccess,
+    'pair-fail':  ScreenPairFail,
+    'home':       ScreenHome,
+    'settings':   ScreenSettings,
+    'set-pair':   ScreenSetPair,
+    'filter':     ScreenFilter,
+  };
+  const S = map[screen] || ScreenHome;
+
+  // Flow jump chip
+  const flows = [
+    { k: 'on-welcome', label: '01' }, { k: 'on-how', label: '02' }, { k: 'on-role', label: '03' },
+    { k: 'on-relay', label: '04' }, { k: 'on-perms', label: '05' }, { k: 'on-oem', label: '06' }, { k: 'on-ready', label: '07' },
+    { k: 'pair-qr', label: 'QR' }, { k: 'pair-scan', label: 'Scan' }, { k: 'pair-fp', label: 'Verify' },
+    { k: 'pair-success', label: '✓' }, { k: 'pair-fail', label: '!' },
+    { k: 'home', label: 'Home' }, { k: 'settings', label: 'Settings' }, { k: 'set-pair', label: 'Peer' }, { k: 'filter', label: 'Filter' },
+  ];
+
+  return (
+    <div data-screen-label={`Prototype · ${dark ? 'Dark' : 'Light'} · Role ${role} · ${connection}`} style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+      <Phone ctx={ctx} id={screen}><S ctx={ctx} /></Phone>
+
+      {/* Screen jumper */}
+      <div style={{
+        background: '#1a1713', color: '#f4f1eb', borderRadius: 12, padding: 12, width: 220,
+        fontFamily: TW_FONTS.ui, fontSize: 12,
+        boxShadow: '0 20px 40px rgba(0,0,0,0.2)',
+      }}>
+        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: '#8c867c', marginBottom: 8 }}>Jump to screen</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
+          {flows.map((f) => (
+            <button key={f.k} onClick={() => go(f.k)} style={{
+              background: screen === f.k ? theme.accent : '#252320',
+              color: screen === f.k ? '#fff' : '#c8c3ba',
+              border: 'none', padding: '8px 4px', borderRadius: 6,
+              fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+              minHeight: 32,
+            }} title={f.k}>{f.label}</button>
+          ))}
+        </div>
+        <div style={{ fontSize: 10, color: '#5a564e', marginTop: 10, lineHeight: 1.4 }}>
+          Current: <span style={{ color: '#c8c3ba', fontFamily: TW_FONTS.mono }}>{screen}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═════════════════════ PRIMITIVES GALLERY ═════════════════════
+function PrimitivesCard({ title, sub, children, width = 360, height, theme }) {
+  return (
+    <div style={{
+      width, background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 16,
+      padding: 20, display: 'flex', flexDirection: 'column', gap: 14, height,
+      color: theme.ink,
+    }}>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: theme.ink4, letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 4 }}>{title}</div>
+        {sub && <div style={{ fontSize: 13, color: theme.ink3 }}>{sub}</div>}
+      </div>
+      <div style={{ flex: 1 }}>{children}</div>
+    </div>
+  );
+}
+
+function Primitives({ hue, dark }) {
+  const theme = twTheme({ hue, dark });
+  window.__twTheme = theme;
+  const t = theme;
+  return (
+    <div style={{
+      background: t.bg, padding: 40, minWidth: 1200,
+      color: t.ink, fontFamily: TW_FONTS.ui,
+      display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20, alignItems: 'stretch',
+    }}>
+      {/* LOGO */}
+      <PrimitivesCard title="P-01 · Wordmark + logo" sub="Three monogram variants exploring the twin motif" theme={t} width="100%">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, justifyContent: 'center', padding: '14px 0' }}>
+          <TwWordmark size={26} variant="pair" />
+          <TwWordmark size={26} variant="dots" />
+          <TwWordmark size={26} variant="monogram" />
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 6 }}>
+            <TwLogo size={44} variant="pair" />
+            <TwLogo size={44} variant="dots" />
+            <TwLogo size={44} variant="monogram" />
+          </div>
+        </div>
+      </PrimitivesCard>
+
+      {/* COLOR */}
+      <PrimitivesCard title="P-13 · Accent ramp" sub={`oklch · hue ${hue}`} theme={t} width="100%">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4 }}>
+          {[50,100,200,300,400,500,600,700,800,900].map((l) => (
+            <div key={l} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ height: 40, borderRadius: 6, background: t.pal[`accent${l}`], border: `1px solid ${t.border}` }}/>
+              <div style={{ fontSize: 10, color: t.ink3, fontFamily: TW_FONTS.mono, textAlign: 'center' }}>{l}</div>
+            </div>
+          ))}
+        </div>
+      </PrimitivesCard>
+
+      {/* NEUTRALS */}
+      <PrimitivesCard title="Neutrals · warm ink" sub="Not cold gray — 2% chroma toward orange" theme={t} width="100%">
+        <div style={{ display: 'flex', gap: 4 }}>
+          {['bg','card','fill','hover','border','borderHi','ink4','ink3','ink2','ink'].map((k) => (
+            <div key={k} style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ height: 56, borderRadius: 6, background: t[k], border: `1px solid ${t.border}` }}/>
+              <div style={{ fontSize: 9, color: t.ink3, fontFamily: TW_FONTS.mono, textAlign: 'center' }}>{k}</div>
+            </div>
+          ))}
+        </div>
+      </PrimitivesCard>
+
+      {/* P-04 STATUS */}
+      <PrimitivesCard title="P-04 · Connection status" sub="Color + icon + label — never color alone" theme={t} width="100%">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {['lan','relay','pairing','offline'].map((s) => (
+            <div key={s} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: t.fill, borderRadius: 10 }}>
+              <TwStatusDot state={s} size={10} />
+              <div style={{ fontSize: 13, fontWeight: 600, color: t.ink }}>{TwStatusLabel({state: s})}</div>
+              <div style={{ flex: 1 }}/>
+              <div style={{ fontSize: 11, color: t.ink3, fontFamily: TW_FONTS.mono }}>{s.toUpperCase()}</div>
+            </div>
+          ))}
+        </div>
+      </PrimitivesCard>
+
+      {/* P-05 DEVICE CHIP + P-06 APP CHIP */}
+      <PrimitivesCard title="P-05/06 · Chips" sub="Device + app chips" theme={t} width="100%">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <TwDeviceChip name="Pixel 9 Pro" role="A" status="lan" />
+          <TwDeviceChip name="Samsung S24" role="B" status="relay" />
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <TwAppChip app={TW_APPS.signal} />
+            <TwAppChip app={TW_APPS.gmail} />
+            <TwAppChip app={TW_APPS.slack} showBadge="3" />
+          </div>
+        </div>
+      </PrimitivesCard>
+
+      {/* P-14 TYPE */}
+      <PrimitivesCard title="P-14 · Typography" sub="Inter + JetBrains Mono" theme={t} width="100%">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 32, fontWeight: 600, letterSpacing: -0.5, lineHeight: 1.1 }}>Display 32</div>
+          <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: -0.3 }}>Title 22</div>
+          <div style={{ fontSize: 15 }}>Body 15 · lorem ipsum dolor sit amet</div>
+          <div style={{ fontSize: 13, color: t.ink3 }}>Caption 13 · subtle copy in ink3</div>
+          <div style={{ fontFamily: TW_FONTS.mono, fontSize: 13 }}>mono.13 · a1b2-c3d4-e5f6</div>
+        </div>
+      </PrimitivesCard>
+
+      {/* P-07 FINGERPRINT */}
+      <div style={{ gridColumn: 'span 2' }}>
+        <PrimitivesCard title="P-07 · Fingerprint" sub="16 × 4 hex groups, colored highlights for anchoring" theme={t} width="100%">
+          <TwFingerprint hex={PEER_FP} highlightGroups={[0, 5, 10, 15]} />
+        </PrimitivesCard>
+      </div>
+
+      {/* QR */}
+      <PrimitivesCard title="QR with mirror logo" sub="Centered mark reinforces brand at the moment of pairing" theme={t} width="100%">
+        <div style={{ display: 'flex', justifyContent: 'center' }}>
+          <TwQR size={200} seed="twinotify-demo" />
+        </div>
+      </PrimitivesCard>
+
+      {/* BUTTONS */}
+      <PrimitivesCard title="Buttons" sub="Primary · Accent · Secondary · Destructive" theme={t} width="100%">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <TwButton variant="primary" fullWidth>Pair device</TwButton>
+          <TwButton variant="accent" fullWidth>Accept match</TwButton>
+          <TwButton variant="secondary" fullWidth>Test connection</TwButton>
+          <TwButton variant="destructive" fullWidth icon={<TwIcon.unpair />}>Unpair</TwButton>
+        </div>
+      </PrimitivesCard>
+
+      {/* SWITCHES + CARDS */}
+      <PrimitivesCard title="Switches + rows" theme={t} width="100%">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: `1px solid ${t.border}` }}>
+            <div style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>Mirror notifications</div>
+            <TwSwitch checked={true} onChange={() => {}} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: `1px solid ${t.border}` }}>
+            <div style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>Prefer LAN</div>
+            <TwSwitch checked={true} onChange={() => {}} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0' }}>
+            <div style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>Always-connected</div>
+            <TwSwitch checked={false} onChange={() => {}} />
+          </div>
+        </div>
+      </PrimitivesCard>
+
+      {/* P-10 BANNERS */}
+      <div style={{ gridColumn: 'span 2' }}>
+        <PrimitivesCard title="P-10 · Banners" sub="Info · Warn · Danger · OK" theme={t} width="100%">
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <TwBanner tone="info" title="Over relay" body="Tunneled, still E2EE." compact />
+            <TwBanner tone="ok" title="Hash verified" body="Denylist intact." compact />
+            <TwBanner tone="warn" title="Battery optimization on" body="Mirror may stall." compact />
+            <TwBanner tone="danger" title="Peer offline" body="Last seen 3 min ago." compact />
+          </div>
+        </PrimitivesCard>
+      </div>
+
+      {/* P-09 EMPTY */}
+      <PrimitivesCard title="P-09 · Empty" theme={t} width="100%">
+        <TwEmpty title="No peer paired" body="Set up another device to start mirroring." cta={<TwButton size="sm" variant="primary">Pair device</TwButton>} />
+      </PrimitivesCard>
+    </div>
+  );
+}
+
+// ═════════════════════ ROOT + TWEAKS ═════════════════════
+function App() {
+  const [hueKey, setHueKey] = React.useState(TWEAKS.accent);
+  const [theme, setTheme] = React.useState(TWEAKS.theme);   // 'light' | 'dark' | 'both'
+  const [role, setRole] = React.useState(TWEAKS.role);      // 'A' | 'B'
+  const [connection, setConnection] = React.useState(TWEAKS.connection);  // 'lan' | 'relay' | 'offline' | 'pairing'
+
+  const [editing, setEditing] = React.useState(false);
+
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      if (!e.data) return;
+      if (e.data.type === '__activate_edit_mode') setEditing(true);
+      if (e.data.type === '__deactivate_edit_mode') setEditing(false);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent?.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const persist = (patch) => {
+    window.parent?.postMessage({ type: '__edit_mode_set_keys', edits: patch }, '*');
+  };
+
+  const hue = TW_HUES[hueKey] || 180;
+
+  return (
+    <>
+      <DesignCanvas minScale={0.1} maxScale={3}>
+        <DCSection id="proto" title="Interactive prototype" subtitle="Tier-1 Android flow · tap screens in the jumper panel, or use Tweaks to swap state">
+          {(theme === 'light' || theme === 'both') && (
+            <DCArtboard id="proto-light" label="Prototype · Light" width={PHONE_W + 220} height={PHONE_H + 40}>
+              <div style={{ padding: 20, background: '#f0eee9', height: '100%', display: 'flex', alignItems: 'center' }}>
+                <Prototype hue={hue} dark={false} role={role} connection={connection} setRole={setRole} setConnection={setConnection} />
+              </div>
+            </DCArtboard>
+          )}
+          {(theme === 'dark' || theme === 'both') && (
+            <DCArtboard id="proto-dark" label="Prototype · Dark" width={PHONE_W + 220} height={PHONE_H + 40}>
+              <div style={{ padding: 20, background: '#141210', height: '100%', display: 'flex', alignItems: 'center' }}>
+                <Prototype hue={hue} dark={true} role={role} connection={connection} setRole={setRole} setConnection={setConnection} />
+              </div>
+            </DCArtboard>
+          )}
+        </DCSection>
+
+        <DCSection id="primitives" title="Primitives" subtitle="P-01 through P-14 — design tokens and atoms">
+          <DCArtboard id="prim-light" label="Primitives · Light" width={1280} height={1060}>
+            <Primitives hue={hue} dark={false} />
+          </DCArtboard>
+          <DCArtboard id="prim-dark" label="Primitives · Dark" width={1280} height={1060}>
+            <Primitives hue={hue} dark={true} />
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="flow" title="Full flow atlas" subtitle="Every Tier-1 screen at a glance">
+          <DCArtboard id="atlas" label="Tier-1 atlas · Light" width={(PHONE_W + 16) * 4 + 32} height={(PHONE_H + 60) * 4 + 32}>
+            <FlowAtlas hue={hue} dark={false} role={role} />
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      {editing && (
+        <TweaksPanel
+          hueKey={hueKey} setHueKey={(v) => { setHueKey(v); persist({ accent: v }); }}
+          theme={theme} setTheme={(v) => { setTheme(v); persist({ theme: v }); }}
+          role={role} setRole={(v) => { setRole(v); persist({ role: v }); }}
+          connection={connection} setConnection={(v) => { setConnection(v); persist({ connection: v }); }}
+        />
+      )}
+    </>
+  );
+}
+
+// ═════════════════════ FLOW ATLAS ═════════════════════
+function FlowAtlas({ hue, dark, role }) {
+  const theme = twTheme({ hue, dark });
+  window.__twTheme = theme;
+  const screens = [
+    ['on-welcome', 'ON-01 Welcome', ScreenWelcome],
+    ['on-how',     'ON-02 How it works', ScreenHow],
+    ['on-role',    'ON-03 Role', ScreenRole],
+    ['on-relay',   'ON-04 Relay', ScreenRelay],
+    ['on-perms',   'ON-05 Permissions', ScreenPerms],
+    ['on-oem',     'ON-06 OEM fixes', ScreenOEM],
+    ['on-ready',   'ON-07 Ready', ScreenReady],
+    ['pair-qr',    'PAIR-03 Show QR', ScreenPairQR],
+    ['pair-scan',  'PAIR-05 Scan', ScreenPairScan],
+    ['pair-fp',    'PAIR-07 Fingerprint', ScreenPairFP],
+    ['pair-success','PAIR-10 Success', ScreenPairSuccess],
+    ['pair-fail',  'PAIR-11 Fail', ScreenPairFail],
+    ['home',       'HOM-01 Home', ScreenHome],
+    ['settings',   'SET-01 Settings', ScreenSettings],
+    ['set-pair',   'SET-02 Pairing', ScreenSetPair],
+    ['filter',     'FIL-01 App filter', ScreenFilter],
+  ];
+  return (
+    <div style={{ background: theme.bg, padding: 16, display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 16, alignItems: 'start', fontFamily: TW_FONTS.ui }}>
+      {screens.map(([k, label, S]) => {
+        const ctx = { theme, go: () => {}, screen: k, role, setRole: () => {}, connection: 'lan', setConnection: () => {} };
+        window.__twTheme = theme;
+        return (
+          <div key={k} style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center' }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: theme.ink3, fontFamily: TW_FONTS.mono }}>{label}</div>
+            <Phone ctx={ctx} id={k}><S ctx={ctx} /></Phone>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ═════════════════════ TWEAKS PANEL ═════════════════════
+function TweaksPanel({ hueKey, setHueKey, theme, setTheme, role, setRole, connection, setConnection }) {
+  const panelBg = '#1a1713';
+  const fg = '#f4f1eb';
+  const label = { fontSize: 10, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase', color: '#8c867c', marginBottom: 6 };
+  const Btn = ({ on, children, onClick, ...rest }) => (
+    <button onClick={onClick} {...rest} style={{
+      flex: 1, padding: '8px 10px', border: 'none', borderRadius: 8,
+      fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: TW_FONTS.ui,
+      background: on ? fg : '#2a2520', color: on ? '#1a1713' : '#c8c3ba',
+      minHeight: 36,
+    }}>{children}</button>
+  );
+  const hueSwatch = (k) => {
+    const col = `oklch(0.7 0.13 ${TW_HUES[k]})`;
+    return <span style={{ display: 'inline-block', width: 14, height: 14, borderRadius: 7, background: col, border: '1px solid rgba(255,255,255,0.15)', marginRight: 6, verticalAlign: 'middle' }}/>;
+  };
+  return (
+    <div style={{
+      position: 'fixed', right: 20, bottom: 20, width: 280,
+      background: panelBg, color: fg, borderRadius: 14, padding: 16,
+      fontFamily: TW_FONTS.ui,
+      boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
+      border: '1px solid #2e2a25',
+      zIndex: 200,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+        <TwLogo size={18} color={fg} accent="oklch(0.72 0.13 180)" />
+        <div style={{ fontSize: 13, fontWeight: 600 }}>Tweaks</div>
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <div style={label}>Accent hue</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          {Object.keys(TW_HUES).map((k) => (
+            <Btn key={k} on={hueKey === k} onClick={() => setHueKey(k)}>
+              {hueSwatch(k)}<span style={{ verticalAlign: 'middle' }}>{k}</span>
+            </Btn>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <div style={label}>Theme</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {['light', 'dark', 'both'].map((v) => <Btn key={v} on={theme === v} onClick={() => setTheme(v)}>{v}</Btn>)}
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <div style={label}>Role</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <Btn on={role === 'A'} onClick={() => setRole('A')}>A · Initiator</Btn>
+          <Btn on={role === 'B'} onClick={() => setRole('B')}>B · Joiner</Btn>
+        </div>
+      </div>
+
+      <div>
+        <div style={label}>Connection state</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+          {['lan', 'relay', 'pairing', 'offline'].map((v) => (
+            <Btn key={v} on={connection === v} onClick={() => setConnection(v)}>{v}</Btn>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
