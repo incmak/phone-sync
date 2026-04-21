@@ -5,10 +5,13 @@
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
-    "android": "expo start --android",
+    "android": "expo run:android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "prebuild": "expo prebuild --clean",
+    "build:dev": "eas build --profile development --platform android --local",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "phone-sync-core": "file:./modules/phone-sync-core",

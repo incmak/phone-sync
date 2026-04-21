@@ -1,2 +1,5 @@
 # Synced from /proto via `make sync-proto` — never committed.
 relay/internal/server/schemas/
+
+mobile/android/
+mobile/ios/
