@@ -1,4 +1,4 @@
-# Phone-Sync — Design Spec
+# Twinotify — Design Spec
 
 **Date:** 2026-04-20
 **Status:** Draft for review
@@ -240,7 +240,7 @@ Receiver surfaces a toast: "Reply couldn't be sent — open the conversation on 
   - **Lazy FGS (default)** — FGS promoted while actively transmitting; demoted to a regular bound service + socket released after 5 min idle. Woken by FCM high-priority pings.
   - **Always Connected** — FGS always promoted, WebSocket held open. Opt-in for users who prioritize latency over battery.
 - State machine: `LAN_CONNECTED` → `RELAY_CONNECTED` → `OFFLINE_QUEUED` → `IDLE_DEMOTED` (lazy mode only).
-- Persistent notification (while FGS promoted): "Phone-Sync active — connected via LAN/Relay".
+- Persistent notification (while FGS promoted): "Twinotify active — connected via LAN/Relay".
 
 **AndroidManifest.xml entries (required, API 34+):**
 

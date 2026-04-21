@@ -1,4 +1,4 @@
-# Phone-Sync Relay (Phase 1)
+# Twinotify Relay (Phase 1)
 
 Go WebSocket relay that echoes validated-envelope messages. Used during development and as the wake-path relay for the mobile app.
 

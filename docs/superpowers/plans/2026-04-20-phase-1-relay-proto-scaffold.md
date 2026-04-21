@@ -879,7 +879,7 @@ Create `proto/ping.schema.json`:
 Create `proto/README.md`:
 
 ```markdown
-# Phone-Sync Protocol (v1)
+# Twinotify Protocol (v1)
 
 Single source of truth for packet schemas. Each client parses in its native language:
 - Relay (Go) — hand-written structs validated against these schemas in tests
@@ -1282,7 +1282,7 @@ export default function Home() {
   const [status, setStatus] = useState<string>('idle');
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Phone-Sync</Text>
+      <Text style={styles.title}>Twinotify</Text>
       <Text>Status: {status}</Text>
       <Button title="Ping relay" onPress={() => setStatus('not implemented yet')} />
     </View>
@@ -1558,7 +1558,7 @@ export default function Home() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Phone-Sync</Text>
+      <Text style={styles.title}>Twinotify</Text>
       <TextInput style={styles.input} value={url} onChangeText={setUrl} autoCapitalize="none" />
       <Button title="Ping relay" onPress={handlePing} />
       <Text style={styles.status}>{status}</Text>
@@ -1739,7 +1739,7 @@ Expected: no errors; WebSocket upgrade completed.
 Create `docs/test-scenarios.md`:
 
 ```markdown
-# Phone-Sync Test Scenarios
+# Twinotify Test Scenarios
 
 ## Phase 1 — Smoke Test
 
@@ -1871,7 +1871,7 @@ git commit -m "ci: relay tests + docker build; mobile typecheck + expo-doctor"
 Create `relay/README.md`:
 
 ```markdown
-# Phone-Sync Relay (Phase 1)
+# Twinotify Relay (Phase 1)
 
 Go WebSocket relay that echoes validated-envelope messages. Used during development and as the wake-path relay for the mobile app.
 
