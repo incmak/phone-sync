@@ -69,7 +69,7 @@ The app selects LAN when available, falls back to relay. Both sides publish live
 | **Mobile (Android 14+)** | Expo RN app + custom Expo Native Module (Kotlin) | Both origin AND receiver of notifications |
 | **Mobile iOS** | Expo stub, no-op v1 | iOS cannot read arbitrary notifications without entitlement — out of scope |
 | **Desktop** (macOS/Win/Linux) | Tauri (Rust core + React UI) | **Receiver only** in v1 (mirrors phone notifications to desktop). Origin role deferred to v2 (would require desktop's own notification capture, OS-specific). |
-| **Relay** | Go + WebSocket + BoltDB | Docker container |
+| **Relay** | Go 1.22 + gorilla/websocket + bbolt + chi + santhosh-tekuri/jsonschema **v6** | Docker container |
 
 ### 2.1.1 Why Expo + Native Module (not pure-Kotlin)
 
@@ -102,7 +102,7 @@ Inspired by KDE Connect. Packets are JSON, encrypted as opaque ciphertext over t
 ```json
 {
   "v": 1,
-  "type": "notif.post" | "notif.update" | "notif.cancel" | "notif.reply" | "reply.failed" | "icon.request" | "ping" | "pong" | "ack",
+  "type": "notif.post" | "notif.update" | "notif.cancel" | "notif.reply" | "reply.failed" | "icon.request" | "icon.reply" | "ping" | "pong" | "ack",
   "msg_id": "uuid",
   "origin_device": "device-id",
   "ts": 1713600000000,
@@ -176,7 +176,7 @@ Receiver → sender NACK when a `notif.post`/`notif.update` arrived with an `*_i
 { "hash": "<sha256 hex>" }
 ```
 
-Sender responds with a fresh `notif.post` for the same `canon_id` with `*_icon_png` present.
+Sender responds with a dedicated `icon.reply` packet carrying `{ hash, png_b64 }` (not a full `notif.post` — that would re-trigger the listener's post-event on the receiver). Receiver caches the bytes by hash and re-renders the pending notification whose `*_icon_hash` matches. `icon.reply` is added to the envelope `type` enum alongside `icon.request`.
 
 ### 3.2.2 `reply.failed`
 
@@ -301,7 +301,7 @@ Android 8+ silently drops notifications posted without a registered channel.
 Android Keystore cannot directly hold X25519 keys usable by libsodium (Keystore exposes asymmetric keys only through `Cipher`/`KeyAgreement` APIs and does not support XSalsa20-Poly1305). Pattern used: **Keystore-wrapped libsodium keys.**
 
 - **Master key** — AES-256-GCM key, generated in Android Keystore with `setUserAuthenticationRequired(false)`, hardware-backed (StrongBox when available). This key never leaves Keystore.
-- **libsodium X25519 keypair** — generated with `crypto_box_keypair()`. The raw secret key bytes are encrypted with the master key (AES-GCM, Keystore-sealed) and persisted to EncryptedSharedPreferences. Public key stored in plain SharedPreferences.
+- **libsodium X25519 keypair** — generated with `crypto_box_keypair()`. The raw secret key bytes are encrypted with the master key (AES-GCM, Keystore-sealed) and persisted via **Jetpack DataStore with androidx.datastore:datastore-tink** (see "At-rest storage" note below). Public key stored in plain DataStore (unencrypted).
 - **Ed25519 signing keypair** (for JWT relay auth) — generated with `crypto_sign_keypair()`; same wrapping pattern.
 - **Runtime access** — when encrypting/decrypting a packet, app unseals the wrapped secret key via Keystore → passes raw bytes to libsodium `crypto_box_easy` → zeros the raw bytes in memory immediately after. Keys live as raw bytes only for the duration of a single operation.
 - Encryption: `crypto_box_easy` (X25519 + XSalsa20-Poly1305, authenticated). Sender encrypts with own secret + peer's public; recipient decrypts and verifies sender authenticity. `crypto_box_seal` is rejected because it is anonymous and provides no sender authentication.
