@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phone-sync.local/schemas/notif-cancel.schema.json",
+  "title": "NotifCancelPayload",
+  "type": "object",
+  "required": ["canon_id", "reason"],
+  "properties": {
+    "canon_id": { "type": "string" },
+    "reason": { "type": "string", "enum": ["user_swipe", "user_click", "app_cancel"] }
+  }
+}

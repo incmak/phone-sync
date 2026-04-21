@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phone-sync.local/schemas/packet.schema.json",
+  "title": "Packet",
+  "description": "Top-level envelope for all messages. Contents are E2EE; this schema describes the inner cleartext.",
+  "type": "object",
+  "required": ["v", "type", "msg_id", "origin_device", "ts"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": {
+      "type": "string",
+      "description": "Phase 1 accepts only this subset. Later phases widen the enum by replacing this schema.",
+      "enum": ["ping", "pong", "notif.post", "notif.update", "notif.cancel"]
+    },
+    "msg_id": { "type": "string", "format": "uuid" },
+    "origin_device": { "type": "string", "minLength": 1 },
+    "ts": { "type": "integer", "description": "Origin wall-clock millis; advisory only." },
+    "payload": { "type": ["object", "null"] }
+  }
+}

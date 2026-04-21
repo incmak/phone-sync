@@ -326,7 +326,7 @@ Android Keystore cannot directly hold X25519 keys usable by libsodium (Keystore 
 - **Device A displays SHA-256(`B_enc_pubkey || B_sign_pubkey`).** User compares with what Device B is showing for A's keys. Both users tap confirm on both devices.
 - Both confirmations (signed with respective signing keys) sent back to relay → relay marks pair `trusted` → `pair_token` invalidated.
 - **Why two-sided:** prevents MITM at `/pair/complete` where an attacker with the QR (shoulder-surfed, screen-recorded) could race Device B to submit attacker's pubkeys. With one-sided confirmation, user on Device A would see legit fingerprint (from legit Device B) while the *relay* is bound to attacker's keys if the attacker races first. Two-sided: both devices must cryptographically confirm they agree on each other's pubkeys before binding.
-- `pair_token` is cryptographically bound to the pubkeys it accompanies via Device A's signature (`sig_A(pair_token || B_enc_pubkey || B_sign_pubkey)`) at confirmation time, so the relay rejects any pubkey substitution even if the token leaks.
+- `pair_token` is cryptographically bound to BOTH pubkey sets via Device A's signature — `sig_A(pair_token || A_enc_pubkey || A_sign_pubkey || B_enc_pubkey || B_sign_pubkey)` — at confirmation time. Binding A's own pubkeys too prevents a MITM from pretending A's stored keys differ from what A actually signed with. The relay reconstructs this message from the pair record (pending stores A's pubkeys from `/pair/init`; B's arrive in `/pair/complete`) and verifies with `ASignPubkey`.
 
 ### 4.7.1 Mirror Tap Behavior (Content Intent)
 
