@@ -11,7 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/phonesync/relay/internal/store"
+	"github.com/twinotify/relay/internal/store"
 )
 
 // registerPair puts a confirmed pair directly into the PairStore and returns

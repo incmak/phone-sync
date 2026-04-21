@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/phonesync/relay/internal/store"
+	"github.com/twinotify/relay/internal/store"
 )
 
 func newTestServer(t *testing.T) *Server {

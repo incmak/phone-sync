@@ -1,0 +1,50 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+  <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+                   android:usesPermissionFlags="neverForLocation"
+                   tools:targetApi="s" />
+  <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK"
+                   tools:targetApi="upside_down_cake" />
+
+  <application>
+    <service
+      android:name="co.twinotify.core.listener.TwinotifyNotificationListener"
+      android:label="@string/app_name"
+      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.service.notification.NotificationListenerService" />
+      </intent-filter>
+    </service>
+
+    <service
+      android:name="co.twinotify.core.service.SyncService"
+      android:foregroundServiceType="remoteMessaging"
+      android:exported="false" />
+
+    <receiver
+      android:name="co.twinotify.core.service.BootReceiver"
+      android:enabled="true"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+      </intent-filter>
+    </receiver>
+
+    <receiver
+      android:name="co.twinotify.core.service.MirrorTapReceiver"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="co.twinotify.MIRROR_TAP" />
+      </intent-filter>
+    </receiver>
+  </application>
+</manifest>

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://phone-sync.local/schemas/packet.schema.json",
+  "$id": "https://twinotify.app/schemas/packet.schema.json",
   "title": "Packet",
   "description": "Top-level envelope for all messages. Contents are E2EE; this schema describes the inner cleartext.",
   "type": "object",
@@ -9,8 +9,8 @@
     "v": { "type": "integer", "const": 1 },
     "type": {
       "type": "string",
-      "description": "Phase 1 accepts only this subset. Later phases widen the enum by replacing this schema.",
-      "enum": ["ping", "pong", "notif.post", "notif.update", "notif.cancel"]
+      "description": "Phase 3 adds enc and ack. Phase 1 had only ping/pong/notif.*.",
+      "enum": ["ping", "pong", "notif.post", "notif.update", "notif.cancel", "enc", "ack"]
     },
     "msg_id": { "type": "string", "format": "uuid" },
     "origin_device": { "type": "string", "minLength": 1 },

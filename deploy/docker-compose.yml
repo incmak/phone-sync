@@ -3,7 +3,7 @@ services:
     build:
       context: ..
       dockerfile: relay/Dockerfile
-    container_name: phone-sync-relay
+    container_name: twinotify-relay
     environment:
       LISTEN_ADDR: ":8080"
     ports:
@@ -12,11 +12,11 @@ services:
       - relay-data:/data
     restart: unless-stopped
     networks:
-      - phone-sync-net
+      - twinotify-net
 
   caddy:
     image: caddy:2-alpine
-    container_name: phone-sync-caddy
+    container_name: twinotify-caddy
     ports:
       - "443:443"
       - "80:80"
@@ -28,7 +28,7 @@ services:
       - relay
     restart: unless-stopped
     networks:
-      - phone-sync-net
+      - twinotify-net
 
 volumes:
   relay-data:
@@ -36,4 +36,4 @@ volumes:
   caddy-config:
 
 networks:
-  phone-sync-net:
+  twinotify-net:

@@ -1,0 +1,15 @@
+# Lock hashed asset to LF line endings — SHA-256 is precomputed in Kotlin source.
+mobile/modules/twinotify-core/android/src/main/assets/default-denylist.json text eol=lf
+
+# General: normalize text to LF, leave binaries alone.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.aar binary
+*.jar binary
+*.zip binary
+*.gz binary

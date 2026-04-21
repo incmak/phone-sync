@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/phonesync/relay/internal/server"
-	"github.com/phonesync/relay/internal/store"
+	"github.com/twinotify/relay/internal/server"
+	"github.com/twinotify/relay/internal/store"
 )
 
 func main() {
@@ -21,7 +21,7 @@ func main() {
 	}
 	boltPath := os.Getenv("BOLT_PATH")
 	if boltPath == "" {
-		boltPath = "/tmp/phone-sync-relay.db"
+		boltPath = "/tmp/twinotify-relay.db"
 	}
 	b, err := store.OpenBolt(boltPath)
 	if err != nil {

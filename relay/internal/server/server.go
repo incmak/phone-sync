@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/phonesync/relay/internal/store"
+	"github.com/twinotify/relay/internal/store"
 )
 
 type Server struct {
@@ -15,6 +15,7 @@ type Server struct {
 	validator *Validator
 	pairStore *store.PairStore
 	jtiCache  *JTICache
+	pairHub   *PairHub
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -28,6 +29,7 @@ func NewWithStore(b *store.Bolt) *Server {
 		validator: v,
 		pairStore: store.NewPairStore(b),
 		jtiCache:  NewJTICache(60 * time.Second),
+		pairHub:   NewPairHub(),
 	}
 	s.routes()
 	return s
@@ -38,7 +40,7 @@ func NewWithStore(b *store.Bolt) *Server {
 func New() *Server {
 	path := os.Getenv("BOLT_PATH")
 	if path == "" {
-		path = "/tmp/phone-sync-relay.db"
+		path = "/tmp/twinotify-relay.db"
 	}
 	b, err := store.OpenBolt(path)
 	if err != nil {
@@ -53,5 +55,6 @@ func (s *Server) routes() {
 	s.router.Get("/health", s.handleHealth)
 	s.router.Post("/pair/init", s.handlePairInit)
 	s.router.Post("/pair/complete", s.handlePairComplete)
+	s.router.Get("/pair/notify", s.handlePairNotify)
 	s.router.With(s.authMiddleware).Get("/ws", s.handleWebSocket)
 }

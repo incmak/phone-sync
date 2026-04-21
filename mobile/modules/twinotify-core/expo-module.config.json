@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["TwinotifyCoreModule"]
+  },
+  "android": {
+    "modules": ["co.twinotify.core.TwinotifyCoreModule"]
+  }
+}

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://phone-sync.local/schemas/pair-complete.schema.json",
+  "$id": "https://twinotify.app/schemas/pair-complete.schema.json",
   "type": "object",
   "required": ["pair_token", "device_id", "enc_pubkey", "sign_pubkey", "confirmation_sig"],
   "properties": {
