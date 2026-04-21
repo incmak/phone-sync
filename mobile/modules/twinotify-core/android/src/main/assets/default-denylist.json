@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "packages": [
+    "com.google.android.apps.authenticator2",
+    "com.authy.authy",
+    "com.microsoft.azure.authenticator",
+    "com.cisco.duo",
+    "com.chase.sig.android",
+    "com.americanexpress.android.acctsvcs.us",
+    "com.bankofamerica.cashpromobile",
+    "com.wf.wellsfargomobile",
+    "com.paypal.android.p2pmobile",
+    "com.venmo",
+    "com.discover.mobile.banking",
+    "com.lastpass.lpandroid",
+    "com.onepassword.android",
+    "com.bitwarden.authenticator",
+    "com.dashlane.dashlanephonefinal"
+  ]
+}
