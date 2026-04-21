@@ -66,7 +66,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
-		// Task 7 replaces this line with envelope validation via s.validator, then calls writeMsg.
+		if err := s.validator.ValidateEnvelope(msg); err != nil {
+			_ = writeMsg(websocket.TextMessage, []byte(`{"error":"invalid envelope"}`))
+			continue
+		}
 		_ = writeMsg(websocket.TextMessage, msg)
 	}
 }

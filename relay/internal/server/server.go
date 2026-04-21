@@ -7,11 +7,16 @@ import (
 )
 
 type Server struct {
-	router *chi.Mux
+	router    *chi.Mux
+	validator *Validator
 }
 
 func New() *Server {
-	s := &Server{router: chi.NewRouter()}
+	v, err := NewValidator()
+	if err != nil {
+		panic(err)
+	}
+	s := &Server{router: chi.NewRouter(), validator: v}
 	s.routes()
 	return s
 }
