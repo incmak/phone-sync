@@ -1,0 +1,39 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    container_name: phone-sync-relay
+    environment:
+      LISTEN_ADDR: ":8080"
+    ports:
+      - "8080:8080"  # Expose for local dev & Android emulator; remove when fronted by Caddy in prod.
+    volumes:
+      - relay-data:/data
+    restart: unless-stopped
+    networks:
+      - phone-sync-net
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: phone-sync-caddy
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - relay
+    restart: unless-stopped
+    networks:
+      - phone-sync-net
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  phone-sync-net:
