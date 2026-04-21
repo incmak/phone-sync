@@ -65,87 +65,25 @@ phone-sync/
 
 ---
 
-## Task 1: Initialize Go module and relay skeleton
+## Task 1: Initialize Go module + chi router + /health with unit test
+
+**Rationale:** Task 1 used to stand up a throwaway `main.go` and Task 2 replaced it. Merged here so the first commit is already the shape we want — no churn for the implementing agent.
 
 **Files:**
 
 - Create: `relay/go.mod`
 - Create: `relay/cmd/relay/main.go`
+- Create: `relay/internal/server/server.go`
+- Create: `relay/internal/server/health.go`
+- Create: `relay/internal/server/server_test.go`
 
-- [ ] **Step 1: Initialize Go module**
+- [ ] **Step 1: Initialize Go module + add chi**
 
 Run from repo root:
 
 ```bash
 mkdir -p relay/cmd/relay relay/internal/server relay/internal/store
-cd relay && go mod init github.com/phonesync/relay
-```
-
-Expected: `go.mod` created with Go version.
-
-- [ ] **Step 2: Write minimal main.go**
-
-Create `relay/cmd/relay/main.go`:
-
-```go
-package main
-
-import (
-	"log"
-	"net/http"
-	"os"
-)
-
-func main() {
-	addr := os.Getenv("LISTEN_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
-	log.Printf("relay listening on %s", addr)
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatal(err)
-	}
-}
-```
-
-- [ ] **Step 3: Run it and curl /health**
-
-```bash
-cd relay && go run ./cmd/relay &
-sleep 1
-curl -sf http://localhost:8080/health
-kill %1
-```
-
-Expected: `{"status":"ok"}`.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add relay/
-git commit -m "feat(relay): initialize Go module with /health endpoint"
-```
-
----
-
-## Task 2: Add chi router and /health unit test
-
-**Files:**
-
-- Modify: `relay/go.mod`
-- Create: `relay/internal/server/server.go`
-- Create: `relay/internal/server/health.go`
-- Create: `relay/internal/server/server_test.go`
-- Modify: `relay/cmd/relay/main.go`
-
-- [ ] **Step 1: Add chi dependency**
-
-```bash
-cd relay && go get github.com/go-chi/chi/v5
+cd relay && go mod init github.com/phonesync/relay && go get github.com/go-chi/chi/v5
 ```
 
 - [ ] **Step 2: Write failing test for /health**
@@ -233,9 +171,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-- [ ] **Step 5: Update main.go to use the server**
+- [ ] **Step 5: Create main.go**
 
-Rewrite `relay/cmd/relay/main.go`:
+Create `relay/cmd/relay/main.go`:
 
 ```go
 package main
@@ -273,12 +211,12 @@ Expected: `PASS`.
 
 ```bash
 git add relay/
-git commit -m "feat(relay): chi router with /health unit test"
+git commit -m "feat(relay): Go module + chi router + /health with unit test"
 ```
 
 ---
 
-## Task 3: WebSocket echo endpoint (proof of upgrade path)
+## Task 2: WebSocket echo endpoint (proof of upgrade path)
 
 **Files:**
 
@@ -357,7 +295,7 @@ cd relay && go test ./internal/server/ -run TestWebSocketEcho
 
 Expected: FAIL — 404 or connection refused on `/ws`.
 
-- [ ] **Step 4: Implement WS handler**
+- [ ] **Step 4: Implement WS handler with safety limits**
 
 Create `relay/internal/server/ws.go`:
 
@@ -367,11 +305,20 @@ package server
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+const (
+	maxMessageSize = 1 << 20 // 1 MB — notif.post with base64 icons should fit comfortably
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
+	writeWait      = 10 * time.Second
+)
+
 var upgrader = websocket.Upgrader{
+	// TODO(phase-2): restrict origins once pairing auth is in place. Never expose this publicly in Phase 1.
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
@@ -382,14 +329,43 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+
+	conn.SetReadLimit(maxMessageSize)
+	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+
+	// Writer goroutine: app-layer ping/pong every pingPeriod.
+	stopPinger := make(chan struct{})
+	defer close(stopPinger)
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
+			case <-stopPinger:
+				return
+			}
+		}
+	}()
+
 	for {
-		mt, msg, err := conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			return
 		}
-		if err := conn.WriteMessage(mt, msg); err != nil {
-			return
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		if err := s.validator.ValidateEnvelope(msg); err != nil {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"error":"invalid envelope"}`))
+			continue
 		}
+		_ = conn.WriteMessage(websocket.TextMessage, msg)
 	}
 }
 ```
@@ -422,7 +398,7 @@ git commit -m "feat(relay): WebSocket /ws echo endpoint with integration test"
 
 ---
 
-## Task 4: bbolt KV store wrapper (foundational, not yet wired)
+## Task 3: bbolt KV store wrapper (foundational, not yet wired)
 
 **Files:**
 
@@ -579,18 +555,39 @@ git commit -m "feat(relay): bbolt KV wrapper with Put/Get/Delete"
 - Create: `deploy/docker-compose.yml`
 - Create: `deploy/caddy/Caddyfile`
 
-- [ ] **Step 1: Write multi-stage Dockerfile**
+**Prerequisites for the Docker BUILD step (Step 3):**
+
+- Tasks 1–4 complete (go.mod + go.sum exist, all deps downloaded).
+- Task 5.5 complete (Makefile with `sync-proto` target exists — Dockerfile runs `make sync-proto`).
+- Task 6 complete (`proto/*.schema.json` files exist — `make sync-proto` copies them).
+
+Writing the Dockerfile + compose files (Steps 0–2) and committing (Step 4) can happen now. The build+smoke test (Step 3) must wait until Tasks 5.5 and 6 finish. Step 3 is marked with a blocker note below.
+
+- [ ] **Step 0: Ensure go.sum is clean**
+
+```bash
+cd relay && go mod tidy
+```
+
+- [ ] **Step 1: Write Dockerfile built from repo root (multi-stage)**
+
+The build context is the **repo root** (not `relay/`) because we need both `proto/` and `relay/` in the build stage so the Makefile can sync schemas into the embed path. Adjust compose accordingly in Step 2.
 
 Create `relay/Dockerfile`:
 
 ```dockerfile
 # syntax=docker/dockerfile:1.6
+# Build context: repo root (contains /proto and /relay)
 FROM golang:1.22-alpine AS build
+RUN apk add --no-cache make
 WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/relay ./cmd/relay
+COPY relay/go.mod relay/go.sum ./relay/
+RUN cd relay && go mod download
+COPY proto/ ./proto/
+COPY relay/ ./relay/
+COPY Makefile ./
+RUN make sync-proto
+RUN cd relay && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/relay ./cmd/relay
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/relay /relay
@@ -606,6 +603,7 @@ Dockerfile
 .dockerignore
 *.md
 .git
+internal/server/schemas/
 ```
 
 - [ ] **Step 2: Write docker-compose**
@@ -615,7 +613,9 @@ Create `deploy/docker-compose.yml`:
 ```yaml
 services:
   relay:
-    build: ../relay
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
     container_name: phone-sync-relay
     environment:
       LISTEN_ADDR: ":8080"
@@ -664,7 +664,7 @@ relay.local {
 }
 ```
 
-- [ ] **Step 3: Build and smoke test locally**
+- [ ] **Step 3: Build and smoke test locally** — **BLOCKED until Tasks 5.5 and 6 complete.** Defer and revisit.
 
 ```bash
 cd deploy && docker compose build relay
@@ -685,52 +685,59 @@ git commit -m "feat(deploy): Dockerfile + docker-compose + Caddy"
 
 ---
 
-## Task 5.5: Makefile — canonicalize proto sync
+## Task 5.5: Makefile + gitignore-based single source of truth for proto
+
+**Approach:** `/proto/*.schema.json` is the ONLY committed copy. `relay/internal/server/schemas/` is gitignored and regenerated on demand by `make sync-proto`. This eliminates drift entirely — there's nothing to drift *from* because only one copy is ever tracked.
 
 **Files:**
 
 - Create: `Makefile`
+- Modify: `.gitignore` (or create)
 
 - [ ] **Step 1: Write top-level Makefile**
 
-Create `Makefile` at repo root:
+Create `Makefile` at repo root (Make requires TABS for recipe lines):
 
 ```makefile
-.PHONY: sync-proto relay-test relay-build proto-diff
+.PHONY: sync-proto relay-test relay-build clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas
+	rm -f relay/internal/server/schemas/*.schema.json
 	cp proto/*.schema.json relay/internal/server/schemas/
-
-# Fails if relay's embedded schemas drift from canonical proto/.
-proto-diff:
-	diff -q proto/ relay/internal/server/schemas/ | grep -v '^Only in proto' ; \
-	for f in proto/*.schema.json ; do \
-		diff -q $$f relay/internal/server/schemas/$$(basename $$f) || exit 1 ; \
-	done
 
 relay-test: sync-proto
 	cd relay && go test ./... -race -count=1
 
 relay-build: sync-proto
 	cd relay && go build -o ../bin/relay ./cmd/relay
+
+clean:
+	rm -rf relay/internal/server/schemas bin
 ```
 
-- [ ] **Step 2: Verify**
+- [ ] **Step 2: Add gitignore entry so the synced copy is never committed**
+
+Append to `.gitignore` (create if missing):
+
+```text
+# Synced from /proto via `make sync-proto` — never committed.
+relay/internal/server/schemas/
+```
+
+- [ ] **Step 3: Verify**
 
 ```bash
 make sync-proto
-make proto-diff    # should exit 0
-echo "change" >> proto/ping.schema.json
-make proto-diff    # should exit 1
-git checkout proto/ping.schema.json
+ls relay/internal/server/schemas/    # should list the schemas
+git status                            # should NOT list schemas/ as tracked
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add Makefile
-git commit -m "chore: Makefile with sync-proto + proto-diff drift check"
+git add Makefile .gitignore
+git commit -m "chore: Makefile sync-proto; gitignore synced schemas for single source of truth"
 ```
 
 ---
@@ -761,7 +768,8 @@ Create `proto/packet.schema.json`:
     "v": { "type": "integer", "const": 1 },
     "type": {
       "type": "string",
-      "enum": ["notif.post", "notif.update", "notif.cancel", "notif.reply", "ping", "pong", "ack", "icon.request"]
+      "description": "Phase 1 accepts only this subset. Later phases widen the enum by replacing this schema.",
+      "enum": ["ping", "pong", "notif.post", "notif.update", "notif.cancel"]
     },
     "msg_id": { "type": "string", "format": "uuid" },
     "origin_device": { "type": "string", "minLength": 1 },
@@ -910,19 +918,15 @@ git commit -m "feat(proto): v1 JSON Schema — envelope, notif.post, notif.cance
 cd relay && go get github.com/santhosh-tekuri/jsonschema/v5
 ```
 
-- [ ] **Step 2: Copy proto into relay for embed**
+- [ ] **Step 2: Populate the embed path**
+
+**Prerequisite:** Task 5.5 (Makefile) must be complete. Run:
 
 ```bash
-mkdir -p relay/internal/server/schemas
-cp ../proto/*.schema.json relay/internal/server/schemas/
+make sync-proto
 ```
 
-Actually use `go:embed` from relative path. Adjust approach:
-
-```bash
-mkdir -p relay/proto
-cp proto/*.schema.json relay/proto/
-```
+This copies `/proto/*.schema.json` into `relay/internal/server/schemas/` (gitignored; regenerated on demand). The `//go:embed schemas/*.schema.json` directive in Step 5 reads from that directory relative to `validator.go`.
 
 - [ ] **Step 3: Write failing validator test**
 
@@ -1016,11 +1020,7 @@ func (v *Validator) ValidateEnvelope(raw []byte) error {
 }
 ```
 
-Copy schemas into relay's embed path via the canonical Makefile target (added in Task 5.5):
-
-```bash
-make sync-proto
-```
+(Schemas are already in place via Step 2's `make sync-proto`.)
 
 - [ ] **Step 6: Wire validator into /ws**
 
@@ -1179,6 +1179,8 @@ git add relay/ proto/
 git commit -m "feat(relay): validate envelopes against embedded JSON Schema on /ws"
 ```
 
+**Validation scope note:** the relay validates ONLY the envelope (`v`, `type`, `msg_id`, `origin_device`, `ts`). It does NOT validate payload shape. This is deliberate — in later phases payloads are E2EE ciphertext that the relay cannot see. Client-side validators (mobile Kotlin, desktop Rust) validate payload shapes against their per-type schemas after decryption. An envelope with `type=notif.post` and no `payload` will pass the relay.
+
 ---
 
 ## Task 8: Expo app scaffold
@@ -1193,10 +1195,9 @@ git commit -m "feat(relay): validate envelopes against embedded JSON Schema on /
 
 - [ ] **Step 1: Scaffold Expo app**
 
-Run from repo root:
+Run from the repo root:
 
 ```bash
-cd /Users/moaieen.kirmani/Documents/projects/Learn/phone-sync
 npx create-expo-app@latest mobile --template default
 ```
 
@@ -1340,6 +1341,8 @@ Overwrite `mobile/modules/phone-sync-core/android/src/main/java/expo/modules/pho
 ```kotlin
 package expo.modules.phonesynccore
 
+import android.os.Handler
+import android.os.Looper
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -1363,15 +1366,25 @@ class PhoneSyncCoreModule : Module() {
 
         AsyncFunction("ping") { relayUrl: String, promise: Promise ->
             val settled = AtomicBoolean(false)
+            val handler = Handler(Looper.getMainLooper())
+            var timeoutRunnable: Runnable? = null
+
             fun resolve(value: String) {
-                if (settled.compareAndSet(false, true)) promise.resolve(value)
+                if (settled.compareAndSet(false, true)) {
+                    timeoutRunnable?.let { handler.removeCallbacks(it) }
+                    promise.resolve(value)
+                }
             }
             fun reject(code: String, msg: String, t: Throwable?) {
-                if (settled.compareAndSet(false, true)) promise.reject(code, msg, t)
+                if (settled.compareAndSet(false, true)) {
+                    timeoutRunnable?.let { handler.removeCallbacks(it) }
+                    promise.reject(code, msg, t)
+                }
             }
 
             val request = Request.Builder().url(relayUrl).build()
             val msgId = UUID.randomUUID().toString()
+            // TODO(phase-2): replace "mobile" with the paired device_id from persistent storage.
             val envelope = """{"v":1,"type":"ping","msg_id":"$msgId","origin_device":"mobile","ts":${System.currentTimeMillis()}}"""
 
             val ws = client.newWebSocket(request, object : WebSocketListener() {
@@ -1386,29 +1399,29 @@ class PhoneSyncCoreModule : Module() {
                     reject("PING_FAILED", t.message ?: "unknown", t)
                 }
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    // Safety net: if closed without onMessage, surface a failure.
+                    // Normal close (code 1000) after onMessage: settled is already true; this is a no-op.
+                    // Abnormal close without onMessage: surfaces a failure here.
                     reject("PING_CLOSED", "closed before message (code=$code reason=$reason)", null)
                 }
             })
 
-            // Timeout fallback — no delay coroutine, no cancel against already-closed socket.
-            // OkHttp's readTimeout above will trigger onFailure if nothing arrives.
-            // We also explicitly cancel on timeout via a scheduled task:
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            timeoutRunnable = Runnable {
                 if (!settled.get()) {
                     ws.cancel()
                     reject("PING_TIMEOUT", "no response within 10s", null)
                 }
-            }, 10_000)
+            }
+            handler.postDelayed(timeoutRunnable!!, 10_000)
         }
     }
 }
 ```
 
 **Why this shape:**
-- `AtomicBoolean settled` guarantees `promise.resolve/reject` fires at most once, preventing bridge crashes on any ordering of `onMessage` / `onFailure` / `onClosed` / timeout.
-- No `delay(...)` coroutine + no `ws.cancel()` on an already-closed socket.
-- `postDelayed` on main looper schedules the timeout safely; it only cancels if still unsettled.
+- `AtomicBoolean settled` guarantees `promise.resolve/reject` fires at most once.
+- `handler.removeCallbacks(timeoutRunnable)` inside `resolve` / `reject` cancels the pending timeout, so a successful ping at 2s does NOT leak a Handler reference for the remaining 8s. Matters if `ping()` is called frequently during dev.
+- No `delay(...)` coroutine; no `ws.cancel()` on an already-closed socket.
+- `TODO(phase-2)`: `origin_device` hard-coded to `"mobile"`; Phase 2 pairing introduces persistent device_id.
 
 - [ ] **Step 4: Add OkHttp to module's Gradle**
 
@@ -1601,21 +1614,20 @@ cd mobile && npx expo prebuild --platform android --clean
 
 Expected: `android/` directory generated. Gradle sync may take 2–5 min.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Ignore prebuild output, then commit config only**
 
-```bash
-git add mobile/eas.json mobile/package.json mobile/android/
-git commit -m "chore(mobile): EAS Build config + local prebuild for Android"
+`prebuild` regenerates `mobile/android/` and `mobile/ios/` — never commit them. Append to root `.gitignore`:
+
+```text
+mobile/android/
+mobile/ios/
 ```
 
-Note: committing `android/` is optional. Many projects `.gitignore` it since `prebuild` regenerates. Decide per project policy. For now, keep it out:
+Commit the EAS config + gitignore entries (not the prebuild output):
 
 ```bash
-echo "mobile/android/" >> .gitignore
-echo "mobile/ios/" >> .gitignore
-git rm -r --cached mobile/android mobile/ios 2>/dev/null || true
-git add .gitignore
-git commit -m "chore: ignore prebuild output"
+git add mobile/eas.json mobile/package.json .gitignore
+git commit -m "chore(mobile): EAS Build config; ignore prebuild output"
 ```
 
 ---
@@ -1744,9 +1756,6 @@ jobs:
       - name: Sync proto (canonical via Makefile)
         working-directory: .
         run: make sync-proto
-      - name: Proto drift check
-        working-directory: .
-        run: make proto-diff
       - run: go mod download
       - run: go vet ./...
       - run: go test ./... -race -count=1
@@ -1756,14 +1765,35 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v4
-      - name: Sync proto (canonical via Makefile)
-        run: make sync-proto
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
-          context: ./relay
+          context: .
+          file: relay/Dockerfile
           push: false
+          load: true
           tags: phone-sync-relay:ci
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: relay/Dockerfile
+          push: false
+          load: true
+          tags: phone-sync-relay:ci
+      - name: Run container and hit /health
+        run: |
+          docker run -d --name relay -p 8080:8080 phone-sync-relay:ci
+          sleep 2
+          curl -sf http://localhost:8080/health
+          docker logs relay
+          docker rm -f relay
 ```
 
 - [ ] **Step 2: Write mobile workflow**
@@ -1801,6 +1831,62 @@ jobs:
 ```bash
 git add .github/workflows/
 git commit -m "ci: relay tests + docker build; mobile typecheck + expo-doctor"
+```
+
+---
+
+## Task 14: Relay README (safety + usage)
+
+**Files:**
+
+- Create: `relay/README.md`
+
+- [ ] **Step 1: Write relay README**
+
+Create `relay/README.md`:
+
+```markdown
+# Phone-Sync Relay (Phase 1)
+
+Go WebSocket relay that echoes validated-envelope messages. Used during development and as the wake-path relay for the mobile app.
+
+## Run locally
+
+```bash
+make sync-proto
+cd relay && go run ./cmd/relay   # listens on :8080
+curl -sf http://localhost:8080/health
+```
+
+## Run in Docker
+
+```bash
+cd deploy && docker compose up -d relay
+curl -sf http://localhost:8080/health
+```
+
+## Phase 1 security posture — **DO NOT EXPOSE PUBLICLY**
+
+- `CheckOrigin` accepts ALL origins. Any browser anywhere can open a WebSocket to `/ws`. This is intentional for dev scaffolding; Phase 2 adds JWT auth bound to the paired device's `sign_pubkey`.
+- No rate limiting in Phase 1.
+- No TLS termination in the relay itself — Caddy handles TLS in `deploy/` when exposed.
+- Bind to `127.0.0.1` in `LISTEN_ADDR` or firewall port 8080 if running on a LAN-accessible host until Phase 2 auth lands.
+
+## Endpoints
+
+- `GET /health` — liveness, returns `{"status":"ok"}`.
+- `GET /ws` — WebSocket upgrade. Echoes validated envelope back. Validates only envelope (not payload). Max message size: 1 MB.
+
+## Schema
+
+Envelope schema is embedded at build time from `/proto` via `make sync-proto`. See `/proto/README.md` for the protocol definition.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add relay/README.md
+git commit -m "docs(relay): Phase 1 README with security posture note"
 ```
 
 ---
