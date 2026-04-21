@@ -76,3 +76,149 @@ async function smokePhase2() {
 - Only Device A's signature is verified by the relay (`sig_A`). Device B's independent consent is implicit in the UX gate (B chooses to call complete after seeing A's fingerprint). Phase 3 adds Device B's signature path.
 
 **Pass:** ☐  Date: __________ Devices: __________
+
+---
+
+## Phase 3 — Listener + First Mirror + Tier-1 UI
+
+**Setup:**
+
+- Two physical Android phones running API 26+ (Android 8+). API 33+ (Android 13+) recommended.
+- Both phones have Expo dev client installed with Phase 3 build: `npx expo prebuild --clean && npx expo run:android` on each phone (or distribute via EAS Build dev profile).
+- Relay running — either `cd relay && go run ./cmd/relay` on a laptop on the same LAN with firewall open to 8080, or `docker compose -f deploy/docker-compose.yml up relay` + access via host IP from phones (e.g. `ws://192.168.1.10:8080/ws`).
+- Both phones uninstalled + reinstalled clean to clear Phase 2 paired state (Task 0 renamed DataStore keys).
+
+### Scenario 1 — Fresh onboarding + pair
+
+1. Launch app on Phone A → should route to `/onboarding/welcome`.
+2. Tap **Continue** → ScreenHow; swipe through 3 slides → **Get started**.
+3. ScreenRole → tap **"This is my first phone"** (role A) → ScreenRelay.
+4. ScreenRelay → enter your relay URL (e.g. `ws://192.168.1.10:8080/ws`) → **Test** → expect success indicator → **Continue**.
+5. ScreenPerms:
+   - Tap **Grant** next to "Post notifications" → Android 13 runtime dialog → Allow.
+   - Tap **Grant** next to "Notification access" → system NLS settings → toggle Twinotify on → back.
+   - Return to the app; both cards show check marks.
+6. ScreenOEM → tap **Skip for now** (or Done).
+7. ScreenReady → tap **Show my code** → `/pair/qr`.
+8. `/pair/qr` shows a QR code + "Waiting for Phone B..." + 5-min countdown.
+9. Repeat steps 1–6 on Phone B; at ScreenRole tap **"I have a code already"** (role B) → Relay → Perms → OEM → Ready → **Scan code**.
+10. `/pair/scan` requests camera permission → Grant → scan QR from Phone A.
+11. Both phones route to `/pair/fingerprint` with matching fingerprints.
+12. Phone A: tap **They match** → sig displayed as a long base-64 code (Phase 3 interim UX).
+13. Phone A: long-press the code and copy it (use system share/copy). Transport to Phone B (type, or use a shared clipboard app during smoke test).
+14. Phone B: paste the code into the text input → **They match**.
+15. Phone B: sees "Twinned." success screen, then routes to `/home` (CONNECTED state).
+16. Phone A: tap **Finish** on its success screen → `/home`.
+
+**Pass criteria:**
+
+- Both phones land on `/home` with `TwStatusDot` green + "Direct / Relay / Encrypted" label.
+- Settings → Paired device shows a short UUID + fingerprint matching what was displayed during pairing.
+
+### Scenario 2 — First mirror (A → B)
+
+**Prereq:** Scenario 1 complete; both phones on `/home` with service running.
+
+1. On Phone A, trigger a notification — easiest is receiving a real Signal or WhatsApp message.
+2. Within ~3 s, Phone B shows a mirrored notification under channel "Mirrored notifications" (IMPORTANCE_DEFAULT). Lock screen preview is hidden (VISIBILITY_PRIVATE).
+3. Pull down the notification shade on Phone B → title + text should match the origin.
+4. Content comes from the `notif.post` packet's title/text (Phase 3 skips MessagingStyle reconstruction).
+
+**Pass criteria:**
+
+- Mirror appears in ≤ 3 s on a good Wi-Fi.
+- Icons (if fetched) show up either as the app's small icon or Twinotify fallback icon (Phase 3: fallback system icon is acceptable).
+
+### Scenario 3 — Dismiss sync (swipe on B cancels on A)
+
+1. With the Scenario 2 mirror still present on Phone B, swipe it away.
+2. Within ~2 s the original notification on Phone A should also disappear.
+
+**Pass criteria:**
+
+- Phone A's original notification is removed; no duplicate cancels or infinite loops observable.
+
+### Scenario 4 — Dismiss sync (dismiss on A cancels on B)
+
+1. Trigger another notification on A.
+2. Swipe it on A.
+3. Within ~2 s the mirror on B disappears.
+
+**Pass criteria:** Same as Scenario 3, reverse direction.
+
+### Scenario 5 — Offline queue drain
+
+1. On Phone A, toggle airplane mode ON.
+2. Trigger 3 notifications on Phone A.
+3. `/home` on A shows state `OFFLINE_QUEUED` with queued count.
+4. Toggle airplane mode OFF.
+5. Within ~10 s, all 3 mirrors appear on Phone B.
+
+**Pass criteria:**
+
+- Queue count increments while offline, decrements + reaches 0 after reconnect.
+- All 3 mirrors show on B (FIFO order preserved).
+
+### Scenario 6 — Denylist suppression
+
+1. On Phone A, trigger a notification from an app in the default denylist — for example, Authy (`com.authy.authy`) or Google Authenticator (`com.google.android.apps.authenticator2`). If you don't have one installed, use the adb shell: `adb shell am broadcast -a com.example.TEST` isn't straightforward; easier to temporarily install Authy.
+2. No mirror should appear on Phone B.
+3. Nothing in the Phone B notification tray for this event.
+
+**Pass criteria:** Denylisted apps do not mirror. Service logs may show the filter result via `adb logcat | grep Twinotify`.
+
+### Scenario 7 — Tampered denylist aborts module init
+
+1. Build a release APK: `npx expo prebuild && cd android && ./gradlew assembleDebug`.
+2. Pull the APK: `adb pull /data/app/com.twinotify.app-.../base.apk tampered.apk`.
+3. Unzip the APK, modify `assets/default-denylist.json` (add a character), re-zip, re-sign with a debug key.
+4. Install the tampered APK on Phone A (`adb install -r tampered.apk`).
+5. Launch the app → expect an immediate crash with `SecurityException: denylist integrity check failed`.
+
+**Pass criteria:** Module init throws SecurityException when the SHA-256 of `default-denylist.json` does not match the compiled-in constant. The app does not start the NLS or SyncService.
+
+### Scenario 8 — Unpair + re-pair
+
+1. On Phone A, navigate Settings → Paired device → **Unpair** → confirm.
+2. App routes to `/onboarding/role`.
+3. Phone B also detects a broken pair (its connection drops to `OFFLINE_QUEUED` indefinitely — this is expected; Phase 3 doesn't push an explicit unpair signal to the peer yet).
+4. On Phone B, also manually Settings → Paired device → **Unpair**.
+5. Re-run Scenario 1 to re-pair.
+
+**Pass criteria:** Unpair rotates keys on both devices; re-pair works cleanly from scratch.
+
+### Scenario 9 — Dark mode + hue toggle
+
+1. Switch the system into dark mode.
+2. All screens should render in dark theme (warm near-black backgrounds, light text).
+3. Settings → (scroll) — tap the hue cycle control if surfaced (Phase 3 may not expose it yet — if not, skip).
+
+**Pass criteria:** No hard-coded colors leaking; dark/light switches respect the theme tokens.
+
+### Scenario 10 — POST_NOTIFICATIONS deny regression
+
+1. Uninstall + reinstall the app on Phone B.
+2. During onboarding Perms screen, tap **Grant** on "Post notifications" but DENY the runtime dialog.
+3. Tap **Grant** again — should open App Settings as a fallback (Phase 3 falls back to `openAppSettings` if expo-notifications returns `!granted`).
+4. Manually enable the permission in system settings → return to the app → card shows as granted.
+
+**Pass criteria:** Denying the runtime dialog doesn't softlock the flow; app-settings fallback works.
+
+---
+
+### Known gaps (Phase 3 documented limitations)
+
+- **Manual sig copy-paste during pairing.** Device A displays the confirmation_sig as a long base-64 string. Device B pastes it manually. Phase 4 automates this via the existing `/pair/notify` relay WebSocket (Task 7 plumbing) plus a second WS leg to Device B.
+- **Always-Connected FGS only.** No lazy-FGS / Doze-aware wake. Phase 9 adds this (requires FCM from Phase 5).
+- **No LAN transport.** All traffic goes through the relay. Phase 4 adds NSD + TLS-pinned LAN direct with daily-rotated ad-ids.
+- **No icon cache / hash-elide.** Every mirror inlines full PNG bytes (base64). Phase 7 adds hash-elide.
+- **No reply bridge.** Typing a reply on the mirror doesn't reach the origin. Phase 6 adds this.
+- **No MessagingStyle reconstruction.** Mirrors show only title + text. BigTextStyle + MessagingStyle land in Phase 18.
+- **App filter toggle is cosmetic.** The UI stores allow/deny per-package, but `NotifPostBuilder` only enforces the compiled-in hardcoded denylist. Phase 4 adds user-override enforcement.
+- **No peer display name.** Only device UUID (first 8 chars shown in mono). Human-readable names require a separate handshake field; deferred.
+- **Metrics on home screen (Today / Latency / Blocked) are placeholders.** Phase 3 doesn't instrument these counters.
+- **Unpair doesn't notify peer.** Peer's connection just drops; user on the other phone must manually unpair.
+
+---
+
+**Phase 3 Pass:** ☐  Date: __________ Devices: __________
