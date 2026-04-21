@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -79,8 +80,23 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad base64", http.StatusBadRequest)
 		return
 	}
-	// TODO(phase-2-task-4): verify req.ConfirmationSig is a valid Ed25519 signature by
-	// pending.ASignPubkey over pair_token || A_enc || A_sign || B_enc || B_sign.
+	msg := append([]byte(req.PairToken), pending.AEncPubkey...)
+	msg = append(msg, pending.ASignPubkey...)
+	msg = append(msg, encPk...)
+	msg = append(msg, signPk...)
+	sig, err := base64.StdEncoding.DecodeString(req.ConfirmationSig)
+	if err != nil {
+		http.Error(w, "bad confirmation_sig base64", http.StatusBadRequest)
+		return
+	}
+	if len(pending.ASignPubkey) != ed25519.PublicKeySize {
+		http.Error(w, "stored A sign_pubkey has wrong size", http.StatusInternalServerError)
+		return
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pending.ASignPubkey), msg, sig) {
+		http.Error(w, "invalid confirmation signature", http.StatusBadRequest)
+		return
+	}
 
 	cp := store.ConfirmedPair{
 		PairID:      uuid.NewString(),
