@@ -1,6 +1,6 @@
 import { View, Text, Button, TextInput, StyleSheet } from 'react-native';
 import { useState } from 'react';
-import { pingRelay } from '../modules/phone-sync-core/src';
+import { pingRelay } from '../modules/twinotify-core/src';
 
 export default function Home() {
   const [url, setUrl] = useState<string>('ws://10.0.2.2:8080/ws');

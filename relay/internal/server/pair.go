@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/phonesync/relay/internal/store"
+	"github.com/twinotify/relay/internal/store"
 )
 
 type pairInitReq struct {

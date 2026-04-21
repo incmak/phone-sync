@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://phone-sync.local/schemas/notif-post.schema.json",
+  "$id": "https://twinotify.app/schemas/notif-post.schema.json",
   "title": "NotifPostPayload",
   "type": "object",
   "required": ["canon_id", "package", "id", "title", "is_clearable"],

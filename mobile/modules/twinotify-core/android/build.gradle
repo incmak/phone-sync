@@ -1,0 +1,30 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'co.twinotify.core'
+version = '0.7.10'
+
+android {
+  namespace "co.twinotify.core"
+  defaultConfig {
+    versionCode 1
+    versionName "0.7.10"
+    testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+  implementation 'com.goterl:lazysodium-android:5.2.0@aar'
+  implementation 'net.java.dev.jna:jna:5.14.0@aar'
+  implementation 'androidx.datastore:datastore-preferences:1.1.1'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0'
+  androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+  androidTestImplementation 'androidx.test:runner:1.6.1'
+  androidTestImplementation 'org.jetbrains.kotlin:kotlin-test:1.9.22'
+}

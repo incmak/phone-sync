@@ -34,10 +34,10 @@ jobs:
           file: relay/Dockerfile
           push: false
           load: true
-          tags: phone-sync-relay:ci
+          tags: twinotify-relay:ci
       - name: Smoke test — run container and hit /health
         run: |
-          docker run -d --name relay -p 8080:8080 phone-sync-relay:ci
+          docker run -d --name relay -p 8080:8080 twinotify-relay:ci
           sleep 2
           curl -sf http://localhost:8080/health
           docker logs relay

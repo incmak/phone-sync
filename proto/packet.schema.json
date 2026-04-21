@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://phone-sync.local/schemas/packet.schema.json",
+  "$id": "https://twinotify.app/schemas/packet.schema.json",
   "title": "Packet",
   "description": "Top-level envelope for all messages. Contents are E2EE; this schema describes the inner cleartext.",
   "type": "object",

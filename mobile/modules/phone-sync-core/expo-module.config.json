@@ -1,9 +1,0 @@
-{
-  "platforms": ["apple", "android", "web"],
-  "apple": {
-    "modules": ["PhoneSyncCoreModule"]
-  },
-  "android": {
-    "modules": ["expo.modules.phonesynccore.PhoneSyncCoreModule"]
-  }
-}

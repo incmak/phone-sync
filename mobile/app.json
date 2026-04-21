@@ -1,16 +1,16 @@
 {
   "expo": {
-    "name": "phone-sync",
-    "slug": "phone-sync",
+    "name": "Twinotify",
+    "slug": "twinotify",
     "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
-    "scheme": "phonesync",
+    "scheme": "twinotify",
     "newArchEnabled": true,
-    "ios": { "supportsTablet": false, "bundleIdentifier": "com.phonesync.app" },
+    "ios": { "supportsTablet": false, "bundleIdentifier": "com.twinotify.app" },
     "android": {
-      "package": "com.phonesync.app",
+      "package": "com.twinotify.app",
       "adaptiveIcon": { "foregroundImage": "./assets/adaptive-icon.png", "backgroundColor": "#000000" }
     },
     "plugins": ["expo-router"],

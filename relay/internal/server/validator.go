@@ -18,7 +18,7 @@ type Validator struct {
 }
 
 // schemaBaseURL must match the $id prefix used in /proto/*.schema.json.
-const schemaBaseURL = "https://phone-sync.local/schemas/"
+const schemaBaseURL = "https://twinotify.app/schemas/"
 
 // TODO(phase-2): enable jsonschema.WithFormatAssert so `format: "uuid"` on msg_id
 // is enforced. Without it, format is advisory only and malformed UUIDs pass.

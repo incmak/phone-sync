@@ -1,4 +1,4 @@
-module github.com/phonesync/relay
+module github.com/twinotify/relay
 
 go 1.23
 

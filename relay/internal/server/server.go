@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/phonesync/relay/internal/store"
+	"github.com/twinotify/relay/internal/store"
 )
 
 type Server struct {
@@ -38,7 +38,7 @@ func NewWithStore(b *store.Bolt) *Server {
 func New() *Server {
 	path := os.Getenv("BOLT_PATH")
 	if path == "" {
-		path = "/tmp/phone-sync-relay.db"
+		path = "/tmp/twinotify-relay.db"
 	}
 	b, err := store.OpenBolt(path)
 	if err != nil {
