@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phone-sync.local/schemas/pair-init.schema.json",
+  "type": "object",
+  "required": ["pair_token", "device_id", "enc_pubkey", "sign_pubkey"],
+  "properties": {
+    "pair_token": { "type": "string", "minLength": 16 },
+    "device_id": { "type": "string", "minLength": 1 },
+    "enc_pubkey": { "type": "string", "contentEncoding": "base64" },
+    "sign_pubkey": { "type": "string", "contentEncoding": "base64" }
+  }
+}

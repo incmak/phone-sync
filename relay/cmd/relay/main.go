@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/phonesync/relay/internal/server"
+	"github.com/phonesync/relay/internal/store"
 )
 
 func main() {
@@ -18,7 +19,17 @@ func main() {
 	if addr == "" {
 		addr = ":8080"
 	}
-	srv := &http.Server{Addr: addr, Handler: server.New().Handler()}
+	boltPath := os.Getenv("BOLT_PATH")
+	if boltPath == "" {
+		boltPath = "/tmp/phone-sync-relay.db"
+	}
+	b, err := store.OpenBolt(boltPath)
+	if err != nil {
+		log.Fatalf("open bolt: %v", err)
+	}
+	defer b.Close()
+
+	srv := &http.Server{Addr: addr, Handler: server.NewWithStore(b).Handler()}
 
 	done := make(chan struct{})
 	go func() {
