@@ -31,4 +31,7 @@ dependencies {
   androidTestImplementation 'androidx.test.ext:junit:1.2.1'
   androidTestImplementation 'androidx.test:runner:1.6.1'
   androidTestImplementation 'org.jetbrains.kotlin:kotlin-test:1.9.22'
+  testImplementation 'org.jetbrains.kotlin:kotlin-test:1.9.22'
+  testImplementation 'org.jetbrains.kotlin:kotlin-test-junit:1.9.22'
+  testImplementation 'junit:junit:4.13.2'
 }
