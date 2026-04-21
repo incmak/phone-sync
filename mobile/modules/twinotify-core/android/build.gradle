@@ -1,6 +1,7 @@
 plugins {
   id 'com.android.library'
   id 'expo-module-gradle-plugin'
+  id 'com.google.devtools.ksp' version '1.9.22-1.0.17'
 }
 
 group = 'co.twinotify.core'
@@ -24,6 +25,9 @@ dependencies {
   implementation 'net.java.dev.jna:jna:5.14.0@aar'
   implementation 'androidx.datastore:datastore-preferences:1.1.1'
   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0'
+  implementation 'androidx.room:room-runtime:2.6.1'
+  implementation 'androidx.room:room-ktx:2.6.1'
+  ksp 'androidx.room:room-compiler:2.6.1'
   androidTestImplementation 'androidx.test.ext:junit:1.2.1'
   androidTestImplementation 'androidx.test:runner:1.6.1'
   androidTestImplementation 'org.jetbrains.kotlin:kotlin-test:1.9.22'
