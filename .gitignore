@@ -3,3 +3,4 @@ relay/internal/server/schemas/
 
 mobile/android/
 mobile/ios/
+mobile/modules/phone-sync-core/android/build/

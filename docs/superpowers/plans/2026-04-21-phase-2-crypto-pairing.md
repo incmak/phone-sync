@@ -785,8 +785,12 @@ func (c *JTICache) CheckAndSet(jti string, now time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if now.Sub(c.lastGC) > c.ttl {
+		// Evict entries older than 2*ttl. Retention must outlive the JWT's own exp
+		// to prevent a replay window between GC and exp expiry. Since JWT exp == ttl,
+		// 2*ttl guarantees the cached jti remains blocked until after any valid JWT
+		// carrying it would have expired.
 		for k, t := range c.seen {
-			if now.Sub(t) > c.ttl {
+			if now.Sub(t) > 2*c.ttl {
 				delete(c.seen, k)
 			}
 		}
@@ -911,9 +915,95 @@ git commit -m "feat(relay): JWT auth middleware on /ws with jti replay cache"
 - Modify: `relay/internal/server/pair.go` (enforce confirmation_sig)
 - Modify: `relay/internal/server/pair_test.go` (update placeholder sig to real Ed25519)
 
-- [ ] **Step 1: Failing test**
+- [ ] **Step 1: Failing test — explicit code**
 
-Update the `TestPairInitAndComplete` test to generate a real Ed25519 signing keypair for Device A, sign `pair_token || A_enc || A_sign || B_enc || B_sign`, and include that sig in the complete request. Also add a negative test with a wrong signature.
+Replace `TestPairInitAndComplete` in `pair_test.go` and add a negative test:
+
+```go
+func TestPairInitAndComplete_WithSig(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Device A keys
+	aEncPub := make([]byte, 32); rand.Read(aEncPub)
+	aSignPub, aSignPriv, _ := ed25519.GenerateKey(nil)
+
+	// Device B keys
+	bEncPub := make([]byte, 32); rand.Read(bEncPub)
+	bSignPub, _, _ := ed25519.GenerateKey(nil)
+
+	token := "tok-" + uuid.NewString()
+
+	// /pair/init
+	initBody, _ := json.Marshal(map[string]any{
+		"pair_token":  token,
+		"device_id":   "devA",
+		"enc_pubkey":  base64.StdEncoding.EncodeToString(aEncPub),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(aSignPub),
+	})
+	resp, _ := http.Post(ts.URL+"/pair/init", "application/json", bytes.NewReader(initBody))
+	if resp.StatusCode != 200 { t.Fatalf("init status %d", resp.StatusCode) }
+
+	// Device A signs: pair_token || A_enc || A_sign || B_enc || B_sign
+	msg := append([]byte(token), aEncPub...)
+	msg = append(msg, aSignPub...)
+	msg = append(msg, bEncPub...)
+	msg = append(msg, bSignPub...)
+	sig := ed25519.Sign(aSignPriv, msg)
+
+	completeBody, _ := json.Marshal(map[string]any{
+		"pair_token":       token,
+		"device_id":        "devB",
+		"enc_pubkey":       base64.StdEncoding.EncodeToString(bEncPub),
+		"sign_pubkey":      base64.StdEncoding.EncodeToString(bSignPub),
+		"confirmation_sig": base64.StdEncoding.EncodeToString(sig),
+	})
+	resp2, _ := http.Post(ts.URL+"/pair/complete", "application/json", bytes.NewReader(completeBody))
+	if resp2.StatusCode != 200 { t.Fatalf("complete status %d", resp2.StatusCode) }
+}
+
+func TestPairComplete_BadSig(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPub := make([]byte, 32); rand.Read(aEncPub)
+	aSignPub, _, _ := ed25519.GenerateKey(nil)
+	bEncPub := make([]byte, 32); rand.Read(bEncPub)
+	bSignPub, _, _ := ed25519.GenerateKey(nil)
+	_, attackerPriv, _ := ed25519.GenerateKey(nil)  // wrong signing key
+	token := "tok-" + uuid.NewString()
+
+	initBody, _ := json.Marshal(map[string]any{
+		"pair_token": token, "device_id": "devA",
+		"enc_pubkey": base64.StdEncoding.EncodeToString(aEncPub),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(aSignPub),
+	})
+	http.Post(ts.URL+"/pair/init", "application/json", bytes.NewReader(initBody))
+
+	msg := append([]byte(token), aEncPub...)
+	msg = append(msg, aSignPub...)
+	msg = append(msg, bEncPub...)
+	msg = append(msg, bSignPub...)
+	wrongSig := ed25519.Sign(attackerPriv, msg)  // signed with attacker's key, not A's
+
+	completeBody, _ := json.Marshal(map[string]any{
+		"pair_token": token, "device_id": "devB",
+		"enc_pubkey": base64.StdEncoding.EncodeToString(bEncPub),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPub),
+		"confirmation_sig": base64.StdEncoding.EncodeToString(wrongSig),
+	})
+	resp, _ := http.Post(ts.URL+"/pair/complete", "application/json", bytes.NewReader(completeBody))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad sig, got %d", resp.StatusCode)
+	}
+}
+```
+
+Add imports: `crypto/ed25519`, `crypto/rand`, `github.com/google/uuid`.
+
+Run: `go test ./internal/server/ -run TestPair -count=1`. Expect FAIL — confirmation_sig is not yet verified.
 
 - [ ] **Step 2: Implement verification in `handlePairComplete`**
 
@@ -1248,14 +1338,22 @@ object Encrypter {
         return ct
     }
 
+    sealed class DecryptError : Exception() {
+        object AuthFailed : DecryptError() { override val message = "MAC verification failed — wrong key, wrong nonce, or tampered ciphertext" }
+        data class SizeMismatch(val got: Int) : DecryptError() { override val message = "ciphertext too short: $got" }
+    }
+
     fun decrypt(ct: ByteArray, nonce: ByteArray, peerPubkey: ByteArray, ownSecret: ByteArray): ByteArray {
+        if (ct.size < Box.MACBYTES) throw DecryptError.SizeMismatch(ct.size)
         val plain = ByteArray(ct.size - Box.MACBYTES)
         val rc = sodium.cryptoBoxOpenEasy(plain, ct, ct.size.toLong(), nonce, peerPubkey, ownSecret)
-        check(rc == 0) { "cryptoBoxOpenEasy failed rc=$rc" }
+        if (rc != 0) throw DecryptError.AuthFailed
         return plain
     }
 }
 ```
+
+**Why typed DecryptError:** `crypto_box_open_easy` returning non-zero means MAC auth failed — wrong key or tampered ciphertext. Typed exception lets callers distinguish crypto failures from programming errors (e.g., encrypt always-success cases where `check { rc == 0 }` is a legitimate invariant).
 
 - [ ] **Step 3: ReplayGuard.kt — in-memory + DataStore-persisted seen set (48h TTL)**
 
@@ -1330,6 +1428,7 @@ object JwtMinter {
     private val sodium = ls.sodium
 
     fun mint(deviceId: String, signSecret: ByteArray, nowSec: Long = System.currentTimeMillis() / 1000): String {
+        require(signSecret.size == 64) { "libsodium Ed25519 secret key is 64 bytes (seed+pubkey); got ${signSecret.size}" }
         val header = """{"alg":"EdDSA","typ":"JWT"}"""
         val payload = JSONObject(mapOf(
             "sub" to deviceId,
@@ -1439,34 +1538,49 @@ object PairProtocol {
         check(resp.isSuccessful) { "init HTTP ${resp.code}" }
     }
 
-    fun complete(
-        relayUrl: String, token: String, deviceId: String,
-        ownEncPub: ByteArray, ownSignPub: ByteArray,
-        peerEncPub: ByteArray, peerSignPub: ByteArray,
-        aSignSecret: ByteArray,  // NOTE: this is invoked on Device A with A's sign secret to produce the confirmation_sig
-    ) {
-        val msg = token.toByteArray() + peerEncPub + peerSignPub + ownEncPub + ownSignPub
-        // Wait — spec: sig_A(pair_token || A_enc || A_sign || B_enc || B_sign).
-        // On Device A's side we already have A_enc, A_sign, and are proving consent to B's pubkeys.
-        // Adjust order based on which device is completing. Phase 2 scope: Device B calls /pair/complete
-        // but the confirmation_sig is created by Device A (sent to B over the relay out-of-band once A confirms).
-        // This method signs from Device A's side and returns the sig; a separate RPC sends it to B,
-        // which includes it in /pair/complete.
-        // Simplified: Device B receives sig from A via relay and POSTs with it.
+    /**
+     * Called on **Device A** to produce the confirmation signature after the user
+     * visually confirms Device B's fingerprint on screen. Result is conveyed to
+     * Device B (out-of-band for v1 — QR2, paste, or WebSocket relay in Phase 3).
+     * Spec §4.7: sig_A(pair_token || A_enc || A_sign || B_enc || B_sign).
+     */
+    fun deviceASignConfirmation(
+        token: String,
+        aEncPub: ByteArray, aSignPub: ByteArray,
+        bEncPub: ByteArray, bSignPub: ByteArray,
+        aSignSecret: ByteArray,
+    ): ByteArray {
+        require(aSignSecret.size == 64) { "Ed25519 secret key must be 64 bytes (libsodium format)" }
+        val msg = token.toByteArray() + aEncPub + aSignPub + bEncPub + bSignPub
         val sig = ByteArray(Sign.BYTES)
         sodium.cryptoSignDetached(sig, null, msg, msg.size.toLong(), aSignSecret)
+        return sig
+    }
+
+    /**
+     * Called on **Device B** once it has the confirmation_sig from Device A.
+     * Device B's own approval of A's pubkeys is implicit in the fact that B
+     * proceeds to call this (UX gate — user confirmed the fingerprint on B before tapping Pair).
+     */
+    fun deviceBCompletePair(
+        relayUrl: String, token: String, deviceId: String,
+        bEncPub: ByteArray, bSignPub: ByteArray,
+        confirmationSig: ByteArray,
+    ) {
         val body = JSONObject(mapOf(
             "pair_token" to token,
             "device_id" to deviceId,
-            "enc_pubkey" to Base64.getEncoder().encodeToString(ownEncPub),
-            "sign_pubkey" to Base64.getEncoder().encodeToString(ownSignPub),
-            "confirmation_sig" to Base64.getEncoder().encodeToString(sig),
+            "enc_pubkey" to Base64.getEncoder().encodeToString(bEncPub),
+            "sign_pubkey" to Base64.getEncoder().encodeToString(bSignPub),
+            "confirmation_sig" to Base64.getEncoder().encodeToString(confirmationSig),
         )).toString().toRequestBody(JSON)
         val resp = http.newCall(Request.Builder().url("$relayUrl/pair/complete").post(body).build()).execute()
         check(resp.isSuccessful) { "complete HTTP ${resp.code}" }
     }
 }
 ```
+
+**Note on two-sided confirmation (spec §4.7):** v1 implements Device A's sig only. Device B's independent sig (proving B agrees on A's keys) is deferred: the UX gate on B serves as implicit consent. A follow-up task in Phase 2 can add a `BConfirmationSig` field to `ConfirmedPair` and verify it on the relay once the WebSocket-push flow lands in Phase 3. Documented as known gap.
 
 **Note on two-sided confirmation:** Phase 2 scope — Device B initiates `complete` with a sig produced by Device A. Device A→Device B transport of the sig is out-of-band for now (user types/scans it); Phase 3 will add the WebSocket-push flow from relay.
 
@@ -1560,6 +1674,12 @@ Phase 2 is done when:
 - [ ] JTI replay rejected within 60s window.
 - [ ] Relay NEVER sees plaintext of any `encryptToPeer` output.
 - [ ] TODO(phase-2) comments from Phase 1 are RESOLVED: `CheckOrigin` still open (acceptable for personal dev; Phase 3 paired-origin check arrives), `origin_device` hardcoded "mobile" is replaced with persisted device UUID, jsonschema FormatAssert still deferred (it's cosmetic).
+
+**Known gaps carried to Phase 3:**
+
+1. **Two-sided confirmation partial:** spec §4.7 calls for both devices to sign. v1 implements only Device A's signature (UX gate on Device B serves as implicit consent). Phase 3 adds `BConfirmationSig` field + relay enforcement once the WebSocket push channel exists.
+2. **Confirmation sig transport is out-of-band:** user copy-pastes or QR-2 between devices. Phase 3 adds a relay-side rendezvous where Device A streams the sig to Device B over the WebSocket.
+3. **`CheckOrigin: true`:** WebSocket upgrader still accepts any origin. Phase 3 narrows to known user-agents once pairing tightens.
 
 **Next:** Phase 3 plan — NotificationListenerService + first real notification mirror (loop-free), posting through the established crypto + relay. File: `docs/superpowers/plans/2026-04-21-phase-3-listener-first-mirror.md`. Do NOT start Phase 3 until Phase 2 manual smoke passes.
 
