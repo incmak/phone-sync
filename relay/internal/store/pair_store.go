@@ -15,21 +15,33 @@ const (
 )
 
 type PendingPair struct {
-	PairToken   string `json:"pair_token"`
-	DeviceAID   string `json:"device_a_id"`
-	AEncPubkey  []byte `json:"a_enc_pubkey"`
-	ASignPubkey []byte `json:"a_sign_pubkey"`
-	CreatedAt   int64  `json:"created_at"`
+	PairToken    string `json:"pair_token"`
+	DeviceAID    string `json:"device_a_id"`
+	AEncPubkey   []byte `json:"a_enc_pubkey"`
+	ASignPubkey  []byte `json:"a_sign_pubkey"`
+	ADisplayName string `json:"a_display_name,omitempty"`
+	CreatedAt    int64  `json:"created_at"`
+
+	// Populated by /pair/hello once Device B sends them:
+	DeviceBID    string `json:"device_b_id,omitempty"`
+	BEncPubkey   []byte `json:"b_enc_pubkey,omitempty"`
+	BSignPubkey  []byte `json:"b_sign_pubkey,omitempty"`
+	BDisplayName string `json:"b_display_name,omitempty"`
+
+	// Populated by /pair/send_sig once Device A signs:
+	ConfirmationSig []byte `json:"confirmation_sig,omitempty"`
 }
 
 type ConfirmedPair struct {
-	PairID      string `json:"pair_id"`
-	DeviceA     string `json:"device_a"`
-	DeviceB     string `json:"device_b"`
-	AEncPubkey  []byte `json:"a_enc_pubkey"`
-	ASignPubkey []byte `json:"a_sign_pubkey"`
-	BEncPubkey  []byte `json:"b_enc_pubkey"`
-	BSignPubkey []byte `json:"b_sign_pubkey"`
+	PairID       string `json:"pair_id"`
+	DeviceA      string `json:"device_a"`
+	DeviceB      string `json:"device_b"`
+	AEncPubkey   []byte `json:"a_enc_pubkey"`
+	ASignPubkey  []byte `json:"a_sign_pubkey"`
+	ADisplayName string `json:"a_display_name,omitempty"`
+	BEncPubkey   []byte `json:"b_enc_pubkey"`
+	BSignPubkey  []byte `json:"b_sign_pubkey"`
+	BDisplayName string `json:"b_display_name,omitempty"`
 }
 
 type PairStore struct {
@@ -65,6 +77,31 @@ func (ps *PairStore) GetPending(token string) (*PendingPair, error) {
 
 func (ps *PairStore) DeletePending(token string) error {
 	return ps.bolt.Delete(bucketPending, token)
+}
+
+// UpdatePendingB merges Device B's fields into the existing pending record.
+// A's fields are preserved untouched.
+func (ps *PairStore) UpdatePendingB(pairToken, deviceBID string, bEncPk, bSignPk []byte, bDisplayName string) error {
+	p, err := ps.GetPending(pairToken)
+	if err != nil {
+		return err
+	}
+	p.DeviceBID = deviceBID
+	p.BEncPubkey = bEncPk
+	p.BSignPubkey = bSignPk
+	p.BDisplayName = bDisplayName
+	return ps.PutPending(*p)
+}
+
+// UpdatePendingSig merges the confirmation signature into the existing pending record.
+// All other fields are preserved untouched.
+func (ps *PairStore) UpdatePendingSig(pairToken string, sig []byte) error {
+	p, err := ps.GetPending(pairToken)
+	if err != nil {
+		return err
+	}
+	p.ConfirmationSig = sig
+	return ps.PutPending(*p)
 }
 
 func (ps *PairStore) Confirm(cp ConfirmedPair) error {

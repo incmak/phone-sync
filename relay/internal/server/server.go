@@ -54,6 +54,8 @@ func (s *Server) Handler() http.Handler { return s.router }
 func (s *Server) routes() {
 	s.router.Get("/health", s.handleHealth)
 	s.router.Post("/pair/init", s.handlePairInit)
+	s.router.Post("/pair/hello", s.handlePairHello)
+	s.router.Post("/pair/send_sig", s.handlePairSendSig)
 	s.router.Post("/pair/complete", s.handlePairComplete)
 	s.router.Get("/pair/notify", s.handlePairNotify)
 	s.router.With(s.authMiddleware).Get("/ws", s.handleWebSocket)

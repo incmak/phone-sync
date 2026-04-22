@@ -4,7 +4,6 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 
@@ -13,10 +12,11 @@ import (
 )
 
 type pairInitReq struct {
-	PairToken  string `json:"pair_token"`
-	DeviceID   string `json:"device_id"`
-	EncPubkey  string `json:"enc_pubkey"`
-	SignPubkey string `json:"sign_pubkey"`
+	PairToken   string `json:"pair_token"`
+	DeviceID    string `json:"device_id"`
+	EncPubkey   string `json:"enc_pubkey"`
+	SignPubkey  string `json:"sign_pubkey"`
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 type pairCompleteReq struct {
@@ -25,6 +25,7 @@ type pairCompleteReq struct {
 	EncPubkey       string `json:"enc_pubkey"`
 	SignPubkey      string `json:"sign_pubkey"`
 	ConfirmationSig string `json:"confirmation_sig"`
+	DisplayName     string `json:"display_name,omitempty"`
 }
 
 func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
@@ -44,11 +45,12 @@ func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := store.PendingPair{
-		PairToken:   req.PairToken,
-		DeviceAID:   req.DeviceID,
-		AEncPubkey:  encPk,
-		ASignPubkey: signPk,
-		CreatedAt:   time.Now().Unix(),
+		PairToken:    req.PairToken,
+		DeviceAID:    req.DeviceID,
+		AEncPubkey:   encPk,
+		ASignPubkey:  signPk,
+		ADisplayName: req.DisplayName,
+		CreatedAt:    time.Now().Unix(),
 	}
 	if err := s.pairStore.PutPending(p); err != nil {
 		http.Error(w, "store", http.StatusInternalServerError)
@@ -99,14 +101,22 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prefer B's display name from /pair/hello if already stored; allow override from this request.
+	bDisplayName := pending.BDisplayName
+	if req.DisplayName != "" {
+		bDisplayName = req.DisplayName
+	}
+
 	cp := store.ConfirmedPair{
-		PairID:      uuid.NewString(),
-		DeviceA:     pending.DeviceAID,
-		DeviceB:     req.DeviceID,
-		AEncPubkey:  pending.AEncPubkey,
-		ASignPubkey: pending.ASignPubkey,
-		BEncPubkey:  encPk,
-		BSignPubkey: signPk,
+		PairID:       uuid.NewString(),
+		DeviceA:      pending.DeviceAID,
+		DeviceB:      req.DeviceID,
+		AEncPubkey:   pending.AEncPubkey,
+		ASignPubkey:  pending.ASignPubkey,
+		ADisplayName: pending.ADisplayName,
+		BEncPubkey:   encPk,
+		BSignPubkey:  signPk,
+		BDisplayName: bDisplayName,
 	}
 	if err := s.pairStore.Confirm(cp); err != nil {
 		http.Error(w, "confirm", http.StatusInternalServerError)
@@ -114,18 +124,8 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.pairStore.DeletePending(req.PairToken)
 
-	// Push confirmation_sig to Device A's pair-notify subscription (best-effort).
-	pairSigFrame, err := json.Marshal(map[string]any{
-		"v":                1,
-		"type":             "pair.sig",
-		"pair_token":       req.PairToken,
-		"confirmation_sig": req.ConfirmationSig,
-	})
-	if err != nil {
-		log.Printf("pair.sig marshal: %v", err)
-	} else {
-		s.pairHub.Push(req.PairToken, pairSigFrame)
-	}
+	// Phase 4: pair.sig push is handled by /pair/send_sig before B calls this endpoint.
+	// No redundant push here.
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
