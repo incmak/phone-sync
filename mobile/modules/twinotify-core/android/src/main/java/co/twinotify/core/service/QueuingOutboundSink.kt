@@ -20,6 +20,7 @@ class QueuingOutboundSink(
     override suspend fun enqueuePost(post: NotifPostJson) {
         val inner = postToJson(post)
         encryptAndEnqueue(inner)
+        co.twinotify.core.metrics.MetricsStore.incrementMirrored(ctx)
     }
 
     override suspend fun enqueueCancel(canonId: String, reason: String, originDevice: String, tsMs: Long) {

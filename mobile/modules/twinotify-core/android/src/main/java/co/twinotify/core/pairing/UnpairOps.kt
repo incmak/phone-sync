@@ -28,5 +28,6 @@ object UnpairOps {
         CryptoStore.rotate(ctx)
         NonceSource.regenerate(ctx)
         ReplayGuard.clear(ctx)
+        co.twinotify.core.metrics.MetricsStore.clear(ctx)
     }
 }

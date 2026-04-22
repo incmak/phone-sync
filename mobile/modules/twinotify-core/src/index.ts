@@ -1,6 +1,6 @@
-import TwinotifyCoreModule, { KeyPair, EncryptResult } from './TwinotifyCoreModule';
+import TwinotifyCoreModule, { KeyPair, EncryptResult, MetricsSnapshot } from './TwinotifyCoreModule';
 
-export type { KeyPair, EncryptResult };
+export type { KeyPair, EncryptResult, MetricsSnapshot };
 
 export async function getDeviceId(): Promise<string> {
   return await TwinotifyCoreModule.getDeviceId();
@@ -97,4 +97,8 @@ export async function addToDenylist(pkg: string): Promise<void> {
 
 export async function removeFromDenylist(pkg: string): Promise<void> {
   return await TwinotifyCoreModule.removeFromDenylist(pkg);
+}
+
+export async function getMetrics(): Promise<MetricsSnapshot> {
+  return await TwinotifyCoreModule.getMetrics();
 }

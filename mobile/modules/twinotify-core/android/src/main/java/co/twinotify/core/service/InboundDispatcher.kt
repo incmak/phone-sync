@@ -66,6 +66,10 @@ class InboundDispatcher(private val ctx: Context) {
             large_icon_png_b64 = o.optString("large_icon_png_b64").takeIf { it.isNotEmpty() },
             ts = o.optLong("ts"),
         )
+        // Record latency from envelope timestamp (stamped by sender) to receive time.
+        val latencyMs = System.currentTimeMillis() - post.ts
+        co.twinotify.core.metrics.MetricsStore.recordLatency(ctx, latencyMs)
+
         if (post.is_group_summary) return   // spec §4.7.2 — drop summary, mirror children only
         MirrorPoster.post(ctx, post)
     }

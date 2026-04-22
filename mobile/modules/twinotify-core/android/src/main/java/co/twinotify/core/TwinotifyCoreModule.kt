@@ -416,6 +416,19 @@ class TwinotifyCoreModule : Module() {
             }
         }
 
+        AsyncFunction("getMetrics") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val s = co.twinotify.core.metrics.MetricsStore.snapshot(requireContext())
+                    promise.resolve(mapOf(
+                        "mirroredToday" to s.mirroredToday,
+                        "blockedToday"  to s.blockedToday,
+                        "latencyMs"     to s.latencyMs,
+                    ))
+                } catch (e: Throwable) { promise.reject("METRICS", e.message ?: "err", e) }
+            }
+        }
+
         AsyncFunction("ping") { relayUrl: String, authed: Boolean, promise: Promise ->
             val settled = AtomicBoolean(false)
             val handler = Handler(Looper.getMainLooper())

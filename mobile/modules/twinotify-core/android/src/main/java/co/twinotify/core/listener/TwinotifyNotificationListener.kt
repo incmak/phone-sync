@@ -54,7 +54,11 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         scope.launch {
             val userDeny = co.twinotify.core.filter.AppFilterStore.load(applicationContext)
             val effective = denylist + userDeny
-            val post = NotifPostBuilder.build(sbn, applicationContext, originDevice, effective) ?: return@launch
+            val post = NotifPostBuilder.build(sbn, applicationContext, originDevice, effective)
+            if (post == null) {
+                co.twinotify.core.metrics.MetricsStore.incrementBlocked(applicationContext)
+                return@launch
+            }
             sink.enqueuePost(post)
         }
     }

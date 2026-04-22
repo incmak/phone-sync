@@ -41,6 +41,12 @@ export interface PeerHelloPayload {
   display_name?: string;
 }
 
+export interface MetricsSnapshot {
+  mirroredToday: number;
+  blockedToday: number;
+  latencyMs: number;
+}
+
 export interface TwinotifyCoreAPI {
   getDeviceId(): Promise<string>;
   getPublicKeys(): Promise<KeyPair>;
@@ -69,4 +75,6 @@ export interface TwinotifyCoreAPI {
   getUserDenylist(): Promise<string[]>;
   addToDenylist(pkg: string): Promise<void>;
   removeFromDenylist(pkg: string): Promise<void>;
+  // Home screen metrics
+  getMetrics(): Promise<MetricsSnapshot>;
 }

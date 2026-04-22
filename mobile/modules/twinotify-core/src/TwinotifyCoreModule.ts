@@ -2,6 +2,7 @@ import { NativeModule, requireNativeModule } from 'expo-modules-core';
 
 export type KeyPair = { encPubkey: string; signPubkey: string };
 export type EncryptResult = { ciphertext: string; nonce: string };
+export type MetricsSnapshot = { mirroredToday: number; blockedToday: number; latencyMs: number };
 
 export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'OFFLINE_QUEUED';
 
@@ -65,6 +66,8 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   getUserDenylist(): Promise<string[]>;
   addToDenylist(pkg: string): Promise<void>;
   removeFromDenylist(pkg: string): Promise<void>;
+  // Home screen metrics
+  getMetrics(): Promise<MetricsSnapshot>;
 }
 
 export default requireNativeModule<TwinotifyCoreModuleType>('TwinotifyCore');
