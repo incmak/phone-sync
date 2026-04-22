@@ -85,3 +85,15 @@ export async function unpair(): Promise<void> {
 export async function pingRelay(relayUrl: string, authed: boolean = false): Promise<string> {
   return await TwinotifyCoreModule.ping(relayUrl, authed);
 }
+
+export async function getUserDenylist(): Promise<string[]> {
+  return await TwinotifyCoreModule.getUserDenylist();
+}
+
+export async function addToDenylist(pkg: string): Promise<void> {
+  return await TwinotifyCoreModule.addToDenylist(pkg);
+}
+
+export async function removeFromDenylist(pkg: string): Promise<void> {
+  return await TwinotifyCoreModule.removeFromDenylist(pkg);
+}

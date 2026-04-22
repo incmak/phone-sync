@@ -57,6 +57,10 @@ declare class TwinotifyCoreModuleType extends NativeModule<{ onSyncStatus: (evt:
   openListenerSettings(): Promise<void>;
   isPostNotificationsGranted(): Promise<boolean>;
   openAppSettings(): Promise<void>;
+  // User-controlled app denylist
+  getUserDenylist(): Promise<string[]>;
+  addToDenylist(pkg: string): Promise<void>;
+  removeFromDenylist(pkg: string): Promise<void>;
 }
 
 export default requireNativeModule<TwinotifyCoreModuleType>('TwinotifyCore');

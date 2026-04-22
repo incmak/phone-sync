@@ -362,6 +362,33 @@ class TwinotifyCoreModule : Module() {
             }
         }
 
+        AsyncFunction("getUserDenylist") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val set = co.twinotify.core.filter.AppFilterStore.load(requireContext())
+                    promise.resolve(set.toList())
+                } catch (e: Throwable) { promise.reject("FILTER_GET", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("addToDenylist") { pkg: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    co.twinotify.core.filter.AppFilterStore.add(requireContext(), pkg)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("FILTER_ADD", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("removeFromDenylist") { pkg: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    co.twinotify.core.filter.AppFilterStore.remove(requireContext(), pkg)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("FILTER_REMOVE", e.message ?: "err", e) }
+            }
+        }
+
         AsyncFunction("ping") { relayUrl: String, authed: Boolean, promise: Promise ->
             val settled = AtomicBoolean(false)
             val handler = Handler(Looper.getMainLooper())

@@ -50,5 +50,11 @@ export function useTwinotifyCore() {
       const res = await Notifications.requestPermissionsAsync();
       return res.granted;
     },
+    getUserDenylist: (): Promise<string[]> =>
+      TwinotifyCoreModule.getUserDenylist(),
+    addToDenylist: (pkg: string): Promise<void> =>
+      TwinotifyCoreModule.addToDenylist(pkg),
+    removeFromDenylist: (pkg: string): Promise<void> =>
+      TwinotifyCoreModule.removeFromDenylist(pkg),
   };
 }

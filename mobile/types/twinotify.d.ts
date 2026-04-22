@@ -63,4 +63,8 @@ export interface TwinotifyCoreAPI {
   isPostNotificationsGranted(): Promise<boolean>;
   openAppSettings(): Promise<void>;
   addListener(event: 'onSyncStatus', handler: (evt: SyncStatus) => void): { remove: () => void };
+  // User-controlled app denylist
+  getUserDenylist(): Promise<string[]>;
+  addToDenylist(pkg: string): Promise<void>;
+  removeFromDenylist(pkg: string): Promise<void>;
 }
