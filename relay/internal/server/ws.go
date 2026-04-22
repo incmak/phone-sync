@@ -17,7 +17,12 @@ const (
 )
 
 var upgrader = websocket.Upgrader{
-	// TODO(phase-2): restrict origins once pairing auth is in place. Never expose this publicly in Phase 1.
+	// CheckOrigin: `/ws` is gated by JWT authMiddleware (Phase 2 onward) — JWT is verified
+	// against the paired device's stored sign_pubkey before any message flows. `/pair/notify`
+	// and `/pair/hello`/`/pair/send_sig` are intentionally unauthenticated (pre-pair state)
+	// but gated by pair_token which has a 5-min TTL. Therefore allowing any origin on
+	// upgrade is safe: the cryptographic gates live at the handler layer, not at the
+	// WebSocket handshake layer.
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 

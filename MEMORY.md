@@ -156,12 +156,19 @@
 - Home screen metrics (Today/Latency/Blocked) — counters not instrumented yet.
 - Two-sided cryptographic confirmation (B's sig enforcement) — still UX-gated, not crypto-enforced.
 
-**Post-merge improvements captured from final review (non-blocking):**
-1. Update stale `TODO(phase-2)` on `CheckOrigin: true` in `ws.go` — JWT auth gates `/ws` now; `/pair/notify` is intentionally unauthenticated + `pairToken`-gated.
-2. Add reason-code 5 (REASON_LISTENER_CANCEL) as explicit test case in `ReasonCodeFilterTest` (currently hits `else → NoEmit` by accident).
-3. `SyncService.connect()` writes `currentWs` twice (line 143 onOpen + line 159 post-newWebSocket) — clean up one.
-4. CI hook: re-compute SHA-256 of `default-denylist.json`, fail if drifts from `EXPECTED_SHA256_HEX`.
-5. Document nonce `regenerate()` / `PeerStore` wipe coupling in `NonceSource.kt` — Phase 4 unpair UI needs them atomic.
+### Phase 4 — Housekeeping + CI integrity (in progress on branch `phase-4-pair-auto-and-enforcement`)
+
+Tasks 1–6 ship pair automation, app filter enforcement, unpair-notify-peer, peer display name, and home metrics instrumentation. Task 7 is a housekeeping sweep with the following 7 items (all addressed):
+
+1. **A — ws.go comment updated**: Replaced stale `TODO(phase-2)` on `CheckOrigin: true` with a rationale block explaining JWT gate on `/ws` and pair_token gate on unauthenticated pair endpoints.
+2. **B — jsonschema AssertFormat enabled**: `compiler.AssertFormat()` called in `NewValidator()`; `format:"uuid"` on `msg_id` is now enforced. Test `TestValidateEnvelope_BadUUIDFormat` added and passes.
+3. **C — SyncService.currentWs double-assign removed**: `val ws = client.newWebSocket(...)` → `client.newWebSocket(...)`, post-`newWebSocket` `currentWs = ws` line dropped. Assignment inside `onOpen` is the single authoritative write.
+4. **D — ReasonCodeFilterTest reason-code 5 coverage**: Two new cases added (`!ownPkg + !pending + reason 5 → NoEmit` and `ownPkg + pending + reason 5 → Suppress`).
+5. **E — NonceSource.regenerate KDoc**: Documents the atomic coupling with `PeerStore.clear()` and `CryptoStore.rotate()` and the catastrophic nonce-reuse risk of mid-session regeneration.
+6. **F — CI denylist integrity gate**: `denylist-integrity` job added to `.github/workflows/mobile.yml`; `shasum -a 256` on the asset vs. `EXPECTED_SHA256_HEX` constant in `DenylistLoader.kt`; fails CI if they diverge.
+7. **G — MEMORY.md refreshed**: §10 Known gaps pruned of Phase 4-fixed items; §3 Phase 4 subsection added; §6 updated to Phase 5; §12 updated.
+
+Commit TBD — branch merges to main after final review.
 
 ---
 
@@ -215,20 +222,15 @@ Spec: `docs/superpowers/specs/2026-04-20-phone-sync-design.md` (v10).
 
 ---
 
-## 6 · What ships next (Phase 4 plan to be written)
+## 6 · What ships next (Phase 5)
 
-**Phase 4 — LAN transport + pair-automation polish**
+**Phase 4** is in progress on branch `phase-4-pair-auto-and-enforcement` (Tasks 1–7 complete). After merge, Phase 5 opens:
 
-First build-sequence item after Phase 3. Open items to address:
+1. **LAN transport (`LanTransport`)** — `NsdManager.registerService(_twinotify._tcp)` with daily-rotated ad-id (`HKDF(pair_secret, "ad-id", utc_epoch_day)`) ± 1 day window. TLS socket with SPKI pinning to paired `enc_pubkey` (spec §4.3). Transport selection order: LAN → relay.
+2. **FCM wake path** — high-priority FCM message promotes FGS from Doze. Required for background delivery when LAN is unavailable and device is idle.
+3. **mDNS ad-id rotation** — ±1 day window for clock-skew tolerance; rotate the advertising ID daily via HKDF.
 
-1. **Bidirectional pair-sig push (automate the Phase 3 manual copy-paste).** Relay already pushes sig to Device A via `/pair/notify` (Task 7). Add symmetric leg: Device B opens `/pair/notify` too; relay forwards sig once A signs. Removes the only remaining UX friction in pairing.
-2. **LAN transport (`LanTransport`)** — `NsdManager.registerService(_twinotify._tcp)` with daily-rotated ad-id (`HKDF(pair_secret, "ad-id", utc_epoch_day)`) ± 1 day window. TLS socket with SPKI pinning to paired `enc_pubkey` (spec §4.3). Transport selection order: LAN → relay.
-3. **App filter enforcement.** Phase 3's per-app allow/deny toggles are cosmetic. Wire into `NotifPostBuilder` so user overrides actually suppress/allow mirror builds at the sender.
-4. **Unpair notify-peer signal.** Phase 3's unpair only rotates local keys; peer stays oblivious. Add `unpair` packet → peer clears pair state + rotates keys too.
-5. **Peer display name.** Add to pair handshake payload (e.g., from `Settings.Global.DEVICE_NAME`). Phase 3 only shows truncated UUID.
-6. **Home metrics instrumentation.** Count today's mirrors / recent latency samples / blocked count via DataStore counters. Phase 3 shows `—` placeholders.
-
-Later phases: FCM (Phase 5), reply bridge (Phase 6), icon cache + hash-elide (Phase 7), desktop Tauri (Phase 8+), lazy FGS + battery tuning (Phase 9), MessagingStyle reconstruction (Phase 18).
+Later phases: reply bridge (Phase 6), icon cache + hash-elide (Phase 7), desktop Tauri (Phase 8+), lazy FGS + battery tuning (Phase 9), MessagingStyle reconstruction (Phase 18).
 
 ---
 
@@ -270,23 +272,13 @@ Later phases: FCM (Phase 5), reply bridge (Phase 6), icon cache + hash-elide (Ph
 
 ## 10 · Known gaps / TODOs planted in code
 
-- Stale `TODO(phase-2)` on `CheckOrigin: true` in `relay/internal/server/ws.go`. JWT auth now gates `/ws`, `/pair/notify` is intentionally unauthenticated + `pairToken`-gated. Update comment to reflect current state.
-- `TODO(phase-2): enable jsonschema.WithFormatAssert` in `relay/internal/server/validator.go` — format `"uuid"` still advisory-only. Turn on when comfortable rejecting malformed UUIDs across the board.
 - **Two-sided confirmation partial** — only Device A's sig enforced at the relay (spec §4.7 known gap). B's consent remains UX-gated. Cryptographic enforcement is Phase 4+.
-- **Phase 3 manual sig copy-paste** — Device A displays sig as base-64; Device B pastes. Automation requires bidirectional `/pair/notify` (Phase 4 Task 1).
-- App filter user-override not enforced — Phase 3 UI toggles are cosmetic; `NotifPostBuilder` only honors the compiled-in denylist. Wire into the filter in Phase 4.
-- Unpair doesn't notify peer — the other device sees connection drop, user must manually unpair on that side. Add `unpair` packet in Phase 4.
-- Home-screen metrics (Today / Latency / Blocked) show `—` placeholders. Instrument counters in Phase 4.
-- Peer display name missing — only truncated UUID shown. Handshake-extended in Phase 4.
 - Reply `action_id` map is in-memory only (PendingIntents are process-local); OEM kill → reply fails with `reply.failed` (Phase 6 when reply bridge lands).
-- LAN TLS SPKI pinning not yet implemented (Phase 4).
-- mDNS ad-id rotation + ±1 day window not yet implemented (Phase 4).
+- LAN TLS SPKI pinning not yet implemented (Phase 5).
+- mDNS ad-id rotation + ±1 day window not yet implemented (Phase 5).
 - FCM-based wake path absent (Phase 5); Phase 3 is relay-WS-only.
 - Icon hash-elide absent (Phase 7); every mirror inlines full PNG bytes base64.
-- `SyncService.connect()` writes `currentWs` in two places (onOpen callback + post-`newWebSocket`) — cleanup noted in final review.
-- `ReasonCodeFilterTest` lacks explicit reason-code 5 (`REASON_LISTENER_CANCEL`) case — currently falls through the `else → NoEmit` branch by accident; add named test in Phase 4.
-- CI hook missing: recompute SHA-256 of `default-denylist.json` on change vs `EXPECTED_SHA256_HEX` in `DenylistLoader.kt` — add to prevent denylist edits that silently break startup.
-- Document `NonceSource.regenerate()` + `PeerStore.clear()` atomic coupling before Phase 4 wires an `unpair` JS function.
+- MessagingStyle / BigTextStyle reconstruction (Phase 18).
 
 ---
 
@@ -317,11 +309,13 @@ If starting a new session, read in this order:
 2. `docs/superpowers/specs/2026-04-20-phone-sync-design.md` (spec v10).
 3. `git log --oneline main | head -30` (recent history).
 4. `docs/superpowers/plans/2026-04-21-phase-3-listener-first-mirror.md` (executed; reference for patterns).
-5. `docs/test-scenarios.md` Phase 3 section (10 scenarios — may have user's pass/fail notes).
+5. `docs/test-scenarios.md` Phase 3 + Phase 4 sections.
+
+**Current state (2026-04-21):** Phase 4 is in progress on branch `phase-4-pair-auto-and-enforcement`. Tasks 1–7 are complete. Branch is ready for final review + merge.
 
 **Immediate next step (when user returns):**
 
-- If smoke results report issues → triage + patch (likely small surface bugs in the new UI / listener race paths).
-- If smoke is clean → write Phase 4 plan (`docs/superpowers/plans/2026-04-<DATE>-phase-4-lan-and-pair-automation.md`) covering the 6 items in §6 above. Phase 4 is mostly extensions to Phase 3 surfaces — no rebrand-scale churn.
+- Merge Phase 4 branch to main, update §3 with final SHA.
+- Write Phase 5 plan (`docs/superpowers/plans/2026-04-<DATE>-phase-5-lan-fcm.md`) covering LAN transport + FCM wake path (see §6).
 
 User will say "go" / "proceed" / "subagent" to begin execution.

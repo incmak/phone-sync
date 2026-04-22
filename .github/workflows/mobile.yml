@@ -21,3 +21,28 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npx expo-doctor
+
+  denylist-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify default-denylist.json SHA matches DenylistLoader constant
+        run: |
+          set -euo pipefail
+          ASSET_SHA=$(shasum -a 256 mobile/modules/twinotify-core/android/src/main/assets/default-denylist.json | awk '{print $1}')
+          # The Kotlin const declaration wraps the 64-char hex onto the line AFTER the
+          # EXPECTED_SHA256_HEX field name. Scan forward from the field name and extract
+          # the first 64-char lowercase-hex literal found after it.
+          EXPECTED=$(awk '
+            /EXPECTED_SHA256_HEX/,0 {
+              if (match($0, /"[0-9a-f]{64}"/)) {
+                s = substr($0, RSTART+1, RLENGTH-2); print s; exit
+              }
+            }' mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/filter/DenylistLoader.kt)
+          echo "Asset SHA:    $ASSET_SHA"
+          echo "Constant SHA: $EXPECTED"
+          if [ "$ASSET_SHA" != "$EXPECTED" ]; then
+            echo "::error::default-denylist.json SHA does not match EXPECTED_SHA256_HEX in DenylistLoader.kt."
+            echo "If you intentionally changed the denylist, update the constant in the same commit."
+            exit 1
+          fi

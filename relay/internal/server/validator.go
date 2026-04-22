@@ -22,13 +22,11 @@ type Validator struct {
 // schemaBaseURL must match the $id prefix used in /proto/*.schema.json.
 const schemaBaseURL = "https://twinotify.app/schemas/"
 
-// TODO(phase-2): enable jsonschema.WithFormatAssert so `format: "uuid"` on msg_id
-// is enforced. Without it, format is advisory only and malformed UUIDs pass.
-
 // NewValidator compiles the packet envelope schema from the embedded FS.
 // All referenced schemas are registered first so intra-schema $ref resolution works.
 func NewValidator() (*Validator, error) {
 	compiler := jsonschema.NewCompiler()
+	compiler.AssertFormat() // enforce format:"uuid" on msg_id — malformed UUIDs are rejected
 
 	err := fs.WalkDir(schemaFS, "schemas", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
