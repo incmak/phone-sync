@@ -4,7 +4,6 @@ import com.goterl.lazysodium.LazySodiumAndroid
 import com.goterl.lazysodium.SodiumAndroid
 import com.goterl.lazysodium.interfaces.Box
 import com.goterl.lazysodium.interfaces.Sign
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 
@@ -38,11 +37,13 @@ object WrappedKeys {
     }
 
     fun seal(plaintext: ByteArray): Sealed {
-        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+        // Android Keystore requires Keystore-generated IVs for AES-GCM on API 28+
+        // (caller-provided IVs raise "caller-provided IV not permitted" on newer MIUI/AOSP).
+        // Let Keystore generate the IV by calling init() without GCMParameterSpec, then read it back.
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, KeystoreMaster.getOrCreate(), GCMParameterSpec(128, iv))
+        cipher.init(Cipher.ENCRYPT_MODE, KeystoreMaster.getOrCreate())
         val ct = cipher.doFinal(plaintext)
-        return Sealed(ct, iv)
+        return Sealed(ct, cipher.iv)
     }
 
     fun unseal(sealed: Sealed): ByteArray {
