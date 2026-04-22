@@ -226,15 +226,7 @@ export default function HomeScreen() {
             style={styles.banner}
           />
         )}
-        {connection === 'relay' && (
-          <TwBanner
-            tone="info"
-            title="Not on the same Wi-Fi"
-            body="We'll keep you on the relay until your phones can find each other again."
-            style={styles.banner}
-            compact
-          />
-        )}
+        {/* LAN direct transport ships in a later phase; relay is the only transport in Phase 3/4. */}
 
         {/* Recent activity — Phase 3 empty state */}
         <View style={styles.recentHeader}>
