@@ -6,9 +6,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme, TwButton } from '../../components';
 import { OnboardingState } from '../../state/onboardingState';
-import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 
-const DEFAULT_RELAY = 'wss://relay.twinotify.app';
+// Blank default so the user must enter their relay URL.
+// Production: 'wss://relay.twinotify.app/ws'. Local dev: 'ws://<LAN-IP>:8080/ws'.
+const DEFAULT_RELAY = '';
 const TIMEOUT_MS = 10_000;
 
 type TestState = 'idle' | 'testing' | 'ok' | 'error';
@@ -27,19 +28,38 @@ export default function RelayScreen() {
     setErrorMsg('');
     setLatency(null);
 
+    // Derive the /health URL from the user-supplied relay URL.
+    // User enters ws://host:port/ws or wss://host:port/ws (the JWT-gated WebSocket).
+    // For a reachability test we use /health which is public (no auth).
+    let healthUrl: string;
+    try {
+      const u = new URL(trimmed);
+      const httpScheme = u.protocol === 'wss:' ? 'https:' : 'http:';
+      healthUrl = `${httpScheme}//${u.host}/health`;
+    } catch {
+      setErrorMsg('Invalid URL. Expected ws://host:port/ws or wss://host:port/ws');
+      setTestState('error');
+      return;
+    }
+
     const start = Date.now();
     try {
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Timed out after 10s')), TIMEOUT_MS),
-      );
-      await Promise.race([
-        TwinotifyCoreModule.ping(trimmed, false),
-        timeoutPromise,
-      ]);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+      const resp = await fetch(healthUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!resp.ok) {
+        throw new Error(`relay returned HTTP ${resp.status}`);
+      }
       setLatency(Date.now() - start);
       setTestState('ok');
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('Aborted')) {
+        setErrorMsg('Timed out after 10s');
+      } else {
+        setErrorMsg(msg);
+      }
       setTestState('error');
     }
   }
@@ -109,7 +129,7 @@ export default function RelayScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
-            placeholder={DEFAULT_RELAY}
+            placeholder="ws://192.168.x.y:8080/ws or wss://relay.example/ws"
             placeholderTextColor={theme.ink4}
           />
 
