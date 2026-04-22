@@ -15,6 +15,7 @@ export interface PairStatus {
   peerDeviceId?: string;
   peerEncPubkey?: string;
   peerSignPubkey?: string;
+  peerDisplayName?: string;
 }
 
 export interface PeerHelloPayload {
@@ -44,7 +45,7 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   // Backward-compat: waits for pair.sig on role=B, returns base64 sig
   awaitPairSig(relayUrl: string, pairToken: string): Promise<string>;
   deviceBCompletePairing(relayUrl: string, pairToken: string, confirmationSigB64: string): Promise<void>;
-  storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string): Promise<void>;
+  storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string): Promise<void>;
   mintAuthJwt(): Promise<string>;
   encryptToPeer(plaintextB64: string): Promise<EncryptResult>;
   decryptFromPeer(ciphertextB64: string, nonceB64: string): Promise<string>;

@@ -62,8 +62,9 @@ export async function storePeerPubkeys(
   encB64: string,
   signB64: string,
   peerDeviceId: string,
+  peerDisplayName: string,
 ): Promise<void> {
-  return await TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId);
+  return await TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId, peerDisplayName);
 }
 
 export async function mintAuthJwt(): Promise<string> {

@@ -26,8 +26,8 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.awaitPairSig(relayUrl, pairToken),
     deviceBCompletePairing: (relayUrl: string, pairToken: string, sigB64: string): Promise<void> =>
       TwinotifyCoreModule.deviceBCompletePairing(relayUrl, pairToken, sigB64),
-    storePeerPubkeys: (encB64: string, signB64: string, peerDeviceId: string): Promise<void> =>
-      TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId),
+    storePeerPubkeys: (encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string = ''): Promise<void> =>
+      TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId, peerDisplayName),
     unpair: (): Promise<void> =>
       TwinotifyCoreModule.unpair(),
     startSyncService: (relayUrl: string): Promise<void> =>

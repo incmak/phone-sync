@@ -166,6 +166,7 @@ class TwinotifyCoreModule : Module() {
                             "peerDeviceId" to peer.deviceId,
                             "peerEncPubkey" to Base64.getEncoder().encodeToString(peer.encPubkey),
                             "peerSignPubkey" to Base64.getEncoder().encodeToString(peer.signPubkey),
+                            "peerDisplayName" to (peer.displayName ?: ""),
                         ))
                     }
                 } catch (e: Throwable) { promise.reject("PAIR_STATUS", e.message ?: "err", e) }
@@ -300,13 +301,14 @@ class TwinotifyCoreModule : Module() {
             }
         }
 
-        AsyncFunction("storePeerPubkeys") { encB64: String, signB64: String, peerDeviceId: String, promise: Promise ->
+        AsyncFunction("storePeerPubkeys") { encB64: String, signB64: String, peerDeviceId: String, peerDisplayName: String, promise: Promise ->
             moduleScope.launch {
                 try {
                     val ctx  = requireContext()
                     val enc  = Base64.getDecoder().decode(encB64)
                     val sign = Base64.getDecoder().decode(signB64)
-                    PeerStore.save(ctx, PeerRecord(peerDeviceId, enc, sign))
+                    val name = peerDisplayName.takeIf { it.isNotBlank() }
+                    PeerStore.save(ctx, PeerRecord(peerDeviceId, enc, sign, name))
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("PEER_STORE", e.message ?: "err", e) }
             }

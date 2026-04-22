@@ -19,6 +19,7 @@ export interface PairStatus {
   peerDeviceId?: string;
   peerEncPubkey?: string;
   peerSignPubkey?: string;
+  peerDisplayName?: string;
 }
 
 export interface PairPayloadJson {
@@ -52,7 +53,7 @@ export interface TwinotifyCoreAPI {
   computeFingerprint(encB64: string, signB64: string): Promise<string>;
   deviceASignConfirmation(pairToken: string, bEncB64: string, bSignB64: string): Promise<string>;
   deviceBCompletePairing(relayUrl: string, pairToken: string, sigB64: string): Promise<void>;
-  storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string): Promise<void>;
+  storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string): Promise<void>;
   unpair(): Promise<void>;
   startSyncService(relayUrl: string): Promise<void>;
   stopSyncService(): Promise<void>;

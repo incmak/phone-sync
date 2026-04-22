@@ -61,7 +61,7 @@ export default function FingerprintScreen() {
         pairToken, peerEncB64, peerSignB64,
       );
       await TwinotifyCoreModule.sendConfirmationSig(relayUrl, pairToken, sigB64);
-      await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId);
+      await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId, peerDisplayName);
       router.replace('/pair/success');
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Signing or relay push failed.');
@@ -76,7 +76,7 @@ export default function FingerprintScreen() {
       setErrorMsg(null);
       const sigB64 = await TwinotifyCoreModule.awaitPairSig(relayUrl, pairToken);
       await TwinotifyCoreModule.deviceBCompletePairing(relayUrl, pairToken, sigB64);
-      await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId);
+      await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId, peerDisplayName);
       router.replace('/pair/success');
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Pair completion failed.');
@@ -97,7 +97,9 @@ export default function FingerprintScreen() {
           Verify the match
         </Text>
         <Text style={{ fontSize: 15, color: theme.ink3, fontFamily: theme.fonts.ui, lineHeight: 22, marginBottom: 4 }}>
-          Compare these 16 blocks with what your other phone is showing. They must match exactly.
+          {peerDisplayName?.trim()
+            ? `Compare these 16 blocks with what ${peerDisplayName} is showing. They must match exactly.`
+            : 'Compare these 16 blocks with what your other phone is showing. They must match exactly.'}
         </Text>
         {peerDisplayName ? (
           <Text style={{ fontSize: 13, color: theme.ink3, fontFamily: theme.fonts.ui, marginBottom: 20 }}>

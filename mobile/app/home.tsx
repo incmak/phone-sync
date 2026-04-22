@@ -102,8 +102,9 @@ export default function HomeScreen() {
   }, [relayUrl]);
 
   // Display values
-  const peerId = pairStatus.peerDeviceId ? pairStatus.peerDeviceId.slice(0, 8) : '—';
-  const peerLabel = pairStatus.paired ? peerId : 'Not paired';
+  const peerLabel = pairStatus.paired
+    ? (pairStatus.peerDisplayName?.trim() || pairStatus.peerDeviceId?.slice(0, 8) || '—')
+    : 'Not paired';
   const peerOnline = connection !== 'offline';
 
   return (
