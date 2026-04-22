@@ -30,6 +30,14 @@ object MirrorPoster {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
+        // Pick best expanded-view content. Many apps (messaging, mail, etc.) don't populate
+        // EXTRA_BIG_TEXT because their originals use MessagingStyle / InboxStyle — NotifPostBuilder
+        // already collapsed those into `text`. Fall back to `text` (or title) so the expanded view
+        // shows SOMETHING instead of null.
+        val expandedText = post.big_text?.takeIf { it.isNotBlank() }
+            ?: post.text?.takeIf { it.isNotBlank() }
+            ?: post.title
+
         val nb = NotificationCompat.Builder(ctx, NotifChannelSetup.CHANNEL_MIRRORS)
             .setContentTitle(post.title ?: "")
             .setContentText(post.text ?: "")
@@ -40,7 +48,9 @@ object MirrorPoster {
             .setSmallIcon(android.R.drawable.ic_dialog_info)       // fallback — real smallIcon is a Bitmap, not an Icon resource; Phase 3 uses the system one until Phase 7 icon cache lands
             .apply {
                 if (largeIcon != null) setLargeIcon(largeIcon)
-                if (post.big_text != null) setStyle(NotificationCompat.BigTextStyle().bigText(post.big_text))
+                if (!expandedText.isNullOrBlank()) {
+                    setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+                }
             }
             .build()
             .also { if (!post.is_clearable) it.flags = it.flags or Notification.FLAG_NO_CLEAR }

@@ -279,6 +279,11 @@ Later phases: reply bridge (Phase 6), icon cache + hash-elide (Phase 7), desktop
 - FCM-based wake path absent (Phase 5); Phase 3 is relay-WS-only.
 - Icon hash-elide absent (Phase 7); every mirror inlines full PNG bytes base64.
 - MessagingStyle / BigTextStyle reconstruction (Phase 18).
+- **Call notifications** currently mirror as plain text. Proper incoming-call mirroring needs
+  `Notification.CallStyle` + accept/decline PendingIntents routed back to the origin (requires
+  reply-bridge-style round-trip). Per-app / per-category custom ringtones need additional
+  notification channels on the receiver keyed by `originDevice + category`. Deferred to
+  Phase 6 (reply bridge) alongside the accept/decline routing.
 
 ---
 
