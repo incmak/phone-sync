@@ -81,9 +81,16 @@ class InboundDispatcher(private val ctx: Context) {
 
     private suspend fun handleUnpair() {
         android.util.Log.i("Twinotify", "peer initiated unpair — wiping local state")
+        // Wipe inside NonCancellable + signal JS BEFORE stopService. If this runs on the
+        // SyncService's scope and we stopService first, onDestroy can cancel the scope mid-wipe
+        // at the next DataStore suspension point, leaving a partial wipe (peer cleared but
+        // crypto not rotated). NonCancellable protects the wipe sequence from scope cancellation;
+        // stopService after so the service exits on the now-cleared state.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
+            SyncServiceStatus.notifyPeerUnpaired()
+        }
         val stopIntent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
         ctx.stopService(stopIntent)
-        co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
-        SyncServiceStatus.notifyPeerUnpaired()
     }
 }
