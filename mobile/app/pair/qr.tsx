@@ -9,7 +9,8 @@ import {
   TwWordmark,
   TwStatusDot,
 } from '../../components';
-import TwinotifyCoreModule, { PairStatus } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
+import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
+import type { PeerHelloPayload } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../../state/onboardingState';
 
 type ScreenStatus = 'starting' | 'waiting' | 'connected' | 'error';
@@ -33,7 +34,9 @@ export default function PairQRScreen() {
           return;
         }
 
-        const payloadStr = await TwinotifyCoreModule.startPairInitiator(relayUrl);
+        // Get device display name then register with relay
+        const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
+        const payloadStr = await TwinotifyCoreModule.startPairInitiator(relayUrl, displayName);
         if (cancelled) return;
         setPayload(payloadStr);
         setStatus('waiting');
@@ -47,31 +50,33 @@ export default function PairQRScreen() {
           return;
         }
 
-        // awaitPairSig blocks until relay pushes pair.sig (Device B complete signal).
+        // Wait for B's peer.hello frame — relay pushes it once B scans and calls /pair/hello
+        let helloFrame: PeerHelloPayload;
         try {
-          await TwinotifyCoreModule.awaitPairSig(relayUrl, parsed.pairToken);
+          const rawFrame = await TwinotifyCoreModule.awaitPeerHello(relayUrl, parsed.pairToken);
           if (cancelled) return;
-          setStatus('connected');
-
-          const pairStatus: PairStatus = await TwinotifyCoreModule.getPairStatus();
+          helloFrame = JSON.parse(rawFrame) as PeerHelloPayload;
+        } catch (err: unknown) {
           if (cancelled) return;
-
-          router.push({
-            pathname: '/pair/fingerprint',
-            params: {
-              role: 'A',
-              pairToken: parsed.pairToken,
-              relayUrl,
-              peerEncB64: pairStatus.peerEncPubkey ?? '',
-              peerSignB64: pairStatus.peerSignPubkey ?? '',
-              peerDeviceId: pairStatus.peerDeviceId ?? 'peer',
-            },
-          });
-        } catch (sigErr: unknown) {
-          if (cancelled) return;
-          setErrorMsg(sigErr instanceof Error ? sigErr.message : 'Pair wait failed.');
+          setErrorMsg(err instanceof Error ? err.message : 'Peer hello wait failed.');
           setStatus('error');
+          return;
         }
+
+        setStatus('connected');
+
+        router.push({
+          pathname: '/pair/fingerprint',
+          params: {
+            role: 'A',
+            pairToken: parsed.pairToken,
+            relayUrl,
+            peerDeviceId: helloFrame.device_id,
+            peerEncB64: helloFrame.enc_pubkey,
+            peerSignB64: helloFrame.sign_pubkey,
+            peerDisplayName: helloFrame.display_name ?? '',
+          },
+        });
       } catch (err: unknown) {
         if (cancelled) return;
         setErrorMsg(err instanceof Error ? err.message : 'Pair init failed.');

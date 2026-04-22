@@ -8,8 +8,16 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.getDeviceId(),
     getPublicKeys: (): Promise<KeyPair> =>
       TwinotifyCoreModule.getPublicKeys(),
-    startPairInitiator: (relayUrl: string): Promise<string> =>
-      TwinotifyCoreModule.startPairInitiator(relayUrl),
+    getDeviceDisplayName: (): Promise<string> =>
+      TwinotifyCoreModule.getDeviceDisplayName(),
+    startPairInitiator: (relayUrl: string, displayName: string): Promise<string> =>
+      TwinotifyCoreModule.startPairInitiator(relayUrl, displayName),
+    sendPeerHello: (relayUrl: string, pairToken: string, displayName: string): Promise<void> =>
+      TwinotifyCoreModule.sendPeerHello(relayUrl, pairToken, displayName),
+    awaitPeerHello: (relayUrl: string, pairToken: string): Promise<string> =>
+      TwinotifyCoreModule.awaitPeerHello(relayUrl, pairToken),
+    sendConfirmationSig: (relayUrl: string, pairToken: string, sigB64: string): Promise<void> =>
+      TwinotifyCoreModule.sendConfirmationSig(relayUrl, pairToken, sigB64),
     computeFingerprint: (encB64: string, signB64: string): Promise<string> =>
       TwinotifyCoreModule.computeFingerprint(encB64, signB64),
     deviceASignConfirmation: (pairToken: string, bEncB64: string, bSignB64: string): Promise<string> =>

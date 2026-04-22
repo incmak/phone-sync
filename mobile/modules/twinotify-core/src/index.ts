@@ -10,8 +10,32 @@ export async function getPublicKeys(): Promise<KeyPair> {
   return await TwinotifyCoreModule.getPublicKeys();
 }
 
-export async function startPairInitiator(relayUrl: string): Promise<string> {
-  return await TwinotifyCoreModule.startPairInitiator(relayUrl);
+export async function getDeviceDisplayName(): Promise<string> {
+  return await TwinotifyCoreModule.getDeviceDisplayName();
+}
+
+export async function startPairInitiator(relayUrl: string, displayName: string): Promise<string> {
+  return await TwinotifyCoreModule.startPairInitiator(relayUrl, displayName);
+}
+
+export async function sendPeerHello(
+  relayUrl: string,
+  pairToken: string,
+  displayName: string,
+): Promise<void> {
+  return await TwinotifyCoreModule.sendPeerHello(relayUrl, pairToken, displayName);
+}
+
+export async function awaitPeerHello(relayUrl: string, pairToken: string): Promise<string> {
+  return await TwinotifyCoreModule.awaitPeerHello(relayUrl, pairToken);
+}
+
+export async function sendConfirmationSig(
+  relayUrl: string,
+  pairToken: string,
+  sigB64: string,
+): Promise<void> {
+  return await TwinotifyCoreModule.sendConfirmationSig(relayUrl, pairToken, sigB64);
 }
 
 export async function computeFingerprint(encB64: string, signB64: string): Promise<string> {

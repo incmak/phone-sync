@@ -186,17 +186,67 @@ class TwinotifyCoreModule : Module() {
             }
         }
 
-        AsyncFunction("startPairInitiator") { relayUrl: String, promise: Promise ->
+        AsyncFunction("getDeviceDisplayName") { promise: Promise ->
+            try {
+                val ctx = requireContext()
+                val name = android.provider.Settings.Global.getString(ctx.contentResolver, "device_name")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: android.os.Build.MODEL
+                    ?: "Android device"
+                promise.resolve(name)
+            } catch (e: Throwable) { promise.reject("DEVICE_NAME", e.message ?: "err", e) }
+        }
+
+        AsyncFunction("startPairInitiator") { relayUrl: String, displayName: String, promise: Promise ->
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
                     val (box, sign) = CryptoStore.loadOrGenerate(ctx)
                     val deviceId = DeviceIdentity.getOrCreate(ctx)
                     val token = PairPayload.newToken()
-                    PairProtocol.initiate(relayUrl, token, deviceId, box.publicKey, sign.publicKey)
+                    PairProtocol.initiate(
+                        relayUrl, token, deviceId, box.publicKey, sign.publicKey,
+                        displayName.takeIf { it.isNotBlank() }
+                    )
                     val payload = PairPayload(relayUrl, deviceId, box.publicKey, sign.publicKey, token).toJson()
                     promise.resolve(payload)
                 } catch (e: Throwable) { promise.reject("PAIR_INIT", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("sendPeerHello") { relayUrl: String, pairToken: String, displayName: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    val deviceId = co.twinotify.core.storage.DeviceIdentity.getOrCreate(ctx)
+                    val (box, sign) = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(ctx)
+                    co.twinotify.core.pairing.PairProtocol.sendPeerHello(
+                        relayUrl, pairToken, deviceId, box.publicKey, sign.publicKey,
+                        displayName.takeIf { it.isNotBlank() }
+                    )
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("PAIR_HELLO", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("awaitPeerHello") { relayUrl: String, pairToken: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val frame = co.twinotify.core.pairing.PairNotifyClient.awaitFrame(
+                        relayUrl, pairToken, role = "A", expectedType = "peer.hello",
+                    )
+                    promise.resolve(frame)
+                } catch (e: Throwable) { promise.reject("PAIR_HELLO_WAIT", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("sendConfirmationSig") { relayUrl: String, pairToken: String, sigB64: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val sig = java.util.Base64.getDecoder().decode(sigB64)
+                    co.twinotify.core.pairing.PairProtocol.sendConfirmationSig(relayUrl, pairToken, sig)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("SEND_SIG", e.message ?: "err", e) }
             }
         }
 

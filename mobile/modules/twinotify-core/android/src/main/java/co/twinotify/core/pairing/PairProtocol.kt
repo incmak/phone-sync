@@ -12,14 +12,15 @@ import java.util.Base64
 import java.util.concurrent.TimeUnit
 
 /**
- * HTTP client for /pair/init and /pair/complete.
+ * HTTP client for /pair/init, /pair/hello, /pair/send_sig, and /pair/complete.
  *
  * Role split:
  *   - Device A calls `initiate()` to register with the relay and display QR.
  *   - Device A produces the confirmation_sig via `deviceASignConfirmation()`
  *     after seeing B's fingerprint and user approval.
- *   - Device B calls `deviceBCompletePair()` with A's confirmation_sig
- *     (conveyed out-of-band in v1; Phase 3 adds WebSocket push).
+ *   - Device A calls `sendConfirmationSig()` to push the sig to B via relay.
+ *   - Device B calls `sendPeerHello()` after scanning QR to send its own pubkeys.
+ *   - Device B calls `deviceBCompletePair()` after receiving the sig from relay.
  *
  * Spec §4.7: sig_A(pair_token || A_enc || A_sign || B_enc || B_sign) — 5 fields, A first then B.
  */
@@ -33,15 +34,51 @@ object PairProtocol {
         .build()
 
     /** Called on Device A. Registers pending pair with relay. */
-    fun initiate(relayUrl: String, token: String, deviceId: String, encPub: ByteArray, signPub: ByteArray) {
-        val body = JSONObject(mapOf(
+    fun initiate(
+        relayUrl: String, token: String, deviceId: String,
+        encPub: ByteArray, signPub: ByteArray,
+        displayName: String? = null,
+    ) {
+        val map = mutableMapOf<String, Any>(
             "pair_token" to token,
             "device_id" to deviceId,
             "enc_pubkey" to Base64.getEncoder().encodeToString(encPub),
             "sign_pubkey" to Base64.getEncoder().encodeToString(signPub),
-        )).toString().toRequestBody(JSON)
+        )
+        if (!displayName.isNullOrBlank()) map["display_name"] = displayName
+        val body = JSONObject(map.toMap()).toString().toRequestBody(JSON)
         val resp = http.newCall(Request.Builder().url("$relayUrl/pair/init").post(body).build()).execute()
         check(resp.isSuccessful) { "init HTTP ${resp.code}" }
+        resp.close()
+    }
+
+    /** Device B → relay: announce own pubkeys + optional display name. Relay forwards to A. */
+    fun sendPeerHello(
+        relayUrl: String, token: String, deviceId: String,
+        bEncPub: ByteArray, bSignPub: ByteArray,
+        displayName: String? = null,
+    ) {
+        val map = mutableMapOf<String, Any>(
+            "pair_token" to token,
+            "device_id" to deviceId,
+            "enc_pubkey" to Base64.getEncoder().encodeToString(bEncPub),
+            "sign_pubkey" to Base64.getEncoder().encodeToString(bSignPub),
+        )
+        if (!displayName.isNullOrBlank()) map["display_name"] = displayName
+        val body = JSONObject(map.toMap()).toString().toRequestBody(JSON)
+        val resp = http.newCall(Request.Builder().url("$relayUrl/pair/hello").post(body).build()).execute()
+        check(resp.isSuccessful) { "pair/hello HTTP ${resp.code}" }
+        resp.close()
+    }
+
+    /** Device A → relay: push confirmation_sig. Relay forwards to B. */
+    fun sendConfirmationSig(relayUrl: String, token: String, sig: ByteArray) {
+        val body = JSONObject(mapOf(
+            "pair_token" to token,
+            "confirmation_sig" to Base64.getEncoder().encodeToString(sig),
+        )).toString().toRequestBody(JSON)
+        val resp = http.newCall(Request.Builder().url("$relayUrl/pair/send_sig").post(body).build()).execute()
+        check(resp.isSuccessful) { "pair/send_sig HTTP ${resp.code}" }
         resp.close()
     }
 
