@@ -137,10 +137,14 @@ export default function PermsScreen() {
     }
   }, []);
 
-  // Check on focus (user returning from system settings)
+  // Check on focus (user returning from system settings) + poll every 1.5s while on screen.
+  // Polling is needed because Android re-focus can be delayed after the NLS settings screen
+  // closes; without it the card stays stale until user taps back manually.
   useFocusEffect(
     useCallback(() => {
       void checkPerms();
+      const id = setInterval(() => void checkPerms(), 1500);
+      return () => clearInterval(id);
     }, [checkPerms]),
   );
 

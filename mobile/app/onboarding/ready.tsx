@@ -28,7 +28,9 @@ export default function ReadyScreen() {
 
   useEffect(() => {
     OnboardingState.getRole().then((r) => setRole(r));
-    OnboardingState.markComplete();
+    // Note: onboarding is marked complete only after a successful pair (see pair/success.tsx).
+    // Marking it here would route the user to /home on next launch even if pair fails,
+    // leaving no way back to the pair flow without clearing app data.
   }, []);
 
   function handleAction() {

@@ -30,8 +30,13 @@ object PairNotifyClient {
         timeoutMs: Long = 5 * 60 * 1000L,
     ): String {
         require(role == "A" || role == "B") { "role must be A or B, got $role" }
-        val wsUrl = relayBaseUrl.replaceFirst("^http".toRegex(), "ws") +
-            "/pair/notify?token=$pairToken&role=$role"
+        // Normalize to ws(s)://host[:port] — strip a trailing /ws path from user-entered URL,
+        // swap http(s)→ws(s), then append /pair/notify.
+        var origin = relayBaseUrl.trim().trimEnd('/').removeSuffix("/ws")
+        origin = origin.replaceFirst(Regex("^https://"), "wss://")
+        origin = origin.replaceFirst(Regex("^http://"), "ws://")
+        // If user entered ws:// or wss:// already, keep as-is.
+        val wsUrl = "$origin/pair/notify?token=$pairToken&role=$role"
         val req = Request.Builder().url(wsUrl).build()
         val deferred = CompletableDeferred<String>()
         val ws = client.newWebSocket(req, object : WebSocketListener() {

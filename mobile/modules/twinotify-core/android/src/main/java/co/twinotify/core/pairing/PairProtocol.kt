@@ -33,6 +33,19 @@ object PairProtocol {
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * Normalizes the user-entered relay URL (e.g. "ws://host:8080/ws") into a plain HTTP origin
+     * suitable for POSTs (e.g. "http://host:8080"). Strips any /ws suffix and swaps ws(s) schemes.
+     */
+    internal fun relayOrigin(relayUrl: String): String {
+        var u = relayUrl.trim().trimEnd('/')
+        u = u.replaceFirst(Regex("^wss://"), "https://")
+        u = u.replaceFirst(Regex("^ws://"), "http://")
+        // Drop a trailing "/ws" path segment if present (user-entered WS URL).
+        u = u.removeSuffix("/ws")
+        return u
+    }
+
     /** Called on Device A. Registers pending pair with relay. */
     fun initiate(
         relayUrl: String, token: String, deviceId: String,
@@ -47,7 +60,7 @@ object PairProtocol {
         )
         if (!displayName.isNullOrBlank()) map["display_name"] = displayName
         val body = JSONObject(map.toMap()).toString().toRequestBody(JSON)
-        val resp = http.newCall(Request.Builder().url("$relayUrl/pair/init").post(body).build()).execute()
+        val resp = http.newCall(Request.Builder().url("${relayOrigin(relayUrl)}/pair/init").post(body).build()).execute()
         check(resp.isSuccessful) { "init HTTP ${resp.code}" }
         resp.close()
     }
@@ -66,7 +79,7 @@ object PairProtocol {
         )
         if (!displayName.isNullOrBlank()) map["display_name"] = displayName
         val body = JSONObject(map.toMap()).toString().toRequestBody(JSON)
-        val resp = http.newCall(Request.Builder().url("$relayUrl/pair/hello").post(body).build()).execute()
+        val resp = http.newCall(Request.Builder().url("${relayOrigin(relayUrl)}/pair/hello").post(body).build()).execute()
         check(resp.isSuccessful) { "pair/hello HTTP ${resp.code}" }
         resp.close()
     }
@@ -77,7 +90,7 @@ object PairProtocol {
             "pair_token" to token,
             "confirmation_sig" to Base64.getEncoder().encodeToString(sig),
         )).toString().toRequestBody(JSON)
-        val resp = http.newCall(Request.Builder().url("$relayUrl/pair/send_sig").post(body).build()).execute()
+        val resp = http.newCall(Request.Builder().url("${relayOrigin(relayUrl)}/pair/send_sig").post(body).build()).execute()
         check(resp.isSuccessful) { "pair/send_sig HTTP ${resp.code}" }
         resp.close()
     }
@@ -112,7 +125,7 @@ object PairProtocol {
             "sign_pubkey" to Base64.getEncoder().encodeToString(bSignPub),
             "confirmation_sig" to Base64.getEncoder().encodeToString(confirmationSig),
         )).toString().toRequestBody(JSON)
-        val resp = http.newCall(Request.Builder().url("$relayUrl/pair/complete").post(body).build()).execute()
+        val resp = http.newCall(Request.Builder().url("${relayOrigin(relayUrl)}/pair/complete").post(body).build()).execute()
         check(resp.isSuccessful) { "complete HTTP ${resp.code}" }
         resp.close()
     }
