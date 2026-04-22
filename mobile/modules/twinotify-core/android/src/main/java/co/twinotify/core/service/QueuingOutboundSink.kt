@@ -20,6 +20,7 @@ class QueuingOutboundSink(
     override suspend fun enqueuePost(post: NotifPostJson) {
         val inner = postToJson(post)
         encryptAndEnqueue(inner)
+        co.twinotify.core.metrics.MetricsStore.incrementMirrored(ctx)
     }
 
     override suspend fun enqueueCancel(canonId: String, reason: String, originDevice: String, tsMs: Long) {
@@ -28,6 +29,17 @@ class QueuingOutboundSink(
             put("type", "notif.cancel")
             put("canon_id", canonId)
             put("reason", reason)
+            put("ts", tsMs)
+        }.toString()
+        encryptAndEnqueue(inner)
+    }
+
+    override suspend fun enqueueUnpair(reason: String, originDevice: String, tsMs: Long) {
+        val inner = JSONObject().apply {
+            put("v", 1)
+            put("type", "unpair")
+            put("reason", reason)
+            put("origin_device", originDevice)
             put("ts", tsMs)
         }.toString()
         encryptAndEnqueue(inner)

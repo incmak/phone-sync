@@ -47,7 +47,7 @@ class TwinotifyCoreModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("TwinotifyCore")
 
-        Events("onSyncStatus")
+        Events("onSyncStatus", "onPeerUnpair")
 
         OnCreate {
             try {
@@ -63,6 +63,11 @@ class TwinotifyCoreModule : Module() {
                     co.twinotify.core.service.SyncServiceStatus.queuedCount,
                 ) { s, q -> mapOf("state" to s.name, "queuedCount" to q) }
                     .collect { sendEvent("onSyncStatus", it) }
+            }
+            moduleScope.launch {
+                co.twinotify.core.service.SyncServiceStatus.peerUnpaired.collect {
+                    sendEvent("onPeerUnpair", emptyMap<String, Any>())
+                }
             }
         }
 
@@ -161,6 +166,7 @@ class TwinotifyCoreModule : Module() {
                             "peerDeviceId" to peer.deviceId,
                             "peerEncPubkey" to Base64.getEncoder().encodeToString(peer.encPubkey),
                             "peerSignPubkey" to Base64.getEncoder().encodeToString(peer.signPubkey),
+                            "peerDisplayName" to (peer.displayName ?: ""),
                         ))
                     }
                 } catch (e: Throwable) { promise.reject("PAIR_STATUS", e.message ?: "err", e) }
@@ -186,17 +192,67 @@ class TwinotifyCoreModule : Module() {
             }
         }
 
-        AsyncFunction("startPairInitiator") { relayUrl: String, promise: Promise ->
+        AsyncFunction("getDeviceDisplayName") { promise: Promise ->
+            try {
+                val ctx = requireContext()
+                val name = android.provider.Settings.Global.getString(ctx.contentResolver, "device_name")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: android.os.Build.MODEL
+                    ?: "Android device"
+                promise.resolve(name)
+            } catch (e: Throwable) { promise.reject("DEVICE_NAME", e.message ?: "err", e) }
+        }
+
+        AsyncFunction("startPairInitiator") { relayUrl: String, displayName: String, promise: Promise ->
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
                     val (box, sign) = CryptoStore.loadOrGenerate(ctx)
                     val deviceId = DeviceIdentity.getOrCreate(ctx)
                     val token = PairPayload.newToken()
-                    PairProtocol.initiate(relayUrl, token, deviceId, box.publicKey, sign.publicKey)
+                    PairProtocol.initiate(
+                        relayUrl, token, deviceId, box.publicKey, sign.publicKey,
+                        displayName.takeIf { it.isNotBlank() }
+                    )
                     val payload = PairPayload(relayUrl, deviceId, box.publicKey, sign.publicKey, token).toJson()
                     promise.resolve(payload)
                 } catch (e: Throwable) { promise.reject("PAIR_INIT", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("sendPeerHello") { relayUrl: String, pairToken: String, displayName: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    val deviceId = co.twinotify.core.storage.DeviceIdentity.getOrCreate(ctx)
+                    val (box, sign) = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(ctx)
+                    co.twinotify.core.pairing.PairProtocol.sendPeerHello(
+                        relayUrl, pairToken, deviceId, box.publicKey, sign.publicKey,
+                        displayName.takeIf { it.isNotBlank() }
+                    )
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("PAIR_HELLO", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("awaitPeerHello") { relayUrl: String, pairToken: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val frame = co.twinotify.core.pairing.PairNotifyClient.awaitFrame(
+                        relayUrl, pairToken, role = "A", expectedType = "peer.hello",
+                    )
+                    promise.resolve(frame)
+                } catch (e: Throwable) { promise.reject("PAIR_HELLO_WAIT", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("sendConfirmationSig") { relayUrl: String, pairToken: String, sigB64: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val sig = java.util.Base64.getDecoder().decode(sigB64)
+                    co.twinotify.core.pairing.PairProtocol.sendConfirmationSig(relayUrl, pairToken, sig)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("SEND_SIG", e.message ?: "err", e) }
             }
         }
 
@@ -245,13 +301,14 @@ class TwinotifyCoreModule : Module() {
             }
         }
 
-        AsyncFunction("storePeerPubkeys") { encB64: String, signB64: String, peerDeviceId: String, promise: Promise ->
+        AsyncFunction("storePeerPubkeys") { encB64: String, signB64: String, peerDeviceId: String, peerDisplayName: String, promise: Promise ->
             moduleScope.launch {
                 try {
                     val ctx  = requireContext()
                     val enc  = Base64.getDecoder().decode(encB64)
                     val sign = Base64.getDecoder().decode(signB64)
-                    PeerStore.save(ctx, PeerRecord(peerDeviceId, enc, sign))
+                    val name = peerDisplayName.takeIf { it.isNotBlank() }
+                    PeerStore.save(ctx, PeerRecord(peerDeviceId, enc, sign, name))
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("PEER_STORE", e.message ?: "err", e) }
             }
@@ -303,12 +360,72 @@ class TwinotifyCoreModule : Module() {
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
-                    PeerStore.clear(ctx)
-                    CryptoStore.rotate(ctx)
-                    NonceSource.regenerate(ctx)
-                    ReplayGuard.clear(ctx)
+                    // Try to notify peer first (best effort, before keys are rotated)
+                    val peer = PeerStore.load(ctx)
+                    if (peer != null) {
+                        try {
+                            val deviceId = DeviceIdentity.getOrCreate(ctx)
+                            co.twinotify.core.listener.TwinotifyNotificationListener
+                                .currentSink()
+                                .enqueueUnpair("user_initiated", deviceId, System.currentTimeMillis())
+                            // Wait up to 3s for queue to drain
+                            val deadline = System.currentTimeMillis() + 3_000L
+                            while (System.currentTimeMillis() < deadline) {
+                                if (co.twinotify.core.service.SyncServiceStatus.queuedCount.value == 0) break
+                                kotlinx.coroutines.delay(100)
+                            }
+                        } catch (e: Throwable) {
+                            android.util.Log.w("Twinotify", "unpair notify peer failed: ${e.message}")
+                            // Continue with local wipe regardless
+                        }
+                    }
+                    // Stop sync service before wiping state
+                    val stopIntent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
+                    ctx.stopService(stopIntent)
+                    // Wipe all paired state
+                    co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("UNPAIR", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("getUserDenylist") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val set = co.twinotify.core.filter.AppFilterStore.load(requireContext())
+                    promise.resolve(set.toList())
+                } catch (e: Throwable) { promise.reject("FILTER_GET", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("addToDenylist") { pkg: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    co.twinotify.core.filter.AppFilterStore.add(requireContext(), pkg)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("FILTER_ADD", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("removeFromDenylist") { pkg: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    co.twinotify.core.filter.AppFilterStore.remove(requireContext(), pkg)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("FILTER_REMOVE", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("getMetrics") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val s = co.twinotify.core.metrics.MetricsStore.snapshot(requireContext())
+                    promise.resolve(mapOf(
+                        "mirroredToday" to s.mirroredToday,
+                        "blockedToday"  to s.blockedToday,
+                        "latencyMs"     to s.latencyMs,
+                    ))
+                } catch (e: Throwable) { promise.reject("METRICS", e.message ?: "err", e) }
             }
         }
 

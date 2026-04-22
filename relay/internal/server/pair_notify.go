@@ -9,13 +9,14 @@ import (
 
 const pairNotifyMaxDuration = 5 * time.Minute
 
-// handlePairNotify accepts unauthenticated WebSocket subscriptions from Device A
-// during pairing. Holds open up to pair_token TTL (5 min), pushes the pair.sig
-// frame when /pair/complete fires, then closes.
+// handlePairNotify accepts unauthenticated WebSocket subscriptions during pairing.
+// Device A (role=A) waits for a peer.hello frame; Device B (role=B) waits for pair.sig.
+// Holds open up to pair_token TTL (5 min), pushes the relevant frame, then closes.
 func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 	pairToken := r.URL.Query().Get("token")
-	if pairToken == "" {
-		http.Error(w, "missing token", http.StatusBadRequest)
+	role := r.URL.Query().Get("role")
+	if pairToken == "" || (role != "A" && role != "B") {
+		http.Error(w, "missing or invalid token/role", http.StatusBadRequest)
 		return
 	}
 	// Verify pair_token exists as a pending pair. Deters unbounded subscribe-without-init.
@@ -33,8 +34,8 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(256)
 	_ = conn.SetReadDeadline(time.Now().Add(pairNotifyMaxDuration))
 
-	ch := s.pairHub.Subscribe(pairToken)
-	defer s.pairHub.Unsubscribe(pairToken, ch)
+	ch := s.pairHub.Subscribe(pairToken, role)
+	defer s.pairHub.Unsubscribe(pairToken, role, ch)
 
 	// Reader goroutine: detect client disconnect.
 	done := make(chan struct{})
@@ -59,7 +60,7 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 		_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 		_ = conn.WriteMessage(websocket.TextMessage, frame)
 		// After pushing, close normally.
-		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "sig delivered"))
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "frame delivered"))
 	case <-timer.C:
 		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "pair token expired"))
 	case <-done:

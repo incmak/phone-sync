@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -9,6 +9,7 @@ import { OnboardingState } from '../../state/onboardingState';
 
 export default function PairSuccessScreen() {
   const theme = useTheme();
+  const [peerName, setPeerName] = useState<string>('');
 
   useEffect(() => {
     (async () => {
@@ -20,6 +21,14 @@ export default function PairSuccessScreen() {
         await OnboardingState.markComplete();
       } catch {
         // Non-fatal — sync service can be restarted from the home screen.
+      }
+      try {
+        const ps = await TwinotifyCoreModule.getPairStatus();
+        if (ps.peerDisplayName?.trim()) {
+          setPeerName(ps.peerDisplayName.trim());
+        }
+      } catch {
+        // Non-fatal — fallback to generic copy.
       }
     })();
   }, []);
@@ -65,7 +74,9 @@ export default function PairSuccessScreen() {
           lineHeight: 22,
           maxWidth: 280,
         }}>
-          Your phones are paired. Notifications will start mirroring immediately.
+          {peerName
+            ? `Paired with ${peerName}. Notifications will start mirroring immediately.`
+            : 'Your phones are paired. Notifications will start mirroring immediately.'}
         </Text>
       </View>
 

@@ -69,7 +69,7 @@ export default function PairDetailScreen() {
   }, []);
 
   const peerIdFull = pairStatus?.peerDeviceId ?? '';
-  const peerIdShort = peerIdFull.slice(0, 8) || '—';
+  const peerDisplayName = pairStatus?.peerDisplayName?.trim() || '';
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>
@@ -92,14 +92,11 @@ export default function PairDetailScreen() {
             {/* Phone silhouette */}
             <Text style={[styles.phoneMoji, { color: theme.accent }]}>📱</Text>
           </View>
-          <Text style={[styles.peerId, { color: theme.ink, fontFamily: theme.fonts.mono }]}>
-            {pairStatus === null ? '…' : peerIdShort}
+          <Text style={[styles.peerId, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
+            {pairStatus === null ? '…' : (peerDisplayName || 'Paired device')}
           </Text>
           <Text style={[styles.peerFull, { color: theme.ink3, fontFamily: theme.fonts.mono }]}>
             {peerIdFull || '—'}
-          </Text>
-          <Text style={[styles.peerMeta, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
-            Phase 3 · UUID identifier
           </Text>
         </View>
 

@@ -9,35 +9,15 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import TwinotifyCoreModule from '../modules/twinotify-core/src/TwinotifyCoreModule';
 import { useTheme, TwAppChip, TW_APPS, TwSwitch, TwBanner } from '../components';
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
 type TabKey = 'all' | 'mirrored' | 'blocked';
-type AppFilter = Record<string, boolean>; // packageName → allowed
-
-const FILTER_STORAGE_KEY = 'twinotify_app_filter';
-
-// Default: most apps allowed; banking/OTP pre-blocked
-const DEFAULT_FILTER: AppFilter = {
-  signal: true,
-  whatsapp: true,
-  slack: true,
-  gmail: true,
-  linear: true,
-  github: true,
-  spotify: true,
-  calendar: true,
-  maps: false,
-  chase: false,   // pre-blocked (banking)
-  authy: false,   // pre-blocked (OTP)
-  uber: true,
-  instagram: true,
-  discord: true,
-  telegram: true,
-};
+// packageName → allowed (true = mirrored, false = blocked)
+type AppFilter = Record<string, boolean>;
 
 // ── component ─────────────────────────────────────────────────────────────────
 
@@ -45,32 +25,43 @@ export default function FilterScreen() {
   const theme = useTheme();
   const [tab, setTab] = useState<TabKey>('all');
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<AppFilter>(DEFAULT_FILTER);
+  const [filter, setFilter] = useState<AppFilter>({});
+  const [loading, setLoading] = useState(true);
 
-  // Load persisted filter on mount
+  // Load user denylist from native bridge on mount
   useEffect(() => {
-    AsyncStorage.getItem(FILTER_STORAGE_KEY)
-      .then((raw) => {
-        if (!raw) return;
-        try {
-          const parsed: unknown = JSON.parse(raw);
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-            // Merge with defaults to handle new apps added later
-            setFilter({ ...DEFAULT_FILTER, ...(parsed as AppFilter) });
-          }
-        } catch {
-          // malformed — keep defaults
+    TwinotifyCoreModule.getUserDenylist()
+      .then((denied: string[]) => {
+        const deniedSet = new Set(denied);
+        const allKeys = Object.keys(TW_APPS);
+        const initial: AppFilter = {};
+        for (const k of allKeys) {
+          // toggle ON (allowed) = NOT in denylist
+          initial[k] = !deniedSet.has(k);
         }
+        setFilter(initial);
       })
-      .catch(() => {});
+      .catch(() => {
+        // fallback: allow everything (fail open for display; enforcement is in native)
+        const allKeys = Object.keys(TW_APPS);
+        const fallback: AppFilter = {};
+        for (const k of allKeys) {
+          fallback[k] = true;
+        }
+        setFilter(fallback);
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   const handleToggle = useCallback((key: string, next: boolean) => {
-    setFilter((prev) => {
-      const updated = { ...prev, [key]: next };
-      AsyncStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(updated)).catch(() => {});
-      return updated;
-    });
+    setFilter((prev) => ({ ...prev, [key]: next }));
+    if (next) {
+      // Turning ON = allow = remove from denylist
+      TwinotifyCoreModule.removeFromDenylist(key).catch(() => {});
+    } else {
+      // Turning OFF = block = add to denylist
+      TwinotifyCoreModule.addToDenylist(key).catch(() => {});
+    }
   }, []);
 
   const allKeys = Object.keys(TW_APPS);
@@ -110,13 +101,13 @@ export default function FilterScreen() {
         <View style={styles.backBtn} />
       </View>
 
-      {/* Phase 3 limitation banner */}
+      {/* Default denylist info banner */}
       <TwBanner
-        tone="warn"
-        title="Phase 3: cosmetic only"
-        body="This list is stored but not yet enforced. Hardcoded deny-list is active. Per-app control lands in Phase 4."
+        tone="info"
+        title="Default denylist is compiled-in"
+        body="The default denylist (OTP, banking, password managers) is compiled into the app and cannot be unblocked here. Use the toggles below to additionally block any app you don't want mirrored."
         compact
-        style={styles.limitBanner}
+        style={styles.infoBanner}
       />
 
       {/* Search + tabs — sticky above list */}
@@ -190,7 +181,13 @@ export default function FilterScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={[styles.listCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
-          {visibleKeys.length === 0 ? (
+          {loading ? (
+            <View style={styles.emptyRow}>
+              <Text style={[styles.emptyText, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
+                Loading…
+              </Text>
+            </View>
+          ) : visibleKeys.length === 0 ? (
             <View style={styles.emptyRow}>
               <Text style={[styles.emptyText, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
                 No apps match
@@ -246,8 +243,8 @@ const styles = StyleSheet.create({
   backBtn: { minWidth: 80 },
   backLabel: { fontSize: 16 },
   headerTitle: { fontSize: 17 },
-  // Limit banner
-  limitBanner: { marginHorizontal: 16, marginTop: 12 },
+  // Info banner
+  infoBanner: { marginHorizontal: 16, marginTop: 12 },
   // Controls
   controls: { paddingHorizontal: 20, paddingTop: 12, gap: 12 },
   searchBar: {

@@ -1,6 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import TwinotifyCoreModule from '../modules/twinotify-core/src/TwinotifyCoreModule';
-import type { SyncStatus, PairStatus, KeyPair } from '../modules/twinotify-core/src/TwinotifyCoreModule';
+import type { SyncStatus, PairStatus, KeyPair, MetricsSnapshot } from '../modules/twinotify-core/src/TwinotifyCoreModule';
 
 export function useTwinotifyCore() {
   return {
@@ -8,8 +8,16 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.getDeviceId(),
     getPublicKeys: (): Promise<KeyPair> =>
       TwinotifyCoreModule.getPublicKeys(),
-    startPairInitiator: (relayUrl: string): Promise<string> =>
-      TwinotifyCoreModule.startPairInitiator(relayUrl),
+    getDeviceDisplayName: (): Promise<string> =>
+      TwinotifyCoreModule.getDeviceDisplayName(),
+    startPairInitiator: (relayUrl: string, displayName: string): Promise<string> =>
+      TwinotifyCoreModule.startPairInitiator(relayUrl, displayName),
+    sendPeerHello: (relayUrl: string, pairToken: string, displayName: string): Promise<void> =>
+      TwinotifyCoreModule.sendPeerHello(relayUrl, pairToken, displayName),
+    awaitPeerHello: (relayUrl: string, pairToken: string): Promise<string> =>
+      TwinotifyCoreModule.awaitPeerHello(relayUrl, pairToken),
+    sendConfirmationSig: (relayUrl: string, pairToken: string, sigB64: string): Promise<void> =>
+      TwinotifyCoreModule.sendConfirmationSig(relayUrl, pairToken, sigB64),
     computeFingerprint: (encB64: string, signB64: string): Promise<string> =>
       TwinotifyCoreModule.computeFingerprint(encB64, signB64),
     deviceASignConfirmation: (pairToken: string, bEncB64: string, bSignB64: string): Promise<string> =>
@@ -18,8 +26,8 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.awaitPairSig(relayUrl, pairToken),
     deviceBCompletePairing: (relayUrl: string, pairToken: string, sigB64: string): Promise<void> =>
       TwinotifyCoreModule.deviceBCompletePairing(relayUrl, pairToken, sigB64),
-    storePeerPubkeys: (encB64: string, signB64: string, peerDeviceId: string): Promise<void> =>
-      TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId),
+    storePeerPubkeys: (encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string = ''): Promise<void> =>
+      TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId, peerDisplayName),
     unpair: (): Promise<void> =>
       TwinotifyCoreModule.unpair(),
     startSyncService: (relayUrl: string): Promise<void> =>
@@ -42,5 +50,13 @@ export function useTwinotifyCore() {
       const res = await Notifications.requestPermissionsAsync();
       return res.granted;
     },
+    getUserDenylist: (): Promise<string[]> =>
+      TwinotifyCoreModule.getUserDenylist(),
+    addToDenylist: (pkg: string): Promise<void> =>
+      TwinotifyCoreModule.addToDenylist(pkg),
+    removeFromDenylist: (pkg: string): Promise<void> =>
+      TwinotifyCoreModule.removeFromDenylist(pkg),
+    getMetrics: (): Promise<MetricsSnapshot> =>
+      TwinotifyCoreModule.getMetrics(),
   };
 }

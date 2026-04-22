@@ -26,6 +26,22 @@ func newTestServer(t *testing.T) *Server {
 	return NewWithStore(b)
 }
 
+// ed25519Keypair generates a random X25519-like enc pubkey (32 random bytes) and
+// a real Ed25519 signing keypair, returning (encPub, signPub, signPriv).
+func ed25519Keypair(t *testing.T) (encPub []byte, signPub ed25519.PublicKey, signPriv ed25519.PrivateKey) {
+	t.Helper()
+	encPub = make([]byte, 32)
+	if _, err := rand.Read(encPub); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	var err error
+	signPub, signPriv, err = ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("ed25519: %v", err)
+	}
+	return
+}
+
 // TestPairInitAndComplete_WithSig replaces the Task-2 placeholder test.
 // Device A generates an Ed25519 keypair, signs the canonical pair message, and the
 // server verifies it.

@@ -114,3 +114,14 @@ func TestValidateAck_MissingCanonID(t *testing.T) {
 		t.Fatal("expected error for missing canon_id, got nil")
 	}
 }
+
+func TestValidateEnvelope_BadUUIDFormat(t *testing.T) {
+	v, err := NewValidator()
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	bad := []byte(`{"v":1,"type":"ping","msg_id":"not-a-uuid","origin_device":"devA","ts":1713600000000}`)
+	if err := v.ValidateEnvelope(bad); err == nil {
+		t.Fatal("expected validation error on malformed msg_id UUID")
+	}
+}

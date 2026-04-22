@@ -39,4 +39,7 @@ abstract class OutboundEventDao {
         if (size >= maxSize) dropOldest(1 + (size - maxSize))
         return insertRaw(event)
     }
+
+    @Query("DELETE FROM outbound_queue")
+    abstract suspend fun clearAll()
 }

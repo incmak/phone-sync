@@ -40,6 +40,7 @@ class InboundDispatcher(private val ctx: Context) {
         when (innerType) {
             "notif.post", "notif.update" -> handlePost(inner)
             "notif.cancel" -> handleCancel(inner)
+            "unpair" -> handleUnpair()
             "ack" -> { /* Phase 3: drop */ }
             else -> android.util.Log.i("Twinotify", "unknown inner type: $innerType")
         }
@@ -65,6 +66,10 @@ class InboundDispatcher(private val ctx: Context) {
             large_icon_png_b64 = o.optString("large_icon_png_b64").takeIf { it.isNotEmpty() },
             ts = o.optLong("ts"),
         )
+        // Record latency from envelope timestamp (stamped by sender) to receive time.
+        val latencyMs = System.currentTimeMillis() - post.ts
+        co.twinotify.core.metrics.MetricsStore.recordLatency(ctx, latencyMs)
+
         if (post.is_group_summary) return   // spec §4.7.2 — drop summary, mirror children only
         MirrorPoster.post(ctx, post)
     }
@@ -72,5 +77,20 @@ class InboundDispatcher(private val ctx: Context) {
     private suspend fun handleCancel(o: JSONObject) {
         val canonId = o.getString("canon_id")
         MirrorDismisser.dismiss(ctx, canonId)
+    }
+
+    private suspend fun handleUnpair() {
+        android.util.Log.i("Twinotify", "peer initiated unpair — wiping local state")
+        // Wipe inside NonCancellable + signal JS BEFORE stopService. If this runs on the
+        // SyncService's scope and we stopService first, onDestroy can cancel the scope mid-wipe
+        // at the next DataStore suspension point, leaving a partial wipe (peer cleared but
+        // crypto not rotated). NonCancellable protects the wipe sequence from scope cancellation;
+        // stopService after so the service exits on the now-cleared state.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
+            SyncServiceStatus.notifyPeerUnpaired()
+        }
+        val stopIntent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
+        ctx.stopService(stopIntent)
     }
 }

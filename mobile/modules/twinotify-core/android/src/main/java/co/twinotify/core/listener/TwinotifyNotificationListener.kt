@@ -48,8 +48,19 @@ class TwinotifyNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName == packageName) return   // self-mirror loop guard
-        val post = NotifPostBuilder.build(sbn, applicationContext, originDevice, denylist) ?: return
-        scope.launch { sink.enqueuePost(post) }
+
+        // Fast bail for denylisted packages before doing any work.
+        // Default list is cached; user list invalidates on write.
+        scope.launch {
+            val userDeny = co.twinotify.core.filter.AppFilterStore.load(applicationContext)
+            val effective = denylist + userDeny
+            val post = NotifPostBuilder.build(sbn, applicationContext, originDevice, effective)
+            if (post == null) {
+                co.twinotify.core.metrics.MetricsStore.incrementBlocked(applicationContext)
+                return@launch
+            }
+            sink.enqueuePost(post)
+        }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification, rankingMap: NotificationListenerService.RankingMap?, reason: Int) {

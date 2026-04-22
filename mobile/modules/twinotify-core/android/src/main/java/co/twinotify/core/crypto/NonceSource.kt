@@ -47,6 +47,17 @@ object NonceSource {
         return nonce
     }
 
+    /**
+     * Regenerates the nonce prefix + resets counter to 0.
+     *
+     * CRITICAL: only call this as part of the unpair sequence (see UnpairOps.wipeAll). Regenerating
+     * mid-session with the same peer keys corrupts forward progress — a counter reset + reused random
+     * prefix = nonce reuse = catastrophic (XSalsa20-Poly1305 leaks plaintext XOR, breaks MAC).
+     *
+     * UnpairOps.wipeAll sequences this with PeerStore.clear() and CryptoStore.rotate() so the peer
+     * keys are gone BEFORE we reset — any in-flight encrypt would fail at PeerStore.load() long
+     * before reaching NonceSource.next(), preventing the reuse window.
+     */
     suspend fun regenerate(ctx: Context) {
         ctx.nonceDs.edit { it.clear() }
     }

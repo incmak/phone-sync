@@ -34,7 +34,9 @@ class ReasonCodeFilterTest {
         Case("!ownPkg + !pending + reason 12 → NoEmit", false, false, 12, FilterResult.NoEmit),
         Case("!ownPkg + !pending + reason 13 → NoEmit", false, false, 13, FilterResult.NoEmit),
         Case("!ownPkg + !pending + reason 14 → NoEmit", false, false, 14, FilterResult.NoEmit),
-        Case("!ownPkg + !pending + unknown reason 99 → NoEmit", false, false, 99, FilterResult.NoEmit),
+        Case("!ownPkg + !pending + reason 99 (unknown) → NoEmit", false, false, 99, FilterResult.NoEmit),
+        Case("!ownPkg + !pending + reason 5 (REASON_LISTENER_CANCEL) → NoEmit", false, false, 5, FilterResult.NoEmit),
+        Case("ownPkg + pending + reason 5 (REASON_LISTENER_CANCEL) → Suppress", true, true, 5, FilterResult.Suppress),
     )
 
     @Test

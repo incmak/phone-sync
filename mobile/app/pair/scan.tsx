@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router } from 'expo-router';
 import { useTheme, TwButton } from '../../components';
+import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 
 interface QRPayload {
   relayUrl: string;
@@ -11,6 +12,7 @@ interface QRPayload {
   encPubkey: string;
   signPubkey: string;
   pairToken: string;
+  displayName?: string;
 }
 
 function parsePayload(data: string): QRPayload | null {
@@ -37,25 +39,39 @@ export default function PairScanScreen() {
   const theme = useTheme();
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const scannedRef = useRef(false);
 
-  function onBarcode({ data }: { data: string }) {
+  async function onBarcode({ data }: { data: string }) {
     if (scannedRef.current) return;
     const payload = parsePayload(data);
     if (!payload) return; // not our QR — keep scanning
     scannedRef.current = true;
     setScanned(true);
-    router.push({
-      pathname: '/pair/fingerprint',
-      params: {
-        role: 'B',
-        relayUrl: payload.relayUrl,
-        pairToken: payload.pairToken,
-        peerDeviceId: payload.deviceId,
-        peerEncB64: payload.encPubkey,
-        peerSignB64: payload.signPubkey,
-      },
-    });
+
+    try {
+      // Get B's display name and announce B's pubkeys to the relay
+      const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
+      await TwinotifyCoreModule.sendPeerHello(payload.relayUrl, payload.pairToken, displayName);
+
+      router.push({
+        pathname: '/pair/fingerprint',
+        params: {
+          role: 'B',
+          relayUrl: payload.relayUrl,
+          pairToken: payload.pairToken,
+          peerDeviceId: payload.deviceId,
+          peerEncB64: payload.encPubkey,
+          peerSignB64: payload.signPubkey,
+          peerDisplayName: payload.displayName ?? '',
+        },
+      });
+    } catch (err: unknown) {
+      // Allow retry on error
+      scannedRef.current = false;
+      setScanned(false);
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to announce to relay.');
+    }
   }
 
   if (!permission) return null;
@@ -138,6 +154,18 @@ export default function PairScanScreen() {
           }}>
             Point at the QR code shown on your other phone
           </Text>
+          {errorMsg !== null && (
+            <Text style={{
+              color: '#ff6b6b',
+              marginTop: 12,
+              fontSize: 13,
+              fontFamily: theme.fonts.ui,
+              textAlign: 'center',
+              paddingHorizontal: 32,
+            }}>
+              {errorMsg}
+            </Text>
+          )}
         </View>
       </SafeAreaView>
     </View>

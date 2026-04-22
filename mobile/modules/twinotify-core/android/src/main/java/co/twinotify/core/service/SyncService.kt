@@ -138,7 +138,7 @@ class SyncService : Service() {
             .build()
 
         val done = kotlinx.coroutines.CompletableDeferred<Boolean>()
-        val ws = client.newWebSocket(req, object : WebSocketListener() {
+        client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 currentWs = ws
                 SyncServiceStatus.setState(SyncState.CONNECTED)
@@ -156,7 +156,6 @@ class SyncService : Service() {
                 done.complete(code == 1000)
             }
         })
-        currentWs = ws
         return done.await()
     }
 

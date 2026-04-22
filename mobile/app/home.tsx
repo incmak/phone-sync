@@ -23,6 +23,7 @@ import {
   TwEmpty,
 } from '../components';
 import { useSyncStatus } from '../hooks/useSyncStatus';
+import { useMetrics } from '../hooks/useMetrics';
 import TwinotifyCoreModule, { PairStatus, SyncState } from '../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../state/onboardingState';
 
@@ -54,6 +55,7 @@ export default function HomeScreen() {
   const theme = useTheme();
   const { state, queuedCount: _queuedCount } = useSyncStatus();
   const connection = syncStateToConnection(state);
+  const metrics = useMetrics();
   const copy = STATUS_COPY[connection];
 
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
@@ -102,8 +104,9 @@ export default function HomeScreen() {
   }, [relayUrl]);
 
   // Display values
-  const peerId = pairStatus.peerDeviceId ? pairStatus.peerDeviceId.slice(0, 8) : '—';
-  const peerLabel = pairStatus.paired ? peerId : 'Not paired';
+  const peerLabel = pairStatus.paired
+    ? (pairStatus.peerDisplayName?.trim() || pairStatus.peerDeviceId?.slice(0, 8) || '—')
+    : 'Not paired';
   const peerOnline = connection !== 'offline';
 
   return (
@@ -178,19 +181,25 @@ export default function HomeScreen() {
             </Pressable>
           </View>
 
-          {/* Metrics row — Phase 3 stubs */}
+          {/* Metrics row */}
           <View style={styles.metricsRow}>
             <View style={styles.metric}>
               <Text style={[styles.metricLabel, { color: theme.ink4, fontFamily: theme.fonts.uiSemi }]}>TODAY</Text>
-              <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>—</Text>
+              <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>
+                {metrics.mirroredToday}
+              </Text>
             </View>
             <View style={styles.metric}>
               <Text style={[styles.metricLabel, { color: theme.ink4, fontFamily: theme.fonts.uiSemi }]}>LATENCY</Text>
-              <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>—</Text>
+              <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>
+                {metrics.latencyMs > 0 ? `${metrics.latencyMs}ms` : '0ms'}
+              </Text>
             </View>
             <View style={styles.metric}>
               <Text style={[styles.metricLabel, { color: theme.ink4, fontFamily: theme.fonts.uiSemi }]}>BLOCKED</Text>
-              <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>—</Text>
+              <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>
+                {metrics.blockedToday}
+              </Text>
             </View>
           </View>
         </TwCard>
