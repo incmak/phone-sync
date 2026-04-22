@@ -27,6 +27,13 @@ var upgrader = websocket.Upgrader{
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// authMiddleware populated context with the sender's device_id (JWT sub).
+	deviceID, ok := DeviceIDFromContext(r.Context())
+	if !ok || deviceID == "" {
+		http.Error(w, "no device id", http.StatusUnauthorized)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrade: %v", err)
@@ -48,6 +55,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return conn.WriteMessage(mt, data)
 	}
 
+	// Register this connection in the hub so the PEER can route frames to us.
+	// Bounded buffer: slow reader on our end → relay drops frames rather than stalling
+	// the peer's send path. Lost frames will be re-sent by peer's OutboundQueue on reconnect.
+	outbound := make(chan []byte, 32)
+	client := s.clientHub.Register(deviceID, outbound)
+	defer s.clientHub.Unregister(client)
+
 	stopPinger := make(chan struct{})
 	defer close(stopPinger)
 	go func() {
@@ -65,6 +79,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Writer goroutine: drains outbound channel, sends to this client's WS.
+	go func() {
+		for frame := range outbound {
+			if err := writeMsg(websocket.TextMessage, frame); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Reader: validate incoming envelope, look up paired peer, forward via hub.
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -75,6 +99,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			_ = writeMsg(websocket.TextMessage, []byte(`{"error":"invalid envelope"}`))
 			continue
 		}
-		_ = writeMsg(websocket.TextMessage, msg)
+		peerID, err := s.pairStore.PeerFor(deviceID)
+		if err != nil || peerID == "" {
+			// Sender isn't paired (shouldn't happen — authMiddleware ensures SignPubkey exists,
+			// which only happens for confirmed pairs — but defensive).
+			_ = writeMsg(websocket.TextMessage, []byte(`{"error":"not paired"}`))
+			continue
+		}
+		// Forward to peer. If peer is offline or buffer is full, drop silently —
+		// sender's OutboundQueue will retry on next reconnect.
+		_ = s.clientHub.Send(peerID, msg)
 	}
 }

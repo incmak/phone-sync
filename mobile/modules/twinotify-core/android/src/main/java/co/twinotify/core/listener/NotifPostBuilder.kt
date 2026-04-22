@@ -61,8 +61,23 @@ object NotifPostBuilder {
         if (pkg in denylist) return null
 
         val extras = notif.extras
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
+        // Title fallbacks: EXTRA_TITLE → EXTRA_TITLE_BIG → EXTRA_CONVERSATION_TITLE → app name
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()?.takeIf { it.isNotBlank() }
+            ?: pkg
+        // Text fallbacks: EXTRA_TEXT → last line of EXTRA_TEXT_LINES → last MessagingStyle message text
+        //   → EXTRA_BIG_TEXT → EXTRA_SUMMARY_TEXT → EXTRA_INFO_TEXT
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+                ?.lastOrNull()?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.let { msgs ->
+                // MessagingStyle messages Bundle — last one's "text" key holds the body
+                (msgs.lastOrNull() as? android.os.Bundle)?.getCharSequence("text")?.toString()?.takeIf { it.isNotBlank() }
+            }
+            ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_INFO_TEXT)?.toString()?.takeIf { it.isNotBlank() }
         val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()
         val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
         val appName = pkg // Phase 3: use package name as display name; Phase 7+ loads real app label.

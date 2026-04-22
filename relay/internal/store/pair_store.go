@@ -153,3 +153,25 @@ func (ps *PairStore) SignPubkeyFor(deviceID string) ([]byte, error) {
 	}
 	return nil, ErrNotFound
 }
+
+// PeerFor returns the paired peer's device ID for deviceID, or ErrNotFound.
+func (ps *PairStore) PeerFor(deviceID string) (string, error) {
+	pairIDBytes, err := ps.bolt.Get(bucketByDevice, deviceID)
+	if err != nil {
+		return "", err
+	}
+	if pairIDBytes == nil {
+		return "", ErrNotFound
+	}
+	cp, err := ps.Get(string(pairIDBytes))
+	if err != nil {
+		return "", err
+	}
+	if cp.DeviceA == deviceID {
+		return cp.DeviceB, nil
+	}
+	if cp.DeviceB == deviceID {
+		return cp.DeviceA, nil
+	}
+	return "", ErrNotFound
+}

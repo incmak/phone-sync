@@ -16,6 +16,7 @@ type Server struct {
 	pairStore *store.PairStore
 	jtiCache  *JTICache
 	pairHub   *PairHub
+	clientHub *ClientHub
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -30,6 +31,7 @@ func NewWithStore(b *store.Bolt) *Server {
 		pairStore: store.NewPairStore(b),
 		jtiCache:  NewJTICache(60 * time.Second),
 		pairHub:   NewPairHub(),
+		clientHub: NewClientHub(),
 	}
 	s.routes()
 	return s
