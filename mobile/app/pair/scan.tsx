@@ -15,21 +15,31 @@ interface QRPayload {
   displayName?: string;
 }
 
+// Wire format (from PairPayload.toJson on the Kotlin side) uses snake_case keys.
+interface RawQR {
+  relay_url?: string;
+  device_id?: string;
+  enc_pubkey?: string;
+  sign_pubkey?: string;
+  pair_token?: string;
+  display_name?: string;
+}
+
 function parsePayload(data: string): QRPayload | null {
   try {
-    const parsed = JSON.parse(data) as unknown;
-    if (
-      parsed !== null &&
-      typeof parsed === 'object' &&
-      'pairToken' in parsed &&
-      'encPubkey' in parsed &&
-      'signPubkey' in parsed &&
-      'relayUrl' in parsed &&
-      'deviceId' in parsed
-    ) {
-      return parsed as QRPayload;
+    const raw = JSON.parse(data) as RawQR;
+    if (!raw || typeof raw !== 'object') return null;
+    if (!raw.pair_token || !raw.enc_pubkey || !raw.sign_pubkey || !raw.relay_url || !raw.device_id) {
+      return null;
     }
-    return null;
+    return {
+      relayUrl: raw.relay_url,
+      deviceId: raw.device_id,
+      encPubkey: raw.enc_pubkey,
+      signPubkey: raw.sign_pubkey,
+      pairToken: raw.pair_token,
+      displayName: raw.display_name,
+    };
   } catch {
     return null;
   }

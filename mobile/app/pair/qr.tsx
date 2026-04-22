@@ -41,19 +41,22 @@ export default function PairQRScreen() {
         setPayload(payloadStr);
         setStatus('waiting');
 
-        let parsed: { pairToken: string };
+        // Native payload uses snake_case keys (see PairPayload.toJson).
+        let parsed: { pair_token: string };
         try {
-          parsed = JSON.parse(payloadStr) as { pairToken: string };
-        } catch {
-          setErrorMsg('Malformed pairing payload from native module.');
+          parsed = JSON.parse(payloadStr) as { pair_token: string };
+          if (!parsed.pair_token) throw new Error('payload missing pair_token');
+        } catch (err: unknown) {
+          setErrorMsg(err instanceof Error ? err.message : 'Malformed pairing payload.');
           setStatus('error');
           return;
         }
+        const pairToken = parsed.pair_token;
 
         // Wait for B's peer.hello frame — relay pushes it once B scans and calls /pair/hello
         let helloFrame: PeerHelloPayload;
         try {
-          const rawFrame = await TwinotifyCoreModule.awaitPeerHello(relayUrl, parsed.pairToken);
+          const rawFrame = await TwinotifyCoreModule.awaitPeerHello(relayUrl, pairToken);
           if (cancelled) return;
           helloFrame = JSON.parse(rawFrame) as PeerHelloPayload;
         } catch (err: unknown) {
@@ -69,7 +72,7 @@ export default function PairQRScreen() {
           pathname: '/pair/fingerprint',
           params: {
             role: 'A',
-            pairToken: parsed.pairToken,
+            pairToken: pairToken,
             relayUrl,
             peerDeviceId: helloFrame.device_id,
             peerEncB64: helloFrame.enc_pubkey,
