@@ -49,6 +49,10 @@ abstract class NotificationMapDao {
     @Query("DELETE FROM mirrored_from_peer WHERE createdTs < :cutoffMs")
     abstract suspend fun sweepExpired(cutoffMs: Long)
 
+    // Wipes all mirrored notifications; FK CASCADE removes local_to_canon rows automatically.
+    @Query("DELETE FROM mirrored_from_peer")
+    abstract suspend fun clearAll()
+
     @Query("SELECT localId, localTag FROM local_to_canon WHERE canonId = :canonId LIMIT 1")
     abstract suspend fun lookupLocalByCanonId(canonId: String): LocalIdTagPair?
 }

@@ -47,7 +47,7 @@ class TwinotifyCoreModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("TwinotifyCore")
 
-        Events("onSyncStatus")
+        Events("onSyncStatus", "onPeerUnpair")
 
         OnCreate {
             try {
@@ -63,6 +63,11 @@ class TwinotifyCoreModule : Module() {
                     co.twinotify.core.service.SyncServiceStatus.queuedCount,
                 ) { s, q -> mapOf("state" to s.name, "queuedCount" to q) }
                     .collect { sendEvent("onSyncStatus", it) }
+            }
+            moduleScope.launch {
+                co.twinotify.core.service.SyncServiceStatus.peerUnpaired.collect {
+                    sendEvent("onPeerUnpair", emptyMap<String, Any>())
+                }
             }
         }
 
@@ -353,10 +358,30 @@ class TwinotifyCoreModule : Module() {
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
-                    PeerStore.clear(ctx)
-                    CryptoStore.rotate(ctx)
-                    NonceSource.regenerate(ctx)
-                    ReplayGuard.clear(ctx)
+                    // Try to notify peer first (best effort, before keys are rotated)
+                    val peer = PeerStore.load(ctx)
+                    if (peer != null) {
+                        try {
+                            val deviceId = DeviceIdentity.getOrCreate(ctx)
+                            co.twinotify.core.listener.TwinotifyNotificationListener
+                                .currentSink()
+                                .enqueueUnpair("user_initiated", deviceId, System.currentTimeMillis())
+                            // Wait up to 3s for queue to drain
+                            val deadline = System.currentTimeMillis() + 3_000L
+                            while (System.currentTimeMillis() < deadline) {
+                                if (co.twinotify.core.service.SyncServiceStatus.queuedCount.value == 0) break
+                                kotlinx.coroutines.delay(100)
+                            }
+                        } catch (e: Throwable) {
+                            android.util.Log.w("Twinotify", "unpair notify peer failed: ${e.message}")
+                            // Continue with local wipe regardless
+                        }
+                    }
+                    // Stop sync service before wiping state
+                    val stopIntent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
+                    ctx.stopService(stopIntent)
+                    // Wipe all paired state
+                    co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("UNPAIR", e.message ?: "err", e) }
             }

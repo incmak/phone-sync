@@ -40,6 +40,7 @@ class InboundDispatcher(private val ctx: Context) {
         when (innerType) {
             "notif.post", "notif.update" -> handlePost(inner)
             "notif.cancel" -> handleCancel(inner)
+            "unpair" -> handleUnpair()
             "ack" -> { /* Phase 3: drop */ }
             else -> android.util.Log.i("Twinotify", "unknown inner type: $innerType")
         }
@@ -72,5 +73,13 @@ class InboundDispatcher(private val ctx: Context) {
     private suspend fun handleCancel(o: JSONObject) {
         val canonId = o.getString("canon_id")
         MirrorDismisser.dismiss(ctx, canonId)
+    }
+
+    private suspend fun handleUnpair() {
+        android.util.Log.i("Twinotify", "peer initiated unpair — wiping local state")
+        val stopIntent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
+        ctx.stopService(stopIntent)
+        co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
+        SyncServiceStatus.notifyPeerUnpaired()
     }
 }

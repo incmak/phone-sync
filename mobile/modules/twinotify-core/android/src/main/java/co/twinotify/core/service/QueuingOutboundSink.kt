@@ -33,6 +33,17 @@ class QueuingOutboundSink(
         encryptAndEnqueue(inner)
     }
 
+    override suspend fun enqueueUnpair(reason: String, originDevice: String, tsMs: Long) {
+        val inner = JSONObject().apply {
+            put("v", 1)
+            put("type", "unpair")
+            put("reason", reason)
+            put("origin_device", originDevice)
+            put("ts", tsMs)
+        }.toString()
+        encryptAndEnqueue(inner)
+    }
+
     private suspend fun encryptAndEnqueue(plaintext: String) {
         val peer = PeerStore.load(ctx) ?: return  // no peer — drop silently
         val (box, _) = CryptoStore.loadOrGenerate(ctx)

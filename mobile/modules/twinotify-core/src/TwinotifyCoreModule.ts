@@ -27,7 +27,10 @@ export interface PeerHelloPayload {
   display_name?: string;
 }
 
-declare class TwinotifyCoreModuleType extends NativeModule<{ onSyncStatus: (evt: SyncStatus) => void }> {
+declare class TwinotifyCoreModuleType extends NativeModule<{
+  onSyncStatus: (evt: SyncStatus) => void;
+  onPeerUnpair: () => void;
+}> {
   getDeviceId(): Promise<string>;
   getPublicKeys(): Promise<KeyPair>;
   getDeviceDisplayName(): Promise<string>;
