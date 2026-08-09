@@ -25,6 +25,16 @@ func (b *Bolt) Close() error {
 	return b.db.Close()
 }
 
+// Update runs fn in a writable Bolt transaction.
+func (b *Bolt) Update(fn func(*bbolt.Tx) error) error {
+	return b.db.Update(fn)
+}
+
+// View runs fn in a read-only Bolt transaction.
+func (b *Bolt) View(fn func(*bbolt.Tx) error) error {
+	return b.db.View(fn)
+}
+
 // Put stores value under bucket/key, creating the bucket if absent.
 func (b *Bolt) Put(bucket, key string, value []byte) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
