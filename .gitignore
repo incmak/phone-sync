@@ -4,3 +4,6 @@ relay/internal/server/schemas/
 mobile/android/
 mobile/ios/
 mobile/modules/twinotify-core/android/build/
+
+# Local execution state for the subagent-driven implementation workflow.
+.superpowers/
