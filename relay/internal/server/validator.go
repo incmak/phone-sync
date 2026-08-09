@@ -14,15 +14,17 @@ import (
 var schemaFS embed.FS
 
 type Validator struct {
-	envelope *jsonschema.Schema
-	enc      *jsonschema.Schema // encrypted outer envelope
-	ack      *jsonschema.Schema // inner ack cleartext shape
+	legacyPacket *jsonschema.Schema
+	encrypted    *jsonschema.Schema
+	relayControl *jsonschema.Schema
+	innerV2      *jsonschema.Schema
+	peerReceipt  *jsonschema.Schema
 }
 
 // schemaBaseURL must match the $id prefix used in /proto/*.schema.json.
 const schemaBaseURL = "https://twinotify.app/schemas/"
 
-// NewValidator compiles the packet envelope schema from the embedded FS.
+// NewValidator compiles the v1 and v2 schemas from the embedded FS.
 // All referenced schemas are registered first so intra-schema $ref resolution works.
 func NewValidator() (*Validator, error) {
 	compiler := jsonschema.NewCompiler()
@@ -47,47 +49,58 @@ func NewValidator() (*Validator, error) {
 		return nil, err
 	}
 
-	env, err := compiler.Compile(schemaBaseURL + "packet.schema.json")
+	legacyPacket, err := compiler.Compile(schemaBaseURL + "packet.schema.json")
 	if err != nil {
-		return nil, fmt.Errorf("compile envelope: %w", err)
+		return nil, fmt.Errorf("compile legacy packet: %w", err)
 	}
-	enc, err := compiler.Compile(schemaBaseURL + "envelope-encrypted.schema.json")
+	encrypted, err := compiler.Compile(schemaBaseURL + "envelope-encrypted.schema.json")
 	if err != nil {
-		return nil, fmt.Errorf("compile enc envelope: %w", err)
+		return nil, fmt.Errorf("compile encrypted envelope: %w", err)
 	}
-	ack, err := compiler.Compile(schemaBaseURL + "ack.schema.json")
+	relayControl, err := compiler.Compile(schemaBaseURL + "relay-control.schema.json")
 	if err != nil {
-		return nil, fmt.Errorf("compile ack: %w", err)
+		return nil, fmt.Errorf("compile relay control: %w", err)
 	}
-	return &Validator{envelope: env, enc: enc, ack: ack}, nil
+	innerV2, err := compiler.Compile(schemaBaseURL + "inner-event-v2.schema.json")
+	if err != nil {
+		return nil, fmt.Errorf("compile inner v2: %w", err)
+	}
+	peerReceipt, err := compiler.Compile(schemaBaseURL + "peer-receipt.schema.json")
+	if err != nil {
+		return nil, fmt.Errorf("compile peer receipt: %w", err)
+	}
+
+	return &Validator{
+		legacyPacket: legacyPacket,
+		encrypted:    encrypted,
+		relayControl: relayControl,
+		innerV2:      innerV2,
+		peerReceipt:  peerReceipt,
+	}, nil
 }
 
-// ValidateEnvelope unmarshals raw JSON and validates it against the packet schema.
-// Returns a non-nil error for malformed JSON or schema violations.
+func validateJSON(schema *jsonschema.Schema, raw []byte) error {
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	return schema.Validate(doc)
+}
+
+func (v *Validator) ValidateLegacyPacket(raw []byte) error {
+	return validateJSON(v.legacyPacket, raw)
+}
+
+func (v *Validator) ValidateEncryptedEnvelope(raw []byte) error {
+	return validateJSON(v.encrypted, raw)
+}
+
+func (v *Validator) ValidateRelayControl(raw []byte) error {
+	return validateJSON(v.relayControl, raw)
+}
+
+// ValidateEnvelope preserves the v1 WebSocket call site until explicit legacy/v2
+// routing is introduced. Encrypted envelopes must use ValidateEncryptedEnvelope.
 func (v *Validator) ValidateEnvelope(raw []byte) error {
-	var doc any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("parse: %w", err)
-	}
-	return v.envelope.Validate(doc)
-}
-
-// ValidateEncEnvelope validates raw JSON against the encrypted outer envelope schema
-// (envelope-encrypted.schema.json). Call this when type=="enc" is confirmed.
-func (v *Validator) ValidateEncEnvelope(raw []byte) error {
-	var doc any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("parse: %w", err)
-	}
-	return v.enc.Validate(doc)
-}
-
-// ValidateAck validates raw JSON against the ack inner cleartext schema (ack.schema.json).
-// Call this on the decrypted payload when the outer type=="ack".
-func (v *Validator) ValidateAck(raw []byte) error {
-	var doc any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("parse: %w", err)
-	}
-	return v.ack.Validate(doc)
+	return v.ValidateLegacyPacket(raw)
 }

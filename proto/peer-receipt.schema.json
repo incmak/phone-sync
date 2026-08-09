@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://twinotify.app/schemas/peer-receipt.schema.json",
+  "type": "object",
+  "required": ["acked_msg_id", "envelope_sha256", "status"],
+  "properties": {
+    "acked_msg_id": { "type": "string", "format": "uuid" },
+    "envelope_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "status": { "type": "string", "enum": ["applied", "expired", "rejected", "decrypt_failed"] },
+    "reason": { "type": "string", "maxLength": 128 }
+  },
+  "additionalProperties": false
+}

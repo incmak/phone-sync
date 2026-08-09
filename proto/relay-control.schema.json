@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://twinotify.app/schemas/relay-control.schema.json",
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["v", "type"],
+      "properties": { "v": { "const": 2 }, "type": { "type": "string" } }
+    },
+    "msg_id": { "type": "string", "format": "uuid" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "protocols": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "integer", "enum": [1, 2] }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["v", "type", "protocols", "app_version"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.hello" },
+        "protocols": { "$ref": "#/$defs/protocols" },
+        "app_version": { "type": "string", "minLength": 1, "maxLength": 32 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "envelope"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.put" },
+        "envelope": { "$ref": "envelope-encrypted.schema.json" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "msg_id", "envelope_sha256"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.ack" },
+        "msg_id": { "$ref": "#/$defs/msg_id" },
+        "envelope_sha256": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "msg_id", "accepted_at"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.accepted" },
+        "msg_id": { "$ref": "#/$defs/msg_id" },
+        "accepted_at": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "msg_id"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.legacy_forwarded" },
+        "msg_id": { "$ref": "#/$defs/msg_id" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "accepted_at", "envelope"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.deliver" },
+        "accepted_at": { "type": "integer", "minimum": 0 },
+        "envelope": { "$ref": "envelope-encrypted.schema.json" }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "msg_id", "reason"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.rejected" },
+        "msg_id": { "$ref": "#/$defs/msg_id" },
+        "reason": { "type": "string", "enum": ["mailbox_full", "id_conflict", "digest_mismatch", "not_recipient", "peer_legacy", "invalid_frame"] }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "msg_id", "expired_at"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.expired" },
+        "msg_id": { "$ref": "#/$defs/msg_id" },
+        "expired_at": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "self", "peer", "floor"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "relay.capabilities" },
+        "self": { "$ref": "#/$defs/protocols" },
+        "peer": { "$ref": "#/$defs/protocols" },
+        "floor": { "type": "integer", "enum": [1, 2] }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

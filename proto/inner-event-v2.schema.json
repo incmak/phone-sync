@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://twinotify.app/schemas/inner-event-v2.schema.json",
+  "type": "object",
+  "required": ["v", "msg_id", "origin_device", "type", "created_at", "expires_at", "payload"],
+  "properties": {
+    "v": { "const": 2 },
+    "msg_id": { "type": "string", "format": "uuid" },
+    "origin_device": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "peer.receipt", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
+    "canon_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "created_at": { "type": "integer", "minimum": 0 },
+    "expires_at": { "type": "integer", "minimum": 0 },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "enum": ["notif.post", "notif.update", "notif.cancel", "state.snapshot.item"] } } },
+      "then": { "required": ["canon_id", "sequence"] }
+    }
+  ],
+  "additionalProperties": false
+}

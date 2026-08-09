@@ -1,16 +1,32 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://twinotify.app/schemas/envelope-encrypted.schema.json",
-  "type": "object",
-  "required": ["v", "type", "msg_id", "origin_device", "ts", "nonce", "ciphertext"],
-  "properties": {
-    "v": { "const": 1 },
-    "type": { "const": "enc" },
-    "msg_id": { "type": "string", "format": "uuid" },
-    "origin_device": { "type": "string", "minLength": 1 },
-    "ts": { "type": "integer", "minimum": 0 },
-    "nonce": { "type": "string", "contentEncoding": "base64", "minLength": 32, "maxLength": 32 },
-    "ciphertext": { "type": "string", "contentEncoding": "base64", "minLength": 1 }
-  },
-  "additionalProperties": false
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["v", "type", "msg_id", "origin_device", "ts", "nonce", "ciphertext"],
+      "properties": {
+        "v": { "const": 1 }, "type": { "const": "enc" },
+        "msg_id": { "type": "string", "format": "uuid" },
+        "origin_device": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ts": { "type": "integer", "minimum": 0 },
+        "nonce": { "type": "string", "contentEncoding": "base64", "minLength": 32, "maxLength": 32 },
+        "ciphertext": { "type": "string", "contentEncoding": "base64", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["v", "type", "msg_id", "origin_device", "created_at", "nonce", "ciphertext"],
+      "properties": {
+        "v": { "const": 2 }, "type": { "const": "enc" },
+        "msg_id": { "type": "string", "format": "uuid" },
+        "origin_device": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "created_at": { "type": "integer", "minimum": 0 },
+        "nonce": { "type": "string", "contentEncoding": "base64", "minLength": 32, "maxLength": 32 },
+        "ciphertext": { "type": "string", "contentEncoding": "base64", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  ]
 }
