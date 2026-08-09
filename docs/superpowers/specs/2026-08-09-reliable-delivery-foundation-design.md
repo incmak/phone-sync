@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-09
 
-**Status:** Approved design, pending implementation plan
+**Status:** Approved design with implementation plans
 
 **Scope:** Android-to-Android notification delivery through the Go relay
 
@@ -139,6 +139,7 @@ Relay to client:
 
 ```json
 { "v": 2, "type": "relay.accepted", "msg_id": "uuid", "accepted_at": 1786267348000 }
+{ "v": 2, "type": "relay.legacy_forwarded", "msg_id": "uuid" }
 { "v": 2, "type": "relay.deliver", "accepted_at": 1786267348000, "envelope": {} }
 { "v": 2, "type": "relay.rejected", "msg_id": "uuid", "reason": "mailbox_full" }
 { "v": 2, "type": "relay.expired", "msg_id": "uuid", "expired_at": 1786353748000 }
@@ -146,6 +147,8 @@ Relay to client:
 ```
 
 The relay accepts a duplicate `(recipient_device, msg_id)` only when its envelope digest matches the stored digest. It returns the original `accepted_at`. A duplicate ID with different bytes is rejected as `id_conflict` and logged as a security event.
+
+`relay.legacy_forwarded` exists only for a new sender talking to a live v1 peer. It means the v1 envelope entered the peer's current in-memory writer queue; it is not durable relay acceptance or authenticated peer delivery. If the legacy peer is offline or congested, the relay returns `peer_legacy` and the new sender retains the row locally.
 
 When a mailbox item expires, the relay retains a metadata-only delivery-status tombstone for another 24 hours and reports `relay.expired` to the authenticated sender on its next connection. The tombstone contains no ciphertext or notification content. This gives the sender an authoritative terminal transport outcome even when it was offline at expiry.
 
@@ -458,3 +461,11 @@ After this foundation passes its automated gates:
 4. desktop receiver and multi-pair support.
 
 Each follow-on uses the same authenticated v2 envelope, outbox, receipt, sequencing, convergence, and verification infrastructure.
+
+## 14. Implementation Plans
+
+Execute these plans in order because each consumes contracts and artifacts from the prior lane:
+
+1. `docs/superpowers/plans/2026-08-09-reliable-delivery-protocol-relay.md`
+2. `docs/superpowers/plans/2026-08-09-reliable-delivery-android.md`
+3. `docs/superpowers/plans/2026-08-09-reliable-delivery-verification.md`
