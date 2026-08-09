@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.etcd.io/bbolt"
 )
 
@@ -337,8 +338,10 @@ func (s *MailboxStore) Statuses(sender string, since time.Time) ([]DeliveryStatu
 }
 
 func (s *MailboxStore) PurgePair(deviceA, deviceB string) error {
-	if err := validateMailboxKey(deviceA, deviceB); err != nil {
-		return err
+	for _, device := range []string{deviceA, deviceB} {
+		if device == "" || strings.ContainsRune(device, '\x00') {
+			return errors.New("invalid device")
+		}
 	}
 	return s.bolt.Update(func(tx *bbolt.Tx) error {
 		return purgePairTx(tx, deviceA, deviceB)
@@ -432,6 +435,9 @@ func validateMailboxRecord(rec MailboxRecord) error {
 	if _, err := decodeDigest(rec.EnvelopeSHA256); err != nil {
 		return fmt.Errorf("invalid envelope digest: %w", err)
 	}
+	if err := uuid.Validate(rec.MsgID); err != nil {
+		return fmt.Errorf("invalid message id: %w", err)
+	}
 	return nil
 }
 
@@ -446,6 +452,9 @@ func validateMailboxKey(recipient, msgID string) error {
 		if field.value == "" || strings.ContainsRune(field.value, '\x00') {
 			return fmt.Errorf("invalid %s", field.name)
 		}
+	}
+	if err := uuid.Validate(msgID); err != nil {
+		return fmt.Errorf("invalid message id: %w", err)
 	}
 	return nil
 }

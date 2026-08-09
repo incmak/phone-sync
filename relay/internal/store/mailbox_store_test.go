@@ -3,9 +3,12 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 func TestMailboxPutIsIdempotentAndSurvivesReopen(t *testing.T) {
@@ -72,6 +75,44 @@ func TestMailboxRejectsDigestConflict(t *testing.T) {
 	rec.EnvelopeSHA256 = strings.Repeat("b", 64)
 	if _, err := s.Put(rec, time.UnixMilli(1001)); !errors.Is(err, ErrMessageIDConflict) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMailboxRejectsInvalidMessageIDsBeforeMutation(t *testing.T) {
+	cases := []struct {
+		name  string
+		msgID string
+	}{
+		{name: "empty", msgID: ""},
+		{name: "plain text", msgID: "not-a-uuid"},
+		{name: "invalid separators", msgID: "11111111_1111-4111-8111-111111111111"},
+		{name: "invalid hex", msgID: "zzzzzzzz-1111-4111-8111-111111111111"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := openTestBolt(t)
+			s := NewMailboxStore(b, DefaultMailboxLimits())
+			valid := testMailboxRecord("11111111-1111-4111-8111-111111111111", "a")
+			if _, err := s.Put(valid, time.UnixMilli(1000)); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotMailboxBuckets(t, b)
+
+			if _, err := s.Put(testMailboxRecord(tc.msgID, "b"), time.UnixMilli(1001)); err == nil || !strings.Contains(err.Error(), "invalid message id") {
+				t.Fatalf("Put error = %v, want invalid message id", err)
+			}
+			if got := snapshotMailboxBuckets(t, b); !reflect.DeepEqual(got, before) {
+				t.Fatalf("Put mutated mailbox buckets: got %#v, want %#v", got, before)
+			}
+
+			if err := s.Ack(valid.RecipientDevice, tc.msgID, valid.EnvelopeSHA256, time.UnixMilli(1002)); err == nil || !strings.Contains(err.Error(), "invalid message id") {
+				t.Fatalf("Ack error = %v, want invalid message id", err)
+			}
+			if got := snapshotMailboxBuckets(t, b); !reflect.DeepEqual(got, before) {
+				t.Fatalf("Ack mutated mailbox buckets: got %#v, want %#v", got, before)
+			}
+		})
 	}
 }
 
@@ -247,4 +288,28 @@ func testMailboxRecord(msgID, digestSeed string) MailboxRecord {
 		EnvelopeSHA256:  strings.Repeat(digestSeed, 64),
 		Envelope:        []byte(`{"v":2,"type":"enc"}`),
 	}
+}
+
+func snapshotMailboxBuckets(t *testing.T, b *Bolt) map[string]map[string]string {
+	t.Helper()
+	snapshot := make(map[string]map[string]string)
+	if err := b.View(func(tx *bbolt.Tx) error {
+		for _, name := range []string{bucketMailboxItems, bucketMailboxOrder, bucketMailboxStats, bucketMailboxStatus} {
+			entries := make(map[string]string)
+			bucket := tx.Bucket([]byte(name))
+			if bucket != nil {
+				if err := bucket.ForEach(func(key, value []byte) error {
+					entries[string(key)] = string(value)
+					return nil
+				}); err != nil {
+					return err
+				}
+			}
+			snapshot[name] = entries
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
