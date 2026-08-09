@@ -18,6 +18,10 @@ type Server struct {
 	pairHub   *PairHub
 	clientHub *ClientHub
 	mailbox   *store.MailboxStore
+
+	// relayHelloBeforeActivate is a deterministic test seam around the
+	// drain-to-live handoff. Production constructors leave it nil.
+	relayHelloBeforeActivate func(deviceID string)
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.

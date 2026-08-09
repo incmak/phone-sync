@@ -154,15 +154,33 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				protocol = protocolV2
-				if !s.clientHub.SetProtocol(client, protocolV2Handshake) {
+				if !s.clientHub.SetProtocolAndCapabilities(client, protocolV2Handshake, typed.Protocols) {
 					return
 				}
-				if err := s.handleRelayHello(deviceID, typed, writeFrame, writeMsg); err != nil {
+				var drainedIDs []string
+				if err := s.handleRelayHello(deviceID, typed, writeFrame, writeMsg, func(ids []string) {
+					drainedIDs = ids
+				}); err != nil {
 					log.Printf("relay hello for %s: %v", deviceID, err)
 					return
 				}
-				if !s.clientHub.SetProtocol(client, protocolV2) {
-					return
+				if s.relayHelloBeforeActivate != nil {
+					s.relayHelloBeforeActivate(deviceID)
+				}
+				for {
+					frames, activated := s.clientHub.FlushOrActivateV2(client, drainedIDs)
+					drainedIDs = nil
+					if activated {
+						break
+					}
+					if len(frames) == 0 {
+						return
+					}
+					for _, frame := range frames {
+						if err := writeMsg(websocket.TextMessage, frame); err != nil {
+							return
+						}
+					}
 				}
 			case RelayPut:
 				if protocol != protocolV2 {
@@ -186,24 +204,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRelayAck(deviceID string, ack RelayAck) error {
-	err := s.mailbox.Ack(deviceID, ack.MsgID, ack.EnvelopeSHA256, time.Now())
-	if !errors.Is(err, store.ErrNotFound) {
-		return err
-	}
-	peerID, peerErr := s.pairStore.PeerFor(deviceID)
-	if peerErr != nil {
-		return err
-	}
-	statuses, statusErr := s.mailbox.Statuses(peerID, time.UnixMilli(0))
-	if statusErr != nil {
-		return statusErr
-	}
-	for _, status := range statuses {
-		if status.MsgID == ack.MsgID && status.Status == "acknowledged" && status.RecipientDevice == deviceID {
-			return nil
-		}
-	}
-	return err
+	return s.mailbox.Ack(deviceID, ack.MsgID, ack.EnvelopeSHA256, time.Now())
 }
 
 func (s *Server) handleLegacyFrame(deviceID string, client *wsClient, protocol *connectionProtocol, raw []byte) error {
@@ -239,14 +240,20 @@ func (s *Server) handleRelayHello(
 	hello RelayHello,
 	writeFrame func(any) error,
 	writeMsg func(int, []byte) error,
+	recordDrained func([]string),
 ) error {
 	peerID, err := s.pairStore.PeerFor(deviceID)
 	if err != nil || peerID == "" {
 		return errors.New("not paired")
 	}
 	peerProtocols := []int{1}
-	if peerProtocol, online := s.clientHub.ProtocolFor(peerID); online && peerProtocol == protocolV2 {
-		peerProtocols = []int{2, 1}
+	if peerProtocol, advertised, online := s.clientHub.ConnectionFor(peerID); online {
+		switch peerProtocol {
+		case protocolLegacy:
+			peerProtocols = []int{1}
+		case protocolV2Handshake, protocolV2:
+			peerProtocols = advertised
+		}
 	}
 	if err := writeFrame(RelayCapabilities{
 		V: 2, Type: "relay.capabilities", Self: append([]int(nil), hello.Protocols...), Peer: peerProtocols, Floor: 1,
@@ -280,6 +287,7 @@ func (s *Server) handleRelayHello(
 	if err != nil {
 		return err
 	}
+	drainedIDs := make([]string, 0, len(pending))
 	for _, rec := range pending {
 		if rec.SenderDevice != peerID {
 			continue
@@ -287,7 +295,9 @@ func (s *Server) handleRelayHello(
 		if err := writeMsg(websocket.TextMessage, marshalRelayDeliver(rec)); err != nil {
 			return err
 		}
+		drainedIDs = append(drainedIDs, rec.MsgID)
 	}
+	recordDrained(drainedIDs)
 	return nil
 }
 
@@ -316,7 +326,7 @@ func (s *Server) handleRelayPut(
 		return
 	}
 
-	peerProtocol, peerOnline := s.clientHub.ProtocolFor(peerID)
+	peerProtocol, peerProtocols, peerOnline := s.clientHub.ConnectionFor(peerID)
 	if envelope.V == 1 {
 		if peerProtocol != protocolV2 {
 			if peerOnline && peerProtocol == protocolLegacy && s.clientHub.SendLegacy(peerID, put.Envelope) {
@@ -326,7 +336,11 @@ func (s *Server) handleRelayPut(
 			_ = writeRejected(envelope.MsgID, "peer_legacy")
 			return
 		}
-	} else if peerOnline && peerProtocol == protocolLegacy {
+		if !supportsProtocol(peerProtocols, 1) {
+			_ = writeRejected(envelope.MsgID, "peer_legacy")
+			return
+		}
+	} else if peerOnline && !supportsProtocol(peerProtocols, 2) {
 		_ = writeRejected(envelope.MsgID, "peer_legacy")
 		return
 	}
@@ -349,7 +363,10 @@ func (s *Server) handleRelayPut(
 	}); err != nil {
 		return
 	}
-	_ = s.clientHub.SendV2(peerID, marshalRelayDeliver(store.MailboxRecord{
+	if result.Terminal {
+		return
+	}
+	_ = s.clientHub.SendV2(peerID, envelope.MsgID, result.AcceptanceSequence, marshalRelayDeliver(store.MailboxRecord{
 		AcceptedAt: result.AcceptedAt,
 		Envelope:   put.Envelope,
 	}))

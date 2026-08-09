@@ -21,11 +21,12 @@ var (
 )
 
 const (
-	bucketMailboxItems  = "mailbox_items"
-	bucketMailboxOrder  = "mailbox_order"
-	bucketMailboxStats  = "mailbox_stats"
-	bucketMailboxStatus = "mailbox_status"
-	statusRetention     = 24 * time.Hour
+	bucketMailboxItems    = "mailbox_items"
+	bucketMailboxOrder    = "mailbox_order"
+	bucketMailboxStats    = "mailbox_stats"
+	bucketMailboxStatus   = "mailbox_status"
+	bucketMailboxSequence = "mailbox_sequence"
+	statusRetention       = 24 * time.Hour
 )
 
 type MailboxLimits struct {
@@ -39,28 +40,34 @@ func DefaultMailboxLimits() MailboxLimits {
 }
 
 type MailboxRecord struct {
-	RecipientDevice string `json:"recipient_device"`
-	SenderDevice    string `json:"sender_device"`
-	MsgID           string `json:"msg_id"`
-	EnvelopeSHA256  string `json:"envelope_sha256"`
-	Envelope        []byte `json:"envelope"`
-	ByteSize        uint64 `json:"byte_size"`
-	AcceptedAt      int64  `json:"accepted_at"`
-	ExpiresAt       int64  `json:"expires_at"`
+	RecipientDevice    string `json:"recipient_device"`
+	SenderDevice       string `json:"sender_device"`
+	MsgID              string `json:"msg_id"`
+	EnvelopeSHA256     string `json:"envelope_sha256"`
+	Envelope           []byte `json:"envelope"`
+	ByteSize           uint64 `json:"byte_size"`
+	AcceptedAt         int64  `json:"accepted_at"`
+	ExpiresAt          int64  `json:"expires_at"`
+	AcceptanceSequence uint64 `json:"acceptance_sequence,omitempty"`
 }
 
 type PutResult struct {
-	AcceptedAt int64
-	Duplicate  bool
+	AcceptedAt         int64
+	AcceptanceSequence uint64
+	Duplicate          bool
+	Terminal           bool
 }
 
 type DeliveryStatus struct {
-	SenderDevice    string `json:"sender_device"`
-	RecipientDevice string `json:"recipient_device"`
-	MsgID           string `json:"msg_id"`
-	Status          string `json:"status"`
-	OccurredAt      int64  `json:"occurred_at"`
-	ExpiresAt       int64  `json:"expires_at"`
+	SenderDevice     string `json:"sender_device"`
+	RecipientDevice  string `json:"recipient_device"`
+	MsgID            string `json:"msg_id"`
+	Status           string `json:"status"`
+	OccurredAt       int64  `json:"occurred_at"`
+	ExpiresAt        int64  `json:"expires_at"`
+	EnvelopeSHA256   string `json:"envelope_sha256,omitempty"`
+	AcceptedAt       int64  `json:"accepted_at,omitempty"`
+	MailboxExpiresAt int64  `json:"mailbox_expires_at,omitempty"`
 }
 
 // ExpiredRecord is the sender-addressed metadata emitted after a mailbox item
@@ -90,14 +97,9 @@ func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) 
 	rec.ByteSize = uint64(len(rec.Envelope))
 	rec.AcceptedAt = now.UnixMilli()
 	rec.ExpiresAt = now.Add(s.limits.Retention).UnixMilli()
-	encoded, err := json.Marshal(rec)
-	if err != nil {
-		return PutResult{}, fmt.Errorf("marshal mailbox record: %w", err)
-	}
-
 	result := PutResult{AcceptedAt: rec.AcceptedAt}
-	err = s.bolt.Update(func(tx *bbolt.Tx) error {
-		items, order, stats, _, err := mailboxBuckets(tx)
+	err := s.bolt.Update(func(tx *bbolt.Tx) error {
+		items, order, stats, statuses, err := mailboxBuckets(tx)
 		if err != nil {
 			return err
 		}
@@ -111,22 +113,59 @@ func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) 
 			if err != nil {
 				return fmt.Errorf("decode stored mailbox digest: %w", err)
 			}
-			if subtle.ConstantTimeCompare(storedDigest, digest) != 1 {
+			if stored.SenderDevice != rec.SenderDevice || subtle.ConstantTimeCompare(storedDigest, digest) != 1 {
 				return ErrMessageIDConflict
 			}
 			result.AcceptedAt = stored.AcceptedAt
+			result.AcceptanceSequence = stored.AcceptanceSequence
 			result.Duplicate = true
 			return nil
+		}
+		status, terminalKey, terminalFound, err := terminalStatusForPut(statuses, rec.RecipientDevice, rec.MsgID)
+		if err != nil {
+			return err
+		}
+		if terminalFound {
+			if status.ExpiresAt <= now.UnixMilli() {
+				if err := statuses.Delete(terminalKey); err != nil {
+					return err
+				}
+			} else {
+				if status.SenderDevice != rec.SenderDevice || status.RecipientDevice != rec.RecipientDevice || status.AcceptedAt == 0 || status.EnvelopeSHA256 == "" {
+					return ErrMessageIDConflict
+				}
+				terminalDigest, err := decodeDigest(status.EnvelopeSHA256)
+				if err != nil {
+					return fmt.Errorf("decode terminal mailbox digest: %w", err)
+				}
+				if subtle.ConstantTimeCompare(terminalDigest, digest) != 1 {
+					return ErrMessageIDConflict
+				}
+				result.AcceptedAt = status.AcceptedAt
+				result.Duplicate = true
+				result.Terminal = true
+				return nil
+			}
 		}
 
 		count, bytes := readMailboxStats(stats.Get([]byte(rec.RecipientDevice)))
 		if s.limits.MaxItems <= 0 || count >= uint64(s.limits.MaxItems) || rec.ByteSize > s.limits.MaxBytes || bytes > s.limits.MaxBytes-rec.ByteSize {
 			return ErrMailboxFull
 		}
+		sequence, err := allocateAcceptanceSequence(tx, rec.RecipientDevice, items, order)
+		if err != nil {
+			return err
+		}
+		rec.AcceptanceSequence = sequence
+		result.AcceptanceSequence = sequence
+		encoded, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("marshal mailbox record: %w", err)
+		}
 		if err := items.Put(key, encoded); err != nil {
 			return err
 		}
-		if err := order.Put(orderKey(rec.RecipientDevice, rec.AcceptedAt, rec.MsgID), nil); err != nil {
+		if err := order.Put(orderKey(rec.RecipientDevice, rec.AcceptanceSequence, rec.MsgID), nil); err != nil {
 			return err
 		}
 		return stats.Put([]byte(rec.RecipientDevice), encodeMailboxStats(count+1, bytes+rec.ByteSize))
@@ -187,7 +226,7 @@ func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error
 		}
 		raw := items.Get(itemKey(recipient, msgID))
 		if raw == nil {
-			return ErrNotFound
+			return duplicateAckStatus(statuses, recipient, msgID, wantDigest, now.UnixMilli())
 		}
 		var rec MailboxRecord
 		if err := json.Unmarshal(raw, &rec); err != nil {
@@ -205,12 +244,15 @@ func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error
 			return errors.New("invalid mailbox statistics")
 		}
 		status := DeliveryStatus{
-			SenderDevice:    rec.SenderDevice,
-			RecipientDevice: rec.RecipientDevice,
-			MsgID:           rec.MsgID,
-			Status:          "acknowledged",
-			OccurredAt:      now.UnixMilli(),
-			ExpiresAt:       now.Add(statusRetention).UnixMilli(),
+			SenderDevice:     rec.SenderDevice,
+			RecipientDevice:  rec.RecipientDevice,
+			MsgID:            rec.MsgID,
+			Status:           "acknowledged",
+			OccurredAt:       now.UnixMilli(),
+			ExpiresAt:        now.Add(statusRetention).UnixMilli(),
+			EnvelopeSHA256:   rec.EnvelopeSHA256,
+			AcceptedAt:       rec.AcceptedAt,
+			MailboxExpiresAt: rec.ExpiresAt,
 		}
 		statusRaw, err := json.Marshal(status)
 		if err != nil {
@@ -219,7 +261,7 @@ func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error
 		if err := items.Delete(itemKey(recipient, msgID)); err != nil {
 			return err
 		}
-		if err := order.Delete(orderKey(recipient, rec.AcceptedAt, msgID)); err != nil {
+		if err := order.Delete(orderKey(recipient, mailboxOrderValue(rec), msgID)); err != nil {
 			return err
 		}
 		if err := stats.Put([]byte(recipient), encodeMailboxStats(count-1, bytes-rec.ByteSize)); err != nil {
@@ -250,12 +292,15 @@ func (s *MailboxStore) Expire(now time.Time) ([]ExpiredRecord, error) {
 					return errors.New("invalid mailbox statistics")
 				}
 				status := DeliveryStatus{
-					SenderDevice:    rec.SenderDevice,
-					RecipientDevice: rec.RecipientDevice,
-					MsgID:           rec.MsgID,
-					Status:          "expired",
-					OccurredAt:      rec.ExpiresAt,
-					ExpiresAt:       now.Add(statusRetention).UnixMilli(),
+					SenderDevice:     rec.SenderDevice,
+					RecipientDevice:  rec.RecipientDevice,
+					MsgID:            rec.MsgID,
+					Status:           "expired",
+					OccurredAt:       rec.ExpiresAt,
+					ExpiresAt:        now.Add(statusRetention).UnixMilli(),
+					EnvelopeSHA256:   rec.EnvelopeSHA256,
+					AcceptedAt:       rec.AcceptedAt,
+					MailboxExpiresAt: rec.ExpiresAt,
 				}
 				statusRaw, err := json.Marshal(status)
 				if err != nil {
@@ -264,7 +309,7 @@ func (s *MailboxStore) Expire(now time.Time) ([]ExpiredRecord, error) {
 				if err := items.Delete(key); err != nil {
 					return err
 				}
-				if err := order.Delete(orderKey(rec.RecipientDevice, rec.AcceptedAt, rec.MsgID)); err != nil {
+				if err := order.Delete(orderKey(rec.RecipientDevice, mailboxOrderValue(rec), rec.MsgID)); err != nil {
 					return err
 				}
 				if err := stats.Put([]byte(rec.RecipientDevice), encodeMailboxStats(count-1, bytes-rec.ByteSize)); err != nil {
@@ -356,6 +401,7 @@ func purgePairTx(tx *bbolt.Tx, deviceA, deviceB string) error {
 	order := tx.Bucket([]byte(bucketMailboxOrder))
 	stats := tx.Bucket([]byte(bucketMailboxStats))
 	statuses := tx.Bucket([]byte(bucketMailboxStatus))
+	sequences := tx.Bucket([]byte(bucketMailboxSequence))
 	if items != nil {
 		for recipient, sender := range map[string]string{deviceA: deviceB, deviceB: deviceA} {
 			var removedCount, removedBytes uint64
@@ -372,7 +418,7 @@ func purgePairTx(tx *bbolt.Tx, deviceA, deviceB string) error {
 						return err
 					}
 					if order != nil {
-						if err := order.Delete(orderKey(recipient, rec.AcceptedAt, rec.MsgID)); err != nil {
+						if err := order.Delete(orderKey(recipient, mailboxOrderValue(rec), rec.MsgID)); err != nil {
 							return err
 						}
 					}
@@ -394,6 +440,14 @@ func purgePairTx(tx *bbolt.Tx, deviceA, deviceB string) error {
 					return err
 				}
 			}
+		}
+	}
+	if sequences != nil {
+		if err := sequences.Delete([]byte(deviceA)); err != nil {
+			return err
+		}
+		if err := sequences.Delete([]byte(deviceB)); err != nil {
+			return err
 		}
 	}
 	if statuses != nil {
@@ -470,6 +524,45 @@ func decodeDigest(digest string) ([]byte, error) {
 	return decoded, nil
 }
 
+func duplicateAckStatus(statuses *bbolt.Bucket, recipient, msgID string, wantDigest []byte, nowMillis int64) error {
+	cursor := statuses.Cursor()
+	for _, raw := cursor.First(); raw != nil; _, raw = cursor.Next() {
+		var status DeliveryStatus
+		if err := json.Unmarshal(raw, &status); err != nil {
+			return fmt.Errorf("unmarshal delivery status: %w", err)
+		}
+		if status.RecipientDevice != recipient || status.MsgID != msgID || status.Status != "acknowledged" {
+			continue
+		}
+		if status.ExpiresAt <= nowMillis || status.EnvelopeSHA256 == "" {
+			return ErrNotFound
+		}
+		storedDigest, err := decodeDigest(status.EnvelopeSHA256)
+		if err != nil {
+			return fmt.Errorf("decode terminal mailbox digest: %w", err)
+		}
+		if subtle.ConstantTimeCompare(storedDigest, wantDigest) != 1 {
+			return ErrDigestMismatch
+		}
+		return nil
+	}
+	return ErrNotFound
+}
+
+func terminalStatusForPut(statuses *bbolt.Bucket, recipient, msgID string) (DeliveryStatus, []byte, bool, error) {
+	cursor := statuses.Cursor()
+	for key, raw := cursor.First(); key != nil; key, raw = cursor.Next() {
+		var status DeliveryStatus
+		if err := json.Unmarshal(raw, &status); err != nil {
+			return DeliveryStatus{}, nil, false, fmt.Errorf("unmarshal delivery status: %w", err)
+		}
+		if status.RecipientDevice == recipient && status.MsgID == msgID {
+			return status, append([]byte(nil), key...), true, nil
+		}
+	}
+	return DeliveryStatus{}, nil, false, nil
+}
+
 func mailboxBuckets(tx *bbolt.Tx) (items, order, stats, statuses *bbolt.Bucket, err error) {
 	if items, err = tx.CreateBucketIfNotExists([]byte(bucketMailboxItems)); err != nil {
 		return nil, nil, nil, nil, err
@@ -498,13 +591,86 @@ func recipientPrefix(recipient string) []byte {
 	return []byte(recipient + "\x00")
 }
 
-func orderKey(recipient string, acceptedAt int64, msgID string) []byte {
+func allocateAcceptanceSequence(tx *bbolt.Tx, recipient string, items, order *bbolt.Bucket) (uint64, error) {
+	sequences, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxSequence))
+	if err != nil {
+		return 0, err
+	}
+	rawCounter := sequences.Get([]byte(recipient))
+	var current uint64
+	if len(rawCounter) == 8 {
+		current = binary.BigEndian.Uint64(rawCounter)
+	} else if len(rawCounter) != 0 {
+		return 0, errors.New("invalid mailbox acceptance sequence")
+	} else {
+		type orderEntry struct {
+			key   []byte
+			msgID string
+		}
+		entries := []orderEntry{}
+		prefix := recipientPrefix(recipient)
+		cursor := order.Cursor()
+		for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), string(prefix)); key, _ = cursor.Next() {
+			_, msgID, ok := parseOrderKey(key)
+			if !ok {
+				return 0, errors.New("invalid mailbox order key")
+			}
+			entries = append(entries, orderEntry{key: append([]byte(nil), key...), msgID: msgID})
+		}
+		for _, entry := range entries {
+			if err := order.Delete(entry.key); err != nil {
+				return 0, err
+			}
+		}
+		for index, entry := range entries {
+			raw := items.Get(itemKey(recipient, entry.msgID))
+			if raw == nil {
+				return 0, errors.New("mailbox item missing for order migration")
+			}
+			var rec MailboxRecord
+			if err := json.Unmarshal(raw, &rec); err != nil {
+				return 0, fmt.Errorf("unmarshal mailbox item: %w", err)
+			}
+			rec.AcceptanceSequence = uint64(index + 1)
+			encoded, err := json.Marshal(rec)
+			if err != nil {
+				return 0, fmt.Errorf("marshal mailbox item: %w", err)
+			}
+			if err := items.Put(itemKey(recipient, rec.MsgID), encoded); err != nil {
+				return 0, err
+			}
+			if err := order.Put(orderKey(recipient, rec.AcceptanceSequence, rec.MsgID), nil); err != nil {
+				return 0, err
+			}
+		}
+		current = uint64(len(entries))
+	}
+	if current == ^uint64(0) {
+		return 0, errors.New("mailbox acceptance sequence exhausted")
+	}
+	next := current + 1
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], next)
+	if err := sequences.Put([]byte(recipient), encoded[:]); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+func mailboxOrderValue(rec MailboxRecord) uint64 {
+	if rec.AcceptanceSequence != 0 {
+		return rec.AcceptanceSequence
+	}
+	return uint64(rec.AcceptedAt)
+}
+
+func orderKey(recipient string, sequence uint64, msgID string) []byte {
 	key := make([]byte, 0, len(recipient)+1+8+1+len(msgID))
 	key = append(key, recipient...)
 	key = append(key, 0)
-	var timestamp [8]byte
-	binary.BigEndian.PutUint64(timestamp[:], uint64(acceptedAt))
-	key = append(key, timestamp[:]...)
+	var encodedSequence [8]byte
+	binary.BigEndian.PutUint64(encodedSequence[:], sequence)
+	key = append(key, encodedSequence[:]...)
 	key = append(key, 0)
 	key = append(key, msgID...)
 	return key

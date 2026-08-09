@@ -1,7 +1,9 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -75,6 +77,105 @@ func TestMailboxRejectsDigestConflict(t *testing.T) {
 	rec.EnvelopeSHA256 = strings.Repeat("b", 64)
 	if _, err := s.Put(rec, time.UnixMilli(1001)); !errors.Is(err, ErrMessageIDConflict) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMailboxPendingUsesDurableSequenceWhenAcceptanceMillisCollide(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mailbox.db")
+	b, err := OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewMailboxStore(b, DefaultMailboxLimits())
+	now := time.UnixMilli(1000)
+	first := testMailboxRecord("f1111111-1111-4111-8111-111111111111", "a")
+	second := testMailboxRecord("11111111-1111-4111-8111-111111111111", "b")
+	if _, err := s.Put(first, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(second, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err = OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	s = NewMailboxStore(b, DefaultMailboxLimits())
+	got, err := s.Pending(first.RecipientDevice, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].MsgID != first.MsgID || got[1].MsgID != second.MsgID {
+		t.Fatalf("same-millisecond pending order = %#v, want %s then %s", got, first.MsgID, second.MsgID)
+	}
+	if got[0].AcceptanceSequence != 1 || got[1].AcceptanceSequence != 2 {
+		t.Fatalf("acceptance sequences = %d, %d, want 1, 2", got[0].AcceptanceSequence, got[1].AcceptanceSequence)
+	}
+}
+
+func TestMailboxSequenceMigratesLegacyOrderAndResetsOnPurge(t *testing.T) {
+	b := openTestBolt(t)
+	legacyFirst := testMailboxRecord("f2222222-2222-4222-8222-222222222222", "a")
+	legacyFirst.AcceptedAt = 1000
+	legacyFirst.ExpiresAt = 1000 + int64(time.Hour/time.Millisecond)
+	legacyFirst.ByteSize = uint64(len(legacyFirst.Envelope))
+	legacySecond := testMailboxRecord("12222222-2222-4222-8222-222222222222", "b")
+	legacySecond.AcceptedAt = 2000
+	legacySecond.ExpiresAt = 2000 + int64(time.Hour/time.Millisecond)
+	legacySecond.ByteSize = uint64(len(legacySecond.Envelope))
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		items, order, stats, _, err := mailboxBuckets(tx)
+		if err != nil {
+			return err
+		}
+		for _, rec := range []MailboxRecord{legacyFirst, legacySecond} {
+			raw, err := json.Marshal(rec)
+			if err != nil {
+				return err
+			}
+			if err := items.Put(itemKey(rec.RecipientDevice, rec.MsgID), raw); err != nil {
+				return err
+			}
+			if err := order.Put(orderKey(rec.RecipientDevice, uint64(rec.AcceptedAt), rec.MsgID), nil); err != nil {
+				return err
+			}
+		}
+		return stats.Put([]byte(legacyFirst.RecipientDevice), encodeMailboxStats(2, legacyFirst.ByteSize+legacySecond.ByteSize))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewMailboxStore(b, MailboxLimits{MaxItems: 4, MaxBytes: 4096, Retention: time.Hour})
+	newRec := testMailboxRecord("02222222-2222-4222-8222-222222222222", "c")
+	if _, err := s.Put(newRec, time.UnixMilli(3000)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Pending(legacyFirst.RecipientDevice, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].MsgID != legacyFirst.MsgID || got[1].MsgID != legacySecond.MsgID || got[2].MsgID != newRec.MsgID {
+		t.Fatalf("migrated pending order = %#v", got)
+	}
+	if got[0].AcceptanceSequence != 1 || got[1].AcceptanceSequence != 2 || got[2].AcceptanceSequence != 3 {
+		t.Fatalf("migrated sequences = %d, %d, %d", got[0].AcceptanceSequence, got[1].AcceptanceSequence, got[2].AcceptanceSequence)
+	}
+
+	if err := s.PurgePair(legacyFirst.SenderDevice, legacyFirst.RecipientDevice); err != nil {
+		t.Fatal(err)
+	}
+	afterPurge := testMailboxRecord("32222222-2222-4222-8222-222222222222", "d")
+	if _, err := s.Put(afterPurge, time.UnixMilli(4000)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.Pending(afterPurge.RecipientDevice, 10)
+	if err != nil || len(pending) != 1 || pending[0].AcceptanceSequence != 1 {
+		t.Fatalf("post-purge sequence = %#v, %v, want reset to 1", pending, err)
 	}
 }
 
@@ -158,6 +259,87 @@ func TestMailboxAckDeletesCiphertextAndRetainsStatus(t *testing.T) {
 	}
 	if len(statuses) != 1 || statuses[0].Status != "acknowledged" || statuses[0].MsgID != rec.MsgID {
 		t.Fatalf("statuses = %#v", statuses)
+	}
+}
+
+func TestMailboxDuplicateAckRequiresTerminalDigest(t *testing.T) {
+	b := openTestBolt(t)
+	s := NewMailboxStore(b, DefaultMailboxLimits())
+	rec := testMailboxRecord("11222222-2222-4222-8222-222222222222", "a")
+	if _, err := s.Put(rec, time.UnixMilli(1000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, time.UnixMilli(2000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Ack(rec.RecipientDevice, rec.MsgID, strings.Repeat("b", 64), time.UnixMilli(3000)); !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("duplicate ACK with wrong digest err = %v, want digest mismatch", err)
+	}
+	if err := s.Ack(rec.RecipientDevice, rec.MsgID, strings.ToUpper(rec.EnvelopeSHA256), time.UnixMilli(3000)); err != nil {
+		t.Fatalf("duplicate ACK with original digest: %v", err)
+	}
+}
+
+func TestMailboxTerminalTombstonePreventsResurrection(t *testing.T) {
+	tests := []struct {
+		name      string
+		terminate func(*testing.T, *MailboxStore, MailboxRecord, time.Time)
+	}{
+		{
+			name: "acknowledged",
+			terminate: func(t *testing.T, s *MailboxStore, rec MailboxRecord, terminalAt time.Time) {
+				t.Helper()
+				if err := s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, terminalAt); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "expired",
+			terminate: func(t *testing.T, s *MailboxStore, _ MailboxRecord, terminalAt time.Time) {
+				t.Helper()
+				if expired, err := s.Expire(terminalAt); err != nil || len(expired) != 1 {
+					t.Fatalf("Expire = %#v, %v", expired, err)
+				}
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b := openTestBolt(t)
+			s := NewMailboxStore(b, MailboxLimits{MaxItems: 2, MaxBytes: 1024, Retention: time.Hour})
+			rec := testMailboxRecord(fmt.Sprintf("11333333-3333-4333-8333-%012d", i+1), "a")
+			acceptedAt := time.UnixMilli(1000)
+			first, err := s.Put(rec, acceptedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminalAt := acceptedAt.Add(time.Hour)
+			tc.terminate(t, s, rec, terminalAt)
+
+			duplicate, err := s.Put(rec, terminalAt.Add(time.Millisecond))
+			if err != nil {
+				t.Fatalf("same terminal put: %v", err)
+			}
+			if !duplicate.Duplicate || duplicate.AcceptedAt != first.AcceptedAt {
+				t.Fatalf("terminal duplicate = %#v, want original acceptance %#v", duplicate, first)
+			}
+			if pending, err := s.Pending(rec.RecipientDevice, 10); err != nil || len(pending) != 0 {
+				t.Fatalf("terminal duplicate resurrected mailbox: %#v, %v", pending, err)
+			}
+			wrongOwner := rec
+			wrongOwner.SenderDevice = "dev-other"
+			if _, err := s.Put(wrongOwner, terminalAt.Add(2*time.Millisecond)); !errors.Is(err, ErrMessageIDConflict) {
+				t.Fatalf("terminal wrong-owner put err = %v, want id conflict", err)
+			}
+
+			conflict := rec
+			conflict.EnvelopeSHA256 = strings.Repeat("b", 64)
+			if _, err := s.Put(conflict, terminalAt.Add(3*time.Millisecond)); !errors.Is(err, ErrMessageIDConflict) {
+				t.Fatalf("terminal conflicting put err = %v, want id conflict", err)
+			}
+		})
 	}
 }
 
@@ -294,7 +476,7 @@ func snapshotMailboxBuckets(t *testing.T, b *Bolt) map[string]map[string]string 
 	t.Helper()
 	snapshot := make(map[string]map[string]string)
 	if err := b.View(func(tx *bbolt.Tx) error {
-		for _, name := range []string{bucketMailboxItems, bucketMailboxOrder, bucketMailboxStats, bucketMailboxStatus} {
+		for _, name := range []string{bucketMailboxItems, bucketMailboxOrder, bucketMailboxStats, bucketMailboxStatus, bucketMailboxSequence} {
 			entries := make(map[string]string)
 			bucket := tx.Bucket([]byte(name))
 			if bucket != nil {
