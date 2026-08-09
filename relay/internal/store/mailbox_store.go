@@ -210,6 +210,48 @@ func (s *MailboxStore) Pending(recipient string, limit int) ([]MailboxRecord, er
 	return result, err
 }
 
+// LiveByIDs resolves opaque mailbox records in the requested order. Missing,
+// acknowledged, purged, and expired records are omitted. Every returned value,
+// including its ciphertext bytes, is copied before the Bolt view closes.
+func (s *MailboxStore) LiveByIDs(recipient string, msgIDs []string, now time.Time) ([]MailboxRecord, error) {
+	if recipient == "" || strings.ContainsRune(recipient, '\x00') {
+		return nil, errors.New("invalid recipient device")
+	}
+	if len(msgIDs) == 0 {
+		return []MailboxRecord{}, nil
+	}
+	for _, msgID := range msgIDs {
+		if err := validateMailboxKey(recipient, msgID); err != nil {
+			return nil, err
+		}
+	}
+
+	result := make([]MailboxRecord, 0, len(msgIDs))
+	err := s.bolt.View(func(tx *bbolt.Tx) error {
+		items := tx.Bucket([]byte(bucketMailboxItems))
+		if items == nil {
+			return nil
+		}
+		nowMillis := now.UnixMilli()
+		for _, msgID := range msgIDs {
+			raw := items.Get(itemKey(recipient, msgID))
+			if raw == nil {
+				continue
+			}
+			var rec MailboxRecord
+			if err := json.Unmarshal(raw, &rec); err != nil {
+				return fmt.Errorf("unmarshal mailbox item: %w", err)
+			}
+			if rec.ExpiresAt <= nowMillis {
+				continue
+			}
+			result = append(result, copyMailboxRecord(rec))
+		}
+		return nil
+	})
+	return result, err
+}
+
 func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error {
 	if err := validateMailboxKey(recipient, msgID); err != nil {
 		return err

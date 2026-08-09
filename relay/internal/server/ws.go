@@ -346,6 +346,8 @@ func (s *Server) handleRelayPut(
 	}
 
 	digest := sha256.Sum256(put.Envelope)
+	handoff := s.handoffs.recipient(peerID)
+	handoff.commitMu.Lock()
 	result, err := s.mailbox.Put(store.MailboxRecord{
 		RecipientDevice: peerID,
 		SenderDevice:    deviceID,
@@ -353,23 +355,79 @@ func (s *Server) handleRelayPut(
 		EnvelopeSHA256:  hex.EncodeToString(digest[:]),
 		Envelope:        append([]byte(nil), put.Envelope...),
 	}, time.Now())
+	var notification *durableNotification
+	if err == nil && !result.Terminal {
+		var overflow bool
+		notification, overflow = s.handoffs.record(handoff, peerID, envelope.MsgID, result.AcceptanceSequence, uint64(len(put.Envelope)))
+		if overflow {
+			s.clientHub.Stop(peerID)
+		}
+	}
+	handoff.commitMu.Unlock()
 	if err != nil {
 		_ = writeRejected(envelope.MsgID, relayPutErrorCode(err))
 		return
 	}
 
-	if err := writeFrame(RelayAccepted{
+	writeErr := writeFrame(RelayAccepted{
 		V: 2, Type: "relay.accepted", MsgID: envelope.MsgID, AcceptedAt: result.AcceptedAt,
-	}); err != nil {
+	})
+	if notification != nil {
+		handoff.complete(notification, s.dispatchDurableNotifications)
+	}
+	if writeErr != nil || result.Terminal {
 		return
 	}
-	if result.Terminal {
+}
+
+func (s *Server) dispatchDurableNotifications(notifications []durableNotification) {
+	if len(notifications) == 0 {
 		return
 	}
-	_ = s.clientHub.SendV2(peerID, envelope.MsgID, result.AcceptanceSequence, marshalRelayDeliver(store.MailboxRecord{
-		AcceptedAt: result.AcceptedAt,
-		Envelope:   put.Envelope,
-	}))
+	recipient := notifications[0].recipient
+	msgIDs := make([]string, 0, len(notifications))
+	for _, notification := range notifications {
+		msgIDs = append(msgIDs, notification.msgID)
+	}
+	records, err := s.mailbox.LiveByIDs(recipient, msgIDs, time.Now())
+	if err != nil {
+		log.Printf("resolve durable relay handoff for %s: %v", recipient, err)
+		s.clientHub.Stop(recipient)
+		return
+	}
+	byID := make(map[string]store.MailboxRecord, len(records))
+	for _, rec := range records {
+		byID[rec.MsgID] = rec
+	}
+	for _, notification := range notifications {
+		rec, ok := byID[notification.msgID]
+		if !ok {
+			continue
+		}
+		_ = s.clientHub.SendV2(recipient, notification.msgID, notification.sequence, notification.byteSize, marshalRelayDeliver(rec))
+	}
+}
+
+func (s *Server) resolveHandoffFrames(recipient string, notifications []queuedV2Notification) ([][]byte, error) {
+	msgIDs := make([]string, 0, len(notifications))
+	for _, notification := range notifications {
+		msgIDs = append(msgIDs, notification.msgID)
+	}
+	records, err := s.mailbox.LiveByIDs(recipient, msgIDs, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]store.MailboxRecord, len(records))
+	for _, rec := range records {
+		byID[rec.MsgID] = rec
+	}
+	frames := make([][]byte, 0, len(records))
+	for _, notification := range notifications {
+		if rec, ok := byID[notification.msgID]; ok {
+			frames = append(frames, marshalRelayDeliver(rec))
+		}
+	}
+	return frames, nil
 }
 
 func isBoundedRelayPut(raw []byte) bool {

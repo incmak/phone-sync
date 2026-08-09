@@ -722,6 +722,221 @@ func TestWebSocketHelloDrainHandoffDeliversConcurrentPutOnce(t *testing.T) {
 	}
 }
 
+func TestWebSocketHelloHandoffSurvivesFailedAcceptedWrite(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	outbound := make(chan []byte, 4)
+	recipient := srv.clientHub.Register(pair.deviceB, outbound)
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set recipient handshake protocol")
+	}
+
+	msgID := "83777777-7777-4777-8777-777777777777"
+	envelope := validMailboxEnvelope(pair.deviceA, msgID)
+	srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: envelope}, func(frame any) error {
+		if _, ok := frame.(RelayAccepted); !ok {
+			t.Fatalf("sender response = %#v, want relay.accepted", frame)
+		}
+		return errors.New("deterministic sender write failure")
+	}, func(gotID, reason string) error {
+		t.Fatalf("unexpected rejection for %s: %s", gotID, reason)
+		return nil
+	})
+
+	frames, activated := srv.clientHub.FlushOrActivateV2(recipient, nil)
+	if activated || len(frames) != 1 {
+		t.Fatalf("handoff after failed accepted write = %d frames, activated=%v; want one frame before activation", len(frames), activated)
+	}
+	if delivered := decodeMailboxFrame(t, frames[0]); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+		t.Fatalf("handoff delivery = %#v, want exact durable envelope", delivered)
+	}
+}
+
+func TestWebSocketHelloHandoffPreservesSequenceAcrossReverseAcceptedWrites(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	outbound := make(chan []byte, 4)
+	recipient := srv.clientHub.Register(pair.deviceB, outbound)
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set recipient handshake protocol")
+	}
+
+	firstID := "83888888-8888-4888-8888-888888888888"
+	secondID := "83999999-9999-4999-8999-999999999999"
+	firstAcceptedStarted := make(chan struct{})
+	releaseFirstAccepted := make(chan struct{})
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, firstID)}, func(any) error {
+			close(firstAcceptedStarted)
+			<-releaseFirstAccepted
+			return nil
+		}, func(string, string) error { return errors.New("unexpected rejection") })
+	}()
+	select {
+	case <-firstAcceptedStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first accepted write did not start")
+	}
+
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, secondID)}, func(any) error {
+			return nil
+		}, func(string, string) error { return errors.New("unexpected rejection") })
+	}()
+	select {
+	case <-secondDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second accepted write did not complete first")
+	}
+
+	frames, activated := srv.clientHub.FlushOrActivateV2(recipient, nil)
+	if len(frames) != 0 || !activated {
+		t.Fatalf("reverse completion exposed later acceptance early: %d frames, activated=%v", len(frames), activated)
+	}
+	close(releaseFirstAccepted)
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first accepted write did not complete")
+	}
+
+	for i, wantID := range []string{firstID, secondID} {
+		select {
+		case raw := <-outbound:
+			delivered := decodeMailboxFrame(t, raw)
+			var header encryptedEnvelopeHeader
+			if err := json.Unmarshal(delivered.Envelope, &header); err != nil {
+				t.Fatalf("decode delivery %d: %v", i, err)
+			}
+			if header.MsgID != wantID {
+				t.Fatalf("delivery %d msg_id = %s, want %s", i, header.MsgID, wantID)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for delivery %d", i)
+		}
+	}
+}
+
+func TestWebSocketHelloHandoffDoesNotEmitExpiredBufferedItem(t *testing.T) {
+	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 2, MaxBytes: 1 << 20, Retention: time.Hour})
+	pair := registerMailboxTestPair(t, srv)
+	recipient := srv.clientHub.Register(pair.deviceB, make(chan []byte, 4))
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set recipient handshake protocol")
+	}
+
+	msgID := "83aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, msgID)}, func(any) error {
+		return nil
+	}, func(string, string) error { return errors.New("unexpected rejection") })
+	if _, err := srv.mailbox.Expire(time.Now().Add(2 * time.Hour)); err != nil {
+		t.Fatalf("expire buffered item: %v", err)
+	}
+
+	frames, _ := srv.clientHub.FlushOrActivateV2(recipient, nil)
+	if len(frames) != 0 {
+		t.Fatalf("expired handoff emitted stale ciphertext: %s", frames[0])
+	}
+}
+
+func TestWebSocketHelloHandoffDoesNotEmitPurgedBufferedItem(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	recipient := srv.clientHub.Register(pair.deviceB, make(chan []byte, 4))
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set recipient handshake protocol")
+	}
+
+	msgID := "83aaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab"
+	srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, msgID)}, func(any) error {
+		return nil
+	}, func(string, string) error { return errors.New("unexpected rejection") })
+	if err := srv.mailbox.PurgePair(pair.deviceA, pair.deviceB); err != nil {
+		t.Fatalf("purge buffered item: %v", err)
+	}
+
+	frames, _ := srv.clientHub.FlushOrActivateV2(recipient, nil)
+	if len(frames) != 0 {
+		t.Fatalf("purged handoff emitted stale ciphertext: %s", frames[0])
+	}
+}
+
+func TestWebSocketHelloHandoffExpireRefillClosesAtConfiguredBound(t *testing.T) {
+	limits := store.MailboxLimits{MaxItems: 1, MaxBytes: 1 << 20, Retention: time.Hour}
+	srv := newMailboxTestServerWithLimits(t, limits)
+	pair := registerMailboxTestPair(t, srv)
+	recipient := srv.clientHub.Register(pair.deviceB, make(chan []byte, 4))
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set recipient handshake protocol")
+	}
+
+	for i := 0; i < 4; i++ {
+		msgID := fmt.Sprintf("83bbbbbb-bbbb-4bbb-8bbb-%012d", i)
+		srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, msgID)}, func(any) error {
+			return nil
+		}, func(string, string) error { return errors.New("unexpected rejection") })
+		if _, err := srv.mailbox.Expire(time.Now().Add(2 * time.Hour)); err != nil {
+			t.Fatalf("expire refill %d: %v", i, err)
+		}
+	}
+	select {
+	case <-recipient.done:
+	default:
+		t.Fatal("handshaking recipient remained open after repeated refill exceeded configured one-item bound")
+	}
+}
+
+func TestWebSocketHelloHandoffClosesAtConfiguredByteBound(t *testing.T) {
+	firstEnvelope := validMailboxEnvelope("mailbox-device-a", "83cccccc-cccc-4ccc-8ccc-000000000001")
+	secondEnvelope := validMailboxEnvelope("mailbox-device-a", "83cccccc-cccc-4ccc-8ccc-000000000002")
+	limits := store.MailboxLimits{
+		MaxItems:  10,
+		MaxBytes:  uint64(len(firstEnvelope) + len(secondEnvelope) - 1),
+		Retention: time.Hour,
+	}
+	srv := newMailboxTestServerWithLimits(t, limits)
+	pair := registerMailboxTestPair(t, srv)
+	recipient := srv.clientHub.Register(pair.deviceB, make(chan []byte, 4))
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set recipient handshake protocol")
+	}
+
+	srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: firstEnvelope}, func(any) error {
+		return nil
+	}, func(string, string) error { return errors.New("unexpected rejection") })
+	if _, err := srv.mailbox.Expire(time.Now().Add(2 * time.Hour)); err != nil {
+		t.Fatalf("expire first buffered item: %v", err)
+	}
+	srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: secondEnvelope}, func(any) error {
+		return nil
+	}, func(string, string) error { return errors.New("unexpected rejection") })
+
+	select {
+	case <-recipient.done:
+	default:
+		t.Fatal("handshaking recipient remained open after metadata exceeded configured mailbox byte bound")
+	}
+}
+
+func decodeMailboxFrame(t *testing.T, raw []byte) testFrame {
+	t.Helper()
+	var frame testFrame
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("decode typed frame %q: %v", raw, err)
+	}
+	return frame
+}
+
 func TestWebSocketHashesAndDeliversExactEnvelopeBytes(t *testing.T) {
 	srv := newTestServer(t)
 	pair := registerMailboxTestPair(t, srv)

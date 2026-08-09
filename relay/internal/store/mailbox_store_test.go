@@ -49,6 +49,31 @@ func TestMailboxPutIsIdempotentAndSurvivesReopen(t *testing.T) {
 	}
 }
 
+func TestMailboxLiveByIDsCopiesAndOmitsExpiredRecords(t *testing.T) {
+	b := openTestBolt(t)
+	s := NewMailboxStore(b, MailboxLimits{MaxItems: 2, MaxBytes: 1024, Retention: time.Hour})
+	acceptedAt := time.UnixMilli(1000)
+	rec := testMailboxRecord("11111111-1111-4111-8111-111111111112", "a")
+	rec.Envelope = []byte("opaque-ciphertext")
+	if _, err := s.Put(rec, acceptedAt); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	live, err := s.LiveByIDs("dev-b", []string{rec.MsgID}, acceptedAt.Add(time.Minute))
+	if err != nil || len(live) != 1 {
+		t.Fatalf("live lookup = %#v, %v; want one record", live, err)
+	}
+	live[0].Envelope[0] = 'X'
+	again, err := s.LiveByIDs("dev-b", []string{rec.MsgID}, acceptedAt.Add(time.Minute))
+	if err != nil || len(again) != 1 || string(again[0].Envelope) != "opaque-ciphertext" {
+		t.Fatalf("copied live lookup = %#v, %v", again, err)
+	}
+	expired, err := s.LiveByIDs("dev-b", []string{rec.MsgID}, acceptedAt.Add(2*time.Hour))
+	if err != nil || len(expired) != 0 {
+		t.Fatalf("expired live lookup = %#v, %v; want empty", expired, err)
+	}
+}
+
 func TestMailboxRejectsCapacityWithoutEviction(t *testing.T) {
 	b := openTestBolt(t)
 	s := NewMailboxStore(b, MailboxLimits{MaxItems: 1, MaxBytes: 1024, Retention: 24 * time.Hour})

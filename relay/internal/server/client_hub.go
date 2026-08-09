@@ -9,8 +9,11 @@ import (
 // Keyed by device_id (the JWT sub of the connected client). Each client exposes a
 // non-blocking send channel; the peer-lookup + forward logic lives in ws.go.
 type ClientHub struct {
-	mu      sync.Mutex
-	clients map[string]*wsClient
+	mu              sync.Mutex
+	clients         map[string]*wsClient
+	handoffMaxItems int
+	handoffMaxBytes uint64
+	resolveHandoff  func(string, []queuedV2Notification) ([][]byte, error)
 }
 
 // wsClient wraps a single authenticated WebSocket connection. Its queue is
@@ -18,20 +21,21 @@ type ClientHub struct {
 // state is never removed when this latency-only queue is full; v1 remains an
 // explicit online-only path.
 type wsClient struct {
-	deviceID        string
-	outbound        chan []byte
-	protocol        connectionProtocol
-	protocols       []int
-	handshakeFrames map[string]queuedV2Frame
-	handoffSuppress map[string]struct{}
-	done            chan struct{}
-	stopOnce        sync.Once
+	deviceID         string
+	outbound         chan []byte
+	protocol         connectionProtocol
+	protocols        []int
+	handshakeNotices map[string]queuedV2Notification
+	handshakeBytes   uint64
+	handoffSuppress  map[string]struct{}
+	done             chan struct{}
+	stopOnce         sync.Once
 }
 
-type queuedV2Frame struct {
+type queuedV2Notification struct {
 	msgID    string
 	sequence uint64
-	frame    []byte
+	byteSize uint64
 }
 
 type connectionProtocol uint8
@@ -48,7 +52,21 @@ func (c *wsClient) stop() {
 }
 
 func NewClientHub() *ClientHub {
-	return &ClientHub{clients: make(map[string]*wsClient)}
+	return NewClientHubWithMailboxLimits(2000, 128<<20)
+}
+
+func NewClientHubWithMailboxLimits(maxItems int, maxBytes uint64) *ClientHub {
+	return &ClientHub{
+		clients:         make(map[string]*wsClient),
+		handoffMaxItems: maxItems,
+		handoffMaxBytes: maxBytes,
+	}
+}
+
+func (h *ClientHub) SetHandoffResolver(resolve func(string, []queuedV2Notification) ([][]byte, error)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.resolveHandoff = resolve
 }
 
 // Register replaces any existing client for the same device (reconnect case).
@@ -77,6 +95,14 @@ func (h *ClientHub) Unregister(c *wsClient) {
 	c.stop()
 }
 
+func (h *ClientHub) Stop(deviceID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c := h.clients[deviceID]; c != nil {
+		c.stop()
+	}
+}
+
 // Send forwards a frame to deviceID if currently connected. Returns true on delivery
 // (queued to outbound channel), false if peer is offline or its buffer is full.
 func (h *ClientHub) Send(deviceID string, frame []byte) bool {
@@ -96,7 +122,7 @@ func (h *ClientHub) SendLegacy(deviceID string, frame []byte) bool {
 	})
 }
 
-func (h *ClientHub) SendV2(deviceID, msgID string, sequence uint64, frame []byte) bool {
+func (h *ClientHub) SendV2(deviceID, msgID string, sequence, byteSize uint64, frame []byte) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
@@ -110,12 +136,21 @@ func (h *ClientHub) SendV2(deviceID, msgID string, sequence uint64, frame []byte
 	}
 	switch c.protocol {
 	case protocolV2Handshake:
-		if c.handshakeFrames == nil {
-			c.handshakeFrames = make(map[string]queuedV2Frame)
+		if c.handshakeNotices == nil {
+			c.handshakeNotices = make(map[string]queuedV2Notification)
 		}
-		c.handshakeFrames[msgID] = queuedV2Frame{
-			msgID: msgID, sequence: sequence, frame: append([]byte(nil), frame...),
+		if _, exists := c.handshakeNotices[msgID]; exists {
+			return true
 		}
+		if h.handoffMaxItems <= 0 || len(c.handshakeNotices) >= h.handoffMaxItems ||
+			byteSize > h.handoffMaxBytes || c.handshakeBytes > h.handoffMaxBytes-byteSize {
+			c.stop()
+			return false
+		}
+		c.handshakeNotices[msgID] = queuedV2Notification{
+			msgID: msgID, sequence: sequence, byteSize: byteSize,
+		}
+		c.handshakeBytes += byteSize
 		return true
 	case protocolV2:
 		if _, suppress := c.handoffSuppress[msgID]; suppress {
@@ -139,43 +174,68 @@ func (h *ClientHub) SendV2(deviceID, msgID string, sequence uint64, frame []byte
 // buffered notifications and Put calls that committed before the drain but
 // reached the hub only after activation.
 func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) (frames [][]byte, activated bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	current, ok := h.clients[c.deviceID]
-	if !ok || current != c || c.protocol != protocolV2Handshake {
-		return nil, false
-	}
-	if c.handoffSuppress == nil {
-		c.handoffSuppress = make(map[string]struct{})
-	}
-	drained := make(map[string]struct{}, len(drainedIDs))
-	for _, msgID := range drainedIDs {
-		drained[msgID] = struct{}{}
-		if _, buffered := c.handshakeFrames[msgID]; !buffered {
-			c.handoffSuppress[msgID] = struct{}{}
+	for {
+		h.mu.Lock()
+		current, ok := h.clients[c.deviceID]
+		if !ok || current != c || c.protocol != protocolV2Handshake {
+			h.mu.Unlock()
+			return nil, false
 		}
-	}
-	queued := make([]queuedV2Frame, 0, len(c.handshakeFrames))
-	for msgID, frame := range c.handshakeFrames {
-		if _, alreadyDrained := drained[msgID]; !alreadyDrained {
-			queued = append(queued, frame)
+		select {
+		case <-c.done:
+			h.mu.Unlock()
+			return nil, false
+		default:
 		}
-		delete(c.handshakeFrames, msgID)
-	}
-	sort.Slice(queued, func(i, j int) bool {
-		if queued[i].sequence == queued[j].sequence {
-			return queued[i].msgID < queued[j].msgID
+		if c.handoffSuppress == nil {
+			c.handoffSuppress = make(map[string]struct{})
 		}
-		return queued[i].sequence < queued[j].sequence
-	})
-	for _, queuedFrame := range queued {
-		frames = append(frames, append([]byte(nil), queuedFrame.frame...))
+		drained := make(map[string]struct{}, len(drainedIDs))
+		for _, msgID := range drainedIDs {
+			drained[msgID] = struct{}{}
+			if _, buffered := c.handshakeNotices[msgID]; !buffered {
+				c.handoffSuppress[msgID] = struct{}{}
+			}
+		}
+		drainedIDs = nil
+		queued := make([]queuedV2Notification, 0, len(c.handshakeNotices))
+		for msgID, notification := range c.handshakeNotices {
+			if _, alreadyDrained := drained[msgID]; !alreadyDrained {
+				queued = append(queued, notification)
+			}
+			delete(c.handshakeNotices, msgID)
+		}
+		c.handshakeBytes = 0
+		sort.Slice(queued, func(i, j int) bool {
+			if queued[i].sequence == queued[j].sequence {
+				return queued[i].msgID < queued[j].msgID
+			}
+			return queued[i].sequence < queued[j].sequence
+		})
+		if len(queued) == 0 {
+			c.protocol = protocolV2
+			h.mu.Unlock()
+			return nil, true
+		}
+		resolve := h.resolveHandoff
+		h.mu.Unlock()
+
+		if resolve == nil {
+			c.stop()
+			return nil, false
+		}
+		resolved, err := resolve(c.deviceID, queued)
+		if err != nil {
+			c.stop()
+			return nil, false
+		}
+		if len(resolved) > 0 {
+			return resolved, false
+		}
+		// Every snapshot item was ACKed, expired, or purged. Recheck the
+		// handoff atomically before activation in case a new notice arrived
+		// while Bolt was being read.
 	}
-	if len(frames) > 0 {
-		return frames, false
-	}
-	c.protocol = protocolV2
-	return nil, true
 }
 
 func (h *ClientHub) send(deviceID string, frame []byte, accepts func(*wsClient) bool) bool {

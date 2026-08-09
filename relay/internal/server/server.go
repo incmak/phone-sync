@@ -18,6 +18,7 @@ type Server struct {
 	pairHub   *PairHub
 	clientHub *ClientHub
 	mailbox   *store.MailboxStore
+	handoffs  *durableHandoffs
 
 	// relayHelloBeforeActivate is a deterministic test seam around the
 	// drain-to-live handoff. Production constructors leave it nil.
@@ -37,15 +38,19 @@ func NewWithDependencies(b *store.Bolt, mailboxLimits store.MailboxLimits) *Serv
 	if err != nil {
 		panic(err)
 	}
+	mailbox := store.NewMailboxStore(b, mailboxLimits)
+	clientHub := NewClientHubWithMailboxLimits(mailboxLimits.MaxItems, mailboxLimits.MaxBytes)
 	s := &Server{
 		router:    chi.NewRouter(),
 		validator: v,
 		pairStore: store.NewPairStore(b),
 		jtiCache:  NewJTICache(60 * time.Second),
 		pairHub:   NewPairHub(),
-		clientHub: NewClientHub(),
-		mailbox:   store.NewMailboxStore(b, mailboxLimits),
+		clientHub: clientHub,
+		mailbox:   mailbox,
+		handoffs:  newDurableHandoffs(mailboxLimits.MaxItems, mailboxLimits.MaxBytes),
 	}
+	clientHub.SetHandoffResolver(s.resolveHandoffFrames)
 	s.routes()
 	return s
 }
