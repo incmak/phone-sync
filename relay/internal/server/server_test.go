@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/twinotify/relay/internal/store"
 )
-
 
 const validEnvelope = `{"v":1,"type":"ping","msg_id":"11111111-1111-4111-8111-111111111111","origin_device":"devA","ts":1713600000000}`
 
@@ -70,7 +70,7 @@ func TestWebSocketRoutesToPeer(t *testing.T) {
 	// Give B a short read deadline so the test fails fast on no delivery.
 	_ = b.SetReadDeadline(time.Now().Add(2 * time.Second))
 
-	msgFromA := `{"v":1,"type":"ping","msg_id":"22222222-2222-4222-8222-222222222222","origin_device":"devA-r","ts":1713600000000}`
+	msgFromA := `{"v":1,"type":"enc","msg_id":"22222222-2222-4222-8222-222222222222","origin_device":"devA-r","ts":1713600000000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}`
 	if err := a.WriteMessage(websocket.TextMessage, []byte(msgFromA)); err != nil {
 		t.Fatalf("write A: %v", err)
 	}
@@ -87,6 +87,22 @@ func TestWebSocketRoutesToPeer(t *testing.T) {
 	_, echo, err := a.ReadMessage()
 	if err == nil {
 		t.Fatalf("A received unexpected echo: %q", string(echo))
+	}
+}
+
+func TestWebSocketClosesOversizedFrame(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	c := dialWSAuthed(t, ts, srv)
+	defer c.Close()
+
+	if err := c.WriteMessage(websocket.TextMessage, bytes.Repeat([]byte("x"), maxMessageSize+1)); err != nil {
+		t.Fatalf("write oversized frame: %v", err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := c.ReadMessage(); err == nil {
+		t.Fatal("expected oversized frame to close the WebSocket")
 	}
 }
 

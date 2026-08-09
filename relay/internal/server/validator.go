@@ -99,8 +99,22 @@ func (v *Validator) ValidateRelayControl(raw []byte) error {
 	return validateJSON(v.relayControl, raw)
 }
 
-// ValidateEnvelope preserves the v1 WebSocket call site until explicit legacy/v2
-// routing is introduced. Encrypted envelopes must use ValidateEncryptedEnvelope.
+// ValidateEnvelope preserves the v1 WebSocket call site until Task 4 introduces
+// explicit legacy/v2 routing. It only admits v1 packets on that path, while
+// continuing to route v1 encrypted envelopes through their dedicated schema.
 func (v *Validator) ValidateEnvelope(raw []byte) error {
+	var header struct {
+		Version int    `json:"v"`
+		Type    string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return fmt.Errorf("parse header: %w", err)
+	}
+	if header.Version != 1 {
+		return fmt.Errorf("unsupported envelope version: %d", header.Version)
+	}
+	if header.Type == "enc" {
+		return v.ValidateEncryptedEnvelope(raw)
+	}
 	return v.ValidateLegacyPacket(raw)
 }

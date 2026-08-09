@@ -17,7 +17,7 @@ func TestValidatorV2Contracts(t *testing.T) {
 	}
 }
 
-func TestValidatorRejectsOversizedOrUnknownRelayControl(t *testing.T) {
+func TestValidatorRejectsUnknownOrMalformedRelayControl(t *testing.T) {
 	v, err := NewValidator()
 	if err != nil {
 		t.Fatal(err)
@@ -29,6 +29,28 @@ func TestValidatorRejectsOversizedOrUnknownRelayControl(t *testing.T) {
 		if err := v.ValidateRelayControl(raw); err == nil {
 			t.Fatalf("expected rejection for %s", raw)
 		}
+	}
+}
+
+func TestValidateEnvelope_RoutesV1EncryptedEnvelope(t *testing.T) {
+	v, err := NewValidator()
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	validV1EncryptedEnvelope := []byte(`{"v":1,"type":"enc","msg_id":"11111111-1111-4111-8111-111111111111","origin_device":"devA","ts":1713600000000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}`)
+	if err := v.ValidateEnvelope(validV1EncryptedEnvelope); err != nil {
+		t.Fatalf("valid v1 encrypted envelope: %v", err)
+	}
+}
+
+func TestValidateEnvelope_RejectsV2RelayControlUntilExplicitRouting(t *testing.T) {
+	v, err := NewValidator()
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	v2RelayControl := []byte(`{"v":2,"type":"relay.hello","protocols":[1,2],"app_version":"1.0.0"}`)
+	if err := v.ValidateEnvelope(v2RelayControl); err == nil {
+		t.Fatal("expected v2 relay control to be rejected on the legacy WebSocket path")
 	}
 }
 
