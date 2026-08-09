@@ -79,11 +79,17 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Writer goroutine: drains outbound channel, sends to this client's WS.
+	// Writer goroutine: exits when this registration is cancelled or when it
+	// receives a frame for the current connection.
 	go func() {
-		for frame := range outbound {
-			if err := writeMsg(websocket.TextMessage, frame); err != nil {
+		for {
+			select {
+			case <-client.done:
 				return
+			case frame := <-client.outbound:
+				if err := writeMsg(websocket.TextMessage, frame); err != nil {
+					return
+				}
 			}
 		}
 	}()

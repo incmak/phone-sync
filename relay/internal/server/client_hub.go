@@ -17,6 +17,12 @@ type ClientHub struct {
 type wsClient struct {
 	deviceID string
 	outbound chan []byte
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+func (c *wsClient) stop() {
+	c.stopOnce.Do(func() { close(c.done) })
 }
 
 func NewClientHub() *ClientHub {
@@ -24,14 +30,15 @@ func NewClientHub() *ClientHub {
 }
 
 // Register replaces any existing client for the same device (reconnect case).
-// The previous client's outbound channel is closed so its writer goroutine can exit.
+// The previous client is cancelled so its writer goroutine can exit. The outbound
+// channel remains open because concurrent producers may still hold its reference.
 func (h *ClientHub) Register(deviceID string, out chan []byte) *wsClient {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if prev, ok := h.clients[deviceID]; ok {
-		close(prev.outbound)
+		prev.stop()
 	}
-	c := &wsClient{deviceID: deviceID, outbound: out}
+	c := &wsClient{deviceID: deviceID, outbound: out, done: make(chan struct{})}
 	h.clients[deviceID] = c
 	return c
 }
@@ -45,19 +52,22 @@ func (h *ClientHub) Unregister(c *wsClient) {
 	if cur, ok := h.clients[c.deviceID]; ok && cur == c {
 		delete(h.clients, c.deviceID)
 	}
+	c.stop()
 }
 
 // Send forwards a frame to deviceID if currently connected. Returns true on delivery
 // (queued to outbound channel), false if peer is offline or its buffer is full.
 func (h *ClientHub) Send(deviceID string, frame []byte) bool {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
-	h.mu.Unlock()
 	if !ok {
 		return false
 	}
 	select {
-	case c.outbound <- frame:
+	case <-c.done:
+		return false
+	case c.outbound <- append([]byte(nil), frame...):
 		return true
 	default:
 		return false

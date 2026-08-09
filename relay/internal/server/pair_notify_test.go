@@ -332,10 +332,10 @@ func TestPairNotify_DoubleSubscribeRace(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			ch := hub.Subscribe(token, "A")
+			subscription := hub.Subscribe(token, "A")
 			// Small yield to allow interleaving
 			time.Sleep(time.Microsecond)
-			hub.Unsubscribe(token, "A", ch)
+			hub.Unsubscribe(token, "A", subscription)
 		}()
 	}
 	wg.Wait()

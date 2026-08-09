@@ -34,8 +34,8 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(256)
 	_ = conn.SetReadDeadline(time.Now().Add(pairNotifyMaxDuration))
 
-	ch := s.pairHub.Subscribe(pairToken, role)
-	defer s.pairHub.Unsubscribe(pairToken, role, ch)
+	subscription := s.pairHub.Subscribe(pairToken, role)
+	defer s.pairHub.Unsubscribe(pairToken, role, subscription)
 
 	// Reader goroutine: detect client disconnect.
 	done := make(chan struct{})
@@ -53,10 +53,9 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 	defer timer.Stop()
 
 	select {
-	case frame, ok := <-ch:
-		if !ok {
-			return
-		}
+	case <-subscription.done:
+		return
+	case frame := <-subscription.outbound:
 		_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 		_ = conn.WriteMessage(websocket.TextMessage, frame)
 		// After pushing, close normally.
