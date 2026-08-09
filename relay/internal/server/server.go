@@ -17,10 +17,18 @@ type Server struct {
 	jtiCache  *JTICache
 	pairHub   *PairHub
 	clientHub *ClientHub
+	mailbox   *store.MailboxStore
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
 func NewWithStore(b *store.Bolt) *Server {
+	return NewWithDependencies(b, store.DefaultMailboxLimits())
+}
+
+// NewWithDependencies builds a server with explicit mailbox limits. Production
+// uses NewWithStore; focused durability tests use this constructor so test-only
+// quotas and retention never leak through environment variables.
+func NewWithDependencies(b *store.Bolt, mailboxLimits store.MailboxLimits) *Server {
 	v, err := NewValidator()
 	if err != nil {
 		panic(err)
@@ -32,6 +40,7 @@ func NewWithStore(b *store.Bolt) *Server {
 		jtiCache:  NewJTICache(60 * time.Second),
 		pairHub:   NewPairHub(),
 		clientHub: NewClientHub(),
+		mailbox:   store.NewMailboxStore(b, mailboxLimits),
 	}
 	s.routes()
 	return s

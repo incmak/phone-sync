@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,7 +120,15 @@ func TestWebSocketRejectsInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if !strings.Contains(string(msg), "invalid envelope") {
-		t.Fatalf("expected error reply, got %q", string(msg))
+	var rejected struct {
+		V      int    `json:"v"`
+		Type   string `json:"type"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(msg, &rejected); err != nil {
+		t.Fatalf("decode rejection: %v", err)
+	}
+	if rejected.V != 2 || rejected.Type != "relay.rejected" || rejected.Reason != "invalid_frame" {
+		t.Fatalf("expected bounded invalid_frame rejection, got %q", string(msg))
 	}
 }

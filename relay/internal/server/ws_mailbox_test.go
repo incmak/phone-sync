@@ -1,0 +1,871 @@
+package server
+
+import (
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/twinotify/relay/internal/store"
+)
+
+type testFrame struct {
+	V        int             `json:"v"`
+	Type     string          `json:"type"`
+	MsgID    string          `json:"msg_id"`
+	Envelope json.RawMessage `json:"envelope"`
+}
+
+type testRejectedFrame struct {
+	V      int    `json:"v"`
+	Type   string `json:"type"`
+	MsgID  string `json:"msg_id"`
+	Reason string `json:"reason"`
+}
+
+type mailboxTestPair struct {
+	deviceA string
+	deviceB string
+	privA   ed25519.PrivateKey
+	privB   ed25519.PrivateKey
+}
+
+func registerMailboxTestPair(t *testing.T, srv *Server) mailboxTestPair {
+	t.Helper()
+	aPub, aPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate A key: %v", err)
+	}
+	bPub, bPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate B key: %v", err)
+	}
+	pair := mailboxTestPair{
+		deviceA: "mailbox-device-a",
+		deviceB: "mailbox-device-b",
+		privA:   aPriv,
+		privB:   bPriv,
+	}
+	if err := srv.pairStore.Confirm(store.ConfirmedPair{
+		PairID:      "mailbox-test-pair",
+		DeviceA:     pair.deviceA,
+		DeviceB:     pair.deviceB,
+		AEncPubkey:  []byte{1},
+		ASignPubkey: aPub,
+		BEncPubkey:  []byte{2},
+		BSignPubkey: bPub,
+	}); err != nil {
+		t.Fatalf("confirm mailbox test pair: %v", err)
+	}
+	return pair
+}
+
+func dialMailboxWS(t *testing.T, ts *httptest.Server, deviceID string, priv ed25519.PrivateKey) *websocket.Conn {
+	t.Helper()
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+mintJWT(t, deviceID, priv, ""))
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("dial %s: %v", deviceID, err)
+	}
+	return conn
+}
+
+func newMailboxTestServerWithLimits(t *testing.T, limits store.MailboxLimits) *Server {
+	t.Helper()
+	b, err := store.OpenBolt(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatalf("open bolt: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	return NewWithDependencies(b, limits)
+}
+
+func validMailboxEnvelope(origin, msgID string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"v":2,"type":"enc","msg_id":%q,"origin_device":%q,"created_at":1786267348000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}`, msgID, origin))
+}
+
+func validLegacyMailboxEnvelope(origin, msgID string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"v":1,"type":"enc","msg_id":%q,"origin_device":%q,"ts":1713600000000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}`, msgID, origin))
+}
+
+func maxSizeMailboxEnvelope(t *testing.T, origin, msgID string) json.RawMessage {
+	t.Helper()
+	for padding := 0; padding < 4; padding++ {
+		prefix := fmt.Sprintf(`{%s"v":2,"type":"enc","msg_id":%q,"origin_device":%q,"created_at":1786267348000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"`, strings.Repeat(" ", padding), msgID, origin)
+		remaining := maxMessageSize - len(prefix) - len(`"}`)
+		if remaining > 0 && remaining%4 == 0 {
+			envelope := make([]byte, 0, maxMessageSize)
+			envelope = append(envelope, prefix...)
+			envelope = append(envelope, strings.Repeat("A", remaining)...)
+			envelope = append(envelope, '"', '}')
+			if len(envelope) != maxMessageSize {
+				t.Fatalf("max envelope length = %d, want %d", len(envelope), maxMessageSize)
+			}
+			return envelope
+		}
+	}
+	t.Fatal("could not construct aligned maximum envelope")
+	return nil
+}
+
+func waitForMailboxProtocol(t *testing.T, srv *Server, deviceID string, want connectionProtocol) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, online := srv.clientHub.ProtocolFor(deviceID); online && got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("device %s did not select protocol %d", deviceID, want)
+}
+
+func putMailboxRecord(t *testing.T, srv *Server, recipient, sender string, envelope json.RawMessage, now time.Time) {
+	t.Helper()
+	var header encryptedEnvelopeHeader
+	if err := json.Unmarshal(envelope, &header); err != nil {
+		t.Fatalf("decode envelope header: %v", err)
+	}
+	digest := sha256.Sum256(envelope)
+	if _, err := srv.mailbox.Put(store.MailboxRecord{
+		RecipientDevice: recipient,
+		SenderDevice:    sender,
+		MsgID:           header.MsgID,
+		EnvelopeSHA256:  hex.EncodeToString(digest[:]),
+		Envelope:        envelope,
+	}, now); err != nil {
+		t.Fatalf("put mailbox record: %v", err)
+	}
+}
+
+func waitForPendingCount(t *testing.T, srv *Server, recipient string, want int) []store.MailboxRecord {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		pending, err := srv.mailbox.Pending(recipient, 100)
+		if err != nil {
+			t.Fatalf("read mailbox for %s: %v", recipient, err)
+		}
+		if len(pending) == want {
+			return pending
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mailbox for %s has %d records, want %d: %#v", recipient, len(pending), want, pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func writeMailboxFrame(t *testing.T, conn *websocket.Conn, frame any) {
+	t.Helper()
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("marshal frame: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+}
+
+func readMailboxFrame(t *testing.T, conn *websocket.Conn) testFrame {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	var frame testFrame
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("decode typed frame %q: %v", string(raw), err)
+	}
+	return frame
+}
+
+func readMailboxRejected(t *testing.T, conn *websocket.Conn) testRejectedFrame {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read rejected frame: %v", err)
+	}
+	var frame testRejectedFrame
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("decode rejected frame %q: %v", string(raw), err)
+	}
+	if frame.V != 2 || frame.Type != "relay.rejected" {
+		t.Fatalf("response = %s, want relay.rejected", raw)
+	}
+	return frame
+}
+
+func sendMailboxHello(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	writeMailboxFrame(t, conn, map[string]any{
+		"v":           2,
+		"type":        "relay.hello",
+		"protocols":   []int{2, 1},
+		"app_version": "test",
+	})
+	frame := readMailboxFrame(t, conn)
+	if frame.V != 2 || frame.Type != "relay.capabilities" {
+		t.Fatalf("hello response = %#v, want relay.capabilities", frame)
+	}
+}
+
+func TestWebSocketMailboxOfflineDelivery(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	envelope := validMailboxEnvelope(pair.deviceA, "11111111-1111-4111-8111-111111111111")
+	digest := sha256.Sum256(envelope)
+
+	a := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	sendMailboxHello(t, a)
+	writeMailboxFrame(t, a, map[string]any{
+		"v":        2,
+		"type":     "relay.put",
+		"envelope": envelope,
+	})
+	accepted := readMailboxFrame(t, a)
+	if accepted.V != 2 || accepted.Type != "relay.accepted" || accepted.MsgID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("put response = %#v, want relay.accepted", accepted)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("close sender: %v", err)
+	}
+
+	b := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	sendMailboxHello(t, b)
+	delivered := readMailboxFrame(t, b)
+	if delivered.V != 2 || delivered.Type != "relay.deliver" {
+		t.Fatalf("mailbox response = %#v, want relay.deliver", delivered)
+	}
+	if string(delivered.Envelope) != string(envelope) {
+		t.Fatalf("delivered envelope = %s, want exact bytes %s", delivered.Envelope, envelope)
+	}
+	writeMailboxFrame(t, b, map[string]any{
+		"v":               2,
+		"type":            "relay.ack",
+		"msg_id":          "11111111-1111-4111-8111-111111111111",
+		"envelope_sha256": hex.EncodeToString(digest[:]),
+	})
+	waitForPendingCount(t, srv, pair.deviceB, 0)
+	if err := b.Close(); err != nil {
+		t.Fatalf("close recipient: %v", err)
+	}
+
+	reconnected := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer reconnected.Close()
+	sendMailboxHello(t, reconnected)
+	_ = reconnected.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if _, raw, err := reconnected.ReadMessage(); err == nil {
+		t.Fatalf("acked message was redelivered: %s", raw)
+	}
+}
+
+func TestWebSocketAcceptsOnlyAfterDurablePut(t *testing.T) {
+	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 0, MaxBytes: 1024, Retention: time.Hour})
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHello(t, recipient)
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHello(t, sender)
+
+	msgID := "21111111-1111-4111-8111-111111111111"
+	writeMailboxFrame(t, sender, map[string]any{
+		"v": 2, "type": "relay.put", "envelope": validMailboxEnvelope(pair.deviceA, msgID),
+	})
+	rejected := readMailboxRejected(t, sender)
+	if rejected.MsgID != msgID || rejected.Reason != "mailbox_full" {
+		t.Fatalf("rejection = %#v, want mailbox_full for %s", rejected, msgID)
+	}
+	_ = recipient.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if _, raw, err := recipient.ReadMessage(); err == nil {
+		t.Fatalf("recipient received non-durable frame: %s", raw)
+	}
+}
+
+func TestWebSocketRedeliversAfterDisconnectBeforeAck(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	msgID := "31111111-1111-4111-8111-111111111111"
+	envelope := validMailboxEnvelope(pair.deviceA, msgID)
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	sendMailboxHello(t, sender)
+	writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": envelope})
+	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" {
+		t.Fatalf("put response = %#v, want relay.accepted", accepted)
+	}
+	_ = sender.Close()
+
+	first := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	sendMailboxHello(t, first)
+	if delivered := readMailboxFrame(t, first); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+		t.Fatalf("first delivery = %#v, want exact relay.deliver", delivered)
+	}
+	_ = first.Close()
+
+	second := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer second.Close()
+	sendMailboxHello(t, second)
+	if delivered := readMailboxFrame(t, second); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+		t.Fatalf("redelivery = %#v, want exact relay.deliver", delivered)
+	}
+}
+
+func TestWebSocketAckDigestMismatchKeepsMessage(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	msgID := "41111111-1111-4111-8111-111111111111"
+	envelope := validMailboxEnvelope(pair.deviceA, msgID)
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	sendMailboxHello(t, sender)
+	writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": envelope})
+	_ = readMailboxFrame(t, sender)
+	_ = sender.Close()
+
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	sendMailboxHello(t, recipient)
+	_ = readMailboxFrame(t, recipient)
+	writeMailboxFrame(t, recipient, map[string]any{
+		"v": 2, "type": "relay.ack", "msg_id": msgID, "envelope_sha256": strings.Repeat("0", 64),
+	})
+	rejected := readMailboxRejected(t, recipient)
+	if rejected.MsgID != msgID || rejected.Reason != "digest_mismatch" {
+		t.Fatalf("rejection = %#v, want digest_mismatch", rejected)
+	}
+	_ = recipient.Close()
+
+	reconnected := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer reconnected.Close()
+	sendMailboxHello(t, reconnected)
+	if delivered := readMailboxFrame(t, reconnected); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+		t.Fatalf("post-mismatch delivery = %#v, want exact relay.deliver", delivered)
+	}
+}
+
+func TestWebSocketMailboxFullReturnsRejectedAndKeepsFirst(t *testing.T) {
+	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 1, MaxBytes: 1 << 20, Retention: time.Hour})
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHello(t, sender)
+	firstID := "51111111-1111-4111-8111-111111111111"
+	firstEnvelope := validMailboxEnvelope(pair.deviceA, firstID)
+	writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": firstEnvelope})
+	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" || accepted.MsgID != firstID {
+		t.Fatalf("first response = %#v, want relay.accepted", accepted)
+	}
+	secondID := "52222222-2222-4222-8222-222222222222"
+	writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": validMailboxEnvelope(pair.deviceA, secondID)})
+	if rejected := readMailboxRejected(t, sender); rejected.MsgID != secondID || rejected.Reason != "mailbox_full" {
+		t.Fatalf("second response = %#v, want mailbox_full", rejected)
+	}
+
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHello(t, recipient)
+	if delivered := readMailboxFrame(t, recipient); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(firstEnvelope) {
+		t.Fatalf("retained delivery = %#v, want first envelope", delivered)
+	}
+	_ = recipient.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if _, raw, err := recipient.ReadMessage(); err == nil {
+		t.Fatalf("unexpected evicted/rejected delivery: %s", raw)
+	}
+}
+
+func TestWebSocketRejectsOriginDifferentFromJWTSubject(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHello(t, sender)
+	msgID := "61111111-1111-4111-8111-111111111111"
+	writeMailboxFrame(t, sender, map[string]any{
+		"v": 2, "type": "relay.put", "envelope": validMailboxEnvelope(pair.deviceB, msgID),
+	})
+	if rejected := readMailboxRejected(t, sender); rejected.MsgID != msgID || rejected.Reason != "invalid_frame" {
+		t.Fatalf("origin rejection = %#v, want invalid_frame", rejected)
+	}
+}
+
+func TestWebSocketRejectsMixedLegacyAndV2Frames(t *testing.T) {
+	t.Run("legacy then v2", func(t *testing.T) {
+		srv := newTestServer(t)
+		pair := registerMailboxTestPair(t, srv)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		conn := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+		defer conn.Close()
+		legacy := `{"v":1,"type":"enc","msg_id":"71111111-1111-4111-8111-111111111111","origin_device":"mailbox-device-a","ts":1713600000000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}`
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(legacy)); err != nil {
+			t.Fatalf("write legacy frame: %v", err)
+		}
+		writeMailboxFrame(t, conn, map[string]any{"v": 2, "type": "relay.hello", "protocols": []int{2, 1}, "app_version": "test"})
+		if rejected := readMailboxRejected(t, conn); rejected.Reason != "invalid_frame" {
+			t.Fatalf("mixed rejection = %#v, want invalid_frame", rejected)
+		}
+	})
+
+	t.Run("v2 then legacy", func(t *testing.T) {
+		srv := newTestServer(t)
+		pair := registerMailboxTestPair(t, srv)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		conn := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+		defer conn.Close()
+		sendMailboxHello(t, conn)
+		legacyID := "72222222-2222-4222-8222-222222222222"
+		legacy := fmt.Sprintf(`{"v":1,"type":"enc","msg_id":%q,"origin_device":%q,"ts":1713600000000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}`, legacyID, pair.deviceA)
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(legacy)); err != nil {
+			t.Fatalf("write legacy frame: %v", err)
+		}
+		if rejected := readMailboxRejected(t, conn); rejected.MsgID != legacyID || rejected.Reason != "invalid_frame" {
+			t.Fatalf("mixed rejection = %#v, want invalid_frame", rejected)
+		}
+	})
+}
+
+func TestParseRelayFrameStrictValidation(t *testing.T) {
+	validator, err := NewValidator()
+	if err != nil {
+		t.Fatalf("validator: %v", err)
+	}
+	tests := []string{
+		`{"v":2,"type":"relay.hello","protocols":[2,1],"app_version":"test","extra":true}`,
+		`{"v":2,"type":"relay.accepted","msg_id":"81111111-1111-4111-8111-111111111111","accepted_at":1}`,
+		`{"v":2,"type":"relay.unknown"}`,
+	}
+	for _, raw := range tests {
+		if _, err := parseRelayFrame(validator, []byte(raw)); err == nil {
+			t.Fatalf("parseRelayFrame accepted invalid client frame: %s", raw)
+		} else if protocolErr := asRelayProtocolError(err); protocolErr.Code != "invalid_frame" {
+			t.Fatalf("protocol error = %#v, want invalid_frame", protocolErr)
+		}
+	}
+}
+
+func TestWebSocketAckIsIdempotent(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	msgID := "82111111-1111-4111-8111-111111111111"
+	envelope := validMailboxEnvelope(pair.deviceA, msgID)
+	putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, envelope, time.Now())
+	digest := sha256.Sum256(envelope)
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHello(t, recipient)
+	_ = readMailboxFrame(t, recipient)
+	ack := map[string]any{"v": 2, "type": "relay.ack", "msg_id": msgID, "envelope_sha256": hex.EncodeToString(digest[:])}
+	writeMailboxFrame(t, recipient, ack)
+	writeMailboxFrame(t, recipient, ack)
+	if err := recipient.WriteMessage(websocket.TextMessage, []byte(`{"garbage":true}`)); err != nil {
+		t.Fatalf("write sentinel invalid frame: %v", err)
+	}
+	rejected := readMailboxRejected(t, recipient)
+	if rejected.Reason != "invalid_frame" {
+		t.Fatalf("duplicate ACK produced rejection %#v", rejected)
+	}
+}
+
+func TestWebSocketHelloSendsExpiryBeforeMailboxDelivery(t *testing.T) {
+	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 10, MaxBytes: 1 << 20, Retention: time.Hour})
+	pair := registerMailboxTestPair(t, srv)
+	expiredID := "83111111-1111-4111-8111-111111111111"
+	putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, expiredID), time.Now().Add(-2*time.Hour))
+	pendingID := "83222222-2222-4222-8222-222222222222"
+	pendingEnvelope := validMailboxEnvelope(pair.deviceB, pendingID)
+	putMailboxRecord(t, srv, pair.deviceA, pair.deviceB, pendingEnvelope, time.Now())
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHello(t, sender)
+	status := readMailboxFrame(t, sender)
+	if status.Type != "relay.expired" || status.MsgID != expiredID {
+		t.Fatalf("first post-capabilities frame = %#v, want expired status", status)
+	}
+	delivered := readMailboxFrame(t, sender)
+	if delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(pendingEnvelope) {
+		t.Fatalf("second post-capabilities frame = %#v, want mailbox delivery", delivered)
+	}
+}
+
+func TestWebSocketMailboxDrainIsBoundedTo64(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	for i := 1; i <= 65; i++ {
+		msgID := fmt.Sprintf("%08x-1111-4111-8111-111111111111", i)
+		putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, msgID), time.Now().Add(time.Duration(i)*time.Nanosecond))
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHello(t, recipient)
+	for i := 1; i <= mailboxBatchSize; i++ {
+		if frame := readMailboxFrame(t, recipient); frame.Type != "relay.deliver" {
+			t.Fatalf("drain frame %d = %#v, want relay.deliver", i, frame)
+		}
+	}
+	_ = recipient.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if _, raw, err := recipient.ReadMessage(); err == nil {
+		t.Fatalf("mailbox drain exceeded %d: %s", mailboxBatchSize, raw)
+	}
+}
+
+func TestWebSocketHashesAndDeliversExactEnvelopeBytes(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	msgID := "84111111-1111-4111-8111-111111111111"
+	envelope := json.RawMessage(`{ "v": 2, "type": "enc", "msg_id": "84111111-1111-4111-8111-111111111111", "origin_device": "mailbox-device-a", "created_at": 1786267348000, "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "ciphertext": "Y2lwaGVydGV4dA==" }`)
+	put := append([]byte(`{"v":2,"type":"relay.put","envelope":`), envelope...)
+	put = append(put, '}')
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	sendMailboxHello(t, sender)
+	if err := sender.WriteMessage(websocket.TextMessage, put); err != nil {
+		t.Fatalf("write exact-byte put: %v", err)
+	}
+	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" || accepted.MsgID != msgID {
+		t.Fatalf("put response = %#v, want relay.accepted", accepted)
+	}
+	_ = sender.Close()
+
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHello(t, recipient)
+	delivered := readMailboxFrame(t, recipient)
+	if delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+		t.Fatalf("delivered envelope bytes = %q, want %q", delivered.Envelope, envelope)
+	}
+	digest := sha256.Sum256(envelope)
+	writeMailboxFrame(t, recipient, map[string]any{"v": 2, "type": "relay.ack", "msg_id": msgID, "envelope_sha256": hex.EncodeToString(digest[:])})
+	waitForPendingCount(t, srv, pair.deviceB, 0)
+}
+
+func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
+	t.Run("live legacy peer is raw online-only", func(t *testing.T) {
+		srv := newTestServer(t)
+		pair := registerMailboxTestPair(t, srv)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		legacyPeer := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+		defer legacyPeer.Close()
+		selection := validLegacyMailboxEnvelope(pair.deviceB, "85111111-1111-4111-8111-111111111111")
+		if err := legacyPeer.WriteMessage(websocket.TextMessage, selection); err != nil {
+			t.Fatalf("select legacy protocol: %v", err)
+		}
+		waitForMailboxProtocol(t, srv, pair.deviceB, protocolLegacy)
+
+		sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+		defer sender.Close()
+		sendMailboxHello(t, sender)
+		msgID := "85222222-2222-4222-8222-222222222222"
+		envelope := validLegacyMailboxEnvelope(pair.deviceA, msgID)
+		writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": envelope})
+		if response := readMailboxFrame(t, sender); response.Type != "relay.legacy_forwarded" || response.MsgID != msgID {
+			t.Fatalf("compatibility response = %#v, want relay.legacy_forwarded", response)
+		}
+		_ = legacyPeer.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, got, err := legacyPeer.ReadMessage()
+		if err != nil {
+			t.Fatalf("read raw legacy envelope: %v", err)
+		}
+		if string(got) != string(envelope) {
+			t.Fatalf("legacy peer received %q, want exact raw envelope %q", got, envelope)
+		}
+		pending, err := srv.mailbox.Pending(pair.deviceB, 10)
+		if err != nil || len(pending) != 0 {
+			t.Fatalf("legacy online-only frame was persisted: %#v, %v", pending, err)
+		}
+	})
+
+	t.Run("known live legacy peer rejects v2 envelope", func(t *testing.T) {
+		srv := newTestServer(t)
+		pair := registerMailboxTestPair(t, srv)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		legacyPeer := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+		defer legacyPeer.Close()
+		if err := legacyPeer.WriteMessage(websocket.TextMessage, validLegacyMailboxEnvelope(pair.deviceB, "85122222-2222-4222-8222-222222222222")); err != nil {
+			t.Fatalf("select legacy protocol: %v", err)
+		}
+		waitForMailboxProtocol(t, srv, pair.deviceB, protocolLegacy)
+
+		sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+		defer sender.Close()
+		sendMailboxHello(t, sender)
+		msgID := "85133333-3333-4333-8333-333333333333"
+		writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": validMailboxEnvelope(pair.deviceA, msgID)})
+		if rejected := readMailboxRejected(t, sender); rejected.MsgID != msgID || rejected.Reason != "peer_legacy" {
+			t.Fatalf("known legacy v2 response = %#v, want peer_legacy", rejected)
+		}
+		waitForPendingCount(t, srv, pair.deviceB, 0)
+	})
+
+	t.Run("unselected peer is not reported as legacy forwarded", func(t *testing.T) {
+		srv := newTestServer(t)
+		pair := registerMailboxTestPair(t, srv)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		unselected := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+		defer unselected.Close()
+		waitForMailboxProtocol(t, srv, pair.deviceB, protocolUnknown)
+
+		sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+		defer sender.Close()
+		sendMailboxHello(t, sender)
+		msgID := "85233333-3333-4333-8333-333333333333"
+		writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": validLegacyMailboxEnvelope(pair.deviceA, msgID)})
+		if rejected := readMailboxRejected(t, sender); rejected.MsgID != msgID || rejected.Reason != "peer_legacy" {
+			t.Fatalf("unselected peer response = %#v, want peer_legacy", rejected)
+		}
+		_ = unselected.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+		if _, raw, err := unselected.ReadMessage(); err == nil {
+			t.Fatalf("unselected peer received raw v1 frame: %s", raw)
+		}
+	})
+
+	t.Run("offline legacy peer is explicitly rejected", func(t *testing.T) {
+		srv := newTestServer(t)
+		pair := registerMailboxTestPair(t, srv)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+		defer sender.Close()
+		sendMailboxHello(t, sender)
+		msgID := "85333333-3333-4333-8333-333333333333"
+		writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": validLegacyMailboxEnvelope(pair.deviceA, msgID)})
+		if rejected := readMailboxRejected(t, sender); rejected.MsgID != msgID || rejected.Reason != "peer_legacy" {
+			t.Fatalf("offline legacy response = %#v, want peer_legacy", rejected)
+		}
+		pending, err := srv.mailbox.Pending(pair.deviceB, 10)
+		if err != nil || len(pending) != 0 {
+			t.Fatalf("offline legacy frame was persisted: %#v, %v", pending, err)
+		}
+	})
+
+	t.Run("live v2 peer receives durable wrapped v1", func(t *testing.T) {
+		srv := newTestServer(t)
+		pair := registerMailboxTestPair(t, srv)
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+		recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+		defer recipient.Close()
+		sendMailboxHello(t, recipient)
+		waitForMailboxProtocol(t, srv, pair.deviceB, protocolV2)
+		sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+		defer sender.Close()
+		sendMailboxHello(t, sender)
+		msgID := "85444444-4444-4444-8444-444444444444"
+		envelope := validLegacyMailboxEnvelope(pair.deviceA, msgID)
+		writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": envelope})
+		if response := readMailboxFrame(t, sender); response.Type != "relay.accepted" || response.MsgID != msgID {
+			t.Fatalf("v2 compatibility response = %#v, want relay.accepted", response)
+		}
+		if delivered := readMailboxFrame(t, recipient); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+			t.Fatalf("v2 compatibility delivery = %#v, want wrapped v1 envelope", delivered)
+		}
+		pending, err := srv.mailbox.Pending(pair.deviceB, 10)
+		if err != nil || len(pending) != 1 || pending[0].MsgID != msgID {
+			t.Fatalf("wrapped v1 envelope not durable: %#v, %v", pending, err)
+		}
+	})
+}
+
+func TestWebSocketAcceptsOneMiBEnvelopeInsideRelayPut(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHello(t, sender)
+	msgID := "89111111-1111-4111-8111-111111111111"
+	envelope := maxSizeMailboxEnvelope(t, pair.deviceA, msgID)
+	put := append([]byte(`{"v":2,"type":"relay.put","envelope":`), envelope...)
+	put = append(put, '}')
+	if len(put) <= maxMessageSize {
+		t.Fatalf("wrapped frame length = %d, want greater than raw envelope limit", len(put))
+	}
+	if err := sender.WriteMessage(websocket.TextMessage, put); err != nil {
+		t.Fatalf("write maximum envelope: %v", err)
+	}
+	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" || accepted.MsgID != msgID {
+		t.Fatalf("maximum envelope response = %#v, want relay.accepted", accepted)
+	}
+	pending := waitForPendingCount(t, srv, pair.deviceB, 1)
+	if len(pending[0].Envelope) != maxMessageSize {
+		t.Fatalf("stored envelope length = %d, want %d", len(pending[0].Envelope), maxMessageSize)
+	}
+}
+
+func TestWebSocketClosesRelayPutEnvelopeOverOneMiB(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHello(t, sender)
+	msgID := "89222222-2222-4222-8222-222222222222"
+	boundary := maxSizeMailboxEnvelope(t, pair.deviceA, msgID)
+	oversized := make([]byte, 0, len(boundary)+4)
+	oversized = append(oversized, boundary[:len(boundary)-2]...)
+	oversized = append(oversized, "AAAA"...)
+	oversized = append(oversized, '"', '}')
+	if len(oversized) != maxMessageSize+4 {
+		t.Fatalf("oversized envelope length = %d, want %d", len(oversized), maxMessageSize+4)
+	}
+	put := append([]byte(`{"v":2,"type":"relay.put","envelope":`), oversized...)
+	put = append(put, '}')
+	if err := sender.WriteMessage(websocket.TextMessage, put); err != nil {
+		t.Fatalf("write oversized envelope: %v", err)
+	}
+	_ = sender.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, raw, err := sender.ReadMessage(); err == nil {
+		t.Fatalf("oversized envelope received response instead of close: %s", raw)
+	}
+	waitForPendingCount(t, srv, pair.deviceB, 0)
+}
+
+func TestWebSocketWriterBackpressureDoesNotDeleteMailbox(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	blocked := make(chan []byte, 1)
+	blocked <- []byte("occupied")
+	fakeRecipient := srv.clientHub.Register(pair.deviceB, blocked)
+	if !srv.clientHub.SetProtocol(fakeRecipient, protocolV2) {
+		t.Fatal("mark fake recipient v2")
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHello(t, sender)
+	msgID := "86111111-1111-4111-8111-111111111111"
+	envelope := validMailboxEnvelope(pair.deviceA, msgID)
+	writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": envelope})
+	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" || accepted.MsgID != msgID {
+		t.Fatalf("backpressured put = %#v, want relay.accepted", accepted)
+	}
+	srv.clientHub.Unregister(fakeRecipient)
+
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHello(t, recipient)
+	if delivered := readMailboxFrame(t, recipient); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+		t.Fatalf("backpressured mailbox delivery = %#v, want retained envelope", delivered)
+	}
+}
+
+func TestWebSocketRejectsPutBeforeHello(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	msgID := "87111111-1111-4111-8111-111111111111"
+	writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": validMailboxEnvelope(pair.deviceA, msgID)})
+	if rejected := readMailboxRejected(t, sender); rejected.MsgID != msgID || rejected.Reason != "invalid_frame" {
+		t.Fatalf("pre-hello response = %#v, want invalid_frame", rejected)
+	}
+	pending, err := srv.mailbox.Pending(pair.deviceB, 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pre-hello put reached mailbox: %#v, %v", pending, err)
+	}
+}
+
+func TestWebSocketMapsIDConflictAndNotRecipient(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHello(t, sender)
+	msgID := "88111111-1111-4111-8111-111111111111"
+	first := validMailboxEnvelope(pair.deviceA, msgID)
+	writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": first})
+	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" {
+		t.Fatalf("first put = %#v, want accepted", accepted)
+	}
+	conflicting := json.RawMessage(strings.Replace(string(first), "Y2lwaGVydGV4dA==", "ZGlmZmVyZW50", 1))
+	writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": conflicting})
+	if rejected := readMailboxRejected(t, sender); rejected.MsgID != msgID || rejected.Reason != "id_conflict" {
+		t.Fatalf("conflict response = %#v, want id_conflict", rejected)
+	}
+
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHello(t, recipient)
+	_ = readMailboxFrame(t, recipient)
+	unknownID := "88222222-2222-4222-8222-222222222222"
+	writeMailboxFrame(t, recipient, map[string]any{
+		"v": 2, "type": "relay.ack", "msg_id": unknownID, "envelope_sha256": strings.Repeat("0", 64),
+	})
+	if rejected := readMailboxRejected(t, recipient); rejected.MsgID != unknownID || rejected.Reason != "not_recipient" {
+		t.Fatalf("unknown ACK response = %#v, want not_recipient", rejected)
+	}
+}
+
+func TestWebSocketReplacementClosesOldConnection(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	old := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer old.Close()
+	replacement := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer replacement.Close()
+
+	_ = old.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, _, err := old.ReadMessage(); err == nil {
+		t.Fatal("replaced connection remained readable")
+	} else {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatalf("replaced connection remained open until timeout: %v", err)
+		}
+	}
+}
