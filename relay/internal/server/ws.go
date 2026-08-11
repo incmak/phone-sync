@@ -253,21 +253,21 @@ func (s *Server) handleRelayHello(
 	if _, err := s.mailbox.Expire(now); err != nil {
 		return err
 	}
-	statuses, err := s.mailbox.ExpiryStatuses(deviceID, peerID, mailboxBatchSize)
+	statuses, err := s.mailbox.ExpiryStatuses(deviceID, peerID, mailboxBatchSize, now)
 	if err != nil {
 		return err
 	}
-	reportedIDs := make([]string, 0, len(statuses))
 	for _, status := range statuses {
 		if err := writeFrame(RelayExpired{
 			V: 2, Type: "relay.expired", MsgID: status.MsgID, ExpiredAt: status.OccurredAt,
 		}); err != nil {
 			return err
 		}
-		reportedIDs = append(reportedIDs, status.MsgID)
 	}
-	if err := s.mailbox.MarkExpiryStatusesReported(deviceID, peerID, reportedIDs); err != nil {
-		return err
+	if len(statuses) > 0 {
+		if err := s.mailbox.AdvanceExpiryStatusCursor(deviceID, peerID, statuses[len(statuses)-1].MsgID); err != nil {
+			return err
+		}
 	}
 
 	pending, err := s.mailbox.Pending(deviceID, mailboxBatchSize)

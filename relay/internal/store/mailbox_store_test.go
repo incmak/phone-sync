@@ -495,38 +495,199 @@ func TestMailboxStatusIndexesMigrateLegacyTombstonesAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.Close()
 	s := NewMailboxStore(b, DefaultMailboxLimits())
 	if _, err := s.Expire(time.UnixMilli(4000)); err != nil {
 		t.Fatalf("migrate legacy indexes: %v", err)
 	}
 
-	page, err := s.ExpiryStatuses(expired.SenderDevice, expired.RecipientDevice, 1)
+	page, err := s.ExpiryStatuses(expired.SenderDevice, expired.RecipientDevice, 1, time.UnixMilli(4000))
 	if err != nil || len(page) != 1 || page[0] != expired {
 		t.Fatalf("migrated expiry page = %#v, %v", page, err)
 	}
-	putCorruptUnrelatedStatus(t, b)
 	rec := testMailboxRecord(acked.MsgID, "a")
 	result, err := s.Put(rec, time.UnixMilli(5000))
 	if err != nil {
-		t.Fatalf("reopened indexed terminal put consulted unrelated status: %v", err)
+		t.Fatalf("reopened indexed terminal put: %v", err)
 	}
 	if !result.Duplicate || !result.Terminal || result.AcceptedAt != acked.AcceptedAt {
 		t.Fatalf("reopened terminal duplicate = %#v", result)
 	}
-	if err := s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, time.UnixMilli(5001)); err != nil {
-		t.Fatalf("reopened indexed duplicate ack: %v", err)
-	}
 
-	if err := s.MarkExpiryStatusesReported(expired.SenderDevice, expired.RecipientDevice, []string{expired.MsgID}); err != nil {
+	if err := s.AdvanceExpiryStatusCursor(expired.SenderDevice, expired.RecipientDevice, expired.MsgID); err != nil {
 		t.Fatal(err)
 	}
-	if page, err := s.ExpiryStatuses(expired.SenderDevice, expired.RecipientDevice, 1); err != nil || len(page) != 0 {
-		t.Fatalf("reported expiry was not drained: %#v, %v", page, err)
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err = OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	s = NewMailboxStore(b, DefaultMailboxLimits())
+	if page, err := s.ExpiryStatuses(expired.SenderDevice, expired.RecipientDevice, 1, time.UnixMilli(4000)); err != nil || len(page) != 1 || page[0] != expired {
+		t.Fatalf("rotated expiry after reopen = %#v, %v; want retry", page, err)
+	}
+	if entries := mailboxBucketEntryCount(t, b, bucketMailboxExpiryCursor); entries != 1 {
+		t.Fatalf("persistent pair cursor entries = %d, want 1", entries)
 	}
 	raw, err := b.Get(bucketMailboxStatus, string(statusKey(expired.SenderDevice, expired.MsgID)))
 	if err != nil || raw == nil {
-		t.Fatalf("reporting deleted canonical 24h tombstone: %q, %v", raw, err)
+		t.Fatalf("rotation deleted canonical 24h tombstone: %q, %v", raw, err)
+	}
+	if err := s.ExpireStatuses(time.UnixMilli(expired.ExpiresAt)); err != nil {
+		t.Fatal(err)
+	}
+	if page, err := s.ExpiryStatuses(expired.SenderDevice, expired.RecipientDevice, 1, time.UnixMilli(expired.ExpiresAt)); err != nil || len(page) != 0 {
+		t.Fatalf("physically expired status was retried: %#v, %v", page, err)
+	}
+	if entries := mailboxBucketEntryCount(t, b, bucketMailboxExpiryCursor); entries != 0 {
+		t.Fatalf("physical expiry left %d pair cursors", entries)
+	}
+}
+
+func TestMailboxStatusIndexUpgradeRestoresRetiredExpiryRetry(t *testing.T) {
+	b := openTestBolt(t)
+	s := NewMailboxStore(b, DefaultMailboxLimits())
+	status := DeliveryStatus{
+		SenderDevice: "dev-a", RecipientDevice: "dev-b",
+		MsgID: "11555555-5555-4555-8555-555555555555", Status: "expired",
+		OccurredAt: 3000, ExpiresAt: time.UnixMilli(3000).Add(statusRetention).UnixMilli(),
+		EnvelopeSHA256: strings.Repeat("c", 64), AcceptedAt: 1000, MailboxExpiresAt: 2000,
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		statuses, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxStatus))
+		if err != nil {
+			return err
+		}
+		if err := statuses.Put(statusKey(status.SenderDevice, status.MsgID), raw); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxExpiryPending)); err != nil {
+			return err
+		}
+		meta, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxMeta))
+		if err != nil {
+			return err
+		}
+		return meta.Put([]byte("status_indexes_v1"), []byte{1})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Expire(time.UnixMilli(4000)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ExpiryStatuses(status.SenderDevice, status.RecipientDevice, 1, time.UnixMilli(4000))
+	if err != nil || len(page) != 1 || page[0] != status {
+		t.Fatalf("v1-retired expiry after index upgrade = %#v, %v; want retry", page, err)
+	}
+}
+
+func TestMailboxExpiryStatusCursorIsPairScoped(t *testing.T) {
+	b := openTestBolt(t)
+	s := NewMailboxStore(b, MailboxLimits{MaxItems: 10, MaxBytes: 1 << 20, Retention: time.Hour})
+	now := time.UnixMilli(10_000_000)
+	records := []MailboxRecord{
+		testMailboxRecord("11666666-6666-4666-8666-666666666661", "a"),
+		testMailboxRecord("11666666-6666-4666-8666-666666666662", "b"),
+		testMailboxRecord("11777777-7777-4777-8777-777777777771", "c"),
+		testMailboxRecord("11777777-7777-4777-8777-777777777772", "d"),
+	}
+	for i := 2; i < len(records); i++ {
+		records[i].SenderDevice = "dev-c"
+		records[i].RecipientDevice = "dev-d"
+	}
+	for _, rec := range records {
+		if _, err := s.Put(rec, now.Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if expired, err := s.Expire(now); err != nil || len(expired) != len(records) {
+		t.Fatalf("expire pair-scoped statuses = %#v, %v", expired, err)
+	}
+	pageAB, err := s.ExpiryStatuses("dev-a", "dev-b", 1, now)
+	if err != nil || len(pageAB) != 1 || pageAB[0].MsgID != records[0].MsgID {
+		t.Fatalf("first AB page = %#v, %v", pageAB, err)
+	}
+	pageCD, err := s.ExpiryStatuses("dev-c", "dev-d", 1, now)
+	if err != nil || len(pageCD) != 1 || pageCD[0].MsgID != records[2].MsgID {
+		t.Fatalf("first CD page = %#v, %v", pageCD, err)
+	}
+	if err := s.AdvanceExpiryStatusCursor("dev-a", "dev-b", pageAB[0].MsgID); err != nil {
+		t.Fatal(err)
+	}
+	churn := testMailboxRecord("11888888-8888-4888-8888-888888888888", "e")
+	if _, err := s.Put(churn, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Ack(churn.RecipientDevice, churn.MsgID, churn.EnvelopeSHA256, now.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	pageAB, err = s.ExpiryStatuses("dev-a", "dev-b", 1, now)
+	if err != nil || len(pageAB) != 1 || pageAB[0].MsgID != records[1].MsgID {
+		t.Fatalf("ACK churn reset rotated AB page = %#v, %v", pageAB, err)
+	}
+	pageCD, err = s.ExpiryStatuses("dev-c", "dev-d", 1, now)
+	if err != nil || len(pageCD) != 1 || pageCD[0].MsgID != records[2].MsgID {
+		t.Fatalf("AB cursor changed CD page = %#v, %v", pageCD, err)
+	}
+	if entries := mailboxBucketEntryCount(t, b, bucketMailboxExpiryCursor); entries != 1 {
+		t.Fatalf("bounded cursor entries = %d, want one active pair", entries)
+	}
+}
+
+func TestMailboxExpiryStatusRotationOmitsTombstoneAtLogicalExpiry(t *testing.T) {
+	b := openTestBolt(t)
+	s := NewMailboxStore(b, MailboxLimits{MaxItems: 1, MaxBytes: 1 << 20, Retention: time.Hour})
+	acceptedAt := time.UnixMilli(1000)
+	rec := testMailboxRecord("11999999-9999-4999-8999-999999999999", "f")
+	if _, err := s.Put(rec, acceptedAt); err != nil {
+		t.Fatal(err)
+	}
+	terminalAt := acceptedAt.Add(time.Hour)
+	if expired, err := s.Expire(terminalAt); err != nil || len(expired) != 1 {
+		t.Fatalf("expire logical-expiry item = %#v, %v", expired, err)
+	}
+	page, err := s.ExpiryStatuses(rec.SenderDevice, rec.RecipientDevice, 1, terminalAt.Add(statusRetention))
+	if err != nil || len(page) != 0 {
+		t.Fatalf("logically expired tombstone rotated = %#v, %v", page, err)
+	}
+}
+
+func TestMailboxExpiryStatusRotationBoundsStaleIndexProcessing(t *testing.T) {
+	const pageSize = 64
+	b := openTestBolt(t)
+	s := NewMailboxStore(b, MailboxLimits{MaxItems: pageSize + 1, MaxBytes: 1 << 20, Retention: time.Hour})
+	now := time.UnixMilli(200_000_000)
+	oldAcceptedAt := now.Add(-26 * time.Hour)
+	for i := 0; i < pageSize; i++ {
+		rec := testMailboxRecord(fmt.Sprintf("12000000-0000-4000-8000-%012x", i), "a")
+		if _, err := s.Put(rec, oldAcceptedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if expired, err := s.Expire(oldAcceptedAt.Add(time.Hour)); err != nil || len(expired) != pageSize {
+		t.Fatalf("expire stale index page = %d, %v", len(expired), err)
+	}
+	live := testMailboxRecord("12111111-1111-4111-8111-111111111111", "b")
+	if _, err := s.Put(live, now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if expired, err := s.Expire(now); err != nil || len(expired) != 1 {
+		t.Fatalf("expire live rotation item = %#v, %v", expired, err)
+	}
+
+	first, err := s.ExpiryStatuses(live.SenderDevice, live.RecipientDevice, pageSize, now)
+	if err != nil || len(first) != 0 {
+		t.Fatalf("first bounded scan crossed stale page: %#v, %v", first, err)
+	}
+	second, err := s.ExpiryStatuses(live.SenderDevice, live.RecipientDevice, pageSize, now)
+	if err != nil || len(second) != 1 || second[0].MsgID != live.MsgID {
+		t.Fatalf("live status starved behind stale page: %#v, %v", second, err)
 	}
 }
 
@@ -650,6 +811,13 @@ func TestMailboxPurgePairDeletesBothDirections(t *testing.T) {
 	if expired, err := s.Expire(time.UnixMilli(1002).Add(time.Hour)); err != nil || len(expired) != 1 {
 		t.Fatalf("expire reverse before purge = %#v, %v", expired, err)
 	}
+	page, err := s.ExpiryStatuses(reverse.SenderDevice, reverse.RecipientDevice, 1, time.UnixMilli(1002).Add(time.Hour))
+	if err != nil || len(page) != 1 {
+		t.Fatalf("expiry page before purge = %#v, %v", page, err)
+	}
+	if err := s.AdvanceExpiryStatusCursor(reverse.SenderDevice, reverse.RecipientDevice, reverse.MsgID); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.PurgePair("dev-a", "dev-b"); err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +833,7 @@ func TestMailboxPurgePairDeletesBothDirections(t *testing.T) {
 			t.Fatalf("statuses for %s = %#v, %v", sender, statuses, err)
 		}
 	}
-	for _, bucketName := range []string{bucketMailboxStatusByRecipient, bucketMailboxExpiryPending} {
+	for _, bucketName := range []string{bucketMailboxStatusByRecipient, bucketMailboxExpiryPending, bucketMailboxExpiryCursor} {
 		if entries := mailboxBucketEntryCount(t, b, bucketName); entries != 0 {
 			t.Fatalf("purge left %d entries in %s", entries, bucketName)
 		}
@@ -772,7 +940,8 @@ func snapshotMailboxBuckets(t *testing.T, b *Bolt) map[string]map[string]string 
 	if err := b.View(func(tx *bbolt.Tx) error {
 		for _, name := range []string{
 			bucketMailboxItems, bucketMailboxOrder, bucketMailboxStats, bucketMailboxStatus,
-			bucketMailboxStatusByRecipient, bucketMailboxExpiryPending, bucketMailboxMeta, bucketMailboxSequence,
+			bucketMailboxStatusByRecipient, bucketMailboxExpiryPending, bucketMailboxExpiryCursor,
+			bucketMailboxMeta, bucketMailboxSequence,
 		} {
 			entries := make(map[string]string)
 			bucket := tx.Bucket([]byte(name))

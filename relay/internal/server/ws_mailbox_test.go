@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -660,36 +661,146 @@ func TestWebSocketHelloPagesExpiryStatusesUnderTerminalChurn(t *testing.T) {
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	readPage := func() int {
+	readPage := func() []string {
 		conn := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
 		sendMailboxHello(t, conn)
-		count := 0
+		msgIDs := []string{}
 		for {
 			_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
 			_, raw, err := conn.ReadMessage()
 			if err != nil {
 				_ = conn.Close()
-				return count
+				return msgIDs
 			}
 			var frame testFrame
 			if err := json.Unmarshal(raw, &frame); err != nil || frame.Type != "relay.expired" {
 				t.Fatalf("hello status frame = %s, %v; want relay.expired", raw, err)
 			}
-			count++
+			msgIDs = append(msgIDs, frame.MsgID)
 		}
 	}
-	if got := readPage(); got != statusPage {
-		t.Fatalf("first hello expiry page = %d, want %d", got, statusPage)
+	expiryID := func(i int) string {
+		return fmt.Sprintf("93%06x-1111-4111-8111-%012x", i, i)
 	}
-	if got := readPage(); got != expiredCount-statusPage {
-		t.Fatalf("second hello expiry page = %d, want %d", got, expiredCount-statusPage)
+	wantPage := func(start int) []string {
+		want := make([]string, 0, statusPage)
+		for i := 0; i < statusPage; i++ {
+			want = append(want, expiryID((start+i)%expiredCount))
+		}
+		return want
 	}
-	if got := readPage(); got != 0 {
-		t.Fatalf("drained hello expiry page = %d, want 0", got)
+	for pageNumber, tc := range []struct {
+		start int
+		want  []string
+	}{
+		{start: 0, want: wantPage(0)},
+		{start: 64, want: wantPage(64)},
+		{start: 58, want: wantPage(58)},
+	} {
+		if got := readPage(); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("hello expiry rotation page %d from %d = %#v, want %#v", pageNumber+1, tc.start, got, tc.want)
+		}
 	}
 	statuses, err = srv.mailbox.Statuses(pair.deviceA, time.UnixMilli(0))
 	if err != nil || len(statuses) != ackCount+expiredCount {
 		t.Fatalf("paging changed 24h tombstones: %d, %v", len(statuses), err)
+	}
+}
+
+func TestWebSocketHelloRetriesExpiryAfterSuccessfulWriteAndClientDeath(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 2, MaxBytes: 1 << 20, Retention: time.Hour})
+	pair := registerMailboxTestPair(t, srv)
+	msgID := "93888888-8888-4888-8888-888888888888"
+	putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, msgID), now.Add(-2*time.Hour))
+	if expired, err := srv.mailbox.Expire(now); err != nil || len(expired) != 1 {
+		t.Fatalf("expire retry item = %#v, %v", expired, err)
+	}
+
+	helloCompleted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var first sync.Once
+	srv.relayHelloBeforeActivate = func(deviceID string) {
+		if deviceID == pair.deviceA {
+			first.Do(func() {
+				close(helloCompleted)
+				<-releaseFirst
+			})
+		}
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	deadClient := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	writeMailboxFrame(t, deadClient, map[string]any{
+		"v": 2, "type": "relay.hello", "protocols": []int{2, 1}, "app_version": "test",
+	})
+	select {
+	case <-helloCompleted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first hello did not finish server-side status writes")
+	}
+	_ = deadClient.Close()
+	close(releaseFirst)
+
+	reconnected := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer reconnected.Close()
+	sendMailboxHello(t, reconnected)
+	_ = reconnected.SetReadDeadline(time.Now().Add(750 * time.Millisecond))
+	_, raw, err := reconnected.ReadMessage()
+	if err != nil {
+		t.Fatalf("expiry lost after successful write and client death: %v", err)
+	}
+	var retried testFrame
+	if err := json.Unmarshal(raw, &retried); err != nil || retried.Type != "relay.expired" || retried.MsgID != msgID {
+		t.Fatalf("retried expiry = %s, %v; want %s", raw, err, msgID)
+	}
+}
+
+func TestWebSocketHelloPartialExpiryWriteDoesNotAdvanceCursor(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 3, MaxBytes: 1 << 20, Retention: time.Hour})
+	pair := registerMailboxTestPair(t, srv)
+	wantIDs := []string{
+		"93999999-9999-4999-8999-999999999991",
+		"93999999-9999-4999-8999-999999999992",
+		"93999999-9999-4999-8999-999999999993",
+	}
+	for _, msgID := range wantIDs {
+		putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, msgID), now.Add(-2*time.Hour))
+	}
+	if expired, err := srv.mailbox.Expire(now); err != nil || len(expired) != len(wantIDs) {
+		t.Fatalf("expire partial-write items = %#v, %v", expired, err)
+	}
+
+	client := srv.clientHub.Register(pair.deviceA, make(chan []byte, mailboxBatchSize))
+	defer srv.clientHub.Unregister(client)
+	if !srv.clientHub.SetProtocolAndCapabilities(client, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set handshake protocol")
+	}
+	stopWrite := errors.New("stop after one expiry frame")
+	writes := 0
+	err := srv.handleRelayHello(pair.deviceA, client, RelayHello{
+		V: 2, Type: "relay.hello", Protocols: []int{2, 1}, AppVersion: "test",
+	}, func(any) error {
+		writes++
+		if writes == 3 { // capabilities and one expiry succeeded; second expiry fails.
+			return stopWrite
+		}
+		return nil
+	}, func([]string) {})
+	if !errors.Is(err, stopWrite) {
+		t.Fatalf("partial hello error = %v, want injected write failure", err)
+	}
+	page, err := srv.mailbox.ExpiryStatuses(pair.deviceA, pair.deviceB, mailboxBatchSize, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotIDs := make([]string, 0, len(page))
+	for _, status := range page {
+		gotIDs = append(gotIDs, status.MsgID)
+	}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("partial write advanced past unseen statuses: %#v, want %#v", gotIDs, wantIDs)
 	}
 }
 

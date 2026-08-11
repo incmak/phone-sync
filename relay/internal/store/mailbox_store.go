@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
@@ -27,12 +28,13 @@ const (
 	bucketMailboxStatus            = "mailbox_status"
 	bucketMailboxStatusByRecipient = "mailbox_status_by_recipient"
 	bucketMailboxExpiryPending     = "mailbox_expiry_pending"
+	bucketMailboxExpiryCursor      = "mailbox_expiry_cursor"
 	bucketMailboxMeta              = "mailbox_meta"
 	bucketMailboxSequence          = "mailbox_sequence"
 	statusRetention                = 24 * time.Hour
 )
 
-var statusIndexesVersionKey = []byte("status_indexes_v1")
+var statusIndexesVersionKey = []byte("status_indexes_v2")
 
 type MailboxLimits struct {
 	MaxItems  int
@@ -108,7 +110,7 @@ func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) 
 		if err != nil {
 			return err
 		}
-		statusesByRecipient, expiryPending, err := mailboxStatusIndexes(tx, statuses)
+		statusesByRecipient, expiryPending, expiryCursors, err := mailboxStatusIndexes(tx, statuses)
 		if err != nil {
 			return err
 		}
@@ -143,6 +145,9 @@ func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) 
 					return err
 				}
 				if err := expiryPending.Delete(expiryStatusKey(status.SenderDevice, status.RecipientDevice, status.MsgID)); err != nil {
+					return err
+				}
+				if err := deleteExpiryCursorIfMatches(expiryCursors, status.SenderDevice, status.RecipientDevice, status.MsgID); err != nil {
 					return err
 				}
 			} else {
@@ -291,7 +296,7 @@ func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error
 		if err != nil {
 			return err
 		}
-		statusesByRecipient, expiryPending, err := mailboxStatusIndexes(tx, statuses)
+		statusesByRecipient, expiryPending, _, err := mailboxStatusIndexes(tx, statuses)
 		if err != nil {
 			return err
 		}
@@ -345,7 +350,10 @@ func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error
 		if err := statusesByRecipient.Put(itemKey(rec.RecipientDevice, rec.MsgID), canonicalKey); err != nil {
 			return err
 		}
-		return expiryPending.Delete(expiryStatusKey(rec.SenderDevice, rec.RecipientDevice, rec.MsgID))
+		if err := expiryPending.Delete(expiryStatusKey(rec.SenderDevice, rec.RecipientDevice, rec.MsgID)); err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
@@ -357,7 +365,7 @@ func (s *MailboxStore) Expire(now time.Time) ([]ExpiredRecord, error) {
 		if err != nil {
 			return err
 		}
-		statusesByRecipient, expiryPending, err := mailboxStatusIndexes(tx, statuses)
+		statusesByRecipient, expiryPending, _, err := mailboxStatusIndexes(tx, statuses)
 		if err != nil {
 			return err
 		}
@@ -427,7 +435,7 @@ func (s *MailboxStore) ExpireStatuses(now time.Time) error {
 		if statuses == nil {
 			return nil
 		}
-		statusesByRecipient, expiryPending, err := mailboxStatusIndexes(tx, statuses)
+		statusesByRecipient, expiryPending, expiryCursors, err := mailboxStatusIndexes(tx, statuses)
 		if err != nil {
 			return err
 		}
@@ -446,6 +454,9 @@ func (s *MailboxStore) ExpireStatuses(now time.Time) error {
 					return err
 				}
 				if err := expiryPending.Delete(expiryStatusKey(status.SenderDevice, status.RecipientDevice, status.MsgID)); err != nil {
+					return err
+				}
+				if err := deleteExpiryCursorIfMatches(expiryCursors, status.SenderDevice, status.RecipientDevice, status.MsgID); err != nil {
 					return err
 				}
 			}
@@ -481,10 +492,11 @@ func (s *MailboxStore) Statuses(sender string, since time.Time) ([]DeliveryStatu
 	return statuses, err
 }
 
-// ExpiryStatuses returns at most limit unreported expiry statuses for one
-// sender/recipient pair in deterministic message-id order. ACK tombstones are
-// not visited and canonical tombstone records remain unchanged.
-func (s *MailboxStore) ExpiryStatuses(sender, recipient string, limit int) ([]DeliveryStatus, error) {
+// ExpiryStatuses inspects at most limit expiry-index entries for one
+// sender/recipient pair in rotating message-id order. It returns only live
+// tombstones and removes logically expired entries from canonical and index
+// state in the same bounded transaction. ACK tombstones are never visited.
+func (s *MailboxStore) ExpiryStatuses(sender, recipient string, limit int, now time.Time) ([]DeliveryStatus, error) {
 	for _, device := range []string{sender, recipient} {
 		if device == "" || strings.ContainsRune(device, '\x00') {
 			return nil, errors.New("invalid device")
@@ -494,15 +506,45 @@ func (s *MailboxStore) ExpiryStatuses(sender, recipient string, limit int) ([]De
 		return []DeliveryStatus{}, nil
 	}
 	result := make([]DeliveryStatus, 0, limit)
-	err := s.bolt.View(func(tx *bbolt.Tx) error {
+	err := s.bolt.Update(func(tx *bbolt.Tx) error {
 		statuses := tx.Bucket([]byte(bucketMailboxStatus))
-		pending := tx.Bucket([]byte(bucketMailboxExpiryPending))
-		if statuses == nil || pending == nil {
+		if statuses == nil {
 			return nil
+		}
+		statusesByRecipient, pending, cursors, err := mailboxStatusIndexes(tx, statuses)
+		if err != nil {
+			return err
 		}
 		prefix := expiryStatusPrefix(sender, recipient)
 		cursor := pending.Cursor()
-		for key, canonicalKey := cursor.Seek(prefix); key != nil && len(result) < limit && strings.HasPrefix(string(key), string(prefix)); key, canonicalKey = cursor.Next() {
+		var key, canonicalKey []byte
+		if msgID := cursors.Get(expiryCursorKey(sender, recipient)); msgID != nil {
+			lastKey := expiryStatusKey(sender, recipient, string(msgID))
+			key, canonicalKey = cursor.Seek(lastKey)
+			if bytes.Equal(key, lastKey) {
+				key, canonicalKey = cursor.Next()
+			}
+		}
+		if key == nil {
+			key, canonicalKey = cursor.Seek(prefix)
+		}
+		seen := make(map[string]struct{}, limit)
+		wrapped := false
+		for len(result) < limit && len(seen) < limit {
+			if key == nil || !bytes.HasPrefix(key, prefix) {
+				if wrapped {
+					break
+				}
+				key, canonicalKey = cursor.Seek(prefix)
+				wrapped = true
+				continue
+			}
+			keyString := string(key)
+			if _, exists := seen[keyString]; exists {
+				break
+			}
+			seen[keyString] = struct{}{}
+			nextKey, nextCanonicalKey := cursor.Next()
 			raw := statuses.Get(canonicalKey)
 			if raw == nil {
 				return errors.New("pending expiry index points to missing status")
@@ -514,37 +556,55 @@ func (s *MailboxStore) ExpiryStatuses(sender, recipient string, limit int) ([]De
 			if status.Status != "expired" || status.SenderDevice != sender || status.RecipientDevice != recipient {
 				return errors.New("pending expiry index identity mismatch")
 			}
-			result = append(result, status)
+			if status.ExpiresAt <= now.UnixMilli() {
+				if err := statuses.Delete(canonicalKey); err != nil {
+					return err
+				}
+				if err := statusesByRecipient.Delete(itemKey(status.RecipientDevice, status.MsgID)); err != nil {
+					return err
+				}
+				if err := pending.Delete(key); err != nil {
+					return err
+				}
+				if err := deleteExpiryCursorIfMatches(cursors, status.SenderDevice, status.RecipientDevice, status.MsgID); err != nil {
+					return err
+				}
+			} else {
+				result = append(result, status)
+			}
+			key, canonicalKey = nextKey, nextCanonicalKey
 		}
 		return nil
 	})
 	return result, err
 }
 
-// MarkExpiryStatusesReported advances the bounded hello drain without deleting
-// or modifying the canonical 24-hour tombstones.
-func (s *MailboxStore) MarkExpiryStatusesReported(sender, recipient string, msgIDs []string) error {
+// AdvanceExpiryStatusCursor rotates the bounded hello retry cursor without
+// deleting retryability or modifying canonical 24-hour tombstones. The caller
+// must invoke it only after the full returned page was written successfully.
+func (s *MailboxStore) AdvanceExpiryStatusCursor(sender, recipient, msgID string) error {
 	for _, device := range []string{sender, recipient} {
 		if device == "" || strings.ContainsRune(device, '\x00') {
 			return errors.New("invalid device")
 		}
 	}
-	for _, msgID := range msgIDs {
-		if err := validateMailboxKey(recipient, msgID); err != nil {
-			return err
-		}
+	if err := validateMailboxKey(recipient, msgID); err != nil {
+		return err
 	}
 	return s.bolt.Update(func(tx *bbolt.Tx) error {
 		pending := tx.Bucket([]byte(bucketMailboxExpiryPending))
 		if pending == nil {
 			return nil
 		}
-		for _, msgID := range msgIDs {
-			if err := pending.Delete(expiryStatusKey(sender, recipient, msgID)); err != nil {
-				return err
-			}
+		cursorKey := expiryCursorKey(sender, recipient)
+		cursors, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxExpiryCursor))
+		if err != nil {
+			return err
 		}
-		return nil
+		if pending.Get(expiryStatusKey(sender, recipient, msgID)) == nil {
+			return cursors.Delete(cursorKey)
+		}
+		return cursors.Put(cursorKey, []byte(msgID))
 	})
 }
 
@@ -568,10 +628,11 @@ func purgePairTx(tx *bbolt.Tx, deviceA, deviceB string) error {
 	stats := tx.Bucket([]byte(bucketMailboxStats))
 	statuses := tx.Bucket([]byte(bucketMailboxStatus))
 	sequences := tx.Bucket([]byte(bucketMailboxSequence))
+	expiryCursors := tx.Bucket([]byte(bucketMailboxExpiryCursor))
 	var statusesByRecipient, expiryPending *bbolt.Bucket
 	if statuses != nil {
 		var err error
-		statusesByRecipient, expiryPending, err = mailboxStatusIndexes(tx, statuses)
+		statusesByRecipient, expiryPending, expiryCursors, err = mailboxStatusIndexes(tx, statuses)
 		if err != nil {
 			return err
 		}
@@ -647,6 +708,14 @@ func purgePairTx(tx *bbolt.Tx, deviceA, deviceB string) error {
 				}
 				key, raw = nextKey, nextRaw
 			}
+		}
+	}
+	if expiryCursors != nil {
+		if err := expiryCursors.Delete(expiryCursorKey(deviceA, deviceB)); err != nil {
+			return err
+		}
+		if err := expiryCursors.Delete(expiryCursorKey(deviceB, deviceA)); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -741,40 +810,43 @@ func terminalStatusForPut(statuses, statusesByRecipient *bbolt.Bucket, recipient
 	return status, append([]byte(nil), canonicalKey...), true, nil
 }
 
-func mailboxStatusIndexes(tx *bbolt.Tx, statuses *bbolt.Bucket) (statusesByRecipient, expiryPending *bbolt.Bucket, err error) {
+func mailboxStatusIndexes(tx *bbolt.Tx, statuses *bbolt.Bucket) (statusesByRecipient, expiryPending, expiryCursors *bbolt.Bucket, err error) {
 	if statusesByRecipient, err = tx.CreateBucketIfNotExists([]byte(bucketMailboxStatusByRecipient)); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if expiryPending, err = tx.CreateBucketIfNotExists([]byte(bucketMailboxExpiryPending)); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	if expiryCursors, err = tx.CreateBucketIfNotExists([]byte(bucketMailboxExpiryCursor)); err != nil {
+		return nil, nil, nil, err
 	}
 	meta, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxMeta))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if meta.Get(statusIndexesVersionKey) != nil {
-		return statusesByRecipient, expiryPending, nil
+		return statusesByRecipient, expiryPending, expiryCursors, nil
 	}
 	cursor := statuses.Cursor()
 	for key, raw := cursor.First(); key != nil; key, raw = cursor.Next() {
 		var status DeliveryStatus
 		if err := json.Unmarshal(raw, &status); err != nil {
-			return nil, nil, fmt.Errorf("migrate delivery status index: %w", err)
+			return nil, nil, nil, fmt.Errorf("migrate delivery status index: %w", err)
 		}
 		canonicalKey := append([]byte(nil), key...)
 		if err := statusesByRecipient.Put(itemKey(status.RecipientDevice, status.MsgID), canonicalKey); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if status.Status == "expired" {
 			if err := expiryPending.Put(expiryStatusKey(status.SenderDevice, status.RecipientDevice, status.MsgID), canonicalKey); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 	}
 	if err := meta.Put(statusIndexesVersionKey, []byte{1}); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return statusesByRecipient, expiryPending, nil
+	return statusesByRecipient, expiryPending, expiryCursors, nil
 }
 
 func mailboxBuckets(tx *bbolt.Tx) (items, order, stats, statuses *bbolt.Bucket, err error) {
@@ -807,6 +879,18 @@ func expiryStatusKey(sender, recipient, msgID string) []byte {
 
 func expiryStatusPrefix(sender, recipient string) []byte {
 	return []byte(sender + "\x00" + recipient + "\x00")
+}
+
+func expiryCursorKey(sender, recipient string) []byte {
+	return []byte(sender + "\x00" + recipient)
+}
+
+func deleteExpiryCursorIfMatches(cursors *bbolt.Bucket, sender, recipient, msgID string) error {
+	key := expiryCursorKey(sender, recipient)
+	if bytes.Equal(cursors.Get(key), []byte(msgID)) {
+		return cursors.Delete(key)
+	}
+	return nil
 }
 
 func recipientPrefix(recipient string) []byte {

@@ -370,3 +370,162 @@ Requested commit message:
 ```text
 fix(relay): bound durable status processing
 ```
+
+---
+
+# Re-review correction: retry bounded expiry statuses
+
+## Outcome
+
+The Important reliability finding appended after commit `da4e6e1` is fixed.
+Expiry delivery is no longer retired because a server-side socket write
+returned success. Canonical expired tombstones remain in the retry index for
+their 24-hour lifetime, and a single persistent cursor per sender/recipient
+pair rotates fixed-size pages fairly across reconnects.
+
+This section supersedes the earlier report language that described successful
+hello writes as permanently draining pending expiry-index keys.
+
+## RED evidence
+
+The legacy-index/reopen regression proved the old retirement was persistent:
+
+```text
+--- FAIL: TestMailboxStatusIndexesMigrateLegacyTombstonesAcrossReopen
+    mailbox_store_test.go:529: rotated expiry after reopen = []store.DeliveryStatus{}, <nil>; want retry
+```
+
+The full WebSocket rotation and loss-after-success tests produced:
+
+```text
+--- FAIL: TestWebSocketHelloPagesExpiryStatusesUnderTerminalChurn
+    ws_mailbox_test.go:701: hello expiry rotation page 2 from 64 = [six tail IDs], want [six tail IDs followed by the wrapped first 58 IDs]
+
+--- FAIL: TestWebSocketHelloRetriesExpiryAfterSuccessfulWriteAndClientDeath
+    ws_mailbox_test.go:751: expiry lost after successful write and client death: ... i/o timeout
+```
+
+The upgrade regression recreated the exact `da4e6e1` shape: a canonical
+expired tombstone, the v1 migration marker, and an already-retired pending
+entry. Its RED was:
+
+```text
+--- FAIL: TestMailboxStatusIndexUpgradeRestoresRetiredExpiryRetry
+    mailbox_store_test.go:586: v1-retired expiry after index upgrade = []store.DeliveryStatus{}, <nil>; want retry
+```
+
+Self-review then exposed an ACK-churn starvation edge in the first cursor
+implementation. Its separate RED was:
+
+```text
+--- FAIL: TestMailboxExpiryStatusCursorIsPairScoped
+    mailbox_store_test.go:632: ACK churn reset rotated AB page = [first status], <nil>
+```
+
+Finally, the bounded stale-index test showed that limiting emitted frames alone
+was insufficient because logically expired index entries could still cause an
+unbounded scan:
+
+```text
+--- FAIL: TestMailboxExpiryStatusRotationBoundsStaleIndexProcessing
+    mailbox_store_test.go:686: first bounded scan crossed stale page: [live status], <nil>
+```
+
+An API-level RED also established that expiry selection needed the hello's
+explicit time to enforce the canonical 24-hour boundary deterministically:
+
+```text
+too many arguments in call to s.ExpiryStatuses
+have (string, string, number, time.Time)
+want (string, string, int)
+```
+
+## Design and safety
+
+- `mailbox_expiry_pending` is now a durable retry index. Successful hello
+  writes never delete its live entries.
+- `mailbox_expiry_cursor` stores at most one message ID for each
+  sender/recipient pair. Selection starts strictly after that ID, wraps once,
+  and never repeats an entry within one page.
+- A page inspects at most 64 index entries and emits at most 64 live statuses.
+  Logically expired entries encountered in that bounded window are deleted from
+  canonical and secondary state in the same short Bolt update. Continuous
+  whole-database sweeping remains Task 8.
+- The server advances the cursor to the page's last status only after every
+  `relay.expired` write succeeds. A failed or partial page returns before the
+  cursor update, so the complete page is eligible for retry and duplicates are
+  safe.
+- Apparent success followed by client death advances only fairness, not
+  retryability. A one-item set wraps immediately; larger sets repeat after one
+  bounded rotation cycle.
+- ACK creation never resets an unrelated expiry cursor. Direct tombstone
+  removal clears a cursor only when it points to that tombstone. Pair purge
+  deletes both directional cursors; physical/logical status expiry removes
+  matching cursor and index state transactionally.
+- The migration marker is bumped to `status_indexes_v2`. The one-time
+  transactional backfill restores canonical expired statuses whose v1 pending
+  entries were retired by `da4e6e1`, then persists normal cursor state across
+  close/reopen.
+- Bolt transactions close before WebSocket writes. Cursor advancement is a
+  later short update. No socket I/O occurs under Bolt, hub, or handoff locks.
+
+The deterministic tests cover exact 64-entry pages across three wraps, no
+first-page starvation, retry after server-success/client-death, partial-write
+replay, ACK churn, pair scoping, bounded cursor count, v1 upgrade, reopen,
+logical and physical 24-hour expiry, pair purge, cursor/index cleanup, original
+status identity, digest and acceptance metadata, and ciphertext opacity.
+
+## Final GREEN and gates
+
+```text
+GOCACHE=/tmp/phone-sync-task4-retry-report-store-cache go test ./internal/store \
+  -run 'TestMailbox(StatusIndexesMigrateLegacyTombstonesAcrossReopen|StatusIndexUpgradeRestoresRetiredExpiryRetry|ExpiryStatusCursorIsPairScoped|ExpiryStatusRotationOmitsTombstoneAtLogicalExpiry|ExpiryStatusRotationBoundsStaleIndexProcessing|PurgePairDeletesBothDirections|ExpireStatusesRemovesOnlyExpiredTombstones)' \
+  -race -count=5
+ok github.com/twinotify/relay/internal/store 6.883s
+
+GOCACHE=/tmp/phone-sync-task4-retry-report-server-cache go test ./internal/server \
+  -run 'TestWebSocket(HelloPagesExpiryStatusesUnderTerminalChurn|HelloRetriesExpiryAfterSuccessfulWriteAndClientDeath|HelloPartialExpiryWriteDoesNotAdvanceCursor|HelloSendsExpiryBeforeMailboxDelivery)' \
+  -race -count=3 -v
+PASS
+ok github.com/twinotify/relay/internal/server 9.208s
+
+GOCACHE=/tmp/phone-sync-task4-retry-full-store-cache go test ./internal/store -race -count=1
+ok github.com/twinotify/relay/internal/store 3.761s
+
+GOCACHE=/tmp/phone-sync-task4-retry-full-server-cache go test ./internal/server -race -count=1
+ok github.com/twinotify/relay/internal/server 16.614s
+
+GOCACHE=/tmp/phone-sync-task4-retry-make-cache make relay-test
+[exit 0; sync-proto and `go test ./... -race -count=1` completed]
+
+cd relay && GOCACHE=/tmp/phone-sync-task4-retry-make-cache go vet ./...
+[exit 0, no output]
+
+git diff --check
+[exit 0, no output]
+```
+
+## Final self-review
+
+The appended authoritative re-review and the complete anti-slop law were read
+and checked point by point. The correction preserves capabilities-before-
+status-before-delivery ordering, durable acceptance order, MaxItems/MaxBytes,
+64-item delivery bounds, overflow cancellation, exact opaque envelope bytes,
+terminal digest/idempotence semantics, v1 compatibility, and Task 5's boundary.
+This is persistence and WebSocket logic only, so visual-interface rules are
+inapplicable. No client acknowledgement schema or Task 5 capability state was
+added.
+
+## Files changed by this correction
+
+- `relay/internal/server/ws.go`
+- `relay/internal/server/ws_mailbox_test.go`
+- `relay/internal/store/mailbox_store.go`
+- `relay/internal/store/mailbox_store_test.go`
+- `.superpowers/sdd/task-4-fix3-report.md`
+
+Requested commit message:
+
+```text
+fix(relay): retry bounded expiry statuses
+```
