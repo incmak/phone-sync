@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -27,12 +26,18 @@ type pairHelloReq struct {
 // a peer.hello frame to Device A's /pair/notify?role=A subscription.
 func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
 	var req pairHelloReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if !decodePairJSON(w, r, &req) {
 		return
 	}
 	if req.PairToken == "" || req.DeviceID == "" || req.EncPubkey == "" || req.SignPubkey == "" {
 		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+	if !s.allowPairToken(w, req.PairToken) {
+		return
+	}
+	if !validDisplayName(req.DisplayName) {
+		http.Error(w, "display_name too long", http.StatusBadRequest)
 		return
 	}
 	pending, err := s.pairStore.GetPending(req.PairToken)
@@ -40,15 +45,14 @@ func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown pair_token", http.StatusNotFound)
 		return
 	}
-	if pairTokenExpired(pending, time.Now()) {
+	if pairTokenExpired(pending, s.now()) {
 		_ = s.pairStore.DeletePending(req.PairToken)
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return
 	}
-	encPk, err1 := base64.StdEncoding.DecodeString(req.EncPubkey)
-	signPk, err2 := base64.StdEncoding.DecodeString(req.SignPubkey)
-	if err1 != nil || err2 != nil {
-		http.Error(w, "bad base64", http.StatusBadRequest)
+	encPk, signPk, err := decodePairPublicKeys(req.EncPubkey, req.SignPubkey)
+	if err != nil {
+		http.Error(w, "invalid public key", http.StatusBadRequest)
 		return
 	}
 	if err := s.pairStore.UpdatePendingB(req.PairToken, req.DeviceID, encPk, signPk, req.DisplayName); err != nil {
@@ -90,12 +94,14 @@ type pairSendSigReq struct {
 // sig against A's stored pubkey, stores it, and pushes pair.sig to Device B.
 func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 	var req pairSendSigReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if !decodePairJSON(w, r, &req) {
 		return
 	}
 	if req.PairToken == "" || req.ConfirmationSig == "" {
 		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+	if !s.allowPairToken(w, req.PairToken) {
 		return
 	}
 	pending, err := s.pairStore.GetPending(req.PairToken)
@@ -103,7 +109,7 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown pair_token", http.StatusNotFound)
 		return
 	}
-	if pairTokenExpired(pending, time.Now()) {
+	if pairTokenExpired(pending, s.now()) {
 		_ = s.pairStore.DeletePending(req.PairToken)
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return

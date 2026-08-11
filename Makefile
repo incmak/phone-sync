@@ -1,4 +1,4 @@
-.PHONY: sync-proto relay-test relay-build clean
+.PHONY: sync-proto relay-test relay-build deployment-test clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas
@@ -10,6 +10,9 @@ relay-test: sync-proto
 
 relay-build: sync-proto
 	cd relay && go build -o ../bin/relay ./cmd/relay
+
+deployment-test:
+	./deploy/assert-compose.sh
 
 clean:
 	rm -rf relay/internal/server/schemas bin

@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 var ErrNotFound = errors.New("not found")
 var ErrInvalidProtocolFloor = errors.New("invalid protocol floor")
 var ErrPairConflict = errors.New("pair transition conflict")
+var ErrPendingPairLimit = errors.New("pending pair limit reached")
 
 type PendingPairState string
 
@@ -31,9 +33,22 @@ const (
 	bucketProtocolFloor       = "pair_protocol_floor"
 	bucketRetainedTokenByPair = "pair_retained_token"
 	bucketPairMeta            = "pair_meta"
+	bucketPendingExpiry       = "pair_pending_expiry"
 )
 
 var retainedTokenIndexVersionKey = []byte("retained_token_index_v1")
+var pendingLimitIndexVersionKey = []byte("pending_limit_index_v1")
+var pendingCountKey = []byte("pending_count")
+
+type PendingPairLimits struct {
+	MaxPending int
+	TTL        time.Duration
+	SweepBatch int
+}
+
+func DefaultPendingPairLimits() PendingPairLimits {
+	return PendingPairLimits{MaxPending: 10_000, TTL: 5 * time.Minute, SweepBatch: 256}
+}
 
 type PendingPair struct {
 	PairToken    string `json:"pair_token"`
@@ -83,14 +98,27 @@ type PairSession struct {
 }
 
 type PairStore struct {
-	bolt *Bolt
+	bolt   *Bolt
+	limits PendingPairLimits
 }
 
 func NewPairStore(b *Bolt) *PairStore {
-	if err := b.Update(migrateRetainedTokenIndexTx); err != nil {
+	return NewPairStoreWithLimits(b, DefaultPendingPairLimits())
+}
+
+func NewPairStoreWithLimits(b *Bolt, limits PendingPairLimits) *PairStore {
+	if limits.MaxPending <= 0 || limits.TTL <= 0 || limits.SweepBatch <= 0 {
+		panic("invalid pending pair limits")
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		if err := migrateRetainedTokenIndexTx(tx); err != nil {
+			return err
+		}
+		return migratePendingLimitIndexTx(tx, limits.TTL)
+	}); err != nil {
 		panic(fmt.Sprintf("migrate retained pairing-token index: %v", err))
 	}
-	return &PairStore{bolt: b}
+	return &PairStore{bolt: b, limits: limits}
 }
 
 func (ps *PairStore) PutPending(p PendingPair) error {
@@ -105,7 +133,28 @@ func (ps *PairStore) PutPending(p PendingPair) error {
 		}
 		raw := pending.Get([]byte(p.PairToken))
 		if raw == nil {
-			return pending.Put([]byte(p.PairToken), b)
+			meta, err := tx.CreateBucketIfNotExists([]byte(bucketPairMeta))
+			if err != nil {
+				return err
+			}
+			count, err := decodePendingCount(meta.Get(pendingCountKey))
+			if err != nil {
+				return err
+			}
+			if count >= uint64(ps.limits.MaxPending) {
+				return ErrPendingPairLimit
+			}
+			expiry, err := tx.CreateBucketIfNotExists([]byte(bucketPendingExpiry))
+			if err != nil {
+				return err
+			}
+			if err := pending.Put([]byte(p.PairToken), b); err != nil {
+				return err
+			}
+			if err := expiry.Put(pendingExpiryKey(p.CreatedAt, ps.limits.TTL, p.PairToken), []byte(p.PairToken)); err != nil {
+				return err
+			}
+			return meta.Put(pendingCountKey, encodePendingCount(count+1))
 		}
 		current, err := decodePendingPair(raw)
 		if err != nil {
@@ -135,29 +184,49 @@ func (ps *PairStore) GetPending(token string) (*PendingPair, error) {
 
 func (ps *PairStore) DeletePending(token string) error {
 	return ps.bolt.Update(func(tx *bbolt.Tx) error {
-		pending := tx.Bucket([]byte(bucketPending))
-		if pending == nil {
+		return deletePendingPairTx(tx, token, ps.limits.TTL)
+	})
+}
+
+func (ps *PairStore) PendingCount() (uint64, error) {
+	var count uint64
+	err := ps.bolt.View(func(tx *bbolt.Tx) error {
+		meta := tx.Bucket([]byte(bucketPairMeta))
+		if meta == nil {
 			return nil
 		}
-		raw := pending.Get([]byte(token))
-		if raw == nil {
+		var err error
+		count, err = decodePendingCount(meta.Get(pendingCountKey))
+		return err
+	})
+	return count, err
+}
+
+// SweepExpired removes at most the configured batch from the expiry-ordered
+// index. It never scans attacker-controlled live records on a request path.
+func (ps *PairStore) SweepExpired(now time.Time) (int, error) {
+	removed := 0
+	err := ps.bolt.Update(func(tx *bbolt.Tx) error {
+		expiry := tx.Bucket([]byte(bucketPendingExpiry))
+		if expiry == nil {
 			return nil
 		}
-		record, err := decodePendingPair(raw)
-		if err != nil {
-			return err
-		}
-		if record.PairID != "" {
-			index := tx.Bucket([]byte(bucketRetainedTokenByPair))
-			if index == nil || !bytes.Equal(index.Get([]byte(record.PairID)), []byte(token)) {
-				return ErrPairConflict
+		for removed < ps.limits.SweepBatch {
+			key, token := expiry.Cursor().First()
+			if key == nil {
+				break
 			}
-			if err := index.Delete([]byte(record.PairID)); err != nil {
+			if pendingExpiryUnix(key) > now.Unix() {
+				break
+			}
+			if err := deletePendingPairTx(tx, string(append([]byte(nil), token...)), ps.limits.TTL); err != nil {
 				return err
 			}
+			removed++
 		}
-		return pending.Delete([]byte(token))
+		return nil
 	})
+	return removed, err
 }
 
 // PendingState derives the current pairing transition solely from the durable
@@ -451,10 +520,7 @@ func (ps *PairStore) revoke(deviceID, expectedPairID string) (*ConfirmedPair, er
 				if retained.PairID != pair.PairID {
 					return ErrPairConflict
 				}
-				if err := pending.Delete(pairToken); err != nil {
-					return err
-				}
-				if err := retainedTokens.Delete(pairID); err != nil {
+				if err := deletePendingPairTx(tx, string(pairToken), ps.limits.TTL); err != nil {
 					return err
 				}
 			}
@@ -500,6 +566,112 @@ func migrateRetainedTokenIndexTx(tx *bbolt.Tx) error {
 		}
 	}
 	return meta.Put(retainedTokenIndexVersionKey, []byte{1})
+}
+
+func migratePendingLimitIndexTx(tx *bbolt.Tx, ttl time.Duration) error {
+	meta, err := tx.CreateBucketIfNotExists([]byte(bucketPairMeta))
+	if err != nil {
+		return err
+	}
+	if meta.Get(pendingLimitIndexVersionKey) != nil {
+		return nil
+	}
+	expiry, err := tx.CreateBucketIfNotExists([]byte(bucketPendingExpiry))
+	if err != nil {
+		return err
+	}
+	var count uint64
+	if pending := tx.Bucket([]byte(bucketPending)); pending != nil {
+		cursor := pending.Cursor()
+		for token, raw := cursor.First(); token != nil; token, raw = cursor.Next() {
+			record, err := decodePendingPair(raw)
+			if err != nil {
+				return err
+			}
+			if record.PairToken != string(token) {
+				return ErrPairConflict
+			}
+			if err := expiry.Put(pendingExpiryKey(record.CreatedAt, ttl, record.PairToken), token); err != nil {
+				return err
+			}
+			count++
+		}
+	}
+	if err := meta.Put(pendingCountKey, encodePendingCount(count)); err != nil {
+		return err
+	}
+	return meta.Put(pendingLimitIndexVersionKey, []byte{1})
+}
+
+func deletePendingPairTx(tx *bbolt.Tx, token string, ttl time.Duration) error {
+	pending := tx.Bucket([]byte(bucketPending))
+	if pending == nil {
+		return nil
+	}
+	raw := pending.Get([]byte(token))
+	if raw == nil {
+		return nil
+	}
+	record, err := decodePendingPair(raw)
+	if err != nil {
+		return err
+	}
+	if record.PairID != "" {
+		index := tx.Bucket([]byte(bucketRetainedTokenByPair))
+		if index == nil || !bytes.Equal(index.Get([]byte(record.PairID)), []byte(token)) {
+			return ErrPairConflict
+		}
+		if err := index.Delete([]byte(record.PairID)); err != nil {
+			return err
+		}
+	}
+	meta := tx.Bucket([]byte(bucketPairMeta))
+	if meta == nil {
+		return errors.New("missing pending pair metadata")
+	}
+	count, err := decodePendingCount(meta.Get(pendingCountKey))
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return errors.New("invalid pending pair count")
+	}
+	if expiry := tx.Bucket([]byte(bucketPendingExpiry)); expiry != nil {
+		if err := expiry.Delete(pendingExpiryKey(record.CreatedAt, ttl, record.PairToken)); err != nil {
+			return err
+		}
+	}
+	if err := pending.Delete([]byte(token)); err != nil {
+		return err
+	}
+	return meta.Put(pendingCountKey, encodePendingCount(count-1))
+}
+
+func pendingExpiryKey(createdAt int64, ttl time.Duration, token string) []byte {
+	key := make([]byte, 9+len(token))
+	binary.BigEndian.PutUint64(key[:8], uint64(time.Unix(createdAt, 0).Add(ttl).Unix()))
+	copy(key[9:], token)
+	return key
+}
+
+func pendingExpiryUnix(key []byte) int64 {
+	if len(key) < 9 {
+		return 0
+	}
+	return int64(binary.BigEndian.Uint64(key[:8]))
+}
+
+func encodePendingCount(count uint64) []byte {
+	raw := make([]byte, 8)
+	binary.BigEndian.PutUint64(raw, count)
+	return raw
+}
+
+func decodePendingCount(raw []byte) (uint64, error) {
+	if len(raw) != 8 {
+		return 0, errors.New("invalid pending pair count")
+	}
+	return binary.BigEndian.Uint64(raw), nil
 }
 
 func (ps *PairStore) Get(pairID string) (*ConfirmedPair, error) {

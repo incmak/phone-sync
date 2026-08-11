@@ -29,7 +29,12 @@ func main() {
 	}
 	defer b.Close()
 
-	srv := &http.Server{Addr: addr, Handler: server.NewWithStore(b).Handler()}
+	config := server.DefaultConfig()
+	config.TrustProxyHeaders = os.Getenv("TRUST_PROXY_HEADERS") == "true"
+	app := server.NewWithConfig(b, config)
+	srv := server.NewHTTPServer(addr, app.Handler())
+	maintenanceContext, stopMaintenance := context.WithCancel(context.Background())
+	maintenanceDone := app.StartMaintenance(maintenanceContext)
 
 	done := make(chan struct{})
 	go func() {
@@ -38,6 +43,8 @@ func main() {
 		<-sig
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		stopMaintenance()
+		<-maintenanceDone
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("shutdown: %v", err)
 		}

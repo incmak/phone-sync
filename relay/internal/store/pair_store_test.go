@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -939,5 +941,105 @@ func TestPairStoreMigratesLegacyRetainedTokenIndexOnce(t *testing.T) {
 	}
 	if _, err := ps.GetPending(pending.PairToken); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("migrated retained token survived revoke: %v", err)
+	}
+}
+
+func TestPendingCapRejectsAtomicallyWithoutBoltGrowth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pending-cap.db")
+	b, err := OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	ps := NewPairStoreWithLimits(b, PendingPairLimits{MaxPending: 2, TTL: 5 * time.Minute, SweepBatch: 8})
+	for index := 0; index < 2; index++ {
+		if err := ps.PutPending(PendingPair{
+			PairToken: fmt.Sprintf("pending-%d", index), DeviceAID: fmt.Sprintf("device-%d", index),
+			AEncPubkey: bytes.Repeat([]byte{1}, 32), ASignPubkey: bytes.Repeat([]byte{2}, 32), CreatedAt: int64(index + 1),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ps.PutPending(PendingPair{
+		PairToken: "rejected", DeviceAID: "rejected-device",
+		AEncPubkey: bytes.Repeat([]byte{3}, 32), ASignPubkey: bytes.Repeat([]byte{4}, 32), CreatedAt: 3,
+	})
+	if !errors.Is(err, ErrPendingPairLimit) {
+		t.Fatalf("cap error = %v, want ErrPendingPairLimit", err)
+	}
+	if _, err := ps.GetPending("rejected"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rejected pending pair was persisted: %v", err)
+	}
+	count, err := ps.PendingCount()
+	if err != nil || count != 2 {
+		t.Fatalf("pending count = %d, %v; want 2", count, err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("Bolt grew after rejected insert: before=%d after=%d", before.Size(), after.Size())
+	}
+}
+
+func TestPendingCapIsAtomicUnderConcurrentInserts(t *testing.T) {
+	b := openTestBolt(t)
+	ps := NewPairStoreWithLimits(b, PendingPairLimits{MaxPending: 4, TTL: 5 * time.Minute, SweepBatch: 8})
+	var wg sync.WaitGroup
+	var accepted atomic.Int64
+	for index := 0; index < 32; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			err := ps.PutPending(PendingPair{
+				PairToken: fmt.Sprintf("concurrent-%d", index), DeviceAID: fmt.Sprintf("device-%d", index),
+				AEncPubkey: bytes.Repeat([]byte{1}, 32), ASignPubkey: bytes.Repeat([]byte{2}, 32), CreatedAt: 1,
+			})
+			if err == nil {
+				accepted.Add(1)
+				return
+			}
+			if !errors.Is(err, ErrPendingPairLimit) {
+				t.Errorf("insert %d error = %v", index, err)
+			}
+		}(index)
+	}
+	wg.Wait()
+	if got := accepted.Load(); got != 4 {
+		t.Fatalf("accepted inserts = %d, want 4", got)
+	}
+	if count, err := ps.PendingCount(); err != nil || count != 4 {
+		t.Fatalf("pending count = %d, %v; want 4", count, err)
+	}
+}
+
+func TestPendingPairSweepIsBoundedAndReleasesCapacity(t *testing.T) {
+	b := openTestBolt(t)
+	ps := NewPairStoreWithLimits(b, PendingPairLimits{MaxPending: 3, TTL: 5 * time.Minute, SweepBatch: 2})
+	for index := 0; index < 3; index++ {
+		if err := ps.PutPending(PendingPair{
+			PairToken: fmt.Sprintf("expired-%d", index), DeviceAID: fmt.Sprintf("device-%d", index),
+			AEncPubkey: bytes.Repeat([]byte{1}, 32), ASignPubkey: bytes.Repeat([]byte{2}, 32), CreatedAt: int64(index + 1),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := ps.SweepExpired(time.Unix(10*60, 0))
+	if err != nil || removed != 2 {
+		t.Fatalf("first bounded sweep = %d, %v; want 2", removed, err)
+	}
+	if count, err := ps.PendingCount(); err != nil || count != 1 {
+		t.Fatalf("pending after first sweep = %d, %v; want 1", count, err)
+	}
+	if err := ps.PutPending(PendingPair{
+		PairToken: "replacement", DeviceAID: "replacement-device",
+		AEncPubkey: bytes.Repeat([]byte{3}, 32), ASignPubkey: bytes.Repeat([]byte{4}, 32), CreatedAt: 10 * 60,
+	}); err != nil {
+		t.Fatalf("released capacity was unavailable: %v", err)
 	}
 }

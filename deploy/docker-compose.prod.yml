@@ -1,0 +1,44 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    environment:
+      LISTEN_ADDR: ":8080"
+      BOLT_PATH: "/data/twinotify-relay.db"
+      TRUST_PROXY_HEADERS: "true"
+    expose:
+      - "8080"
+    volumes:
+      - relay-data:/data
+    restart: unless-stopped
+    networks:
+      - relay-internal
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      TWINOTIFY_DOMAIN: "${TWINOTIFY_DOMAIN:?TWINOTIFY_DOMAIN is required}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - relay
+    restart: unless-stopped
+    networks:
+      - edge
+      - relay-internal
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  edge:
+  relay-internal:
+    internal: true

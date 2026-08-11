@@ -1,7 +1,9 @@
-# Replace "your-domain.example" with your DuckDNS hostname when deploying publicly.
-# For local laptop-only dev, access relay directly on port 8080 and skip Caddy.
-
-relay.local {
-    tls internal
-    reverse_proxy relay:8080
+{$TWINOTIFY_DOMAIN} {
+    @relay path /health /pair/* /ws
+    handle @relay {
+        reverse_proxy relay:8080
+    }
+    handle {
+        respond 404
+    }
 }

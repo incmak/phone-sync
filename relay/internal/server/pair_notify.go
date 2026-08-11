@@ -32,6 +32,9 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	if !s.allowPairToken(w, pairToken) {
+		return
+	}
 	// Validate and snapshot before upgrading. This deters unbounded subscriptions
 	// and ensures the first replay does not depend on an in-memory hub frame.
 	initial, err := s.pairStore.GetPending(pairToken)
@@ -39,7 +42,7 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if pairTokenExpired(initial, time.Now()) {
+	if pairTokenExpired(initial, s.now()) {
 		_ = s.pairStore.DeletePending(pairToken)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

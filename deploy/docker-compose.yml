@@ -6,6 +6,7 @@ services:
     container_name: twinotify-relay
     environment:
       LISTEN_ADDR: ":8080"
+      BOLT_PATH: "/data/twinotify-relay.db"
     ports:
       - "8080:8080"  # Expose for local dev & Android emulator; remove when fronted by Caddy in prod.
     volumes:
@@ -14,26 +15,8 @@ services:
     networks:
       - twinotify-net
 
-  caddy:
-    image: caddy:2-alpine
-    container_name: twinotify-caddy
-    ports:
-      - "443:443"
-      - "80:80"
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    depends_on:
-      - relay
-    restart: unless-stopped
-    networks:
-      - twinotify-net
-
 volumes:
   relay-data:
-  caddy-data:
-  caddy-config:
 
 networks:
   twinotify-net:

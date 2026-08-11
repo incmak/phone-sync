@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/twinotify/relay/internal/store"
@@ -32,18 +30,23 @@ type pairCompleteReq struct {
 
 func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
 	var req pairInitReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if !decodePairJSON(w, r, &req) {
 		return
 	}
 	if req.PairToken == "" || req.DeviceID == "" || req.EncPubkey == "" || req.SignPubkey == "" {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
-	encPk, err1 := base64.StdEncoding.DecodeString(req.EncPubkey)
-	signPk, err2 := base64.StdEncoding.DecodeString(req.SignPubkey)
-	if err1 != nil || err2 != nil {
-		http.Error(w, "bad base64", http.StatusBadRequest)
+	if !s.allowPairToken(w, req.PairToken) {
+		return
+	}
+	if !validDisplayName(req.DisplayName) {
+		http.Error(w, "display_name too long", http.StatusBadRequest)
+		return
+	}
+	encPk, signPk, err := decodePairPublicKeys(req.EncPubkey, req.SignPubkey)
+	if err != nil {
+		http.Error(w, "invalid public key", http.StatusBadRequest)
 		return
 	}
 	p := store.PendingPair{
@@ -52,11 +55,15 @@ func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
 		AEncPubkey:   encPk,
 		ASignPubkey:  signPk,
 		ADisplayName: req.DisplayName,
-		CreatedAt:    time.Now().Unix(),
+		CreatedAt:    s.now().Unix(),
 	}
 	if err := s.pairStore.PutPending(p); err != nil {
 		if errors.Is(err, store.ErrPairConflict) {
 			http.Error(w, "pair transition conflict", http.StatusConflict)
+			return
+		}
+		if errors.Is(err, store.ErrPendingPairLimit) {
+			http.Error(w, "too many pending pairs", http.StatusServiceUnavailable)
 			return
 		}
 		http.Error(w, "store", http.StatusInternalServerError)
@@ -69,8 +76,18 @@ func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 	var req pairCompleteReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if !decodePairJSON(w, r, &req) {
+		return
+	}
+	if req.PairToken == "" || req.DeviceID == "" || req.EncPubkey == "" || req.SignPubkey == "" || req.ConfirmationSig == "" {
+		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+	if !s.allowPairToken(w, req.PairToken) {
+		return
+	}
+	if !validDisplayName(req.DisplayName) {
+		http.Error(w, "display_name too long", http.StatusBadRequest)
 		return
 	}
 	pending, err := s.pairStore.GetPending(req.PairToken)
@@ -78,15 +95,14 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown pair_token", http.StatusBadRequest)
 		return
 	}
-	if pairTokenExpired(pending, time.Now()) {
+	if pairTokenExpired(pending, s.now()) {
 		_ = s.pairStore.DeletePending(req.PairToken)
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return
 	}
-	encPk, err1 := base64.StdEncoding.DecodeString(req.EncPubkey)
-	signPk, err2 := base64.StdEncoding.DecodeString(req.SignPubkey)
-	if err1 != nil || err2 != nil {
-		http.Error(w, "bad base64", http.StatusBadRequest)
+	encPk, signPk, err := decodePairPublicKeys(req.EncPubkey, req.SignPubkey)
+	if err != nil {
+		http.Error(w, "invalid public key", http.StatusBadRequest)
 		return
 	}
 	if (pending.DeviceBID != "" || len(pending.BEncPubkey) != 0 || len(pending.BSignPubkey) != 0) &&

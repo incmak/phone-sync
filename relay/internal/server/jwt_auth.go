@@ -47,6 +47,17 @@ func (c *JTICache) CheckAndSet(jti string, now time.Time) error {
 	return nil
 }
 
+func (c *JTICache) Cleanup(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for jti, seenAt := range c.seen {
+		if now.Sub(seenAt) > 2*c.ttl {
+			delete(c.seen, jti)
+		}
+	}
+	c.lastGC = now
+}
+
 type ctxKey string
 
 const (
