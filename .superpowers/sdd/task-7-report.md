@@ -489,15 +489,147 @@ capability-floor behavior, pairing persistence, or mailbox ordering. The full
 anti-slop law was rechecked; no UI implementation is present, so its interface
 rules are not applicable.
 
-### Commit handoff status
+### Committed correction status
+
+The primary agent subsequently committed the complete second correction:
 
 ```text
-intended subject: fix(relay): isolate rebound client generations
+base:    1a8bee75cd5ddc688f75ebee84fe3944b76dfbff
+commit:  3f7d905fd74b8d590a41527643bb2bb50f9ba470
+subject: fix(relay): isolate rebound client generations
+status:  clean worktree and index at final correction re-review
+```
+
+---
+
+## Final test-only correction: deterministic rebound registration
+
+### History and scope
+
+The final correction review approved the production behavior in `3f7d905` and
+identified only a scheduler race in its integration test plus the stale status
+above. This test-only correction started from:
+
+```text
+base/head: 3f7d905fd74b8d590a41527643bb2bb50f9ba470
+subject:   fix(relay): isolate rebound client generations
+branch:    main
+```
+
+Only these paths change:
+
+- `relay/internal/server/revoke_test.go`
+- `.superpowers/sdd/task-7-report.md`
+
+Production source is unchanged, and no Task 8 work is included.
+
+### Reproduced failure
+
+Before editing the test, the current integration regression was run in
+isolation for 100 race-instrumented repetitions:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache \
+  go test ./internal/server \
+  -run TestDelayedRevokedRegistrationCannotEvictReboundGeneration \
+  -race -count=100 -timeout=3m
+--- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
+    revoke_test.go:307: rebound generation did not register
+--- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
+    revoke_test.go:307: rebound generation did not register
+--- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
+    revoke_test.go:307: rebound generation did not register
+--- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
+    revoke_test.go:307: rebound generation did not register
+--- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
+    revoke_test.go:307: rebound generation did not register
+--- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
+    revoke_test.go:307: rebound generation did not register
+FAIL github.com/twinotify/relay/internal/server 8.305s
+```
+
+The six failures confirm the reviewed scheduling race: WebSocket Dial observed
+the completed HTTP upgrade before the handler installed the exact P2 hub
+registration.
+
+### Test-only synchronization fix
+
+- Added a bounded helper that polls `ConnectionForPair(deviceID, pairID)` for
+  the exact expected P2 generation.
+- The helper uses a two-second deadline and a one-millisecond ticker. It does not
+  use an arbitrary sleep or treat a different generation as success.
+- The combined P1/P2 regression waits for that exact registration before
+  asserting online state, injecting the pre-resume P2 frame, or releasing P1.
+- The existing delayed-P1 barrier remains unchanged, so revoke, rebind, verified
+  P2 registration, and P1 resume retain deterministic ordering.
+- No production test seam or production source change was necessary.
+
+### GREEN and gate evidence
+
+Required isolated race stress, 100 repetitions:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache \
+  go test ./internal/server \
+  -run TestDelayedRevokedRegistrationCannotEvictReboundGeneration \
+  -race -count=100 -timeout=3m
+ok github.com/twinotify/relay/internal/server 9.189s
+```
+
+Required combined relevant race stress, 20 repetitions:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache \
+  go test ./internal/server \
+  -run 'Revoke|DelayedRevokedRegistration|ClientHubRegisterPair' \
+  -race -count=20 -timeout=3m
+ok github.com/twinotify/relay/internal/server 15.916s
+```
+
+Required full package race:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache \
+  go test ./internal/store ./internal/server -race -count=1 -timeout=2m
+ok github.com/twinotify/relay/internal/store 11.804s
+ok github.com/twinotify/relay/internal/server 28.488s
+```
+
+Required root repository gate:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache make relay-test
+?  github.com/twinotify/relay/cmd/relay [no test files]
+ok github.com/twinotify/relay/internal/server 30.756s
+ok github.com/twinotify/relay/internal/store 11.954s
+```
+
+Vet:
+
+```text
+cd relay && GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache go vet ./...
+exit 0; no output
+```
+
+Final gofmt, whitespace, exact two-path scope, and commit status are recorded in
+the handoff after staging.
+
+### Constraint and design-law re-check
+
+This is a test/report-only correction. Production authorization, registration,
+mailbox, pairing, capability-floor, retention, quota, backpressure, ordering,
+and privacy behavior are byte-for-byte unchanged from `3f7d905`. The supplied
+anti-slop law was rechecked; no UI implementation is present.
+
+### Test-only commit handoff status
+
+```text
+intended subject: test(relay): synchronize rebound registration
 commit result:    blocked by the managed approval reviewer
-staged base/head: 1a8bee75cd5ddc688f75ebee84fe3944b76dfbff
+staged base/head: 3f7d905fd74b8d590a41527643bb2bb50f9ba470
 ```
 
 The reviewer stated that it did not see trusted authorization for the exact
 default-branch mutation and prohibited workarounds. No retry or indirect commit
-path was attempted. The exact four-path correction remains staged for the
+path was attempted. The exact test/report correction remains staged for the
 primary agent, with no unstaged changes.

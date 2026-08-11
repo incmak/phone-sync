@@ -85,6 +85,24 @@ func dialRevokeTestWS(t *testing.T, ts *httptest.Server, deviceID string, privat
 	return conn
 }
 
+func waitForRevokePairRegistration(t *testing.T, srv *Server, deviceID, pairID string) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		if _, _, online := srv.clientHub.ConnectionForPair(deviceID, pairID); online {
+			return
+		}
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			t.Fatalf("exact pair registration did not appear for device=%q pair=%q", deviceID, pairID)
+		}
+	}
+}
+
 func TestRevokeAllowsEitherPairedDevice(t *testing.T) {
 	for _, revoker := range []string{"a", "b"} {
 		t.Run(revoker, func(t *testing.T) {
@@ -303,9 +321,7 @@ func TestDelayedRevokedRegistrationCannotEvictReboundGeneration(t *testing.T) {
 	}
 	newConn := dialRevokeTestWS(t, ts, rebound.DeviceA, newAPriv)
 	defer newConn.Close()
-	if _, _, online := srv.clientHub.ConnectionForPair(rebound.DeviceA, rebound.PairID); !online {
-		t.Fatal("rebound generation did not register")
-	}
+	waitForRevokePairRegistration(t, srv, rebound.DeviceA, rebound.PairID)
 
 	beforeFrame := []byte(`{"generation":"p2-before"}`)
 	if !srv.clientHub.SendRawV1ForPair(rebound.DeviceA, rebound.PairID, beforeFrame) {
