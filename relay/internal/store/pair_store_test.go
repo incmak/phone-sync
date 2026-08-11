@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -167,6 +168,195 @@ func TestPairPendingTransitionsAreIdempotentAndConflictsDoNotMutate(t *testing.T
 	peer, err := ps.PeerFor(pair.DeviceA)
 	if err != nil || peer != pair.DeviceB {
 		t.Fatalf("device index after conflict = %q, %v", peer, err)
+	}
+}
+
+func TestConfirmPendingRejectsPairAndDeviceBindingCollisionsWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		existing  []ConfirmedPair
+		candidate ConfirmedPair
+	}{
+		{
+			name:      "pair ID",
+			existing:  []ConfirmedPair{{PairID: "occupied-pair", DeviceA: "old-a", DeviceB: "old-b"}},
+			candidate: ConfirmedPair{PairID: "occupied-pair", DeviceA: "new-a", DeviceB: "new-b"},
+		},
+		{
+			name:      "Device A",
+			existing:  []ConfirmedPair{{PairID: "existing-a", DeviceA: "shared-a", DeviceB: "old-b"}},
+			candidate: ConfirmedPair{PairID: "candidate-a", DeviceA: "shared-a", DeviceB: "new-b"},
+		},
+		{
+			name:      "Device B",
+			existing:  []ConfirmedPair{{PairID: "existing-b", DeviceA: "old-a", DeviceB: "shared-b"}},
+			candidate: ConfirmedPair{PairID: "candidate-b", DeviceA: "new-a", DeviceB: "shared-b"},
+		},
+		{
+			name: "mixed",
+			existing: []ConfirmedPair{
+				{PairID: "occupied-mixed", DeviceA: "pair-id-a", DeviceB: "pair-id-b"},
+				{PairID: "binding-a", DeviceA: "shared-mixed-a", DeviceB: "binding-a-peer"},
+				{PairID: "binding-b", DeviceA: "binding-b-peer", DeviceB: "shared-mixed-b"},
+			},
+			candidate: ConfirmedPair{PairID: "occupied-mixed", DeviceA: "shared-mixed-a", DeviceB: "shared-mixed-b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ps := newTestPairStore(t)
+			candidate := tt.candidate
+			candidate.AEncPubkey = []byte("candidate-a-enc")
+			candidate.ASignPubkey = []byte("candidate-a-sign")
+			candidate.BEncPubkey = []byte("candidate-b-enc")
+			candidate.BSignPubkey = []byte("candidate-b-sign")
+			pairIDs, deviceIDs := seedCollisionFixture(t, ps, tt.existing, candidate, "collision-token")
+			before := snapshotPairBindings(t, ps, pairIDs, deviceIDs)
+
+			if _, err := ps.ConfirmPending("collision-token", candidate, []byte("signature")); !errors.Is(err, ErrPairConflict) {
+				t.Fatalf("ConfirmPending collision error = %v, want ErrPairConflict", err)
+			}
+
+			assertPairBindingsUnchanged(t, ps, before)
+			pending, err := ps.GetPending("collision-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pending.PairID != "" {
+				t.Fatalf("collision committed pending token to %q", pending.PairID)
+			}
+		})
+	}
+}
+
+func TestConfirmPendingConcurrentBindingCollisionsDoNotCreateCandidates(t *testing.T) {
+	ps := newTestPairStore(t)
+	existing := ConfirmedPair{PairID: "concurrent-existing", DeviceA: "concurrent-shared-a", DeviceB: "concurrent-old-b"}
+	if err := ps.Confirm(existing); err != nil {
+		t.Fatal(err)
+	}
+
+	const attempts = 16
+	pairIDs := []string{existing.PairID}
+	deviceIDs := []string{existing.DeviceA, existing.DeviceB}
+	candidates := make([]ConfirmedPair, attempts)
+	for index := range candidates {
+		candidates[index] = ConfirmedPair{
+			PairID:     fmt.Sprintf("concurrent-candidate-%02d", index),
+			DeviceA:    existing.DeviceA,
+			DeviceB:    fmt.Sprintf("concurrent-new-b-%02d", index),
+			AEncPubkey: []byte("candidate-a-enc"), ASignPubkey: []byte("candidate-a-sign"),
+			BEncPubkey: []byte("candidate-b-enc"), BSignPubkey: []byte("candidate-b-sign"),
+		}
+		token := fmt.Sprintf("concurrent-token-%02d", index)
+		if err := ps.PutPending(PendingPair{
+			PairToken: token, DeviceAID: candidates[index].DeviceA,
+			AEncPubkey: candidates[index].AEncPubkey, ASignPubkey: candidates[index].ASignPubkey,
+			CreatedAt: time.Now().Unix(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		pairIDs = append(pairIDs, candidates[index].PairID)
+		deviceIDs = append(deviceIDs, candidates[index].DeviceB)
+	}
+	before := snapshotPairBindings(t, ps, pairIDs, deviceIDs)
+
+	start := make(chan struct{})
+	errorsByAttempt := make([]error, attempts)
+	var wg sync.WaitGroup
+	for index := range candidates {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			token := fmt.Sprintf("concurrent-token-%02d", index)
+			_, errorsByAttempt[index] = ps.ConfirmPending(token, candidates[index], []byte("signature"))
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+
+	for index, err := range errorsByAttempt {
+		if !errors.Is(err, ErrPairConflict) {
+			t.Fatalf("attempt %d error = %v, want ErrPairConflict", index, err)
+		}
+		pending, lookupErr := ps.GetPending(fmt.Sprintf("concurrent-token-%02d", index))
+		if lookupErr != nil {
+			t.Fatal(lookupErr)
+		}
+		if pending.PairID != "" {
+			t.Fatalf("attempt %d committed pending token to %q", index, pending.PairID)
+		}
+	}
+	assertPairBindingsUnchanged(t, ps, before)
+}
+
+type pairBindingSnapshot struct {
+	pairs   map[string][]byte
+	devices map[string][]byte
+}
+
+func seedCollisionFixture(t *testing.T, ps *PairStore, existing []ConfirmedPair, candidate ConfirmedPair, token string) ([]string, []string) {
+	t.Helper()
+	pairIDs := []string{candidate.PairID}
+	deviceIDs := []string{candidate.DeviceA, candidate.DeviceB}
+	for _, pair := range existing {
+		if err := ps.Confirm(pair); err != nil {
+			t.Fatal(err)
+		}
+		pairIDs = append(pairIDs, pair.PairID)
+		deviceIDs = append(deviceIDs, pair.DeviceA, pair.DeviceB)
+	}
+	if err := ps.PutPending(PendingPair{
+		PairToken: token, DeviceAID: candidate.DeviceA,
+		AEncPubkey: candidate.AEncPubkey, ASignPubkey: candidate.ASignPubkey,
+		CreatedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return pairIDs, deviceIDs
+}
+
+func snapshotPairBindings(t *testing.T, ps *PairStore, pairIDs, deviceIDs []string) pairBindingSnapshot {
+	t.Helper()
+	snapshot := pairBindingSnapshot{pairs: make(map[string][]byte), devices: make(map[string][]byte)}
+	for _, pairID := range pairIDs {
+		raw, err := ps.bolt.Get(bucketConfirmed, pairID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot.pairs[pairID] = raw
+	}
+	for _, deviceID := range deviceIDs {
+		raw, err := ps.bolt.Get(bucketByDevice, deviceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot.devices[deviceID] = raw
+	}
+	return snapshot
+}
+
+func assertPairBindingsUnchanged(t *testing.T, ps *PairStore, before pairBindingSnapshot) {
+	t.Helper()
+	for pairID, want := range before.pairs {
+		got, err := ps.bolt.Get(bucketConfirmed, pairID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("confirmed pair %q changed: got %x, want %x", pairID, got, want)
+		}
+	}
+	for deviceID, want := range before.devices {
+		got, err := ps.bolt.Get(bucketByDevice, deviceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("device index %q changed: got %x, want %x", deviceID, got, want)
+		}
 	}
 }
 

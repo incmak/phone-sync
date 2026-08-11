@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -12,7 +13,15 @@ import (
 
 const pairNotifyMaxDuration = 5 * time.Minute
 
-// handlePairNotify accepts unauthenticated WebSocket subscriptions during pairing.
+const (
+	pairNotifyDeviceIDHeader       = "X-Twinotify-Device-ID"
+	pairNotifySignatureHeader      = "X-Twinotify-Pair-Signature"
+	pairNotifyDeviceIDMaxBytes     = 256
+	pairNotifySignatureBase64Bytes = 88
+	pairNotifyProofDomain          = "twinotify-pair-notify-v1\n"
+)
+
+// handlePairNotify accepts signing-key-authenticated WebSocket subscriptions during pairing.
 // Device A (role=A) waits for a peer.hello frame; Device B (role=B) waits for pair.sig.
 // Holds open through the pair token's original TTL and replays every applicable
 // persisted transition before waiting for live change signals.
@@ -20,19 +29,23 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 	pairToken := r.URL.Query().Get("token")
 	role := r.URL.Query().Get("role")
 	if pairToken == "" || (role != "A" && role != "B") {
-		http.Error(w, "missing or invalid token/role", http.StatusBadRequest)
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 	// Validate and snapshot before upgrading. This deters unbounded subscriptions
 	// and ensures the first replay does not depend on an in-memory hub frame.
 	initial, err := s.pairStore.GetPending(pairToken)
 	if err != nil {
-		http.Error(w, "unknown pair_token", http.StatusNotFound)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if pairTokenExpired(initial, time.Now()) {
 		_ = s.pairStore.DeletePending(pairToken)
-		http.Error(w, "unknown pair_token", http.StatusNotFound)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !authorizePairNotify(r, initial, pairToken, role) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	initialFrames, err := pairTransitionFrames(initial, role)
@@ -114,6 +127,41 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func authorizePairNotify(r *http.Request, pending *store.PendingPair, pairToken, role string) bool {
+	deviceIDs := r.Header.Values(pairNotifyDeviceIDHeader)
+	signatures := r.Header.Values(pairNotifySignatureHeader)
+	if len(deviceIDs) != 1 || len(signatures) != 1 {
+		return false
+	}
+	deviceID := deviceIDs[0]
+	signatureBase64 := signatures[0]
+	if deviceID == "" || len(deviceID) > pairNotifyDeviceIDMaxBytes || len(signatureBase64) != pairNotifySignatureBase64Bytes {
+		return false
+	}
+
+	var expectedDeviceID string
+	var publicKey []byte
+	switch role {
+	case "A":
+		expectedDeviceID = pending.DeviceAID
+		publicKey = pending.ASignPubkey
+	case "B":
+		expectedDeviceID = pending.DeviceBID
+		publicKey = pending.BSignPubkey
+	default:
+		return false
+	}
+	if expectedDeviceID == "" || deviceID != expectedDeviceID || len(publicKey) != ed25519.PublicKeySize {
+		return false
+	}
+	signature, err := base64.StdEncoding.DecodeString(signatureBase64)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return false
+	}
+	canonical := []byte(pairNotifyProofDomain + pairToken + "\n" + role + "\n" + deviceID)
+	return ed25519.Verify(ed25519.PublicKey(publicKey), canonical, signature)
 }
 
 type pairTransitionFrame struct {

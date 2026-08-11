@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,17 +20,27 @@ import (
 	"github.com/twinotify/relay/internal/store"
 )
 
-// dialPairNotify opens a WebSocket to /pair/notify with the given token and role.
+// dialPairNotify opens an authenticated WebSocket to /pair/notify.
 // Returns the connection (caller must close) or fatals on error.
-func dialPairNotify(t *testing.T, baseURL, token, role string) *websocket.Conn {
+func dialPairNotify(t *testing.T, baseURL, token, role, deviceID string, privateKey ed25519.PrivateKey) *websocket.Conn {
 	t.Helper()
-	wsURL := strings.Replace(baseURL, "http://", "ws://", 1) +
-		"/pair/notify?token=" + token + "&role=" + role
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, _, err := websocket.DefaultDialer.Dial(pairNotifyURL(baseURL, token, role), signedPairNotifyHeaders(token, role, deviceID, privateKey))
 	if err != nil {
 		t.Fatalf("ws dial (role=%s): %v", role, err)
 	}
 	return conn
+}
+
+func pairNotifyURL(baseURL, token, role string) string {
+	return strings.Replace(baseURL, "http://", "ws://", 1) + "/pair/notify?token=" + token + "&role=" + role
+}
+
+func signedPairNotifyHeaders(token, role, deviceID string, privateKey ed25519.PrivateKey) http.Header {
+	canonical := []byte("twinotify-pair-notify-v1\n" + token + "\n" + role + "\n" + deviceID)
+	headers := make(http.Header)
+	headers.Set("X-Twinotify-Device-ID", deviceID)
+	headers.Set("X-Twinotify-Pair-Signature", base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, canonical)))
+	return headers
 }
 
 // initPair calls /pair/init and fatals on non-200.
@@ -61,21 +72,17 @@ func TestBidirectional_HappyPath(t *testing.T) {
 	defer ts.Close()
 
 	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
-	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	bEncPk, bSignPk, bSignSk := ed25519Keypair(t)
 	pairToken := "tok-bidir-happy"
 
 	// 1. Device A calls /pair/init
 	initPair(t, ts.URL, pairToken, "devA-bidir", aEncPk, aSignPk)
 
 	// 2. Device A subscribes role=A (waiting for peer.hello)
-	wsA := dialPairNotify(t, ts.URL, pairToken, "A")
+	wsA := dialPairNotify(t, ts.URL, pairToken, "A", "devA-bidir", aSignSk)
 	defer wsA.Close()
 
-	// 3. Device B subscribes role=B (waiting for pair.sig) — do this before send_sig
-	wsB := dialPairNotify(t, ts.URL, pairToken, "B")
-	defer wsB.Close()
-
-	// 4. Device B POSTs /pair/hello
+	// 3. Device B POSTs /pair/hello
 	helloBody, _ := json.Marshal(map[string]any{
 		"pair_token":   pairToken,
 		"device_id":    "devB-bidir",
@@ -91,6 +98,10 @@ func TestBidirectional_HappyPath(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("pair/hello status %d", resp.StatusCode)
 	}
+
+	// 4. Device B proves possession of its now-persisted signing key and subscribes.
+	wsB := dialPairNotify(t, ts.URL, pairToken, "B", "devB-bidir", bSignSk)
+	defer wsB.Close()
 
 	// 5. Device A receives peer.hello
 	_ = wsA.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -175,7 +186,7 @@ func TestPairNotifyLateSubscriberReceivesPersistedSignatureAndCompletion(t *test
 	defer ts.Close()
 
 	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
-	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	bEncPk, bSignPk, bSignSk := ed25519Keypair(t)
 	pairToken := "tok-late-subscriber"
 
 	initPair(t, ts.URL, pairToken, "devA-late", aEncPk, aSignPk)
@@ -214,7 +225,7 @@ func TestPairNotifyLateSubscriberReceivesPersistedSignatureAndCompletion(t *test
 		t.Fatalf("pair/send_sig status %d", sendSigResp.StatusCode)
 	}
 
-	wsB := dialPairNotify(t, ts.URL, pairToken, "B")
+	wsB := dialPairNotify(t, ts.URL, pairToken, "B", "devB-late", bSignSk)
 	defer wsB.Close()
 	_ = wsB.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	_, data, err := wsB.ReadMessage()
@@ -253,7 +264,7 @@ func TestPairNotifyLateSubscriberReceivesPersistedSignatureAndCompletion(t *test
 		t.Fatalf("pair/complete response = %#v", completed)
 	}
 
-	wsA := dialPairNotify(t, ts.URL, pairToken, "A")
+	wsA := dialPairNotify(t, ts.URL, pairToken, "A", "devA-late", aSignSk)
 	defer wsA.Close()
 	_ = wsA.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	for {
@@ -436,7 +447,7 @@ func TestPairNotifyLiveReplayInterleavingsDeduplicateTransitions(t *testing.T) {
 			defer ts.Close()
 
 			aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
-			bEncPk, bSignPk, _ := ed25519Keypair(t)
+			bEncPk, bSignPk, bSignSk := ed25519Keypair(t)
 			pairToken := fmt.Sprintf("tok-interleave-%d", iteration)
 			initPair(t, ts.URL, pairToken, "devA-interleave", aEncPk, aSignPk)
 
@@ -446,7 +457,7 @@ func TestPairNotifyLiveReplayInterleavingsDeduplicateTransitions(t *testing.T) {
 				"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPk),
 			}
 			helloResult := postPairJSONAsync(t, ts.URL+"/pair/hello", hello)
-			wsA := dialPairNotify(t, ts.URL, pairToken, "A")
+			wsA := dialPairNotify(t, ts.URL, pairToken, "A", "devA-interleave", aSignSk)
 			readPairFramesThrough(t, wsA, []string{"peer.hello"})
 			wsA.Close()
 			assertAsyncPairStatus(t, helloResult, http.StatusOK)
@@ -459,7 +470,7 @@ func TestPairNotifyLiveReplayInterleavingsDeduplicateTransitions(t *testing.T) {
 			signatureBase64 := base64.StdEncoding.EncodeToString(signature)
 			sendSig := map[string]any{"pair_token": pairToken, "confirmation_sig": signatureBase64}
 			sigResult := postPairJSONAsync(t, ts.URL+"/pair/send_sig", sendSig)
-			wsB := dialPairNotify(t, ts.URL, pairToken, "B")
+			wsB := dialPairNotify(t, ts.URL, pairToken, "B", "devB-interleave", bSignSk)
 			readPairFramesThrough(t, wsB, []string{"pair.sig"})
 			wsB.Close()
 			assertAsyncPairStatus(t, sigResult, http.StatusOK)
@@ -471,8 +482,8 @@ func TestPairNotifyLiveReplayInterleavingsDeduplicateTransitions(t *testing.T) {
 				"confirmation_sig": signatureBase64,
 			}
 			completeResult := postPairJSONAsync(t, ts.URL+"/pair/complete", complete)
-			wsA = dialPairNotify(t, ts.URL, pairToken, "A")
-			wsB = dialPairNotify(t, ts.URL, pairToken, "B")
+			wsA = dialPairNotify(t, ts.URL, pairToken, "A", "devA-interleave", aSignSk)
+			wsB = dialPairNotify(t, ts.URL, pairToken, "B", "devB-interleave", bSignSk)
 			readPairFramesThrough(t, wsA, []string{"peer.hello", "pair.complete"})
 			readPairFramesThrough(t, wsB, []string{"pair.sig", "pair.complete"})
 			wsA.Close()
@@ -492,7 +503,7 @@ func TestPairNotifyReplaysCommittedStateAfterStoreReopen(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 
 	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
-	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	bEncPk, bSignPk, bSignSk := ed25519Keypair(t)
 	pairToken := "tok-reopen-completed"
 	initPair(t, ts.URL, pairToken, "devA-reopen", aEncPk, aSignPk)
 	hello := map[string]any{
@@ -549,7 +560,7 @@ func TestPairNotifyReplaysCommittedStateAfterStoreReopen(t *testing.T) {
 	ts = httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	wsB := dialPairNotify(t, ts.URL, pairToken, "B")
+	wsB := dialPairNotify(t, ts.URL, pairToken, "B", "devB-reopen", bSignSk)
 	readPairFramesThrough(t, wsB, []string{"pair.sig", "pair.complete"})
 	wsB.Close()
 	resp = postPairJSON(t, ts.URL+"/pair/complete", complete)
@@ -568,12 +579,179 @@ func TestPairNotifyReplaysCommittedStateAfterStoreReopen(t *testing.T) {
 	}
 }
 
-func TestPairNotifyRejectsAndCleansUpExpiredToken(t *testing.T) {
+func TestPairNotifyRequiresRoleSpecificSigningProofBeforeUpgrade(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
+	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	_, _, attackerSignSk := ed25519Keypair(t)
+	pairToken := "tok-notify-auth"
+	deviceA := "devA-notify-auth"
+	deviceB := "devB-notify-auth"
+	initPair(t, ts.URL, pairToken, deviceA, aEncPk, aSignPk)
+	hello := map[string]any{
+		"pair_token": pairToken, "device_id": deviceB,
+		"enc_pubkey":  base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPk),
+	}
+	resp := postPairJSON(t, ts.URL+"/pair/hello", hello)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pair/hello status = %d", resp.StatusCode)
+	}
+
+	validA := signedPairNotifyHeaders(pairToken, "A", deviceA, aSignSk)
+	tests := []struct {
+		name    string
+		token   string
+		role    string
+		headers http.Header
+	}{
+		{name: "missing device", token: pairToken, role: "A", headers: withoutPairNotifyHeader(validA, "X-Twinotify-Device-ID")},
+		{name: "oversized device", token: pairToken, role: "A", headers: signedPairNotifyHeaders(pairToken, "A", strings.Repeat("d", 257), aSignSk)},
+		{name: "duplicate device", token: pairToken, role: "A", headers: withDuplicatePairNotifyHeader(validA, "X-Twinotify-Device-ID", deviceA)},
+		{name: "missing signature", token: pairToken, role: "A", headers: withoutPairNotifyHeader(validA, "X-Twinotify-Pair-Signature")},
+		{name: "oversized signature", token: pairToken, role: "A", headers: withPairNotifyHeader(validA, "X-Twinotify-Pair-Signature", strings.Repeat("A", 89))},
+		{name: "duplicate signature", token: pairToken, role: "A", headers: withDuplicatePairNotifyHeader(validA, "X-Twinotify-Pair-Signature", validA.Get("X-Twinotify-Pair-Signature"))},
+		{name: "malformed signature", token: pairToken, role: "A", headers: withPairNotifyHeader(validA, "X-Twinotify-Pair-Signature", "not-base64")},
+		{name: "wrong signature length", token: pairToken, role: "A", headers: withPairNotifyHeader(validA, "X-Twinotify-Pair-Signature", base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize-1)))},
+		{name: "device mismatch", token: pairToken, role: "A", headers: signedPairNotifyHeaders(pairToken, "A", "other-device", aSignSk)},
+		{name: "wrong private key", token: pairToken, role: "A", headers: signedPairNotifyHeaders(pairToken, "A", deviceA, attackerSignSk)},
+		{name: "wrong token", token: pairToken + "-wrong", role: "A", headers: validA.Clone()},
+		{name: "cross-role replay", token: pairToken, role: "B", headers: validA.Clone()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertPairNotifyRejected(t, ts.URL, tt.token, tt.role, tt.headers, http.StatusUnauthorized)
+		})
+	}
+}
+
+func TestPairNotifyRejectsRoleBBeforeHello(t *testing.T) {
 	srv := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
 	aEncPk, aSignPk, _ := ed25519Keypair(t)
+	_, _, bSignSk := ed25519Keypair(t)
+	pairToken := "tok-role-b-before-hello"
+	initPair(t, ts.URL, pairToken, "devA-before-hello", aEncPk, aSignPk)
+	headers := signedPairNotifyHeaders(pairToken, "B", "devB-before-hello", bSignSk)
+	assertPairNotifyRejected(t, ts.URL, pairToken, "B", headers, http.StatusUnauthorized)
+}
+
+func TestPairNotifyRejectedProofCannotReplaceAuthenticatedSubscriber(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
+	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	_, _, attackerSignSk := ed25519Keypair(t)
+	pairToken := "tok-auth-replacement-guard"
+	deviceA := "devA-auth-replacement"
+	initPair(t, ts.URL, pairToken, deviceA, aEncPk, aSignPk)
+	legitimate := dialPairNotify(t, ts.URL, pairToken, "A", deviceA, aSignSk)
+	defer legitimate.Close()
+
+	attackerHeaders := signedPairNotifyHeaders(pairToken, "A", deviceA, attackerSignSk)
+	assertPairNotifyRejected(t, ts.URL, pairToken, "A", attackerHeaders, http.StatusUnauthorized)
+	hello := map[string]any{
+		"pair_token": pairToken, "device_id": "devB-auth-replacement",
+		"enc_pubkey":  base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPk),
+	}
+	resp := postPairJSON(t, ts.URL+"/pair/hello", hello)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pair/hello status = %d", resp.StatusCode)
+	}
+	readPairFramesThrough(t, legitimate, []string{"peer.hello"})
+}
+
+func TestPairNotifyAuthenticatedConnectionReplacement(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
+	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	pairToken := "tok-authenticated-replacement"
+	deviceA := "devA-authenticated-replacement"
+	initPair(t, ts.URL, pairToken, deviceA, aEncPk, aSignPk)
+	oldConnection := dialPairNotify(t, ts.URL, pairToken, "A", deviceA, aSignSk)
+	defer oldConnection.Close()
+	newConnection := dialPairNotify(t, ts.URL, pairToken, "A", deviceA, aSignSk)
+	defer newConnection.Close()
+
+	_ = oldConnection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := oldConnection.ReadMessage(); err == nil {
+		t.Fatal("replaced authenticated connection remained active")
+	}
+	hello := map[string]any{
+		"pair_token": pairToken, "device_id": "devB-authenticated-replacement",
+		"enc_pubkey":  base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPk),
+	}
+	resp := postPairJSON(t, ts.URL+"/pair/hello", hello)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pair/hello status = %d", resp.StatusCode)
+	}
+	readPairFramesThrough(t, newConnection, []string{"peer.hello"})
+}
+
+func withoutPairNotifyHeader(headers http.Header, name string) http.Header {
+	cloned := headers.Clone()
+	cloned.Del(name)
+	return cloned
+}
+
+func withPairNotifyHeader(headers http.Header, name, value string) http.Header {
+	cloned := headers.Clone()
+	cloned.Set(name, value)
+	return cloned
+}
+
+func withDuplicatePairNotifyHeader(headers http.Header, name, value string) http.Header {
+	cloned := headers.Clone()
+	cloned.Add(name, value)
+	return cloned
+}
+
+func assertPairNotifyRejected(t *testing.T, baseURL, token, role string, headers http.Header, wantStatus int) {
+	t.Helper()
+	connection, resp, err := websocket.DefaultDialer.Dial(pairNotifyURL(baseURL, token, role), headers)
+	if connection != nil {
+		connection.Close()
+	}
+	if err == nil {
+		t.Fatal("pair notify unexpectedly upgraded")
+	}
+	if resp == nil {
+		t.Fatalf("pair notify rejection had no HTTP response: %v", err)
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 65))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("pair notify status = %d, body %q; want %d", resp.StatusCode, body, wantStatus)
+	}
+	if string(body) != "unauthorized\n" {
+		t.Fatalf("pair notify rejection body = %q, want bounded generic response", body)
+	}
+}
+
+func TestPairNotifyRejectsAndCleansUpExpiredToken(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
 	pairToken := "tok-expired-notify"
 	if err := srv.pairStore.PutPending(store.PendingPair{
 		PairToken: pairToken, DeviceAID: "devA-expired", AEncPubkey: aEncPk,
@@ -581,14 +759,8 @@ func TestPairNotifyRejectsAndCleansUpExpiredToken(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/pair/notify?token=" + pairToken + "&role=A"
-	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err == nil {
-		t.Fatal("expected expired token dial to fail")
-	}
-	if resp == nil || resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expired token response = %v", resp)
-	}
+	headers := signedPairNotifyHeaders(pairToken, "A", "devA-expired", aSignSk)
+	assertPairNotifyRejected(t, ts.URL, pairToken, "A", headers, http.StatusUnauthorized)
 	if _, err := srv.pairStore.GetPending(pairToken); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expired token remained persisted: %v", err)
 	}
@@ -713,11 +885,12 @@ func TestPairNotify_MissingRole(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	aEncPk, aSignPk, _ := ed25519Keypair(t)
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
 	initPair(t, ts.URL, "tok-missing-role", "devA-mr", aEncPk, aSignPk)
 
 	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/pair/notify?token=tok-missing-role"
-	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	headers := signedPairNotifyHeaders("tok-missing-role", "", "devA-mr", aSignSk)
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, headers)
 	if err == nil {
 		t.Fatal("expected dial error for missing role")
 	}
@@ -732,11 +905,12 @@ func TestPairNotify_InvalidRole(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	aEncPk, aSignPk, _ := ed25519Keypair(t)
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
 	initPair(t, ts.URL, "tok-invalid-role", "devA-ir", aEncPk, aSignPk)
 
 	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/pair/notify?token=tok-invalid-role&role=C"
-	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	headers := signedPairNotifyHeaders("tok-invalid-role", "C", "devA-ir", aSignSk)
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, headers)
 	if err == nil {
 		t.Fatal("expected dial error for invalid role")
 	}
@@ -745,20 +919,15 @@ func TestPairNotify_InvalidRole(t *testing.T) {
 	}
 }
 
-// TestPairNotify_UnknownTokenReturns404 verifies an unknown pair token is rejected.
-func TestPairNotify_UnknownTokenReturns404(t *testing.T) {
+// TestPairNotify_UnknownTokenIsGenericUnauthorized verifies token existence is not disclosed.
+func TestPairNotify_UnknownTokenIsGenericUnauthorized(t *testing.T) {
 	srv := newTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/pair/notify?token=does-not-exist&role=A"
-	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err == nil {
-		t.Fatal("expected dial error for unknown token")
-	}
-	if resp == nil || resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404, got %v", resp)
-	}
+	_, _, privateKey := ed25519Keypair(t)
+	headers := signedPairNotifyHeaders("does-not-exist", "A", "unknown-device", privateKey)
+	assertPairNotifyRejected(t, ts.URL, "does-not-exist", "A", headers, http.StatusUnauthorized)
 }
 
 // TestPairSendSig_BeforeHello verifies that /pair/send_sig before /pair/hello returns 409.

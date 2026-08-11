@@ -207,11 +207,11 @@ func (ps *PairStore) ConfirmPending(pairToken string, candidate ConfirmedPair, c
 			return ErrPairConflict
 		}
 
-		confirmed, err := tx.CreateBucketIfNotExists([]byte(bucketConfirmed))
-		if err != nil {
-			return err
-		}
 		if p.PairID != "" {
+			confirmed := tx.Bucket([]byte(bucketConfirmed))
+			if confirmed == nil {
+				return ErrNotFound
+			}
 			raw := confirmed.Get([]byte(p.PairID))
 			if raw == nil {
 				return ErrNotFound
@@ -229,17 +229,33 @@ func (ps *PairStore) ConfirmPending(pairToken string, candidate ConfirmedPair, c
 		if candidate.PairID == "" {
 			return errors.New("empty pair id")
 		}
+		confirmed := tx.Bucket([]byte(bucketConfirmed))
+		if confirmed != nil && confirmed.Get([]byte(candidate.PairID)) != nil {
+			return ErrPairConflict
+		}
+		byDevice := tx.Bucket([]byte(bucketByDevice))
+		if byDevice != nil && (byDevice.Get([]byte(candidate.DeviceA)) != nil || byDevice.Get([]byte(candidate.DeviceB)) != nil) {
+			return ErrPairConflict
+		}
 
 		encodedPair, err := json.Marshal(candidate)
 		if err != nil {
 			return err
 		}
+		if confirmed == nil {
+			confirmed, err = tx.CreateBucket([]byte(bucketConfirmed))
+			if err != nil {
+				return err
+			}
+		}
 		if err := confirmed.Put([]byte(candidate.PairID), encodedPair); err != nil {
 			return err
 		}
-		byDevice, err := tx.CreateBucketIfNotExists([]byte(bucketByDevice))
-		if err != nil {
-			return err
+		if byDevice == nil {
+			byDevice, err = tx.CreateBucket([]byte(bucketByDevice))
+			if err != nil {
+				return err
+			}
 		}
 		if err := byDevice.Put([]byte(candidate.DeviceA), []byte(candidate.PairID)); err != nil {
 			return err
