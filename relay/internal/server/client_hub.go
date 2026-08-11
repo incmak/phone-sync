@@ -141,11 +141,11 @@ func (h *ClientHub) SendCapabilities(deviceID string, selfProtocols []int, frame
 		return
 	default:
 	}
+	if !slices.Equal(c.protocols, expectedSelf) {
+		return
+	}
 	switch c.protocol {
 	case protocolV2Handshake:
-		if !slices.Equal(c.protocols, expectedSelf) {
-			return
-		}
 		c.pendingCapabilities = append(c.pendingCapabilities[:0], frame...)
 	case protocolV2:
 		select {

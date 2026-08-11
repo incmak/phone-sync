@@ -1319,6 +1319,38 @@ func TestClientHubSendCapabilitiesIsTypedBoundedAndReplacementSafe(t *testing.T)
 		}
 	})
 
+	t.Run("active replacement rejects stale expected self", func(t *testing.T) {
+		hub := NewClientHub()
+		oldOutbound := make(chan []byte, 1)
+		old := hub.Register("device", oldOutbound)
+		if !hub.SetProtocolAndCapabilities(old, protocolV2, []int{1}) {
+			t.Fatal("set old typed protocol")
+		}
+		currentOutbound := make(chan []byte, 1)
+		current := hub.Register("device", currentOutbound)
+		if !hub.SetProtocolAndCapabilities(current, protocolV2, []int{2, 1}) {
+			t.Fatal("set replacement typed protocol")
+		}
+
+		stale := []byte(`{"v":2,"type":"relay.capabilities","self":[1],"peer":[2,1],"floor":1}`)
+		hub.SendCapabilities("device", []int{1}, stale)
+		select {
+		case raw := <-oldOutbound:
+			t.Fatalf("replaced connection received stale capabilities: %s", raw)
+		default:
+		}
+		select {
+		case raw := <-currentOutbound:
+			t.Fatalf("current replacement received stale capabilities: %s", raw)
+		default:
+		}
+		select {
+		case <-current.done:
+			t.Fatal("stale capabilities stopped current replacement")
+		default:
+		}
+	})
+
 	t.Run("matching handshake update follows mandatory sequence", func(t *testing.T) {
 		hub := NewClientHub()
 		outbound := make(chan []byte, 4)
