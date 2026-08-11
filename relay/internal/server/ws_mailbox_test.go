@@ -615,6 +615,84 @@ func TestWebSocketHelloSendsExpiryBeforeMailboxDelivery(t *testing.T) {
 	}
 }
 
+func TestWebSocketHelloPagesExpiryStatusesUnderTerminalChurn(t *testing.T) {
+	const (
+		ackCount     = 70
+		expiredCount = 70
+		statusPage   = 64
+	)
+	now := time.Now().Truncate(time.Millisecond)
+	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 80, MaxBytes: 1 << 20, Retention: time.Hour})
+	pair := registerMailboxTestPair(t, srv)
+
+	for i := 0; i < ackCount; i++ {
+		msgID := fmt.Sprintf("92%06x-1111-4111-8111-%012x", i, i)
+		envelope := validMailboxEnvelope(pair.deviceA, msgID)
+		putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, envelope, now.Add(-30*time.Minute))
+		digest := sha256.Sum256(envelope)
+		if err := srv.mailbox.Ack(pair.deviceB, msgID, hex.EncodeToString(digest[:]), now); err != nil {
+			t.Fatalf("ack churn item %d: %v", i, err)
+		}
+	}
+	for i := 0; i < expiredCount; i++ {
+		msgID := fmt.Sprintf("93%06x-1111-4111-8111-%012x", i, i)
+		putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, msgID), now.Add(-2*time.Hour))
+	}
+	if expired, err := srv.mailbox.Expire(now); err != nil || len(expired) != expiredCount {
+		t.Fatalf("expire churn = %d, %v; want %d", len(expired), err, expiredCount)
+	}
+
+	statuses, err := srv.mailbox.Statuses(pair.deviceA, time.UnixMilli(0))
+	if err != nil || len(statuses) != ackCount+expiredCount {
+		t.Fatalf("terminal statuses = %d, %v; want %d", len(statuses), err, ackCount+expiredCount)
+	}
+	for _, status := range statuses {
+		if status.SenderDevice != pair.deviceA || status.RecipientDevice != pair.deviceB ||
+			status.AcceptedAt == 0 || status.EnvelopeSHA256 == "" || status.MailboxExpiresAt == 0 ||
+			status.ExpiresAt != now.Add(24*time.Hour).UnixMilli() {
+			t.Fatalf("terminal identity changed: %#v", status)
+		}
+		raw, err := json.Marshal(status)
+		if err != nil || strings.Contains(string(raw), "ciphertext") {
+			t.Fatalf("terminal status leaked ciphertext: %s, %v", raw, err)
+		}
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	readPage := func() int {
+		conn := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+		sendMailboxHello(t, conn)
+		count := 0
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				_ = conn.Close()
+				return count
+			}
+			var frame testFrame
+			if err := json.Unmarshal(raw, &frame); err != nil || frame.Type != "relay.expired" {
+				t.Fatalf("hello status frame = %s, %v; want relay.expired", raw, err)
+			}
+			count++
+		}
+	}
+	if got := readPage(); got != statusPage {
+		t.Fatalf("first hello expiry page = %d, want %d", got, statusPage)
+	}
+	if got := readPage(); got != expiredCount-statusPage {
+		t.Fatalf("second hello expiry page = %d, want %d", got, expiredCount-statusPage)
+	}
+	if got := readPage(); got != 0 {
+		t.Fatalf("drained hello expiry page = %d, want 0", got)
+	}
+	statuses, err = srv.mailbox.Statuses(pair.deviceA, time.UnixMilli(0))
+	if err != nil || len(statuses) != ackCount+expiredCount {
+		t.Fatalf("paging changed 24h tombstones: %d, %v", len(statuses), err)
+	}
+}
+
 func TestWebSocketMailboxDrainIsBoundedTo64(t *testing.T) {
 	srv := newTestServer(t)
 	pair := registerMailboxTestPair(t, srv)
@@ -719,6 +797,48 @@ func TestWebSocketHelloDrainHandoffDeliversConcurrentPutOnce(t *testing.T) {
 	_ = recipient.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 	if _, raw, err := recipient.ReadMessage(); err == nil {
 		t.Fatalf("handoff delivered a duplicate: %s", raw)
+	}
+}
+
+func TestWebSocketWrappedV1PersistsWhileProtocolOnePeerHandshakes(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	handoffReached := make(chan struct{})
+	releaseHandoff := make(chan struct{})
+	srv.relayHelloBeforeActivate = func(deviceID string) {
+		if deviceID != pair.deviceB {
+			return
+		}
+		close(handoffReached)
+		<-releaseHandoff
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHelloWithProtocols(t, recipient, []int{1})
+	select {
+	case <-handoffReached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("protocol-one peer did not reach typed handshake barrier")
+	}
+
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHelloWithProtocols(t, sender, []int{2, 1})
+	msgID := "83677777-7777-4777-8777-777777777777"
+	envelope := validLegacyMailboxEnvelope(pair.deviceA, msgID)
+	writeMailboxFrame(t, sender, map[string]any{
+		"v": 2, "type": "relay.put", "envelope": envelope,
+	})
+	response := readMailboxFrame(t, sender)
+	close(releaseHandoff)
+	if response.Type != "relay.accepted" || response.MsgID != msgID {
+		t.Fatalf("wrapped v1 during typed [1] handshake = %#v, want relay.accepted", response)
+	}
+	if delivered := readMailboxFrame(t, recipient); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+		t.Fatalf("wrapped v1 handshake delivery = %#v, want exact envelope", delivered)
 	}
 }
 

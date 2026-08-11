@@ -253,22 +253,21 @@ func (s *Server) handleRelayHello(
 	if _, err := s.mailbox.Expire(now); err != nil {
 		return err
 	}
-	if err := s.mailbox.ExpireStatuses(now); err != nil {
-		return err
-	}
-	statuses, err := s.mailbox.Statuses(deviceID, time.UnixMilli(0))
+	statuses, err := s.mailbox.ExpiryStatuses(deviceID, peerID, mailboxBatchSize)
 	if err != nil {
 		return err
 	}
+	reportedIDs := make([]string, 0, len(statuses))
 	for _, status := range statuses {
-		if status.Status != "expired" || status.RecipientDevice != peerID {
-			continue
-		}
 		if err := writeFrame(RelayExpired{
 			V: 2, Type: "relay.expired", MsgID: status.MsgID, ExpiredAt: status.OccurredAt,
 		}); err != nil {
 			return err
 		}
+		reportedIDs = append(reportedIDs, status.MsgID)
+	}
+	if err := s.mailbox.MarkExpiryStatusesReported(deviceID, peerID, reportedIDs); err != nil {
+		return err
 	}
 
 	pending, err := s.mailbox.Pending(deviceID, mailboxBatchSize)
@@ -321,7 +320,7 @@ func (s *Server) handleRelayPut(
 
 	peerProtocol, peerProtocols, peerOnline := s.clientHub.ConnectionFor(peerID)
 	if envelope.V == 1 {
-		if peerProtocol != protocolV2 {
+		if peerProtocol != protocolV2 && peerProtocol != protocolV2Handshake {
 			if peerOnline && peerProtocol == protocolLegacy && s.clientHub.SendLegacy(peerID, put.Envelope) {
 				_ = writeFrame(RelayLegacyForwarded{V: 2, Type: "relay.legacy_forwarded", MsgID: envelope.MsgID})
 				return

@@ -214,3 +214,159 @@ Requested commit message:
 ```text
 fix(relay): linearize durable delivery transfer
 ```
+
+---
+
+# Post-clean-review correction: bounded durable status processing
+
+## Scope and outcome
+
+The two Important findings in `task-4-clean-review.md` are corrected without
+entering Task 5. Wrapped v1 puts now remain durably accepted while a typed
+protocol-1 peer is paused in hello handshake. Terminal message lookup uses a
+recipient/message index after a one-time transactional migration, and hello
+expiry output drains a dedicated per-pair pending index in fixed pages of 64.
+
+## Separate RED/GREEN evidence
+
+### Finding 1: wrapped v1 during typed `[1]` handshake
+
+The new test pauses the recipient inside the full WebSocket hello path after it
+advertises `[1]` but before activation, then sends a wrapped-v1 `relay.put` from
+its peer. The exact initial RED was:
+
+```text
+--- FAIL: TestWebSocketWrappedV1PersistsWhileProtocolOnePeerHandshakes
+    ws_mailbox_test.go:760: wrapped v1 during typed [1] handshake = server.testFrame{V:2, Type:"relay.rejected", MsgID:"83677777-7777-4777-8777-777777777777", Envelope:nil}, want relay.accepted
+```
+
+The production fix treats `protocolV2Handshake` as typed transport for this
+decision, matching the hub's existing typed protocol-1 handshake queue support.
+The resulting focused GREEN, including the complete v1 compatibility matrix,
+was:
+
+```text
+GOCACHE=/tmp/phone-sync-task4-status-focused-cache go test ./internal/server \
+  -run 'TestWebSocket(HelloPagesExpiryStatusesUnderTerminalChurn|HelloSendsExpiryBeforeMailboxDelivery|WrappedV1PersistsWhileProtocolOnePeerHandshakes|V1EnvelopeCompatibility)' \
+  -race -count=3 -v
+PASS
+ok github.com/twinotify/relay/internal/server 12.329s
+```
+
+### Finding 2: direct terminal lookup and bounded expiry output
+
+The direct-lookup test first establishes valid indexed tombstones, then inserts
+an unrelated malformed canonical status before exercising duplicate ACK and
+terminal Put. The pre-index implementation scanned the unrelated record and
+produced these exact REDs:
+
+```text
+TestMailboxTerminalLookupIgnoresUnrelatedCorruptStatuses/duplicate_ack:
+indexed duplicate ack consulted unrelated status: unmarshal delivery status: unexpected end of JSON input
+
+TestMailboxTerminalLookupIgnoresUnrelatedCorruptStatuses/terminal_put:
+indexed terminal put consulted unrelated status: unmarshal delivery status: unexpected end of JSON input
+```
+
+The WebSocket churn test creates 70 acknowledged and 70 expired tombstones,
+then reconnects until expiry output drains. Before paging, its exact RED was:
+
+```text
+--- FAIL: TestWebSocketHelloPagesExpiryStatusesUnderTerminalChurn
+    ws_mailbox_test.go:682: first hello expiry page = 70, want 64
+```
+
+The store now maintains:
+
+- `mailbox_status_by_recipient`: recipient/message to canonical status key,
+  used by terminal Put and missing-item ACK without scanning status records.
+- `mailbox_expiry_pending`: sender/recipient/message to canonical status key,
+  containing expired statuses only and supporting deterministic pair-scoped
+  pages.
+- `mailbox_meta/status_indexes_v1`: a migration marker written only after both
+  indexes are transactionally backfilled from legacy canonical tombstones.
+
+Hello retains its capabilities, expiry-status, then durable-delivery ordering.
+It reads at most 64 pending expiry statuses for the paired devices. Only after
+every frame in that page writes successfully does it mark the page reported.
+A failed partial page remains pending in full and may replay, giving at-least-
+once reporting without silent loss. Reporting deletes only pending-index keys;
+the original canonical tombstone, acceptance time, digest, mailbox expiry,
+terminal occurrence, sender/recipient identity, and 24-hour expiry remain
+unchanged. ACK tombstones are never visited by hello.
+
+The store GREEN covers direct lookup, transactional legacy migration across a
+database close/reopen, expiry drain marking without canonical deletion, and
+secondary-index cleanup on purge and physical status expiry:
+
+```text
+GOCACHE=/tmp/phone-sync-task4-status-focused-cache go test ./internal/store \
+  -run 'TestMailbox(TerminalLookupIgnoresUnrelatedCorruptStatuses|StatusIndexesMigrateLegacyTombstonesAcrossReopen|PurgePairDeletesBothDirections|ExpireStatusesRemovesOnlyExpiredTombstones)' \
+  -race -count=5
+ok github.com/twinotify/relay/internal/store 3.006s
+```
+
+The server churn GREEN above proves pages of exactly 64, then 6, then 0 across
+reconnects. It also verifies all 140 canonical ACK/expiry tombstones survive
+paging with identity, digest, scoping, acceptance timestamps, 24-hour expiry,
+and ciphertext opacity intact.
+
+## Transaction and boundary audit
+
+- Put, ACK, expiry, purge, and physical tombstone expiry update canonical and
+  secondary status state in the same Bolt write transaction.
+- Direct terminal lookup is one secondary-key read plus one canonical-key read.
+  The only whole-status migration is the versioned, one-time upgrade backfill.
+- Hello's Bolt views close before any WebSocket write. Page marking is a later
+  short Bolt update. No socket or network I/O occurs under a Bolt transaction,
+  hub lock, or durable-handoff lane lock.
+- Canonical tombstones still expire logically after 24 hours. Continuous
+  physical sweeping is deliberately left to Task 8 as required by the review.
+- Existing MaxItems/MaxBytes accounting, accepted-write/durable sequence
+  ordering, 64-item mailbox delivery bound, overflow cancellation, envelope
+  byte opacity, status-before-delivery ordering, and raw/typed v1 compatibility
+  are unchanged.
+
+## Fresh full verification
+
+```text
+GOCACHE=/tmp/phone-sync-task4-status-store-race-cache go test ./internal/store -race -count=1
+ok github.com/twinotify/relay/internal/store 2.963s
+
+GOCACHE=/tmp/phone-sync-task4-status-server-race-cache go test ./internal/server -race -count=1
+ok github.com/twinotify/relay/internal/server 21.395s
+
+GOCACHE=/tmp/phone-sync-task4-status-full-cache make relay-test
+[exit 0; sync-proto completed and `cd relay && go test ./... -race -count=1` completed]
+
+cd relay && GOCACHE=/tmp/phone-sync-task4-status-full-cache go vet ./...
+[exit 0, no output]
+
+git diff --check
+[exit 0, no output]
+```
+
+## Final self-review
+
+The authoritative clean review was re-read in full. The implementation was
+checked against both findings, legacy migration/reopen, per-pair scoping,
+reconnect continuation, purge/expiry cleanup, original tombstone identity,
+digest idempotence/conflict, acceptance timestamps, ciphertext opacity, Task 5
+boundaries, and Task 8's physical-sweep boundary. The complete supplied
+anti-slop law was also re-checked point by point. This correction changes only
+Go persistence/WebSocket logic, tests, and this evidence report; its visual UI
+rules are inapplicable.
+
+## Files changed by this correction
+
+- `relay/internal/server/ws.go`
+- `relay/internal/server/ws_mailbox_test.go`
+- `relay/internal/store/mailbox_store.go`
+- `relay/internal/store/mailbox_store_test.go`
+- `.superpowers/sdd/task-4-fix3-report.md`
+
+Requested commit message:
+
+```text
+fix(relay): bound durable status processing
+```

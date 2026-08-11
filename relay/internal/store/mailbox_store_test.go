@@ -399,6 +399,150 @@ func TestMailboxDuplicateAckRequiresTerminalDigest(t *testing.T) {
 	}
 }
 
+func TestMailboxTerminalLookupIgnoresUnrelatedCorruptStatuses(t *testing.T) {
+	t.Run("duplicate ack", func(t *testing.T) {
+		b := openTestBolt(t)
+		s := NewMailboxStore(b, DefaultMailboxLimits())
+		rec := testMailboxRecord("11222222-2222-4222-8222-222222222223", "a")
+		acceptedAt := time.UnixMilli(1000)
+		ackedAt := time.UnixMilli(2000)
+		if _, err := s.Put(rec, acceptedAt); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, ackedAt); err != nil {
+			t.Fatal(err)
+		}
+		putCorruptUnrelatedStatus(t, b)
+		if err := s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, ackedAt.Add(time.Second)); err != nil {
+			t.Fatalf("indexed duplicate ack consulted unrelated status: %v", err)
+		}
+		if err := s.Ack(rec.RecipientDevice, rec.MsgID, strings.Repeat("b", 64), ackedAt.Add(time.Second)); !errors.Is(err, ErrDigestMismatch) {
+			t.Fatalf("indexed duplicate ack wrong digest = %v", err)
+		}
+	})
+
+	t.Run("terminal put", func(t *testing.T) {
+		b := openTestBolt(t)
+		s := NewMailboxStore(b, DefaultMailboxLimits())
+		rec := testMailboxRecord("11222222-2222-4222-8222-222222222224", "a")
+		acceptedAt := time.UnixMilli(3000)
+		if _, err := s.Put(rec, acceptedAt); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, time.UnixMilli(4000)); err != nil {
+			t.Fatal(err)
+		}
+		putCorruptUnrelatedStatus(t, b)
+		result, err := s.Put(rec, time.UnixMilli(5000))
+		if err != nil {
+			t.Fatalf("indexed terminal put consulted unrelated status: %v", err)
+		}
+		if !result.Duplicate || !result.Terminal || result.AcceptedAt != acceptedAt.UnixMilli() {
+			t.Fatalf("terminal duplicate = %#v, want original acceptance identity", result)
+		}
+		conflict := rec
+		conflict.EnvelopeSHA256 = strings.Repeat("b", 64)
+		if _, err := s.Put(conflict, time.UnixMilli(5001)); !errors.Is(err, ErrMessageIDConflict) {
+			t.Fatalf("indexed terminal digest conflict = %v", err)
+		}
+		pending, err := s.Pending(rec.RecipientDevice, 1)
+		if err != nil || len(pending) != 0 {
+			t.Fatalf("terminal duplicate resurrected ciphertext: %#v, %v", pending, err)
+		}
+	})
+}
+
+func TestMailboxStatusIndexesMigrateLegacyTombstonesAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mailbox.db")
+	b, err := OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acked := DeliveryStatus{
+		SenderDevice: "dev-a", RecipientDevice: "dev-b",
+		MsgID: "11444444-4444-4444-8444-444444444441", Status: "acknowledged",
+		OccurredAt: 2000, ExpiresAt: time.UnixMilli(2000).Add(statusRetention).UnixMilli(),
+		EnvelopeSHA256: strings.Repeat("a", 64), AcceptedAt: 1000, MailboxExpiresAt: 3601000,
+	}
+	expired := DeliveryStatus{
+		SenderDevice: "dev-a", RecipientDevice: "dev-b",
+		MsgID: "11444444-4444-4444-8444-444444444442", Status: "expired",
+		OccurredAt: 3000, ExpiresAt: time.UnixMilli(3000).Add(statusRetention).UnixMilli(),
+		EnvelopeSHA256: strings.Repeat("b", 64), AcceptedAt: 1100, MailboxExpiresAt: 3601100,
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		statuses, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxStatus))
+		if err != nil {
+			return err
+		}
+		for _, status := range []DeliveryStatus{acked, expired} {
+			raw, err := json.Marshal(status)
+			if err != nil {
+				return err
+			}
+			if err := statuses.Put(statusKey(status.SenderDevice, status.MsgID), raw); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err = OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	s := NewMailboxStore(b, DefaultMailboxLimits())
+	if _, err := s.Expire(time.UnixMilli(4000)); err != nil {
+		t.Fatalf("migrate legacy indexes: %v", err)
+	}
+
+	page, err := s.ExpiryStatuses(expired.SenderDevice, expired.RecipientDevice, 1)
+	if err != nil || len(page) != 1 || page[0] != expired {
+		t.Fatalf("migrated expiry page = %#v, %v", page, err)
+	}
+	putCorruptUnrelatedStatus(t, b)
+	rec := testMailboxRecord(acked.MsgID, "a")
+	result, err := s.Put(rec, time.UnixMilli(5000))
+	if err != nil {
+		t.Fatalf("reopened indexed terminal put consulted unrelated status: %v", err)
+	}
+	if !result.Duplicate || !result.Terminal || result.AcceptedAt != acked.AcceptedAt {
+		t.Fatalf("reopened terminal duplicate = %#v", result)
+	}
+	if err := s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, time.UnixMilli(5001)); err != nil {
+		t.Fatalf("reopened indexed duplicate ack: %v", err)
+	}
+
+	if err := s.MarkExpiryStatusesReported(expired.SenderDevice, expired.RecipientDevice, []string{expired.MsgID}); err != nil {
+		t.Fatal(err)
+	}
+	if page, err := s.ExpiryStatuses(expired.SenderDevice, expired.RecipientDevice, 1); err != nil || len(page) != 0 {
+		t.Fatalf("reported expiry was not drained: %#v, %v", page, err)
+	}
+	raw, err := b.Get(bucketMailboxStatus, string(statusKey(expired.SenderDevice, expired.MsgID)))
+	if err != nil || raw == nil {
+		t.Fatalf("reporting deleted canonical 24h tombstone: %q, %v", raw, err)
+	}
+}
+
+func putCorruptUnrelatedStatus(t *testing.T, b *Bolt) {
+	t.Helper()
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		statuses, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxStatus))
+		if err != nil {
+			return err
+		}
+		return statuses.Put(statusKey("aaa-unrelated", "00000000-0000-4000-8000-000000000000"), []byte("{"))
+	}); err != nil {
+		t.Fatalf("insert corrupt unrelated status: %v", err)
+	}
+}
+
 func TestMailboxTerminalTombstonePreventsResurrection(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -503,6 +647,9 @@ func TestMailboxPurgePairDeletesBothDirections(t *testing.T) {
 	if _, err := s.Put(reverse, time.UnixMilli(1002)); err != nil {
 		t.Fatal(err)
 	}
+	if expired, err := s.Expire(time.UnixMilli(1002).Add(time.Hour)); err != nil || len(expired) != 1 {
+		t.Fatalf("expire reverse before purge = %#v, %v", expired, err)
+	}
 	if err := s.PurgePair("dev-a", "dev-b"); err != nil {
 		t.Fatal(err)
 	}
@@ -516,6 +663,11 @@ func TestMailboxPurgePairDeletesBothDirections(t *testing.T) {
 		statuses, err := s.Statuses(sender, time.UnixMilli(0))
 		if err != nil || len(statuses) != 0 {
 			t.Fatalf("statuses for %s = %#v, %v", sender, statuses, err)
+		}
+	}
+	for _, bucketName := range []string{bucketMailboxStatusByRecipient, bucketMailboxExpiryPending} {
+		if entries := mailboxBucketEntryCount(t, b, bucketName); entries != 0 {
+			t.Fatalf("purge left %d entries in %s", entries, bucketName)
 		}
 	}
 	if _, err := s.Put(testMailboxRecord("33333333-3333-4333-8333-333333333333", "c"), time.UnixMilli(1003)); err != nil {
@@ -569,6 +721,29 @@ func TestMailboxExpireStatusesRemovesOnlyExpiredTombstones(t *testing.T) {
 	if got, err := s.Statuses(rec.SenderDevice, time.UnixMilli(0)); err != nil || len(got) != 0 {
 		t.Fatalf("status not removed at expiry: %#v, %v", got, err)
 	}
+	for _, bucketName := range []string{bucketMailboxStatusByRecipient, bucketMailboxExpiryPending} {
+		if entries := mailboxBucketEntryCount(t, b, bucketName); entries != 0 {
+			t.Fatalf("status expiry left %d entries in %s", entries, bucketName)
+		}
+	}
+}
+
+func mailboxBucketEntryCount(t *testing.T, b *Bolt, bucketName string) int {
+	t.Helper()
+	count := 0
+	if err := b.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketName))
+		if bucket == nil {
+			return nil
+		}
+		return bucket.ForEach(func(_, _ []byte) error {
+			count++
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 func openTestBolt(t *testing.T) *Bolt {
@@ -595,7 +770,10 @@ func snapshotMailboxBuckets(t *testing.T, b *Bolt) map[string]map[string]string 
 	t.Helper()
 	snapshot := make(map[string]map[string]string)
 	if err := b.View(func(tx *bbolt.Tx) error {
-		for _, name := range []string{bucketMailboxItems, bucketMailboxOrder, bucketMailboxStats, bucketMailboxStatus, bucketMailboxSequence} {
+		for _, name := range []string{
+			bucketMailboxItems, bucketMailboxOrder, bucketMailboxStats, bucketMailboxStatus,
+			bucketMailboxStatusByRecipient, bucketMailboxExpiryPending, bucketMailboxMeta, bucketMailboxSequence,
+		} {
 			entries := make(map[string]string)
 			bucket := tx.Bucket([]byte(name))
 			if bucket != nil {
