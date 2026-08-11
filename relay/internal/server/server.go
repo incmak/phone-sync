@@ -81,5 +81,6 @@ func (s *Server) routes() {
 	s.router.Post("/pair/send_sig", s.handlePairSendSig)
 	s.router.Post("/pair/complete", s.handlePairComplete)
 	s.router.Get("/pair/notify", s.handlePairNotify)
+	s.router.With(s.authMiddleware).Post("/pair/revoke", s.handlePairRevoke)
 	s.router.With(s.authMiddleware).Get("/ws", s.handleWebSocket)
 }

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 func TestPairPendingStatePersistsTransitionsAndCommittedToken(t *testing.T) {
@@ -600,5 +602,186 @@ func TestPairStore_LookupSignPubkey(t *testing.T) {
 	pk, err = ps.SignPubkeyFor("B")
 	if err != nil || pk[0] != 4 {
 		t.Fatalf("lookup B sign: %v %v", err, pk)
+	}
+}
+
+func TestRevokeByDevicePurgesPairAuthorizationCapabilitiesTokenAndMailboxState(t *testing.T) {
+	b := openTestBolt(t)
+	ps := NewPairStore(b)
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	pending := PendingPair{
+		PairToken: "revoke-token", DeviceAID: "dev-a",
+		AEncPubkey: []byte("old-a-enc"), ASignPubkey: []byte("old-a-sign"),
+		CreatedAt: time.Now().Unix(),
+	}
+	if err := ps.PutPending(pending); err != nil {
+		t.Fatal(err)
+	}
+	pair := ConfirmedPair{
+		PairID: "revoke-pair", DeviceA: "dev-a", DeviceB: "dev-b",
+		AEncPubkey: pending.AEncPubkey, ASignPubkey: pending.ASignPubkey,
+		BEncPubkey: []byte("old-b-enc"), BSignPubkey: []byte("old-b-sign"),
+	}
+	if _, err := ps.ConfirmPending(pending.PairToken, pair, []byte("confirmation")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.UpdateCapabilities(pair.DeviceA, []int{2, 1}, "old-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.UpdateCapabilities(pair.DeviceB, []int{2, 1}, "old-b"); err != nil {
+		t.Fatal(err)
+	}
+
+	forward := testMailboxRecord("11111111-1111-4111-8111-111111111111", "a")
+	reverse := testMailboxRecord("22222222-2222-4222-8222-222222222222", "b")
+	reverse.RecipientDevice, reverse.SenderDevice = pair.DeviceA, pair.DeviceB
+	tombstone := testMailboxRecord("33333333-3333-4333-8333-333333333333", "c")
+	for _, rec := range []MailboxRecord{forward, reverse, tombstone} {
+		if _, err := mailbox.Put(rec, time.UnixMilli(1000)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mailbox.Ack(tombstone.RecipientDevice, tombstone.MsgID, tombstone.EnvelopeSHA256, time.UnixMilli(1001)); err != nil {
+		t.Fatal(err)
+	}
+
+	revoked, err := ps.RevokeByDevice(pair.DeviceB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(*revoked, pair) {
+		t.Fatalf("revoked pair = %#v, want %#v", *revoked, pair)
+	}
+	if _, err := ps.Get(pair.PairID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("confirmed pair still present: %v", err)
+	}
+	for _, deviceID := range []string{pair.DeviceA, pair.DeviceB} {
+		if _, err := ps.PeerFor(deviceID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("device %s still indexed: %v", deviceID, err)
+		}
+		pendingRecords, err := mailbox.Pending(deviceID, 10)
+		if err != nil || len(pendingRecords) != 0 {
+			t.Fatalf("pending mailbox for %s = %#v, %v", deviceID, pendingRecords, err)
+		}
+		statuses, err := mailbox.Statuses(deviceID, time.UnixMilli(0))
+		if err != nil || len(statuses) != 0 {
+			t.Fatalf("delivery statuses for %s = %#v, %v", deviceID, statuses, err)
+		}
+	}
+	if _, err := ps.GetPending(pending.PairToken); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("retained pairing token still present: %v", err)
+	}
+
+	rebound := ConfirmedPair{
+		PairID: "rebound-pair", DeviceA: pair.DeviceA, DeviceB: pair.DeviceB,
+		AEncPubkey: []byte("new-a-enc"), ASignPubkey: []byte("new-a-sign"),
+		BEncPubkey: []byte("new-b-enc"), BSignPubkey: []byte("new-b-sign"),
+	}
+	if err := ps.Confirm(rebound); err != nil {
+		t.Fatalf("rebind after revocation: %v", err)
+	}
+	self, peer, floor, err := ps.CapabilitiesFor(rebound.DeviceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(self.Protocols) != 0 || self.AppVersion != "" || len(peer.Protocols) != 0 || peer.AppVersion != "" || floor != 1 {
+		t.Fatalf("rebound pair inherited capabilities: self=%#v peer=%#v floor=%d", self, peer, floor)
+	}
+	for index, rec := range []MailboxRecord{
+		testMailboxRecord("44444444-4444-4444-8444-444444444444", "d"),
+		func() MailboxRecord {
+			rec := testMailboxRecord("55555555-5555-4555-8555-555555555555", "e")
+			rec.RecipientDevice, rec.SenderDevice = rebound.DeviceA, rebound.DeviceB
+			return rec
+		}(),
+	} {
+		result, err := mailbox.Put(rec, time.UnixMilli(2000+int64(index)))
+		if err != nil {
+			t.Fatalf("put after revocation: %v", err)
+		}
+		if result.AcceptanceSequence != 1 {
+			t.Fatalf("recipient sequence after revocation = %d, want 1", result.AcceptanceSequence)
+		}
+	}
+}
+
+func TestRevokeByDeviceRollsBackPairDeletionWhenMailboxPurgeFails(t *testing.T) {
+	b := openTestBolt(t)
+	ps := NewPairStore(b)
+	pending := PendingPair{
+		PairToken: "rollback-token", DeviceAID: "dev-a",
+		AEncPubkey: []byte("a-enc"), ASignPubkey: []byte("a-sign"), CreatedAt: time.Now().Unix(),
+	}
+	if err := ps.PutPending(pending); err != nil {
+		t.Fatal(err)
+	}
+	pair := ConfirmedPair{
+		PairID: "rollback-pair", DeviceA: "dev-a", DeviceB: "dev-b",
+		AEncPubkey: pending.AEncPubkey, ASignPubkey: pending.ASignPubkey,
+		BEncPubkey: []byte("b-enc"), BSignPubkey: []byte("b-sign"),
+	}
+	if _, err := ps.ConfirmPending(pending.PairToken, pair, []byte("confirmation")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.UpdateCapabilities(pair.DeviceA, []int{2, 1}, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.UpdateCapabilities(pair.DeviceB, []int{2, 1}, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		items, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxItems))
+		if err != nil {
+			return err
+		}
+		return items.Put(itemKey(pair.DeviceB, "66666666-6666-4666-8666-666666666666"), []byte("{"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ps.RevokeByDevice(pair.DeviceA); err == nil {
+		t.Fatal("RevokeByDevice succeeded despite corrupt mailbox state")
+	}
+	stored, err := ps.Get(pair.PairID)
+	if err != nil || !reflect.DeepEqual(*stored, pair) {
+		t.Fatalf("confirmed pair did not roll back: %#v, %v", stored, err)
+	}
+	for device, wantPeer := range map[string]string{pair.DeviceA: pair.DeviceB, pair.DeviceB: pair.DeviceA} {
+		if got, err := ps.PeerFor(device); err != nil || got != wantPeer {
+			t.Fatalf("device index %s did not roll back: peer=%q err=%v", device, got, err)
+		}
+	}
+	if state, err := ps.PendingState(pending.PairToken); err != nil || state != PairCommitted {
+		t.Fatalf("pending completion marker did not roll back: state=%q err=%v", state, err)
+	}
+	if _, _, floor, err := ps.CapabilitiesFor(pair.DeviceA); err != nil || floor != 2 {
+		t.Fatalf("capability state did not roll back: floor=%d err=%v", floor, err)
+	}
+}
+
+func TestRevokeRequiredBeforeConfirmCanRebindDevices(t *testing.T) {
+	ps := newTestPairStore(t)
+	original := ConfirmedPair{PairID: "original", DeviceA: "dev-a", DeviceB: "dev-b"}
+	if err := ps.Confirm(original); err != nil {
+		t.Fatal(err)
+	}
+	candidate := ConfirmedPair{PairID: "candidate", DeviceA: "dev-a", DeviceB: "dev-c"}
+	if err := ps.Confirm(candidate); !errors.Is(err, ErrPairConflict) {
+		t.Fatalf("Confirm live device binding error = %v, want ErrPairConflict", err)
+	}
+	if _, err := ps.Get(candidate.PairID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("conflicting candidate was persisted: %v", err)
+	}
+	if peer, err := ps.PeerFor(original.DeviceA); err != nil || peer != original.DeviceB {
+		t.Fatalf("original binding changed: peer=%q err=%v", peer, err)
+	}
+	if _, err := ps.RevokeByDevice(original.DeviceB); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.Confirm(candidate); err != nil {
+		t.Fatalf("Confirm after authenticated-state revocation: %v", err)
+	}
+	if peer, err := ps.PeerFor(candidate.DeviceA); err != nil || peer != candidate.DeviceB {
+		t.Fatalf("rebound device index: peer=%q err=%v", peer, err)
 	}
 }

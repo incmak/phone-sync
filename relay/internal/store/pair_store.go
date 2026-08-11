@@ -291,13 +291,105 @@ func (ps *PairStore) Confirm(cp ConfirmedPair) error {
 	if err != nil {
 		return err
 	}
-	if err := ps.bolt.Put(bucketConfirmed, cp.PairID, b); err != nil {
-		return err
+	return ps.bolt.Update(func(tx *bbolt.Tx) error {
+		confirmed, err := tx.CreateBucketIfNotExists([]byte(bucketConfirmed))
+		if err != nil {
+			return err
+		}
+		byDevice, err := tx.CreateBucketIfNotExists([]byte(bucketByDevice))
+		if err != nil {
+			return err
+		}
+		pairID := []byte(cp.PairID)
+		if raw := confirmed.Get(pairID); raw != nil {
+			stored, err := decodeConfirmedPair(raw)
+			if err != nil {
+				return err
+			}
+			if !sameConfirmedPair(stored, cp) {
+				return ErrPairConflict
+			}
+		}
+		for _, deviceID := range []string{cp.DeviceA, cp.DeviceB} {
+			if existingPairID := byDevice.Get([]byte(deviceID)); existingPairID != nil && !bytes.Equal(existingPairID, pairID) {
+				return ErrPairConflict
+			}
+		}
+		if err := confirmed.Put(pairID, b); err != nil {
+			return err
+		}
+		if err := byDevice.Put([]byte(cp.DeviceA), pairID); err != nil {
+			return err
+		}
+		return byDevice.Put([]byte(cp.DeviceB), pairID)
+	})
+}
+
+// RevokeByDevice atomically removes a confirmed pair's authorization,
+// retained pairing state, capability negotiation, and durable mailboxes.
+func (ps *PairStore) RevokeByDevice(deviceID string) (*ConfirmedPair, error) {
+	var revoked ConfirmedPair
+	err := ps.bolt.Update(func(tx *bbolt.Tx) error {
+		pairID, pair, err := confirmedPairForDeviceTx(tx, deviceID)
+		if err != nil {
+			return err
+		}
+		byDevice := tx.Bucket([]byte(bucketByDevice))
+		for _, pairedDevice := range []string{pair.DeviceA, pair.DeviceB} {
+			if indexedPairID := byDevice.Get([]byte(pairedDevice)); !bytes.Equal(indexedPairID, pairID) {
+				return ErrPairConflict
+			}
+		}
+
+		if err := purgePairTx(tx, pair.DeviceA, pair.DeviceB); err != nil {
+			return err
+		}
+		confirmed := tx.Bucket([]byte(bucketConfirmed))
+		if err := confirmed.Delete(pairID); err != nil {
+			return err
+		}
+		if err := byDevice.Delete([]byte(pair.DeviceA)); err != nil {
+			return err
+		}
+		if err := byDevice.Delete([]byte(pair.DeviceB)); err != nil {
+			return err
+		}
+		if capabilities := tx.Bucket([]byte(bucketCapabilities)); capabilities != nil {
+			if err := capabilities.Delete([]byte(pair.DeviceA)); err != nil {
+				return err
+			}
+			if err := capabilities.Delete([]byte(pair.DeviceB)); err != nil {
+				return err
+			}
+		}
+		if floors := tx.Bucket([]byte(bucketProtocolFloor)); floors != nil {
+			if err := floors.Delete(pairID); err != nil {
+				return err
+			}
+		}
+		if pending := tx.Bucket([]byte(bucketPending)); pending != nil {
+			cursor := pending.Cursor()
+			for key, raw := cursor.First(); key != nil; {
+				nextKey, nextRaw := cursor.Next()
+				retained, err := decodePendingPair(raw)
+				if err != nil {
+					return err
+				}
+				if retained.PairID == pair.PairID {
+					if err := pending.Delete(key); err != nil {
+						return err
+					}
+				}
+				key, raw = nextKey, nextRaw
+			}
+		}
+		revoked = pair
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if err := ps.bolt.Put(bucketByDevice, cp.DeviceA, []byte(cp.PairID)); err != nil {
-		return err
-	}
-	return ps.bolt.Put(bucketByDevice, cp.DeviceB, []byte(cp.PairID))
+	return &revoked, nil
 }
 
 func (ps *PairStore) Get(pairID string) (*ConfirmedPair, error) {

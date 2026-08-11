@@ -105,6 +105,17 @@ func (h *ClientHub) Stop(deviceID string) {
 	}
 }
 
+// Disconnect cancels and unregisters the current connection for deviceID.
+// The private outbound queue stays open because producers may still hold it.
+func (h *ClientHub) Disconnect(deviceID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c := h.clients[deviceID]; c != nil {
+		delete(h.clients, deviceID)
+		c.stop()
+	}
+}
+
 // Send forwards a frame to deviceID if currently connected. Returns true on delivery
 // (queued to outbound channel), false if peer is offline or its buffer is full.
 func (h *ClientHub) Send(deviceID string, frame []byte) bool {
