@@ -4,14 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 var ErrNotFound = errors.New("not found")
 
 const (
-	bucketPending   = "pair_pending"
-	bucketConfirmed = "pair_confirmed"
-	bucketByDevice  = "device_to_pair"
+	bucketPending       = "pair_pending"
+	bucketConfirmed     = "pair_confirmed"
+	bucketByDevice      = "device_to_pair"
+	bucketCapabilities  = "device_capabilities"
+	bucketProtocolFloor = "pair_protocol_floor"
 )
 
 type PendingPair struct {
@@ -42,6 +47,12 @@ type ConfirmedPair struct {
 	BEncPubkey   []byte `json:"b_enc_pubkey"`
 	BSignPubkey  []byte `json:"b_sign_pubkey"`
 	BDisplayName string `json:"b_display_name,omitempty"`
+}
+
+type DeviceCapabilities struct {
+	Protocols  []int  `json:"protocols"`
+	AppVersion string `json:"app_version"`
+	UpdatedAt  int64  `json:"updated_at"`
 }
 
 type PairStore struct {
@@ -174,4 +185,137 @@ func (ps *PairStore) PeerFor(deviceID string) (string, error) {
 		return cp.DeviceA, nil
 	}
 	return "", ErrNotFound
+}
+
+// UpdateCapabilities records a confirmed device's advertised protocols and
+// advances its pair's protocol floor atomically. A negotiated floor never
+// decreases automatically.
+func (ps *PairStore) UpdateCapabilities(deviceID string, protocols []int, appVersion string) error {
+	return ps.bolt.Update(func(tx *bbolt.Tx) error {
+		pairID, pair, err := confirmedPairForDeviceTx(tx, deviceID)
+		if err != nil {
+			return err
+		}
+		peerID := pair.DeviceA
+		if deviceID == pair.DeviceA {
+			peerID = pair.DeviceB
+		}
+
+		capabilities, err := tx.CreateBucketIfNotExists([]byte(bucketCapabilities))
+		if err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(DeviceCapabilities{
+			Protocols: append([]int(nil), protocols...), AppVersion: appVersion, UpdatedAt: time.Now().UnixMilli(),
+		})
+		if err != nil {
+			return err
+		}
+		if err := capabilities.Put([]byte(deviceID), encoded); err != nil {
+			return err
+		}
+
+		floors, err := tx.CreateBucketIfNotExists([]byte(bucketProtocolFloor))
+		if err != nil {
+			return err
+		}
+		if floorForPair(floors.Get(pairID)) >= 2 {
+			return nil
+		}
+		peerCapabilities, err := decodeCapabilities(capabilities.Get([]byte(peerID)))
+		if err != nil {
+			return err
+		}
+		if supportsStoredProtocol(protocols, 2) && supportsStoredProtocol(peerCapabilities.Protocols, 2) {
+			return floors.Put(pairID, []byte{2})
+		}
+		return nil
+	})
+}
+
+// CapabilitiesFor returns one consistent snapshot of a confirmed pair's
+// advertised capabilities and monotonic negotiated floor.
+func (ps *PairStore) CapabilitiesFor(deviceID string) (self DeviceCapabilities, peer DeviceCapabilities, floor int, err error) {
+	err = ps.bolt.View(func(tx *bbolt.Tx) error {
+		pairID, pair, lookupErr := confirmedPairForDeviceTx(tx, deviceID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		peerID := pair.DeviceA
+		if deviceID == pair.DeviceA {
+			peerID = pair.DeviceB
+		}
+		capabilities := tx.Bucket([]byte(bucketCapabilities))
+		if capabilities != nil {
+			self, lookupErr = decodeCapabilities(capabilities.Get([]byte(deviceID)))
+			if lookupErr != nil {
+				return lookupErr
+			}
+			peer, lookupErr = decodeCapabilities(capabilities.Get([]byte(peerID)))
+			if lookupErr != nil {
+				return lookupErr
+			}
+		}
+		floor = 1
+		if floors := tx.Bucket([]byte(bucketProtocolFloor)); floors != nil {
+			floor = floorForPair(floors.Get(pairID))
+		}
+		return nil
+	})
+	return self, peer, floor, err
+}
+
+func confirmedPairForDeviceTx(tx *bbolt.Tx, deviceID string) ([]byte, ConfirmedPair, error) {
+	byDevice := tx.Bucket([]byte(bucketByDevice))
+	if byDevice == nil {
+		return nil, ConfirmedPair{}, ErrNotFound
+	}
+	pairID := byDevice.Get([]byte(deviceID))
+	if pairID == nil {
+		return nil, ConfirmedPair{}, ErrNotFound
+	}
+	confirmed := tx.Bucket([]byte(bucketConfirmed))
+	if confirmed == nil {
+		return nil, ConfirmedPair{}, ErrNotFound
+	}
+	rawPair := confirmed.Get(pairID)
+	if rawPair == nil {
+		return nil, ConfirmedPair{}, ErrNotFound
+	}
+	var pair ConfirmedPair
+	if err := json.Unmarshal(rawPair, &pair); err != nil {
+		return nil, ConfirmedPair{}, err
+	}
+	if pair.DeviceA != deviceID && pair.DeviceB != deviceID {
+		return nil, ConfirmedPair{}, ErrNotFound
+	}
+	return append([]byte(nil), pairID...), pair, nil
+}
+
+func decodeCapabilities(raw []byte) (DeviceCapabilities, error) {
+	if raw == nil {
+		return DeviceCapabilities{}, nil
+	}
+	var capabilities DeviceCapabilities
+	if err := json.Unmarshal(raw, &capabilities); err != nil {
+		return DeviceCapabilities{}, err
+	}
+	capabilities.Protocols = append([]int(nil), capabilities.Protocols...)
+	return capabilities, nil
+}
+
+func supportsStoredProtocol(protocols []int, protocol int) bool {
+	for _, advertised := range protocols {
+		if advertised == protocol {
+			return true
+		}
+	}
+	return false
+}
+
+func floorForPair(raw []byte) int {
+	if len(raw) == 1 && raw[0] >= 2 {
+		return 2
+	}
+	return 1
 }

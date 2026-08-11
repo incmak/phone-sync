@@ -51,6 +51,17 @@ type mailboxTestPair struct {
 }
 
 func registerMailboxTestPair(t *testing.T, srv *Server) mailboxTestPair {
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	if err := srv.pairStore.UpdateCapabilities(pair.deviceA, []int{2, 1}, "test"); err != nil {
+		t.Fatalf("advertise mailbox device A capabilities: %v", err)
+	}
+	if err := srv.pairStore.UpdateCapabilities(pair.deviceB, []int{2, 1}, "test"); err != nil {
+		t.Fatalf("advertise mailbox device B capabilities: %v", err)
+	}
+	return pair
+}
+
+func registerMailboxTestPairWithoutCapabilities(t *testing.T, srv *Server) mailboxTestPair {
 	t.Helper()
 	aPub, aPriv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -447,7 +458,7 @@ func TestWebSocketRejectsOriginDifferentFromJWTSubject(t *testing.T) {
 func TestWebSocketRejectsMixedLegacyAndV2Frames(t *testing.T) {
 	t.Run("legacy then v2", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 		conn := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
@@ -464,7 +475,7 @@ func TestWebSocketRejectsMixedLegacyAndV2Frames(t *testing.T) {
 
 	t.Run("v2 then legacy", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 		conn := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
@@ -913,7 +924,7 @@ func TestWebSocketHelloDrainHandoffDeliversConcurrentPutOnce(t *testing.T) {
 
 func TestWebSocketWrappedV1PersistsWhileProtocolOnePeerHandshakes(t *testing.T) {
 	srv := newTestServer(t)
-	pair := registerMailboxTestPair(t, srv)
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 	handoffReached := make(chan struct{})
 	releaseHandoff := make(chan struct{})
 	srv.relayHelloBeforeActivate = func(deviceID string) {
@@ -1073,6 +1084,12 @@ func TestWebSocketDurableHandoffReclaimsManySequentialRecipients(t *testing.T) {
 			PairID: fmt.Sprintf("lane-pair-%03d", i), DeviceA: sender, DeviceB: recipient,
 		}); err != nil {
 			t.Fatalf("confirm pair %d: %v", i, err)
+		}
+		if err := srv.pairStore.UpdateCapabilities(sender, []int{2, 1}, "test"); err != nil {
+			t.Fatalf("advertise sender %d capabilities: %v", i, err)
+		}
+		if err := srv.pairStore.UpdateCapabilities(recipient, []int{2, 1}, "test"); err != nil {
+			t.Fatalf("advertise recipient %d capabilities: %v", i, err)
 		}
 		msgID := fmt.Sprintf("83dddddd-dddd-4ddd-8ddd-%012d", i)
 		srv.handleRelayPut(sender, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(sender, msgID)}, func(any) error {
@@ -1446,10 +1463,121 @@ func TestWebSocketHashesAndDeliversExactEnvelopeBytes(t *testing.T) {
 	waitForPendingCount(t, srv, pair.deviceB, 0)
 }
 
+func TestWebSocketCapabilitiesBeforePeerHello(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	client := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer client.Close()
+	capabilities := sendMailboxHelloWithProtocols(t, client, []int{2, 1})
+	if !reflect.DeepEqual(capabilities.Self, []int{2, 1}) {
+		t.Fatalf("self capabilities = %v, want [2 1]", capabilities.Self)
+	}
+	if !reflect.DeepEqual(capabilities.Peer, []int{1}) {
+		t.Fatalf("peer capabilities = %v, want legacy default [1]", capabilities.Peer)
+	}
+	if capabilities.Floor != 1 {
+		t.Fatalf("protocol floor = %d, want 1", capabilities.Floor)
+	}
+}
+
+func TestWebSocketV2RequiresBothPersistentAdvertisements(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer sender.Close()
+	sendMailboxHelloWithProtocols(t, sender, []int{2, 1})
+	firstID := "84911111-1111-4111-8111-111111111111"
+	writeMailboxFrame(t, sender, map[string]any{
+		"v": 2, "type": "relay.put", "envelope": validMailboxEnvelope(pair.deviceA, firstID),
+	})
+	if rejected := readMailboxRejected(t, sender); rejected.MsgID != firstID || rejected.Reason != "peer_legacy" {
+		t.Fatalf("v2 before peer advertisement = %#v, want peer_legacy", rejected)
+	}
+	waitForPendingCount(t, srv, pair.deviceB, 0)
+
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	capabilities := sendMailboxHelloWithProtocols(t, recipient, []int{2, 1})
+	if !reflect.DeepEqual(capabilities.Peer, []int{2, 1}) || capabilities.Floor != 2 {
+		t.Fatalf("second hello capabilities = %#v, want persisted peer [2 1] and floor 2", capabilities)
+	}
+
+	secondID := "84922222-2222-4222-8222-222222222222"
+	secondEnvelope := validMailboxEnvelope(pair.deviceA, secondID)
+	writeMailboxFrame(t, sender, map[string]any{
+		"v": 2, "type": "relay.put", "envelope": secondEnvelope,
+	})
+	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" || accepted.MsgID != secondID {
+		t.Fatalf("v2 after both advertisements = %#v, want relay.accepted", accepted)
+	}
+	if delivered := readMailboxFrame(t, recipient); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(secondEnvelope) {
+		t.Fatalf("v2 delivery after negotiation = %#v", delivered)
+	}
+}
+
+func TestWebSocketProtocolFloorTwoRejectsV1AndSurvivesReconnect(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	a := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	sendMailboxHelloWithProtocols(t, a, []int{2, 1})
+	b := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer b.Close()
+	if capabilities := sendMailboxHelloWithProtocols(t, b, []int{2, 1}); capabilities.Floor != 2 {
+		t.Fatalf("negotiated floor = %d, want 2", capabilities.Floor)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("close first sender: %v", err)
+	}
+
+	reconnected := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	capabilities := sendMailboxHelloWithProtocols(t, reconnected, []int{2, 1})
+	if capabilities.Floor != 2 || !reflect.DeepEqual(capabilities.Peer, []int{2, 1}) {
+		t.Fatalf("reconnected capabilities = %#v, want persisted floor 2", capabilities)
+	}
+	if err := reconnected.Close(); err != nil {
+		t.Fatalf("close reconnected sender: %v", err)
+	}
+
+	rawSender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer rawSender.Close()
+	rawID := "84933333-3333-4333-8333-333333333333"
+	if err := rawSender.WriteMessage(websocket.TextMessage, validLegacyMailboxEnvelope(pair.deviceA, rawID)); err != nil {
+		t.Fatalf("write raw v1 after floor 2: %v", err)
+	}
+	if rejected := readMailboxRejected(t, rawSender); rejected.MsgID != rawID || rejected.Reason != "invalid_frame" {
+		t.Fatalf("raw v1 after floor 2 = %#v, want invalid_frame", rejected)
+	}
+	_ = b.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if _, raw, err := b.ReadMessage(); err == nil {
+		t.Fatalf("floor-2 peer received raw v1 downgrade: %s", raw)
+	}
+
+	typedSender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer typedSender.Close()
+	sendMailboxHelloWithProtocols(t, typedSender, []int{2, 1})
+	wrappedID := "84944444-4444-4444-8444-444444444444"
+	writeMailboxFrame(t, typedSender, map[string]any{
+		"v": 2, "type": "relay.put", "envelope": validLegacyMailboxEnvelope(pair.deviceA, wrappedID),
+	})
+	if rejected := readMailboxRejected(t, typedSender); rejected.MsgID != wrappedID || rejected.Reason != "peer_legacy" {
+		t.Fatalf("wrapped v1 after floor 2 = %#v, want peer_legacy", rejected)
+	}
+	waitForPendingCount(t, srv, pair.deviceB, 0)
+}
+
 func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
 	t.Run("typed peer advertises its actual live protocols and rejects v2 before put", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 
@@ -1480,7 +1608,7 @@ func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
 
 	t.Run("raw v1 sender forwards to ready typed dual-read peer while floor is one", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 
@@ -1508,7 +1636,7 @@ func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
 
 	t.Run("live legacy peer is raw online-only", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 		legacyPeer := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
@@ -1544,7 +1672,7 @@ func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
 
 	t.Run("known live legacy peer rejects v2 envelope", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 		legacyPeer := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
@@ -1567,7 +1695,7 @@ func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
 
 	t.Run("unselected peer is not reported as legacy forwarded", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 		unselected := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
@@ -1590,7 +1718,7 @@ func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
 
 	t.Run("offline legacy peer is explicitly rejected", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 		sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
@@ -1609,7 +1737,7 @@ func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
 
 	t.Run("live v2 peer receives durable wrapped v1", func(t *testing.T) {
 		srv := newTestServer(t)
-		pair := registerMailboxTestPair(t, srv)
+		pair := registerMailboxTestPairWithoutCapabilities(t, srv)
 		ts := httptest.NewServer(srv.Handler())
 		defer ts.Close()
 		recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
@@ -1618,7 +1746,7 @@ func TestWebSocketV1EnvelopeCompatibility(t *testing.T) {
 		waitForMailboxProtocol(t, srv, pair.deviceB, protocolV2)
 		sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
 		defer sender.Close()
-		sendMailboxHello(t, sender)
+		sendMailboxHelloWithProtocols(t, sender, []int{1})
 		msgID := "85444444-4444-4444-8444-444444444444"
 		envelope := validLegacyMailboxEnvelope(pair.deviceA, msgID)
 		writeMailboxFrame(t, sender, map[string]any{"v": 2, "type": "relay.put", "envelope": envelope})

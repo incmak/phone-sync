@@ -199,6 +199,13 @@ func (s *Server) handleLegacyFrame(deviceID string, client *wsClient, protocol *
 	if *protocol == protocolV2 {
 		return errors.New("mixed protocol")
 	}
+	_, _, floor, err := s.pairStore.CapabilitiesFor(deviceID)
+	if err != nil {
+		return err
+	}
+	if floor >= 2 {
+		return errors.New("v1 below negotiated protocol floor")
+	}
 	if err := s.validator.ValidateEnvelope(raw); err != nil {
 		return err
 	}
@@ -234,17 +241,19 @@ func (s *Server) handleRelayHello(
 	if err != nil || peerID == "" {
 		return errors.New("not paired")
 	}
-	peerProtocols := []int{1}
-	if peerProtocol, advertised, online := s.clientHub.ConnectionFor(peerID); online {
-		switch peerProtocol {
-		case protocolLegacy:
-			peerProtocols = []int{1}
-		case protocolV2Handshake, protocolV2:
-			peerProtocols = advertised
-		}
+	if err := s.pairStore.UpdateCapabilities(deviceID, hello.Protocols, hello.AppVersion); err != nil {
+		return err
+	}
+	selfCapabilities, peerCapabilities, floor, err := s.pairStore.CapabilitiesFor(deviceID)
+	if err != nil {
+		return err
+	}
+	peerProtocols := append([]int(nil), peerCapabilities.Protocols...)
+	if len(peerProtocols) == 0 {
+		peerProtocols = []int{1}
 	}
 	if err := writeFrame(RelayCapabilities{
-		V: 2, Type: "relay.capabilities", Self: append([]int(nil), hello.Protocols...), Peer: peerProtocols, Floor: 1,
+		V: 2, Type: "relay.capabilities", Self: append([]int(nil), selfCapabilities.Protocols...), Peer: peerProtocols, Floor: floor,
 	}); err != nil {
 		return err
 	}
@@ -318,8 +327,17 @@ func (s *Server) handleRelayPut(
 		return
 	}
 
+	_, _, floor, err := s.pairStore.CapabilitiesFor(deviceID)
+	if err != nil {
+		_ = writeRejected(envelope.MsgID, "not_recipient")
+		return
+	}
 	peerProtocol, peerProtocols, peerOnline := s.clientHub.ConnectionFor(peerID)
 	if envelope.V == 1 {
+		if floor >= 2 {
+			_ = writeRejected(envelope.MsgID, "peer_legacy")
+			return
+		}
 		if peerProtocol != protocolV2 && peerProtocol != protocolV2Handshake {
 			if peerOnline && peerProtocol == protocolLegacy && s.clientHub.SendLegacy(peerID, put.Envelope) {
 				_ = writeFrame(RelayLegacyForwarded{V: 2, Type: "relay.legacy_forwarded", MsgID: envelope.MsgID})
@@ -332,7 +350,7 @@ func (s *Server) handleRelayPut(
 			_ = writeRejected(envelope.MsgID, "peer_legacy")
 			return
 		}
-	} else if peerOnline && !supportsProtocol(peerProtocols, 2) {
+	} else if floor < 2 {
 		_ = writeRejected(envelope.MsgID, "peer_legacy")
 		return
 	}
