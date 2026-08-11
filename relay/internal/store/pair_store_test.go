@@ -1,7 +1,9 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -116,6 +118,53 @@ func TestPairCapabilitiesRequireConfirmedPair(t *testing.T) {
 	}
 	if _, _, _, err := ps.CapabilitiesFor("unknown"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("lookup outside pair error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPairCapabilitiesRejectPresentCorruptProtocolFloor(t *testing.T) {
+	encodings := [][]byte{
+		{},
+		{1},
+		{3},
+		{2, 0},
+		[]byte("2"),
+	}
+	for _, encoding := range encodings {
+		t.Run(fmt.Sprintf("%x", encoding), func(t *testing.T) {
+			ps := newTestPairStore(t)
+			confirmTestPair(t, ps, "a", "b")
+			if err := ps.bolt.Put(bucketProtocolFloor, "pair-1", encoding); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, _, err := ps.CapabilitiesFor("a"); err == nil {
+				t.Fatalf("CapabilitiesFor accepted corrupt floor %x", encoding)
+			}
+		})
+	}
+}
+
+func TestPairCapabilityUpdateRollsBackOnCorruptProtocolFloor(t *testing.T) {
+	ps := newTestPairStore(t)
+	confirmTestPair(t, ps, "a", "b")
+	if err := ps.UpdateCapabilities("a", []int{1}, "before"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.bolt.Put(bucketProtocolFloor, "pair-1", []byte{3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.UpdateCapabilities("a", []int{2, 1}, "after"); err == nil {
+		t.Fatal("UpdateCapabilities accepted corrupt protocol floor")
+	}
+	raw, err := ps.bolt.Get(bucketCapabilities, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored DeviceCapabilities
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(stored.Protocols, []int{1}) || stored.AppVersion != "before" {
+		t.Fatalf("capability update was not rolled back: %#v", stored)
 	}
 }
 

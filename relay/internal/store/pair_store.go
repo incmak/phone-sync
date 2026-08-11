@@ -10,6 +10,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrInvalidProtocolFloor = errors.New("invalid protocol floor")
 
 const (
 	bucketPending       = "pair_pending"
@@ -219,7 +220,11 @@ func (ps *PairStore) UpdateCapabilities(deviceID string, protocols []int, appVer
 		if err != nil {
 			return err
 		}
-		if floorForPair(floors.Get(pairID)) >= 2 {
+		floor, err := floorForPair(floors.Get(pairID))
+		if err != nil {
+			return err
+		}
+		if floor >= 2 {
 			return nil
 		}
 		peerCapabilities, err := decodeCapabilities(capabilities.Get([]byte(peerID)))
@@ -258,7 +263,10 @@ func (ps *PairStore) CapabilitiesFor(deviceID string) (self DeviceCapabilities, 
 		}
 		floor = 1
 		if floors := tx.Bucket([]byte(bucketProtocolFloor)); floors != nil {
-			floor = floorForPair(floors.Get(pairID))
+			floor, lookupErr = floorForPair(floors.Get(pairID))
+			if lookupErr != nil {
+				return lookupErr
+			}
 		}
 		return nil
 	})
@@ -313,9 +321,12 @@ func supportsStoredProtocol(protocols []int, protocol int) bool {
 	return false
 }
 
-func floorForPair(raw []byte) int {
-	if len(raw) == 1 && raw[0] >= 2 {
-		return 2
+func floorForPair(raw []byte) (int, error) {
+	if raw == nil {
+		return 1, nil
 	}
-	return 1
+	if len(raw) == 1 && raw[0] == 2 {
+		return 2, nil
+	}
+	return 0, ErrInvalidProtocolFloor
 }

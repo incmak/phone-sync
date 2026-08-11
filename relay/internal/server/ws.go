@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -241,6 +242,11 @@ func (s *Server) handleRelayHello(
 	if err != nil || peerID == "" {
 		return errors.New("not paired")
 	}
+	priorPeerSelf, priorPeerView, priorPeerFloor, err := s.pairStore.CapabilitiesFor(peerID)
+	if err != nil {
+		return err
+	}
+	priorPeerFrame := relayCapabilitiesSnapshot(priorPeerSelf, priorPeerView, priorPeerFloor)
 	if err := s.pairStore.UpdateCapabilities(deviceID, hello.Protocols, hello.AppVersion); err != nil {
 		return err
 	}
@@ -248,13 +254,20 @@ func (s *Server) handleRelayHello(
 	if err != nil {
 		return err
 	}
-	peerProtocols := append([]int(nil), peerCapabilities.Protocols...)
-	if len(peerProtocols) == 0 {
-		peerProtocols = []int{1}
+	capabilitiesFrame := relayCapabilitiesSnapshot(selfCapabilities, peerCapabilities, floor)
+	peerSelf, peerPeer, peerFloor, err := s.pairStore.CapabilitiesFor(peerID)
+	if err != nil {
+		return err
 	}
-	if err := writeFrame(RelayCapabilities{
-		V: 2, Type: "relay.capabilities", Self: append([]int(nil), selfCapabilities.Protocols...), Peer: peerProtocols, Floor: floor,
-	}); err != nil {
+	peerCapabilitiesFrame := relayCapabilitiesSnapshot(peerSelf, peerPeer, peerFloor)
+	if !relayCapabilitiesEqual(priorPeerFrame, peerCapabilitiesFrame) {
+		peerFrame, err := json.Marshal(peerCapabilitiesFrame)
+		if err != nil {
+			return err
+		}
+		s.clientHub.SendCapabilities(peerID, peerFrame)
+	}
+	if err := writeFrame(capabilitiesFrame); err != nil {
 		return err
 	}
 
@@ -302,6 +315,20 @@ func (s *Server) handleRelayHello(
 	return nil
 }
 
+func relayCapabilitiesSnapshot(self, peer store.DeviceCapabilities, floor int) RelayCapabilities {
+	peerProtocols := append([]int(nil), peer.Protocols...)
+	if len(peerProtocols) == 0 {
+		peerProtocols = []int{1}
+	}
+	return RelayCapabilities{
+		V: 2, Type: "relay.capabilities", Self: append([]int(nil), self.Protocols...), Peer: peerProtocols, Floor: floor,
+	}
+}
+
+func relayCapabilitiesEqual(a, b RelayCapabilities) bool {
+	return a.Floor == b.Floor && slices.Equal(a.Self, b.Self) && slices.Equal(a.Peer, b.Peer)
+}
+
 func (s *Server) handleRelayPut(
 	deviceID string,
 	put RelayPut,
@@ -327,7 +354,7 @@ func (s *Server) handleRelayPut(
 		return
 	}
 
-	_, _, floor, err := s.pairStore.CapabilitiesFor(deviceID)
+	_, persistedPeerCapabilities, floor, err := s.pairStore.CapabilitiesFor(deviceID)
 	if err != nil {
 		_ = writeRejected(envelope.MsgID, "not_recipient")
 		return
@@ -338,15 +365,25 @@ func (s *Server) handleRelayPut(
 			_ = writeRejected(envelope.MsgID, "peer_legacy")
 			return
 		}
-		if peerProtocol != protocolV2 && peerProtocol != protocolV2Handshake {
-			if peerOnline && peerProtocol == protocolLegacy && s.clientHub.SendLegacy(peerID, put.Envelope) {
-				_ = writeFrame(RelayLegacyForwarded{V: 2, Type: "relay.legacy_forwarded", MsgID: envelope.MsgID})
+		if peerOnline {
+			switch peerProtocol {
+			case protocolLegacy:
+				if s.clientHub.SendLegacy(peerID, put.Envelope) {
+					_ = writeFrame(RelayLegacyForwarded{V: 2, Type: "relay.legacy_forwarded", MsgID: envelope.MsgID})
+					return
+				}
+				_ = writeRejected(envelope.MsgID, "peer_legacy")
+				return
+			case protocolV2, protocolV2Handshake:
+				if !supportsProtocol(peerProtocols, 1) {
+					_ = writeRejected(envelope.MsgID, "peer_legacy")
+					return
+				}
+			default:
+				_ = writeRejected(envelope.MsgID, "peer_legacy")
 				return
 			}
-			_ = writeRejected(envelope.MsgID, "peer_legacy")
-			return
-		}
-		if !supportsProtocol(peerProtocols, 1) {
+		} else if !supportsProtocol(persistedPeerCapabilities.Protocols, 1) {
 			_ = writeRejected(envelope.MsgID, "peer_legacy")
 			return
 		}

@@ -21,15 +21,16 @@ type ClientHub struct {
 // state is never removed when this latency-only queue is full; v1 remains an
 // explicit online-only path.
 type wsClient struct {
-	deviceID         string
-	outbound         chan []byte
-	protocol         connectionProtocol
-	protocols        []int
-	handshakeNotices map[string]queuedV2Notification
-	handshakeBytes   uint64
-	handoffSuppress  map[string]struct{}
-	done             chan struct{}
-	stopOnce         sync.Once
+	deviceID            string
+	outbound            chan []byte
+	protocol            connectionProtocol
+	protocols           []int
+	pendingCapabilities []byte
+	handshakeNotices    map[string]queuedV2Notification
+	handshakeBytes      uint64
+	handoffSuppress     map[string]struct{}
+	done                chan struct{}
+	stopOnce            sync.Once
 }
 
 type queuedV2Notification struct {
@@ -120,6 +121,34 @@ func (h *ClientHub) SendLegacy(deviceID string, frame []byte) bool {
 	return h.send(deviceID, frame, func(c *wsClient) bool {
 		return c.protocol == protocolLegacy
 	})
+}
+
+// SendCapabilities queues a bounded typed control snapshot for the current
+// connection only. Handshaking clients receive the latest snapshot after their
+// initial response and mailbox drain; a full active queue is stopped so the
+// client reconnects and reads the persistent negotiation state.
+func (h *ClientHub) SendCapabilities(deviceID string, frame []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, ok := h.clients[deviceID]
+	if !ok {
+		return
+	}
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+	switch c.protocol {
+	case protocolV2Handshake:
+		c.pendingCapabilities = append(c.pendingCapabilities[:0], frame...)
+	case protocolV2:
+		select {
+		case c.outbound <- append([]byte(nil), frame...):
+		default:
+			c.stop()
+		}
+	}
 }
 
 func (h *ClientHub) SendV2(deviceID, msgID string, sequence, byteSize uint64, frame []byte) bool {
@@ -272,6 +301,16 @@ func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) bool {
 			return queued[i].sequence < queued[j].sequence
 		})
 		if len(queued) == 0 {
+			if len(c.pendingCapabilities) > 0 {
+				select {
+				case c.outbound <- append([]byte(nil), c.pendingCapabilities...):
+					c.pendingCapabilities = nil
+				default:
+					c.stop()
+					h.mu.Unlock()
+					return false
+				}
+			}
 			c.protocol = protocolV2
 			h.mu.Unlock()
 			return true
