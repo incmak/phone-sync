@@ -1303,7 +1303,7 @@ func TestClientHubSendCapabilitiesIsTypedBoundedAndReplacementSafe(t *testing.T)
 			t.Fatal("set current typed protocol")
 		}
 
-		hub.SendCapabilities("device", update)
+		hub.SendCapabilities("device", []int{2, 1}, update)
 		select {
 		case raw := <-oldOutbound:
 			t.Fatalf("replaced connection received capabilities: %s", raw)
@@ -1319,29 +1319,52 @@ func TestClientHubSendCapabilitiesIsTypedBoundedAndReplacementSafe(t *testing.T)
 		}
 	})
 
-	t.Run("handshake defers update until activation", func(t *testing.T) {
+	t.Run("matching handshake update follows mandatory sequence", func(t *testing.T) {
 		hub := NewClientHub()
-		outbound := make(chan []byte, 1)
+		outbound := make(chan []byte, 4)
 		client := hub.Register("device", outbound)
 		if !hub.SetProtocolAndCapabilities(client, protocolV2Handshake, []int{2, 1}) {
 			t.Fatal("set handshake protocol")
 		}
-		hub.SendCapabilities("device", update)
-		select {
-		case raw := <-outbound:
-			t.Fatalf("handshake emitted update before activation: %s", raw)
-		default:
+		mandatory := [][]byte{[]byte("initial"), []byte("status"), []byte("delivery")}
+		for _, frame := range mandatory {
+			outbound <- frame
+		}
+		hub.SendCapabilities("device", []int{2, 1}, update)
+		if got := len(outbound); got != len(mandatory) {
+			t.Fatalf("handshake queue length before activation = %d, want %d", got, len(mandatory))
 		}
 		if !hub.FlushOrActivateV2(client, nil) {
 			t.Fatal("activate handshake")
 		}
+		for i, want := range append(mandatory, update) {
+			select {
+			case raw := <-outbound:
+				if string(raw) != string(want) {
+					t.Fatalf("activated frame %d = %q, want %q", i, raw, want)
+				}
+			default:
+				t.Fatalf("activated handshake missing frame %d", i)
+			}
+		}
+	})
+
+	t.Run("reconnect rejects stale non-empty handshake self", func(t *testing.T) {
+		hub := NewClientHub()
+		outbound := make(chan []byte, 1)
+		client := hub.Register("device", outbound)
+		if !hub.SetProtocolAndCapabilities(client, protocolV2Handshake, []int{2, 1}) {
+			t.Fatal("set reconnect handshake protocol")
+		}
+		stale := []byte(`{"v":2,"type":"relay.capabilities","self":[1],"peer":[2,1],"floor":1}`)
+		hub.SendCapabilities("device", []int{1}, stale)
+		if !hub.FlushOrActivateV2(client, nil) {
+			t.Fatal("activate reconnect handshake")
+		}
 		select {
 		case raw := <-outbound:
-			if string(raw) != string(update) {
-				t.Fatalf("activated update = %q, want %q", raw, update)
-			}
+			t.Fatalf("reconnect emitted stale capabilities: %s", raw)
 		default:
-			t.Fatal("activated handshake received no capability update")
 		}
 	})
 
@@ -1352,7 +1375,7 @@ func TestClientHubSendCapabilitiesIsTypedBoundedAndReplacementSafe(t *testing.T)
 		if !hub.SetProtocol(client, protocolLegacy) {
 			t.Fatal("set legacy protocol")
 		}
-		hub.SendCapabilities("device", update)
+		hub.SendCapabilities("device", []int{2, 1}, update)
 		select {
 		case raw := <-outbound:
 			t.Fatalf("raw legacy received typed capabilities: %s", raw)
@@ -1373,13 +1396,74 @@ func TestClientHubSendCapabilitiesIsTypedBoundedAndReplacementSafe(t *testing.T)
 			t.Fatal("set typed protocol")
 		}
 		outbound <- []byte("occupied")
-		hub.SendCapabilities("device", update)
+		hub.SendCapabilities("device", []int{2, 1}, update)
 		select {
 		case <-client.done:
 		case <-time.After(time.Second):
 			t.Fatal("full typed queue did not force reconnect")
 		}
 	})
+}
+
+func TestWebSocketReconnectHandshakeRejectsStalePersistedSelfPropagation(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	if err := srv.pairStore.UpdateCapabilities(pair.deviceA, []int{1}, "old-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.pairStore.UpdateCapabilities(pair.deviceB, []int{1}, "old-b"); err != nil {
+		t.Fatal(err)
+	}
+
+	aOutbound := make(chan []byte, 2)
+	reconnectingA := srv.clientHub.Register(pair.deviceA, aOutbound)
+	defer srv.clientHub.Unregister(reconnectingA)
+	if !srv.clientHub.SetProtocolAndCapabilities(reconnectingA, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set A reconnect handshake")
+	}
+	bOutbound := make(chan []byte, 2)
+	b := srv.clientHub.Register(pair.deviceB, bOutbound)
+	defer srv.clientHub.Unregister(b)
+	if !srv.clientHub.SetProtocolAndCapabilities(b, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set B peer handshake")
+	}
+
+	var bInitial RelayCapabilities
+	if err := srv.handleRelayHello(pair.deviceB, b, RelayHello{
+		V: 2, Type: "relay.hello", Protocols: []int{2, 1}, AppVersion: "new-b",
+	}, func(frame any) error {
+		capabilities, ok := frame.(RelayCapabilities)
+		if !ok {
+			t.Fatalf("B hello frame = %#v, want relay.capabilities", frame)
+		}
+		bInitial = capabilities
+		return nil
+	}, func([]string) {}); err != nil {
+		t.Fatalf("B peer hello: %v", err)
+	}
+	if bInitial.Floor != 1 || !reflect.DeepEqual(bInitial.Self, []int{2, 1}) || !reflect.DeepEqual(bInitial.Peer, []int{1}) {
+		t.Fatalf("B initial capabilities = %#v", bInitial)
+	}
+
+	if err := srv.pairStore.UpdateCapabilities(pair.deviceA, []int{2, 1}, "new-a"); err != nil {
+		t.Fatal(err)
+	}
+	self, peer, floor, err := srv.pairStore.CapabilitiesFor(pair.deviceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validInitial := relayCapabilitiesSnapshot(self, peer, floor)
+	if validInitial.Floor != 2 || !reflect.DeepEqual(validInitial.Self, []int{2, 1}) {
+		t.Fatalf("A valid post-persistence initial = %#v", validInitial)
+	}
+	if !srv.clientHub.FlushOrActivateV2(reconnectingA, nil) {
+		t.Fatal("activate A reconnect")
+	}
+	select {
+	case raw := <-aOutbound:
+		t.Fatalf("A reconnect emitted stale persisted-self capabilities after valid initial: %s", raw)
+	default:
+	}
 }
 
 func TestWebSocketLiveDeliveryMutationWinsBeforeTransfer(t *testing.T) {
@@ -1772,6 +1856,92 @@ func TestWebSocketHelloPropagatesFloorToBothLiveTypedPeers(t *testing.T) {
 		!reflect.DeepEqual(propagated.Self, []int{2, 1}) || !reflect.DeepEqual(propagated.Peer, []int{2, 1}) {
 		t.Fatalf("propagated capabilities = %#v, want both [2 1] and floor 2", propagated)
 	}
+}
+
+func TestWebSocketSimultaneousFreshHellosNeverRegressCapabilities(t *testing.T) {
+	srv, bolt := newMailboxTestServerWithBolt(t)
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	held := make(chan struct{})
+	release := make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- bolt.Update(func(*bbolt.Tx) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	a := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer a.Close()
+	b := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer b.Close()
+	writeMailboxFrame(t, a, map[string]any{
+		"v": 2, "type": "relay.hello", "protocols": []int{2, 1}, "app_version": "simultaneous-a",
+	})
+	writeMailboxFrame(t, b, map[string]any{
+		"v": 2, "type": "relay.hello", "protocols": []int{2, 1}, "app_version": "simultaneous-b",
+	})
+	waitForMailboxProtocol(t, srv, pair.deviceA, protocolV2Handshake)
+	waitForMailboxProtocol(t, srv, pair.deviceB, protocolV2Handshake)
+	close(release)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("release Bolt barrier: %v", err)
+	}
+
+	initialA := sendMailboxReadCapabilities(t, a, 2*time.Second)
+	initialB := sendMailboxReadCapabilities(t, b, 2*time.Second)
+	for device, initial := range map[string]testCapabilitiesFrame{"a": initialA, "b": initialB} {
+		if initial.Type != "relay.capabilities" || !reflect.DeepEqual(initial.Self, []int{2, 1}) {
+			t.Fatalf("%s initial capabilities = %#v, want self [2 1]", device, initial)
+		}
+	}
+
+	updates := 0
+	for device, connection := range map[string]*websocket.Conn{"a": a, "b": b} {
+		initialFloor := initialA.Floor
+		if device == "b" {
+			initialFloor = initialB.Floor
+		}
+		_ = connection.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		for {
+			_, raw, err := connection.ReadMessage()
+			if err != nil {
+				break
+			}
+			var update testCapabilitiesFrame
+			if err := json.Unmarshal(raw, &update); err != nil {
+				t.Fatalf("decode %s post-initial frame %q: %v", device, raw, err)
+			}
+			if update.Type != "relay.capabilities" {
+				t.Fatalf("%s post-initial frame = %#v", device, update)
+			}
+			updates++
+			if !reflect.DeepEqual(update.Self, []int{2, 1}) || !reflect.DeepEqual(update.Peer, []int{2, 1}) || update.Floor < initialFloor {
+				t.Fatalf("%s regressive post-initial capabilities = %#v after floor %d", device, update, initialFloor)
+			}
+		}
+	}
+	if updates == 0 {
+		t.Fatal("simultaneous hellos produced no valid peer update")
+	}
+}
+
+func sendMailboxReadCapabilities(t *testing.T, conn *websocket.Conn, timeout time.Duration) testCapabilitiesFrame {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read capabilities: %v", err)
+	}
+	var capabilities testCapabilitiesFrame
+	if err := json.Unmarshal(raw, &capabilities); err != nil {
+		t.Fatalf("decode capabilities %q: %v", raw, err)
+	}
+	return capabilities
 }
 
 func TestWebSocketProtocolFloorTwoRejectsV1AndSurvivesReconnect(t *testing.T) {

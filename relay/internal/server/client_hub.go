@@ -1,6 +1,7 @@
 package server
 
 import (
+	"slices"
 	"sort"
 	"sync"
 )
@@ -127,7 +128,8 @@ func (h *ClientHub) SendLegacy(deviceID string, frame []byte) bool {
 // connection only. Handshaking clients receive the latest snapshot after their
 // initial response and mailbox drain; a full active queue is stopped so the
 // client reconnects and reads the persistent negotiation state.
-func (h *ClientHub) SendCapabilities(deviceID string, frame []byte) {
+func (h *ClientHub) SendCapabilities(deviceID string, selfProtocols []int, frame []byte) {
+	expectedSelf := append([]int(nil), selfProtocols...)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
@@ -141,6 +143,9 @@ func (h *ClientHub) SendCapabilities(deviceID string, frame []byte) {
 	}
 	switch c.protocol {
 	case protocolV2Handshake:
+		if !slices.Equal(c.protocols, expectedSelf) {
+			return
+		}
 		c.pendingCapabilities = append(c.pendingCapabilities[:0], frame...)
 	case protocolV2:
 		select {

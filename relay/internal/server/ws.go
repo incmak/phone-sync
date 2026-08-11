@@ -265,7 +265,7 @@ func (s *Server) handleRelayHello(
 		if err != nil {
 			return err
 		}
-		s.clientHub.SendCapabilities(peerID, peerFrame)
+		s.clientHub.SendCapabilities(peerID, peerCapabilitiesFrame.Self, peerFrame)
 	}
 	if err := writeFrame(capabilitiesFrame); err != nil {
 		return err
