@@ -23,6 +23,9 @@ type Server struct {
 	// relayHelloBeforeActivate is a deterministic test seam around the
 	// drain-to-live handoff. Production constructors leave it nil.
 	relayHelloBeforeActivate func(deviceID string)
+	// relayBeforeDeliveryTransfer is a deterministic test barrier immediately
+	// before the Bolt-view-to-hub-queue linearization point.
+	relayBeforeDeliveryTransfer func(deviceID string)
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -50,7 +53,7 @@ func NewWithDependencies(b *store.Bolt, mailboxLimits store.MailboxLimits) *Serv
 		mailbox:   mailbox,
 		handoffs:  newDurableHandoffs(mailboxLimits.MaxItems, mailboxLimits.MaxBytes),
 	}
-	clientHub.SetHandoffResolver(s.resolveHandoffFrames)
+	clientHub.SetHandoffResolver(s.transferHandoffFrames)
 	s.routes()
 	return s
 }

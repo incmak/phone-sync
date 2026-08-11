@@ -19,6 +19,8 @@ type recipientHandoff struct {
 	mu           sync.Mutex
 	pending      []*durableNotification
 	pendingBytes uint64
+	dispatching  bool
+	refs         int
 }
 
 type durableNotification struct {
@@ -38,7 +40,10 @@ func newDurableHandoffs(maxItems int, maxBytes uint64) *durableHandoffs {
 	}
 }
 
-func (h *durableHandoffs) recipient(recipient string) *recipientHandoff {
+// acquire leases the one ordering lane for recipient. The parent lock makes
+// lookup/creation and refcounting atomic, so a concurrent releaser cannot
+// delete a lane while another caller still holds its pointer.
+func (h *durableHandoffs) acquire(recipient string) *recipientHandoff {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	lane := h.recipients[recipient]
@@ -46,7 +51,27 @@ func (h *durableHandoffs) recipient(recipient string) *recipientHandoff {
 		lane = &recipientHandoff{}
 		h.recipients[recipient] = lane
 	}
+	lane.refs++
 	return lane
+}
+
+// release reclaims a lane only after the complete put/record/accepted/dispatch
+// lifecycle has ended. Lock order is always parent map then lane state.
+func (h *durableHandoffs) release(recipient string, lane *recipientHandoff) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.recipients[recipient] != lane {
+		panic("release of stale durable handoff lane")
+	}
+	lane.mu.Lock()
+	defer lane.mu.Unlock()
+	if lane.refs <= 0 {
+		panic("durable handoff lane refcount underflow")
+	}
+	lane.refs--
+	if lane.refs == 0 && len(lane.pending) == 0 && !lane.dispatching {
+		delete(h.recipients, recipient)
+	}
 }
 
 func (h *durableHandoffs) record(lane *recipientHandoff, recipient, msgID string, sequence, byteSize uint64) (*durableNotification, bool) {
@@ -94,9 +119,13 @@ func (h *recipientHandoff) complete(notification *durableNotification, dispatch 
 		h.pendingBytes -= h.pending[i].byteSize
 	}
 	h.pending = h.pending[readyCount:]
+	h.dispatching = len(ready) > 0
 	h.mu.Unlock()
 
 	if len(ready) > 0 {
 		dispatch(ready)
+		h.mu.Lock()
+		h.dispatching = false
+		h.mu.Unlock()
 	}
 }

@@ -744,12 +744,20 @@ func TestWebSocketHelloHandoffSurvivesFailedAcceptedWrite(t *testing.T) {
 		return nil
 	})
 
-	frames, activated := srv.clientHub.FlushOrActivateV2(recipient, nil)
-	if activated || len(frames) != 1 {
-		t.Fatalf("handoff after failed accepted write = %d frames, activated=%v; want one frame before activation", len(frames), activated)
+	if activated := srv.clientHub.FlushOrActivateV2(recipient, nil); !activated {
+		t.Fatal("handoff after failed accepted write did not activate after queue transfer")
 	}
-	if delivered := decodeMailboxFrame(t, frames[0]); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+	var raw []byte
+	select {
+	case raw = <-outbound:
+	default:
+		t.Fatal("handoff after failed accepted write queued no delivery")
+	}
+	if delivered := decodeMailboxFrame(t, raw); delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
 		t.Fatalf("handoff delivery = %#v, want exact durable envelope", delivered)
+	}
+	if got := len(srv.handoffs.recipients); got != 0 {
+		t.Fatalf("idle handoff lanes after failed accepted write = %d, want 0", got)
 	}
 }
 
@@ -795,9 +803,8 @@ func TestWebSocketHelloHandoffPreservesSequenceAcrossReverseAcceptedWrites(t *te
 		t.Fatal("second accepted write did not complete first")
 	}
 
-	frames, activated := srv.clientHub.FlushOrActivateV2(recipient, nil)
-	if len(frames) != 0 || !activated {
-		t.Fatalf("reverse completion exposed later acceptance early: %d frames, activated=%v", len(frames), activated)
+	if activated := srv.clientHub.FlushOrActivateV2(recipient, nil); !activated {
+		t.Fatal("empty reverse-completion handoff did not activate")
 	}
 	close(releaseFirstAccepted)
 	select {
@@ -821,12 +828,227 @@ func TestWebSocketHelloHandoffPreservesSequenceAcrossReverseAcceptedWrites(t *te
 			t.Fatalf("timed out waiting for delivery %d", i)
 		}
 	}
+	if got := len(srv.handoffs.recipients); got != 0 {
+		t.Fatalf("idle handoff lanes after overlapping puts = %d, want 0", got)
+	}
+}
+
+func TestWebSocketDurableHandoffReclaimsManySequentialRecipients(t *testing.T) {
+	srv := newTestServer(t)
+	for i := 0; i < 128; i++ {
+		sender := fmt.Sprintf("lane-sender-%03d", i)
+		recipient := fmt.Sprintf("lane-recipient-%03d", i)
+		if err := srv.pairStore.Confirm(store.ConfirmedPair{
+			PairID: fmt.Sprintf("lane-pair-%03d", i), DeviceA: sender, DeviceB: recipient,
+		}); err != nil {
+			t.Fatalf("confirm pair %d: %v", i, err)
+		}
+		msgID := fmt.Sprintf("83dddddd-dddd-4ddd-8ddd-%012d", i)
+		srv.handleRelayPut(sender, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(sender, msgID)}, func(any) error {
+			return nil
+		}, func(gotID, reason string) error {
+			t.Fatalf("recipient %d rejected %s: %s", i, gotID, reason)
+			return nil
+		})
+	}
+	if got := len(srv.handoffs.recipients); got != 0 {
+		t.Fatalf("idle handoff lanes after sequential recipients = %d, want 0", got)
+	}
+}
+
+type atomicClientDeliveryTransfer interface {
+	TransferV2Batch(string, []queuedV2Notification, [][]byte) bool
+	TransferHandshakeV2Batch(*wsClient, []queuedV2Notification, [][]byte) bool
+}
+
+func TestWebSocketDeliveryTransferUsesTypedTransportForProtocolOneEnvelope(t *testing.T) {
+	for _, handshake := range []bool{false, true} {
+		name := "live"
+		if handshake {
+			name = "handshake"
+		}
+		t.Run(name, func(t *testing.T) {
+			hub := NewClientHub()
+			outbound := make(chan []byte, 1)
+			client := hub.Register("typed-protocol-one", outbound)
+			protocol := protocolV2
+			if handshake {
+				protocol = protocolV2Handshake
+			}
+			if !hub.SetProtocolAndCapabilities(client, protocol, []int{1}) {
+				t.Fatal("set typed protocol-one connection")
+			}
+			notices := []queuedV2Notification{{msgID: "83eeeeee-eeee-4eee-8eee-000000000001", sequence: 1, byteSize: 1}}
+			frames := [][]byte{[]byte("v1-control-delivery")}
+			var transferred bool
+			if handshake {
+				transferred = hub.TransferHandshakeV2Batch(client, notices, frames)
+			} else {
+				transferred = hub.TransferV2Batch(client.deviceID, notices, frames)
+			}
+			if !transferred {
+				t.Fatal("typed protocol-one connection rejected relay control delivery")
+			}
+			select {
+			case got := <-outbound:
+				if string(got) != "v1-control-delivery" {
+					t.Fatalf("queued control frame = %q", got)
+				}
+			default:
+				t.Fatal("typed protocol-one connection queued no control delivery")
+			}
+		})
+	}
+}
+
+func TestWebSocketDeliveryTransferLinearizesConnectionReplacement(t *testing.T) {
+	for _, handshake := range []bool{false, true} {
+		name := "live"
+		if handshake {
+			name = "handshake"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv := newTestServer(t)
+			pair := registerMailboxTestPair(t, srv)
+			msgID := "83eeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+			envelope := validMailboxEnvelope(pair.deviceA, msgID)
+			putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, envelope, time.Now())
+			pending, err := srv.mailbox.Pending(pair.deviceB, 1)
+			if err != nil || len(pending) != 1 {
+				t.Fatalf("pending transfer record = %#v, %v", pending, err)
+			}
+			sequence := pending[0].AcceptanceSequence
+
+			oldOutbound := make(chan []byte, 2)
+			old := srv.clientHub.Register(pair.deviceB, oldOutbound)
+			protocol := protocolV2
+			if handshake {
+				protocol = protocolV2Handshake
+			}
+			if !srv.clientHub.SetProtocolAndCapabilities(old, protocol, []int{2, 1}) {
+				t.Fatal("set old connection protocol")
+			}
+			atomicHub, ok := any(srv.clientHub).(atomicClientDeliveryTransfer)
+			if !ok {
+				t.Fatal("ClientHub lacks atomic bounded delivery-transfer API")
+			}
+
+			var replacement *wsClient
+			replacementOutbound := make(chan []byte, 2)
+			err = srv.mailbox.TransferLiveByIDs(pair.deviceB, []string{msgID}, time.Now(), func(records []store.MailboxRecord) error {
+				if len(records) != 1 {
+					t.Fatalf("validated records = %d, want 1", len(records))
+				}
+				replacement = srv.clientHub.Register(pair.deviceB, replacementOutbound)
+				if !srv.clientHub.SetProtocolAndCapabilities(replacement, protocol, []int{2, 1}) {
+					t.Fatal("set replacement protocol")
+				}
+				notices := []queuedV2Notification{{msgID: msgID, sequence: sequence, byteSize: uint64(len(envelope))}}
+				frames := [][]byte{marshalRelayDeliver(records[0])}
+				if handshake {
+					if atomicHub.TransferHandshakeV2Batch(old, notices, frames) {
+						t.Fatal("replaced handshaking connection accepted transfer")
+					}
+				} else if !atomicHub.TransferV2Batch(pair.deviceB, notices, frames) {
+					t.Fatal("current live replacement rejected transfer")
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("atomic replacement transfer: %v", err)
+			}
+			select {
+			case raw := <-oldOutbound:
+				t.Fatalf("old connection received post-replacement frame: %s", raw)
+			default:
+			}
+			select {
+			case raw := <-replacementOutbound:
+				if handshake {
+					t.Fatalf("new handshake received old transfer: %s", raw)
+				}
+				got := decodeMailboxFrame(t, raw)
+				var header encryptedEnvelopeHeader
+				if err := json.Unmarshal(got.Envelope, &header); err != nil || header.MsgID != msgID {
+					t.Fatalf("replacement delivery = %#v with header %#v, %v; want %s", got, header, err, msgID)
+				}
+			default:
+				if !handshake {
+					t.Fatal("current live replacement received no transfer")
+				}
+			}
+			srv.clientHub.Unregister(replacement)
+		})
+	}
+}
+
+func TestWebSocketLiveDeliveryMutationWinsBeforeTransfer(t *testing.T) {
+	mutations := []struct {
+		name string
+		run  func(*Server, mailboxTestPair, string, json.RawMessage) error
+	}{
+		{name: "ack", run: func(s *Server, pair mailboxTestPair, msgID string, envelope json.RawMessage) error {
+			digest := sha256.Sum256(envelope)
+			return s.mailbox.Ack(pair.deviceB, msgID, hex.EncodeToString(digest[:]), time.Now())
+		}},
+		{name: "expiry", run: func(s *Server, _ mailboxTestPair, _ string, _ json.RawMessage) error {
+			_, err := s.mailbox.Expire(time.Now().Add(2 * time.Hour))
+			return err
+		}},
+		{name: "purge", run: func(s *Server, pair mailboxTestPair, _ string, _ json.RawMessage) error {
+			return s.mailbox.PurgePair(pair.deviceA, pair.deviceB)
+		}},
+	}
+	for index, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 4, MaxBytes: 1 << 20, Retention: time.Hour})
+			pair := registerMailboxTestPair(t, srv)
+			outbound := make(chan []byte, 2)
+			recipient := srv.clientHub.Register(pair.deviceB, outbound)
+			defer srv.clientHub.Unregister(recipient)
+			if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2, []int{2, 1}) {
+				t.Fatal("set live recipient protocol")
+			}
+			beforeTransfer := make(chan struct{})
+			releaseTransfer := make(chan struct{})
+			srv.relayBeforeDeliveryTransfer = func(deviceID string) {
+				if deviceID == pair.deviceB {
+					close(beforeTransfer)
+					<-releaseTransfer
+				}
+			}
+			msgID := fmt.Sprintf("83ffffff-ffff-4fff-8fff-%012d", index)
+			envelope := validMailboxEnvelope(pair.deviceA, msgID)
+			putDone := make(chan struct{})
+			go func() {
+				defer close(putDone)
+				srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: envelope}, func(any) error {
+					return nil
+				}, func(gotID, reason string) error {
+					t.Errorf("unexpected rejection for %s: %s", gotID, reason)
+					return nil
+				})
+			}()
+			<-beforeTransfer
+			if err := mutation.run(srv, pair, msgID, envelope); err != nil {
+				t.Fatalf("commit %s before transfer: %v", mutation.name, err)
+			}
+			close(releaseTransfer)
+			<-putDone
+			select {
+			case raw := <-outbound:
+				t.Fatalf("%s-winning live race emitted later frame: %s", mutation.name, raw)
+			default:
+			}
+		})
+	}
 }
 
 func TestWebSocketHelloHandoffDoesNotEmitExpiredBufferedItem(t *testing.T) {
 	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 2, MaxBytes: 1 << 20, Retention: time.Hour})
 	pair := registerMailboxTestPair(t, srv)
-	recipient := srv.clientHub.Register(pair.deviceB, make(chan []byte, 4))
+	outbound := make(chan []byte, 4)
+	recipient := srv.clientHub.Register(pair.deviceB, outbound)
 	defer srv.clientHub.Unregister(recipient)
 	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set recipient handshake protocol")
@@ -836,20 +1058,37 @@ func TestWebSocketHelloHandoffDoesNotEmitExpiredBufferedItem(t *testing.T) {
 	srv.handleRelayPut(pair.deviceA, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, msgID)}, func(any) error {
 		return nil
 	}, func(string, string) error { return errors.New("unexpected rejection") })
+	beforeTransfer := make(chan struct{})
+	releaseTransfer := make(chan struct{})
+	srv.relayBeforeDeliveryTransfer = func(deviceID string) {
+		if deviceID == pair.deviceB {
+			close(beforeTransfer)
+			<-releaseTransfer
+		}
+	}
+	activated := make(chan bool, 1)
+	go func() { activated <- srv.clientHub.FlushOrActivateV2(recipient, nil) }()
+	<-beforeTransfer
 	if _, err := srv.mailbox.Expire(time.Now().Add(2 * time.Hour)); err != nil {
 		t.Fatalf("expire buffered item: %v", err)
 	}
+	close(releaseTransfer)
 
-	frames, _ := srv.clientHub.FlushOrActivateV2(recipient, nil)
-	if len(frames) != 0 {
-		t.Fatalf("expired handoff emitted stale ciphertext: %s", frames[0])
+	if !<-activated {
+		t.Fatal("expired-only handoff did not activate")
+	}
+	select {
+	case raw := <-outbound:
+		t.Fatalf("expired handoff emitted stale ciphertext: %s", raw)
+	default:
 	}
 }
 
 func TestWebSocketHelloHandoffDoesNotEmitPurgedBufferedItem(t *testing.T) {
 	srv := newTestServer(t)
 	pair := registerMailboxTestPair(t, srv)
-	recipient := srv.clientHub.Register(pair.deviceB, make(chan []byte, 4))
+	outbound := make(chan []byte, 4)
+	recipient := srv.clientHub.Register(pair.deviceB, outbound)
 	defer srv.clientHub.Unregister(recipient)
 	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set recipient handshake protocol")
@@ -863,9 +1102,13 @@ func TestWebSocketHelloHandoffDoesNotEmitPurgedBufferedItem(t *testing.T) {
 		t.Fatalf("purge buffered item: %v", err)
 	}
 
-	frames, _ := srv.clientHub.FlushOrActivateV2(recipient, nil)
-	if len(frames) != 0 {
-		t.Fatalf("purged handoff emitted stale ciphertext: %s", frames[0])
+	if !srv.clientHub.FlushOrActivateV2(recipient, nil) {
+		t.Fatal("purged-only handoff did not activate")
+	}
+	select {
+	case raw := <-outbound:
+		t.Fatalf("purged handoff emitted stale ciphertext: %s", raw)
+	default:
 	}
 }
 
@@ -892,6 +1135,9 @@ func TestWebSocketHelloHandoffExpireRefillClosesAtConfiguredBound(t *testing.T) 
 	case <-recipient.done:
 	default:
 		t.Fatal("handshaking recipient remained open after repeated refill exceeded configured one-item bound")
+	}
+	if got := len(srv.handoffs.recipients); got != 0 {
+		t.Fatalf("idle handoff lanes after overflow = %d, want 0", got)
 	}
 }
 

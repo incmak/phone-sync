@@ -214,42 +214,52 @@ func (s *MailboxStore) Pending(recipient string, limit int) ([]MailboxRecord, er
 // acknowledged, purged, and expired records are omitted. Every returned value,
 // including its ciphertext bytes, is copied before the Bolt view closes.
 func (s *MailboxStore) LiveByIDs(recipient string, msgIDs []string, now time.Time) ([]MailboxRecord, error) {
+	result := []MailboxRecord{}
+	err := s.TransferLiveByIDs(recipient, msgIDs, now, func(records []MailboxRecord) error {
+		result = append(result, records...)
+		return nil
+	})
+	return result, err
+}
+
+// TransferLiveByIDs keeps the Bolt read transaction open through transfer.
+// The callback must do only bounded copying/serialization and nonblocking queue
+// insertion. It must never perform socket I/O or wait for queue capacity.
+func (s *MailboxStore) TransferLiveByIDs(recipient string, msgIDs []string, now time.Time, transfer func([]MailboxRecord) error) error {
 	if recipient == "" || strings.ContainsRune(recipient, '\x00') {
-		return nil, errors.New("invalid recipient device")
+		return errors.New("invalid recipient device")
 	}
 	if len(msgIDs) == 0 {
-		return []MailboxRecord{}, nil
+		return transfer([]MailboxRecord{})
 	}
 	for _, msgID := range msgIDs {
 		if err := validateMailboxKey(recipient, msgID); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	result := make([]MailboxRecord, 0, len(msgIDs))
-	err := s.bolt.View(func(tx *bbolt.Tx) error {
+	return s.bolt.View(func(tx *bbolt.Tx) error {
 		items := tx.Bucket([]byte(bucketMailboxItems))
-		if items == nil {
-			return nil
+		if items != nil {
+			nowMillis := now.UnixMilli()
+			for _, msgID := range msgIDs {
+				raw := items.Get(itemKey(recipient, msgID))
+				if raw == nil {
+					continue
+				}
+				var rec MailboxRecord
+				if err := json.Unmarshal(raw, &rec); err != nil {
+					return fmt.Errorf("unmarshal mailbox item: %w", err)
+				}
+				if rec.ExpiresAt <= nowMillis {
+					continue
+				}
+				result = append(result, copyMailboxRecord(rec))
+			}
 		}
-		nowMillis := now.UnixMilli()
-		for _, msgID := range msgIDs {
-			raw := items.Get(itemKey(recipient, msgID))
-			if raw == nil {
-				continue
-			}
-			var rec MailboxRecord
-			if err := json.Unmarshal(raw, &rec); err != nil {
-				return fmt.Errorf("unmarshal mailbox item: %w", err)
-			}
-			if rec.ExpiresAt <= nowMillis {
-				continue
-			}
-			result = append(result, copyMailboxRecord(rec))
-		}
-		return nil
+		return transfer(result)
 	})
-	return result, err
 }
 
 func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error {

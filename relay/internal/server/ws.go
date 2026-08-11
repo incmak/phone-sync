@@ -68,7 +68,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return writeFrame(RelayRejected{V: 2, Type: "relay.rejected", MsgID: normalizedRelayMsgID(msgID), Reason: reason})
 	}
 
-	outbound := make(chan []byte, 32)
+	outbound := make(chan []byte, mailboxBatchSize)
 	client := s.clientHub.Register(deviceID, outbound)
 	defer s.clientHub.Unregister(client)
 	connectionLifetime := make(chan struct{})
@@ -158,7 +158,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				var drainedIDs []string
-				if err := s.handleRelayHello(deviceID, typed, writeFrame, writeMsg, func(ids []string) {
+				if err := s.handleRelayHello(deviceID, client, typed, writeFrame, func(ids []string) {
 					drainedIDs = ids
 				}); err != nil {
 					log.Printf("relay hello for %s: %v", deviceID, err)
@@ -167,20 +167,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if s.relayHelloBeforeActivate != nil {
 					s.relayHelloBeforeActivate(deviceID)
 				}
-				for {
-					frames, activated := s.clientHub.FlushOrActivateV2(client, drainedIDs)
-					drainedIDs = nil
-					if activated {
-						break
-					}
-					if len(frames) == 0 {
-						return
-					}
-					for _, frame := range frames {
-						if err := writeMsg(websocket.TextMessage, frame); err != nil {
-							return
-						}
-					}
+				if !s.clientHub.FlushOrActivateV2(client, drainedIDs) {
+					return
 				}
 			case RelayPut:
 				if protocol != protocolV2 {
@@ -237,9 +225,9 @@ func (s *Server) handleLegacyFrame(deviceID string, client *wsClient, protocol *
 
 func (s *Server) handleRelayHello(
 	deviceID string,
+	client *wsClient,
 	hello RelayHello,
 	writeFrame func(any) error,
-	writeMsg func(int, []byte) error,
 	recordDrained func([]string),
 ) error {
 	peerID, err := s.pairStore.PeerFor(deviceID)
@@ -287,15 +275,20 @@ func (s *Server) handleRelayHello(
 	if err != nil {
 		return err
 	}
-	drainedIDs := make([]string, 0, len(pending))
+	notifications := make([]queuedV2Notification, 0, len(pending))
 	for _, rec := range pending {
 		if rec.SenderDevice != peerID {
 			continue
 		}
-		if err := writeMsg(websocket.TextMessage, marshalRelayDeliver(rec)); err != nil {
-			return err
-		}
-		drainedIDs = append(drainedIDs, rec.MsgID)
+		notifications = append(notifications, queuedV2Notification{
+			msgID: rec.MsgID, sequence: rec.AcceptanceSequence, byteSize: rec.ByteSize,
+		})
+	}
+	drainedIDs, err := s.transferDurableRecords(deviceID, notifications, func(notices []queuedV2Notification, frames [][]byte) bool {
+		return s.clientHub.TransferHandshakeV2Batch(client, notices, frames)
+	})
+	if err != nil {
+		return err
 	}
 	recordDrained(drainedIDs)
 	return nil
@@ -346,7 +339,8 @@ func (s *Server) handleRelayPut(
 	}
 
 	digest := sha256.Sum256(put.Envelope)
-	handoff := s.handoffs.recipient(peerID)
+	handoff := s.handoffs.acquire(peerID)
+	defer s.handoffs.release(peerID, handoff)
 	handoff.commitMu.Lock()
 	result, err := s.mailbox.Put(store.MailboxRecord{
 		RecipientDevice: peerID,
@@ -385,49 +379,66 @@ func (s *Server) dispatchDurableNotifications(notifications []durableNotificatio
 		return
 	}
 	recipient := notifications[0].recipient
-	msgIDs := make([]string, 0, len(notifications))
+	queued := make([]queuedV2Notification, 0, len(notifications))
 	for _, notification := range notifications {
-		msgIDs = append(msgIDs, notification.msgID)
+		queued = append(queued, queuedV2Notification{
+			msgID: notification.msgID, sequence: notification.sequence, byteSize: notification.byteSize,
+		})
 	}
-	records, err := s.mailbox.LiveByIDs(recipient, msgIDs, time.Now())
+	_, err := s.transferDurableRecords(recipient, queued, func(notices []queuedV2Notification, frames [][]byte) bool {
+		// Live queue pressure affects latency only. TransferV2Batch stops an
+		// overfull current client so its reconnect drains Bolt in exact order.
+		_ = s.clientHub.TransferV2Batch(recipient, notices, frames)
+		return true
+	})
 	if err != nil {
-		log.Printf("resolve durable relay handoff for %s: %v", recipient, err)
+		log.Printf("transfer durable relay delivery for %s: %v", recipient, err)
 		s.clientHub.Stop(recipient)
-		return
-	}
-	byID := make(map[string]store.MailboxRecord, len(records))
-	for _, rec := range records {
-		byID[rec.MsgID] = rec
-	}
-	for _, notification := range notifications {
-		rec, ok := byID[notification.msgID]
-		if !ok {
-			continue
-		}
-		_ = s.clientHub.SendV2(recipient, notification.msgID, notification.sequence, notification.byteSize, marshalRelayDeliver(rec))
 	}
 }
 
-func (s *Server) resolveHandoffFrames(recipient string, notifications []queuedV2Notification) ([][]byte, error) {
+func (s *Server) transferHandoffFrames(client *wsClient, notifications []queuedV2Notification) error {
+	_, err := s.transferDurableRecords(client.deviceID, notifications, func(notices []queuedV2Notification, frames [][]byte) bool {
+		return s.clientHub.TransferHandshakeV2Batch(client, notices, frames)
+	})
+	return err
+}
+
+func (s *Server) transferDurableRecords(
+	recipient string,
+	notifications []queuedV2Notification,
+	enqueue func([]queuedV2Notification, [][]byte) bool,
+) ([]string, error) {
+	if s.relayBeforeDeliveryTransfer != nil {
+		s.relayBeforeDeliveryTransfer(recipient)
+	}
 	msgIDs := make([]string, 0, len(notifications))
 	for _, notification := range notifications {
 		msgIDs = append(msgIDs, notification.msgID)
 	}
-	records, err := s.mailbox.LiveByIDs(recipient, msgIDs, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	byID := make(map[string]store.MailboxRecord, len(records))
-	for _, rec := range records {
-		byID[rec.MsgID] = rec
-	}
-	frames := make([][]byte, 0, len(records))
-	for _, notification := range notifications {
-		if rec, ok := byID[notification.msgID]; ok {
-			frames = append(frames, marshalRelayDeliver(rec))
+	transferred := []string{}
+	err := s.mailbox.TransferLiveByIDs(recipient, msgIDs, time.Now(), func(records []store.MailboxRecord) error {
+		byID := make(map[string]store.MailboxRecord, len(records))
+		for _, rec := range records {
+			byID[rec.MsgID] = rec
 		}
-	}
-	return frames, nil
+		liveNotices := make([]queuedV2Notification, 0, len(records))
+		frames := make([][]byte, 0, len(records))
+		for _, notification := range notifications {
+			if rec, ok := byID[notification.msgID]; ok {
+				liveNotices = append(liveNotices, notification)
+				frames = append(frames, marshalRelayDeliver(rec))
+			}
+		}
+		if !enqueue(liveNotices, frames) {
+			return errors.New("delivery queue unavailable")
+		}
+		for _, notification := range liveNotices {
+			transferred = append(transferred, notification.msgID)
+		}
+		return nil
+	})
+	return transferred, err
 }
 
 func isBoundedRelayPut(raw []byte) bool {

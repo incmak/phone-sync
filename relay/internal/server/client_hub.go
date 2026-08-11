@@ -13,7 +13,7 @@ type ClientHub struct {
 	clients         map[string]*wsClient
 	handoffMaxItems int
 	handoffMaxBytes uint64
-	resolveHandoff  func(string, []queuedV2Notification) ([][]byte, error)
+	resolveHandoff  func(*wsClient, []queuedV2Notification) error
 }
 
 // wsClient wraps a single authenticated WebSocket connection. Its queue is
@@ -63,7 +63,7 @@ func NewClientHubWithMailboxLimits(maxItems int, maxBytes uint64) *ClientHub {
 	}
 }
 
-func (h *ClientHub) SetHandoffResolver(resolve func(string, []queuedV2Notification) ([][]byte, error)) {
+func (h *ClientHub) SetHandoffResolver(resolve func(*wsClient, []queuedV2Notification) error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.resolveHandoff = resolve
@@ -123,10 +123,21 @@ func (h *ClientHub) SendLegacy(deviceID string, frame []byte) bool {
 }
 
 func (h *ClientHub) SendV2(deviceID, msgID string, sequence, byteSize uint64, frame []byte) bool {
+	return h.TransferV2Batch(deviceID, []queuedV2Notification{{
+		msgID: msgID, sequence: sequence, byteSize: byteSize,
+	}}, [][]byte{frame})
+}
+
+// TransferV2Batch performs only bounded, nonblocking mutation while holding the
+// hub lock. Callers may invoke it from inside a mailbox read transaction.
+func (h *ClientHub) TransferV2Batch(deviceID string, notifications []queuedV2Notification, frames [][]byte) bool {
+	if len(notifications) != len(frames) {
+		return false
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
-	if !ok || !supportsProtocol(c.protocols, 2) {
+	if !ok {
 		return false
 	}
 	select {
@@ -136,55 +147,103 @@ func (h *ClientHub) SendV2(deviceID, msgID string, sequence, byteSize uint64, fr
 	}
 	switch c.protocol {
 	case protocolV2Handshake:
-		if c.handshakeNotices == nil {
-			c.handshakeNotices = make(map[string]queuedV2Notification)
+		newItems := 0
+		newBytes := uint64(0)
+		for _, notification := range notifications {
+			if _, exists := c.handshakeNotices[notification.msgID]; exists {
+				continue
+			}
+			newItems++
+			if notification.byteSize > h.handoffMaxBytes || newBytes > h.handoffMaxBytes-notification.byteSize {
+				c.stop()
+				return false
+			}
+			newBytes += notification.byteSize
 		}
-		if _, exists := c.handshakeNotices[msgID]; exists {
-			return true
-		}
-		if h.handoffMaxItems <= 0 || len(c.handshakeNotices) >= h.handoffMaxItems ||
-			byteSize > h.handoffMaxBytes || c.handshakeBytes > h.handoffMaxBytes-byteSize {
+		if h.handoffMaxItems <= 0 || len(c.handshakeNotices)+newItems > h.handoffMaxItems ||
+			newBytes > h.handoffMaxBytes || c.handshakeBytes > h.handoffMaxBytes-newBytes {
 			c.stop()
 			return false
 		}
-		c.handshakeNotices[msgID] = queuedV2Notification{
-			msgID: msgID, sequence: sequence, byteSize: byteSize,
+		if c.handshakeNotices == nil {
+			c.handshakeNotices = make(map[string]queuedV2Notification)
 		}
-		c.handshakeBytes += byteSize
+		for _, notification := range notifications {
+			if _, exists := c.handshakeNotices[notification.msgID]; exists {
+				continue
+			}
+			c.handshakeNotices[notification.msgID] = notification
+			c.handshakeBytes += notification.byteSize
+		}
 		return true
 	case protocolV2:
-		if _, suppress := c.handoffSuppress[msgID]; suppress {
-			delete(c.handoffSuppress, msgID)
-			return true
+		queueIndexes := make([]int, 0, len(notifications))
+		for i, notification := range notifications {
+			if _, suppress := c.handoffSuppress[notification.msgID]; !suppress {
+				queueIndexes = append(queueIndexes, i)
+			}
 		}
-		select {
-		case c.outbound <- append([]byte(nil), frame...):
-			return true
-		default:
+		if cap(c.outbound)-len(c.outbound) < len(queueIndexes) {
+			c.stop()
 			return false
 		}
+		for i, notification := range notifications {
+			if _, suppress := c.handoffSuppress[notification.msgID]; suppress {
+				delete(c.handoffSuppress, notification.msgID)
+				continue
+			}
+			c.outbound <- append([]byte(nil), frames[i]...)
+		}
+		return true
 	default:
 		return false
 	}
 }
 
-// FlushOrActivateV2 closes the drain-to-live handoff under the hub lock. The
-// caller writes returned frames while the client remains handshaking, then
-// calls again until activated is true. Drained IDs suppress both already
-// buffered notifications and Put calls that committed before the drain but
-// reached the hub only after activation.
-func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) (frames [][]byte, activated bool) {
+// TransferHandshakeV2Batch queues already-authorized frames only for the exact
+// still-current handshaking connection. It never waits for queue capacity.
+func (h *ClientHub) TransferHandshakeV2Batch(c *wsClient, notifications []queuedV2Notification, frames [][]byte) bool {
+	if len(notifications) != len(frames) {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	current, ok := h.clients[c.deviceID]
+	if !ok || current != c || c.protocol != protocolV2Handshake {
+		return false
+	}
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	if cap(c.outbound)-len(c.outbound) < len(frames) {
+		c.stop()
+		return false
+	}
+	for _, frame := range frames {
+		c.outbound <- append([]byte(nil), frame...)
+	}
+	return true
+}
+
+// FlushOrActivateV2 closes the drain-to-live handoff under the hub lock. Each
+// snapshot is revalidated and transferred into the exact handshaking client's
+// bounded queue before activation. Drained IDs suppress both already buffered
+// notifications and Put calls that committed before the drain but reached the
+// hub only after activation.
+func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) bool {
 	for {
 		h.mu.Lock()
 		current, ok := h.clients[c.deviceID]
 		if !ok || current != c || c.protocol != protocolV2Handshake {
 			h.mu.Unlock()
-			return nil, false
+			return false
 		}
 		select {
 		case <-c.done:
 			h.mu.Unlock()
-			return nil, false
+			return false
 		default:
 		}
 		if c.handoffSuppress == nil {
@@ -215,22 +274,18 @@ func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) (frames 
 		if len(queued) == 0 {
 			c.protocol = protocolV2
 			h.mu.Unlock()
-			return nil, true
+			return true
 		}
 		resolve := h.resolveHandoff
 		h.mu.Unlock()
 
 		if resolve == nil {
 			c.stop()
-			return nil, false
+			return false
 		}
-		resolved, err := resolve(c.deviceID, queued)
-		if err != nil {
+		if err := resolve(c, queued); err != nil {
 			c.stop()
-			return nil, false
-		}
-		if len(resolved) > 0 {
-			return resolved, false
+			return false
 		}
 		// Every snapshot item was ACKed, expired, or purged. Recheck the
 		// handoff atomically before activation in case a new notice arrived

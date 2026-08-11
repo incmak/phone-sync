@@ -74,6 +74,100 @@ func TestMailboxLiveByIDsCopiesAndOmitsExpiredRecords(t *testing.T) {
 	}
 }
 
+type atomicMailboxTransfer interface {
+	TransferLiveByIDs(string, []string, time.Time, func([]MailboxRecord) error) error
+}
+
+func TestMailboxTransferLiveByIDsLinearizesAgainstTerminalMutations(t *testing.T) {
+	mutations := []struct {
+		name string
+		run  func(*MailboxStore, MailboxRecord, time.Time) error
+	}{
+		{name: "ack", run: func(s *MailboxStore, rec MailboxRecord, now time.Time) error {
+			return s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, now)
+		}},
+		{name: "expiry", run: func(s *MailboxStore, _ MailboxRecord, now time.Time) error {
+			_, err := s.Expire(now.Add(2 * time.Hour))
+			return err
+		}},
+		{name: "purge", run: func(s *MailboxStore, rec MailboxRecord, _ time.Time) error {
+			return s.PurgePair(rec.SenderDevice, rec.RecipientDevice)
+		}},
+	}
+
+	for mutationIndex, mutation := range mutations {
+		t.Run(mutation.name+"_wins", func(t *testing.T) {
+			s, rec, now := newTransferLinearizationStore(t, mutationIndex)
+			transfer, ok := any(s).(atomicMailboxTransfer)
+			if !ok {
+				t.Fatal("MailboxStore lacks atomic live-transfer API")
+			}
+			if err := mutation.run(s, rec, now); err != nil {
+				t.Fatalf("commit %s: %v", mutation.name, err)
+			}
+			transferred := 0
+			if err := transfer.TransferLiveByIDs(rec.RecipientDevice, []string{rec.MsgID}, now, func(records []MailboxRecord) error {
+				transferred += len(records)
+				return nil
+			}); err != nil {
+				t.Fatalf("transfer after %s: %v", mutation.name, err)
+			}
+			if transferred != 0 {
+				t.Fatalf("%s-winning transfer emitted %d records, want 0", mutation.name, transferred)
+			}
+		})
+
+		t.Run("transfer_wins_before_"+mutation.name, func(t *testing.T) {
+			s, rec, now := newTransferLinearizationStore(t, mutationIndex+10)
+			transfer, ok := any(s).(atomicMailboxTransfer)
+			if !ok {
+				t.Fatal("MailboxStore lacks atomic live-transfer API")
+			}
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			transferDone := make(chan error, 1)
+			transferred := 0
+			go func() {
+				transferDone <- transfer.TransferLiveByIDs(rec.RecipientDevice, []string{rec.MsgID}, now, func(records []MailboxRecord) error {
+					transferred = len(records)
+					close(entered)
+					<-release
+					return nil
+				})
+			}()
+			<-entered
+			mutationDone := make(chan error, 1)
+			go func() { mutationDone <- mutation.run(s, rec, now) }()
+			select {
+			case err := <-mutationDone:
+				t.Fatalf("%s committed before active read transfer returned: %v", mutation.name, err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			close(release)
+			if err := <-transferDone; err != nil {
+				t.Fatalf("transfer before %s: %v", mutation.name, err)
+			}
+			if err := <-mutationDone; err != nil {
+				t.Fatalf("commit %s after transfer: %v", mutation.name, err)
+			}
+			if transferred != 1 {
+				t.Fatalf("transfer-winning %s race emitted %d records, want 1", mutation.name, transferred)
+			}
+		})
+	}
+}
+
+func newTransferLinearizationStore(t *testing.T, suffix int) (*MailboxStore, MailboxRecord, time.Time) {
+	t.Helper()
+	s := NewMailboxStore(openTestBolt(t), MailboxLimits{MaxItems: 2, MaxBytes: 1024, Retention: time.Hour})
+	now := time.UnixMilli(10_000)
+	rec := testMailboxRecord(fmt.Sprintf("11eeeeee-eeee-4eee-8eee-%012d", suffix), "a")
+	if _, err := s.Put(rec, now); err != nil {
+		t.Fatalf("put transfer record: %v", err)
+	}
+	return s, rec, now.Add(time.Minute)
+}
+
 func TestMailboxRejectsCapacityWithoutEviction(t *testing.T) {
 	b := openTestBolt(t)
 	s := NewMailboxStore(b, MailboxLimits{MaxItems: 1, MaxBytes: 1024, Retention: 24 * time.Hour})
