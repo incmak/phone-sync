@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,16 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrInvalidProtocolFloor = errors.New("invalid protocol floor")
+var ErrPairConflict = errors.New("pair transition conflict")
+
+type PendingPairState string
+
+const (
+	PairWaitingForPeer      PendingPairState = "waiting_for_peer"
+	PairWaitingForSignature PendingPairState = "waiting_for_signature"
+	PairReadyToComplete     PendingPairState = "ready_to_complete"
+	PairCommitted           PendingPairState = "committed"
+)
 
 const (
 	bucketPending       = "pair_pending"
@@ -36,6 +47,10 @@ type PendingPair struct {
 
 	// Populated by /pair/send_sig once Device A signs:
 	ConfirmationSig []byte `json:"confirmation_sig,omitempty"`
+
+	// Populated atomically with the confirmed pair and retained until the
+	// original pair token expires so a lost completion response can be replayed.
+	PairID string `json:"pair_id,omitempty"`
 }
 
 type ConfirmedPair struct {
@@ -69,7 +84,24 @@ func (ps *PairStore) PutPending(p PendingPair) error {
 	if err != nil {
 		return err
 	}
-	return ps.bolt.Put(bucketPending, p.PairToken, b)
+	return ps.bolt.Update(func(tx *bbolt.Tx) error {
+		pending, err := tx.CreateBucketIfNotExists([]byte(bucketPending))
+		if err != nil {
+			return err
+		}
+		raw := pending.Get([]byte(p.PairToken))
+		if raw == nil {
+			return pending.Put([]byte(p.PairToken), b)
+		}
+		current, err := decodePendingPair(raw)
+		if err != nil {
+			return err
+		}
+		if samePairInitiator(current, p) {
+			return nil
+		}
+		return ErrPairConflict
+	})
 }
 
 func (ps *PairStore) GetPending(token string) (*PendingPair, error) {
@@ -91,29 +123,151 @@ func (ps *PairStore) DeletePending(token string) error {
 	return ps.bolt.Delete(bucketPending, token)
 }
 
+// PendingState derives the current pairing transition solely from the durable
+// token-indexed record. No in-memory notification state participates.
+func (ps *PairStore) PendingState(pairToken string) (PendingPairState, error) {
+	p, err := ps.GetPending(pairToken)
+	if err != nil {
+		return "", err
+	}
+	if p.PairID != "" {
+		return PairCommitted, nil
+	}
+	if len(p.ConfirmationSig) != 0 {
+		return PairReadyToComplete, nil
+	}
+	if p.DeviceBID != "" && len(p.BEncPubkey) != 0 && len(p.BSignPubkey) != 0 {
+		return PairWaitingForSignature, nil
+	}
+	return PairWaitingForPeer, nil
+}
+
 // UpdatePendingB merges Device B's fields into the existing pending record.
 // A's fields are preserved untouched.
 func (ps *PairStore) UpdatePendingB(pairToken, deviceBID string, bEncPk, bSignPk []byte, bDisplayName string) error {
-	p, err := ps.GetPending(pairToken)
-	if err != nil {
-		return err
-	}
-	p.DeviceBID = deviceBID
-	p.BEncPubkey = bEncPk
-	p.BSignPubkey = bSignPk
-	p.BDisplayName = bDisplayName
-	return ps.PutPending(*p)
+	return ps.bolt.Update(func(tx *bbolt.Tx) error {
+		pending, p, err := pendingPairForUpdate(tx, pairToken)
+		if err != nil {
+			return err
+		}
+		if p.DeviceBID != "" || len(p.BEncPubkey) != 0 || len(p.BSignPubkey) != 0 || p.BDisplayName != "" {
+			if p.DeviceBID == deviceBID && bytes.Equal(p.BEncPubkey, bEncPk) &&
+				bytes.Equal(p.BSignPubkey, bSignPk) && p.BDisplayName == bDisplayName {
+				return nil
+			}
+			return ErrPairConflict
+		}
+		p.DeviceBID = deviceBID
+		p.BEncPubkey = append([]byte(nil), bEncPk...)
+		p.BSignPubkey = append([]byte(nil), bSignPk...)
+		p.BDisplayName = bDisplayName
+		return putPendingPair(pending, p)
+	})
 }
 
 // UpdatePendingSig merges the confirmation signature into the existing pending record.
 // All other fields are preserved untouched.
 func (ps *PairStore) UpdatePendingSig(pairToken string, sig []byte) error {
-	p, err := ps.GetPending(pairToken)
+	return ps.bolt.Update(func(tx *bbolt.Tx) error {
+		pending, p, err := pendingPairForUpdate(tx, pairToken)
+		if err != nil {
+			return err
+		}
+		if len(p.ConfirmationSig) != 0 {
+			if bytes.Equal(p.ConfirmationSig, sig) {
+				return nil
+			}
+			return ErrPairConflict
+		}
+		p.ConfirmationSig = append([]byte(nil), sig...)
+		return putPendingPair(pending, p)
+	})
+}
+
+// ConfirmPending atomically commits a confirmed pair, both device indexes, and
+// the token-to-pair completion marker. Identical retries return the original
+// confirmed pair; conflicting values leave every bucket unchanged.
+func (ps *PairStore) ConfirmPending(pairToken string, candidate ConfirmedPair, confirmationSig []byte) (*ConfirmedPair, error) {
+	var result ConfirmedPair
+	err := ps.bolt.Update(func(tx *bbolt.Tx) error {
+		pending, p, err := pendingPairForUpdate(tx, pairToken)
+		if err != nil {
+			return err
+		}
+		if !samePendingInitiatorAndCandidate(p, candidate) {
+			return ErrPairConflict
+		}
+		if p.DeviceBID != "" || len(p.BEncPubkey) != 0 || len(p.BSignPubkey) != 0 {
+			if p.DeviceBID != candidate.DeviceB || !bytes.Equal(p.BEncPubkey, candidate.BEncPubkey) ||
+				!bytes.Equal(p.BSignPubkey, candidate.BSignPubkey) {
+				return ErrPairConflict
+			}
+		}
+		if len(p.ConfirmationSig) != 0 && !bytes.Equal(p.ConfirmationSig, confirmationSig) {
+			return ErrPairConflict
+		}
+
+		confirmed, err := tx.CreateBucketIfNotExists([]byte(bucketConfirmed))
+		if err != nil {
+			return err
+		}
+		if p.PairID != "" {
+			raw := confirmed.Get([]byte(p.PairID))
+			if raw == nil {
+				return ErrNotFound
+			}
+			stored, err := decodeConfirmedPair(raw)
+			if err != nil {
+				return err
+			}
+			if !sameConfirmedPair(stored, candidate) {
+				return ErrPairConflict
+			}
+			result = stored
+			return nil
+		}
+		if candidate.PairID == "" {
+			return errors.New("empty pair id")
+		}
+
+		encodedPair, err := json.Marshal(candidate)
+		if err != nil {
+			return err
+		}
+		if err := confirmed.Put([]byte(candidate.PairID), encodedPair); err != nil {
+			return err
+		}
+		byDevice, err := tx.CreateBucketIfNotExists([]byte(bucketByDevice))
+		if err != nil {
+			return err
+		}
+		if err := byDevice.Put([]byte(candidate.DeviceA), []byte(candidate.PairID)); err != nil {
+			return err
+		}
+		if err := byDevice.Put([]byte(candidate.DeviceB), []byte(candidate.PairID)); err != nil {
+			return err
+		}
+
+		if p.DeviceBID == "" {
+			p.DeviceBID = candidate.DeviceB
+			p.BEncPubkey = append([]byte(nil), candidate.BEncPubkey...)
+			p.BSignPubkey = append([]byte(nil), candidate.BSignPubkey...)
+			p.BDisplayName = candidate.BDisplayName
+		}
+		if len(p.ConfirmationSig) == 0 {
+			p.ConfirmationSig = append([]byte(nil), confirmationSig...)
+		}
+		p.PairID = candidate.PairID
+		if err := putPendingPair(pending, p); err != nil {
+			return err
+		}
+		result = candidate
+		return nil
+	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	p.ConfirmationSig = sig
-	return ps.PutPending(*p)
+	return &result, nil
 }
 
 func (ps *PairStore) Confirm(cp ConfirmedPair) error {
@@ -271,6 +425,62 @@ func (ps *PairStore) CapabilitiesFor(deviceID string) (self DeviceCapabilities, 
 		return nil
 	})
 	return self, peer, floor, err
+}
+
+func pendingPairForUpdate(tx *bbolt.Tx, pairToken string) (*bbolt.Bucket, PendingPair, error) {
+	pending := tx.Bucket([]byte(bucketPending))
+	if pending == nil {
+		return nil, PendingPair{}, ErrNotFound
+	}
+	raw := pending.Get([]byte(pairToken))
+	if raw == nil {
+		return nil, PendingPair{}, ErrNotFound
+	}
+	p, err := decodePendingPair(raw)
+	return pending, p, err
+}
+
+func putPendingPair(bucket *bbolt.Bucket, p PendingPair) error {
+	encoded, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(p.PairToken), encoded)
+}
+
+func decodePendingPair(raw []byte) (PendingPair, error) {
+	var p PendingPair
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return PendingPair{}, fmt.Errorf("unmarshal pending: %w", err)
+	}
+	return p, nil
+}
+
+func decodeConfirmedPair(raw []byte) (ConfirmedPair, error) {
+	var pair ConfirmedPair
+	if err := json.Unmarshal(raw, &pair); err != nil {
+		return ConfirmedPair{}, err
+	}
+	return pair, nil
+}
+
+func samePairInitiator(a, b PendingPair) bool {
+	return a.PairToken == b.PairToken && a.DeviceAID == b.DeviceAID &&
+		bytes.Equal(a.AEncPubkey, b.AEncPubkey) && bytes.Equal(a.ASignPubkey, b.ASignPubkey) &&
+		a.ADisplayName == b.ADisplayName
+}
+
+func samePendingInitiatorAndCandidate(p PendingPair, candidate ConfirmedPair) bool {
+	return p.DeviceAID == candidate.DeviceA && bytes.Equal(p.AEncPubkey, candidate.AEncPubkey) &&
+		bytes.Equal(p.ASignPubkey, candidate.ASignPubkey) && p.ADisplayName == candidate.ADisplayName
+}
+
+func sameConfirmedPair(stored, candidate ConfirmedPair) bool {
+	return stored.DeviceA == candidate.DeviceA && stored.DeviceB == candidate.DeviceB &&
+		bytes.Equal(stored.AEncPubkey, candidate.AEncPubkey) &&
+		bytes.Equal(stored.ASignPubkey, candidate.ASignPubkey) && stored.ADisplayName == candidate.ADisplayName &&
+		bytes.Equal(stored.BEncPubkey, candidate.BEncPubkey) &&
+		bytes.Equal(stored.BSignPubkey, candidate.BSignPubkey) && stored.BDisplayName == candidate.BDisplayName
 }
 
 func confirmedPairForDeviceTx(tx *bbolt.Tx, deviceID string) ([]byte, ConfirmedPair, error) {

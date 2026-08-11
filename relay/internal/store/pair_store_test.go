@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,176 @@ import (
 	"testing"
 	"time"
 )
+
+func TestPairPendingStatePersistsTransitionsAndCommittedToken(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pair.db")
+	bolt, err := OpenBolt(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := NewPairStore(bolt)
+	pending := PendingPair{
+		PairToken: "state-token", DeviceAID: "a", AEncPubkey: []byte("a-enc"),
+		ASignPubkey: []byte("a-sign"), CreatedAt: time.Now().Unix(),
+	}
+	if err := ps.PutPending(pending); err != nil {
+		t.Fatal(err)
+	}
+	assertPendingState(t, ps, pending.PairToken, PairWaitingForPeer)
+
+	if err := ps.UpdatePendingB(pending.PairToken, "b", []byte("b-enc"), []byte("b-sign"), "Phone B"); err != nil {
+		t.Fatal(err)
+	}
+	assertPendingState(t, ps, pending.PairToken, PairWaitingForSignature)
+
+	signature := []byte("confirmation")
+	if err := ps.UpdatePendingSig(pending.PairToken, signature); err != nil {
+		t.Fatal(err)
+	}
+	assertPendingState(t, ps, pending.PairToken, PairReadyToComplete)
+
+	confirmed, err := ps.ConfirmPending(pending.PairToken, ConfirmedPair{
+		PairID: "pair-state", DeviceA: "a", DeviceB: "b",
+		AEncPubkey: []byte("a-enc"), ASignPubkey: []byte("a-sign"),
+		BEncPubkey: []byte("b-enc"), BSignPubkey: []byte("b-sign"), BDisplayName: "Phone B",
+	}, signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.PairID != "pair-state" {
+		t.Fatalf("confirmed pair ID = %q", confirmed.PairID)
+	}
+	assertPendingState(t, ps, pending.PairToken, PairCommitted)
+	reinitialized := pending
+	reinitialized.CreatedAt += 300
+	if err := ps.PutPending(reinitialized); err != nil {
+		t.Fatalf("identical init retry after completion: %v", err)
+	}
+	retained, err := ps.GetPending(pending.PairToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.PairID != confirmed.PairID || retained.CreatedAt != pending.CreatedAt {
+		t.Fatalf("init retry replaced committed token state: %#v", retained)
+	}
+
+	if err := bolt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bolt, err = OpenBolt(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bolt.Close()
+	ps = NewPairStore(bolt)
+	assertPendingState(t, ps, pending.PairToken, PairCommitted)
+	reopened, err := ps.GetPending(pending.PairToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.PairID != confirmed.PairID {
+		t.Fatalf("reopened token pair ID = %q, want %q", reopened.PairID, confirmed.PairID)
+	}
+}
+
+func TestPairPendingTransitionsAreIdempotentAndConflictsDoNotMutate(t *testing.T) {
+	ps := newTestPairStore(t)
+	pending := PendingPair{
+		PairToken: "idempotent-token", DeviceAID: "a", AEncPubkey: []byte("a-enc"),
+		ASignPubkey: []byte("a-sign"), ADisplayName: "Phone A", CreatedAt: time.Now().Unix(),
+	}
+	if err := ps.PutPending(pending); err != nil {
+		t.Fatal(err)
+	}
+
+	hello := func(enc []byte) error {
+		return ps.UpdatePendingB(pending.PairToken, "b", enc, []byte("b-sign"), "Phone B")
+	}
+	if err := hello([]byte("b-enc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := hello([]byte("b-enc")); err != nil {
+		t.Fatalf("identical hello retry: %v", err)
+	}
+	if err := hello([]byte("other-enc")); !errors.Is(err, ErrPairConflict) {
+		t.Fatalf("conflicting hello error = %v, want ErrPairConflict", err)
+	}
+	stored, err := ps.GetPending(pending.PairToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored.BEncPubkey, []byte("b-enc")) {
+		t.Fatalf("conflicting hello mutated key to %q", stored.BEncPubkey)
+	}
+
+	signature := []byte("signature")
+	if err := ps.UpdatePendingSig(pending.PairToken, signature); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.UpdatePendingSig(pending.PairToken, append([]byte(nil), signature...)); err != nil {
+		t.Fatalf("identical signature retry: %v", err)
+	}
+	if err := ps.UpdatePendingSig(pending.PairToken, []byte("other-signature")); !errors.Is(err, ErrPairConflict) {
+		t.Fatalf("conflicting signature error = %v, want ErrPairConflict", err)
+	}
+	stored, err = ps.GetPending(pending.PairToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored.ConfirmationSig, signature) {
+		t.Fatalf("conflicting signature mutated value to %q", stored.ConfirmationSig)
+	}
+
+	pair := ConfirmedPair{
+		PairID: "first-pair", DeviceA: "a", DeviceB: "b",
+		AEncPubkey: []byte("a-enc"), ASignPubkey: []byte("a-sign"), ADisplayName: "Phone A",
+		BEncPubkey: []byte("b-enc"), BSignPubkey: []byte("b-sign"), BDisplayName: "Phone B",
+	}
+	first, err := ps.ConfirmPending(pending.PairToken, pair, signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := pair
+	retry.PairID = "discarded-retry-pair"
+	second, err := ps.ConfirmPending(pending.PairToken, retry, append([]byte(nil), signature...))
+	if err != nil {
+		t.Fatalf("identical complete retry: %v", err)
+	}
+	if second.PairID != first.PairID {
+		t.Fatalf("complete retry pair ID = %q, want original %q", second.PairID, first.PairID)
+	}
+
+	conflict := retry
+	conflict.BEncPubkey = []byte("conflicting-b-enc")
+	if _, err := ps.ConfirmPending(pending.PairToken, conflict, signature); !errors.Is(err, ErrPairConflict) {
+		t.Fatalf("conflicting complete error = %v, want ErrPairConflict", err)
+	}
+	storedPair, err := ps.Get(first.PairID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(storedPair.BEncPubkey, pair.BEncPubkey) {
+		t.Fatalf("conflicting complete mutated pair to %#v", storedPair)
+	}
+	if _, err := ps.Get(retry.PairID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("retry candidate pair ID was persisted: %v", err)
+	}
+	peer, err := ps.PeerFor(pair.DeviceA)
+	if err != nil || peer != pair.DeviceB {
+		t.Fatalf("device index after conflict = %q, %v", peer, err)
+	}
+}
+
+func assertPendingState(t *testing.T, ps *PairStore, token string, want PendingPairState) {
+	t.Helper()
+	got, err := ps.PendingState(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("PendingState(%q) = %q, want %q", token, got, want)
+	}
+}
 
 func newTestPairStore(t *testing.T) *PairStore {
 	t.Helper()

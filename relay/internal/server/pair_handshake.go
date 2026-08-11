@@ -1,13 +1,19 @@
 package server
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/twinotify/relay/internal/store"
 )
+
+const pairTokenTTL = 5 * time.Minute
 
 type pairHelloReq struct {
 	PairToken   string `json:"pair_token"`
@@ -34,7 +40,7 @@ func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown pair_token", http.StatusNotFound)
 		return
 	}
-	if time.Now().Unix()-pending.CreatedAt > 300 {
+	if pairTokenExpired(pending, time.Now()) {
 		_ = s.pairStore.DeletePending(req.PairToken)
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return
@@ -46,19 +52,24 @@ func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.pairStore.UpdatePendingB(req.PairToken, req.DeviceID, encPk, signPk, req.DisplayName); err != nil {
+		if errors.Is(err, store.ErrPairConflict) {
+			http.Error(w, "pair transition conflict", http.StatusConflict)
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "unknown pair_token", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "store", http.StatusInternalServerError)
 		return
 	}
 	// Push peer.hello to Device A's subscription.
-	frame, err := json.Marshal(map[string]any{
-		"v":            1,
-		"type":         "peer.hello",
-		"pair_token":   req.PairToken,
-		"device_id":    req.DeviceID,
-		"enc_pubkey":   req.EncPubkey,
-		"sign_pubkey":  req.SignPubkey,
-		"display_name": req.DisplayName,
-	})
+	pending, err = s.pairStore.GetPending(req.PairToken)
+	if err != nil {
+		http.Error(w, "store", http.StatusInternalServerError)
+		return
+	}
+	frame, err := marshalPeerHello(pending)
 	if err != nil {
 		log.Printf("peer.hello marshal: %v", err)
 	} else {
@@ -92,7 +103,7 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown pair_token", http.StatusNotFound)
 		return
 	}
-	if time.Now().Unix()-pending.CreatedAt > 300 {
+	if pairTokenExpired(pending, time.Now()) {
 		_ = s.pairStore.DeletePending(req.PairToken)
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return
@@ -105,6 +116,10 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 	sig, err := base64.StdEncoding.DecodeString(req.ConfirmationSig)
 	if err != nil {
 		http.Error(w, "bad base64", http.StatusBadRequest)
+		return
+	}
+	if len(pending.ConfirmationSig) != 0 && !bytes.Equal(pending.ConfirmationSig, sig) {
+		http.Error(w, "pair transition conflict", http.StatusConflict)
 		return
 	}
 	// Reconstruct and verify the 5-field signed message:
@@ -123,15 +138,23 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Store sig + forward to Device B.
 	if err := s.pairStore.UpdatePendingSig(req.PairToken, sig); err != nil {
+		if errors.Is(err, store.ErrPairConflict) {
+			http.Error(w, "pair transition conflict", http.StatusConflict)
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "unknown pair_token", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "store", http.StatusInternalServerError)
 		return
 	}
-	frame, err := json.Marshal(map[string]any{
-		"v":                1,
-		"type":             "pair.sig",
-		"pair_token":       req.PairToken,
-		"confirmation_sig": req.ConfirmationSig,
-	})
+	pending, err = s.pairStore.GetPending(req.PairToken)
+	if err != nil {
+		http.Error(w, "store", http.StatusInternalServerError)
+		return
+	}
+	frame, err := marshalPairSignature(pending)
 	if err != nil {
 		log.Printf("pair.sig marshal: %v", err)
 	} else {
@@ -140,4 +163,8 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+func pairTokenExpired(pending *store.PendingPair, now time.Time) bool {
+	return !now.Before(time.Unix(pending.CreatedAt, 0).Add(pairTokenTTL))
 }

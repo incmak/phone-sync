@@ -5,14 +5,18 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/twinotify/relay/internal/store"
 )
 
 // dialPairNotify opens a WebSocket to /pair/notify with the given token and role.
@@ -163,6 +167,544 @@ func TestBidirectional_HappyPath(t *testing.T) {
 	if _, ok := completeResp["pair_id"].(string); !ok {
 		t.Fatal("pair_id missing from /pair/complete response")
 	}
+}
+
+func TestPairNotifyLateSubscriberReceivesPersistedSignatureAndCompletion(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
+	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	pairToken := "tok-late-subscriber"
+
+	initPair(t, ts.URL, pairToken, "devA-late", aEncPk, aSignPk)
+
+	helloBody, _ := json.Marshal(map[string]any{
+		"pair_token":  pairToken,
+		"device_id":   "devB-late",
+		"enc_pubkey":  base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPk),
+	})
+	helloResp, err := http.Post(ts.URL+"/pair/hello", "application/json", bytes.NewReader(helloBody))
+	if err != nil {
+		t.Fatalf("pair/hello: %v", err)
+	}
+	helloResp.Body.Close()
+	if helloResp.StatusCode != http.StatusOK {
+		t.Fatalf("pair/hello status %d", helloResp.StatusCode)
+	}
+
+	message := append([]byte(pairToken), aEncPk...)
+	message = append(message, aSignPk...)
+	message = append(message, bEncPk...)
+	message = append(message, bSignPk...)
+	signature := ed25519.Sign(aSignSk, message)
+	signatureBase64 := base64.StdEncoding.EncodeToString(signature)
+	sendSigBody, _ := json.Marshal(map[string]any{
+		"pair_token":       pairToken,
+		"confirmation_sig": signatureBase64,
+	})
+	sendSigResp, err := http.Post(ts.URL+"/pair/send_sig", "application/json", bytes.NewReader(sendSigBody))
+	if err != nil {
+		t.Fatalf("pair/send_sig: %v", err)
+	}
+	sendSigResp.Body.Close()
+	if sendSigResp.StatusCode != http.StatusOK {
+		t.Fatalf("pair/send_sig status %d", sendSigResp.StatusCode)
+	}
+
+	wsB := dialPairNotify(t, ts.URL, pairToken, "B")
+	defer wsB.Close()
+	_ = wsB.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_, data, err := wsB.ReadMessage()
+	if err != nil {
+		t.Fatalf("late Device B read persisted pair.sig: %v", err)
+	}
+	var sigFrame map[string]any
+	if err := json.Unmarshal(data, &sigFrame); err != nil {
+		t.Fatalf("unmarshal pair.sig: %v", err)
+	}
+	if sigFrame["type"] != "pair.sig" || sigFrame["confirmation_sig"] != signatureBase64 {
+		t.Fatalf("first persisted frame = %#v, want pair.sig", sigFrame)
+	}
+
+	completeBody, _ := json.Marshal(map[string]any{
+		"pair_token":       pairToken,
+		"device_id":        "devB-late",
+		"enc_pubkey":       base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey":      base64.StdEncoding.EncodeToString(bSignPk),
+		"confirmation_sig": signatureBase64,
+	})
+	completeResp, err := http.Post(ts.URL+"/pair/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatalf("pair/complete: %v", err)
+	}
+	defer completeResp.Body.Close()
+	if completeResp.StatusCode != http.StatusOK {
+		t.Fatalf("pair/complete status %d", completeResp.StatusCode)
+	}
+	var completed map[string]any
+	if err := json.NewDecoder(completeResp.Body).Decode(&completed); err != nil {
+		t.Fatalf("decode pair/complete: %v", err)
+	}
+	pairID, ok := completed["pair_id"].(string)
+	if !ok || pairID == "" {
+		t.Fatalf("pair/complete response = %#v", completed)
+	}
+
+	wsA := dialPairNotify(t, ts.URL, pairToken, "A")
+	defer wsA.Close()
+	_ = wsA.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	for {
+		_, data, err = wsA.ReadMessage()
+		if err != nil {
+			t.Fatalf("reconnected Device A read pair.complete: %v", err)
+		}
+		var frame map[string]any
+		if err := json.Unmarshal(data, &frame); err != nil {
+			t.Fatalf("unmarshal Device A frame: %v", err)
+		}
+		if frame["type"] == "pair.complete" {
+			if frame["pair_id"] != pairID {
+				t.Fatalf("pair.complete pair_id = %v, want %s", frame["pair_id"], pairID)
+			}
+			break
+		}
+	}
+}
+
+func TestPairHandshakeRetriesAreIdempotentAndConflictsReturn409(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
+	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	conflictingBEncPk, _, _ := ed25519Keypair(t)
+	pairToken := "tok-idempotent-handshake"
+	initPair(t, ts.URL, pairToken, "devA-idempotent", aEncPk, aSignPk)
+
+	hello := map[string]any{
+		"pair_token": pairToken, "device_id": "devB-idempotent",
+		"enc_pubkey":   base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey":  base64.StdEncoding.EncodeToString(bSignPk),
+		"display_name": "Phone B",
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		resp := postPairJSON(t, ts.URL+"/pair/hello", hello)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("identical hello attempt %d status = %d", attempt+1, resp.StatusCode)
+		}
+	}
+	conflictingHello := clonePairRequest(hello)
+	conflictingHello["enc_pubkey"] = base64.StdEncoding.EncodeToString(conflictingBEncPk)
+	resp := postPairJSON(t, ts.URL+"/pair/hello", conflictingHello)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("conflicting hello status = %d, want 409", resp.StatusCode)
+	}
+
+	message := append([]byte(pairToken), aEncPk...)
+	message = append(message, aSignPk...)
+	message = append(message, bEncPk...)
+	message = append(message, bSignPk...)
+	signature := ed25519.Sign(aSignSk, message)
+	signatureBase64 := base64.StdEncoding.EncodeToString(signature)
+	sendSig := map[string]any{"pair_token": pairToken, "confirmation_sig": signatureBase64}
+	for attempt := 0; attempt < 2; attempt++ {
+		resp = postPairJSON(t, ts.URL+"/pair/send_sig", sendSig)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("identical send_sig attempt %d status = %d", attempt+1, resp.StatusCode)
+		}
+	}
+	conflictingSig := clonePairRequest(sendSig)
+	conflictingSig["confirmation_sig"] = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xa5}, ed25519.SignatureSize))
+	resp = postPairJSON(t, ts.URL+"/pair/send_sig", conflictingSig)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("conflicting send_sig status = %d, want 409", resp.StatusCode)
+	}
+
+	complete := map[string]any{
+		"pair_token": pairToken, "device_id": "devB-idempotent",
+		"enc_pubkey":       base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey":      base64.StdEncoding.EncodeToString(bSignPk),
+		"confirmation_sig": signatureBase64, "display_name": "Phone B",
+	}
+	var originalPairID string
+	for attempt := 0; attempt < 2; attempt++ {
+		resp = postPairJSON(t, ts.URL+"/pair/complete", complete)
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("identical complete attempt %d status = %d", attempt+1, resp.StatusCode)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			resp.Body.Close()
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		pairID, _ := body["pair_id"].(string)
+		if pairID == "" {
+			t.Fatalf("complete attempt %d body = %#v", attempt+1, body)
+		}
+		if attempt == 0 {
+			originalPairID = pairID
+		} else if pairID != originalPairID {
+			t.Fatalf("complete retry pair_id = %q, want %q", pairID, originalPairID)
+		}
+	}
+
+	resp = postPairJSON(t, ts.URL+"/pair/hello", hello)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("identical hello after completion status = %d", resp.StatusCode)
+	}
+	resp = postPairJSON(t, ts.URL+"/pair/send_sig", sendSig)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("identical send_sig after completion status = %d", resp.StatusCode)
+	}
+
+	conflictingComplete := clonePairRequest(complete)
+	conflictingComplete["enc_pubkey"] = base64.StdEncoding.EncodeToString(conflictingBEncPk)
+	resp = postPairJSON(t, ts.URL+"/pair/complete", conflictingComplete)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("conflicting complete status = %d, want 409", resp.StatusCode)
+	}
+	state, err := srv.pairStore.PendingState(pairToken)
+	if err != nil || state != store.PairCommitted {
+		t.Fatalf("state after conflicts = %q, %v", state, err)
+	}
+	confirmed, err := srv.pairStore.Get(originalPairID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(confirmed.BEncPubkey, bEncPk) {
+		t.Fatalf("conflicting requests mutated confirmed pair: %#v", confirmed)
+	}
+}
+
+func TestPairHandshakeConcurrentIdenticalTransitionsReturnOneCommittedPair(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
+	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	pairToken := "tok-concurrent-handshake"
+	initPair(t, ts.URL, pairToken, "devA-concurrent", aEncPk, aSignPk)
+	hello := map[string]any{
+		"pair_token": pairToken, "device_id": "devB-concurrent",
+		"enc_pubkey":  base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPk),
+	}
+	assertConcurrentPairResponses(t, ts.URL+"/pair/hello", hello, 8, false)
+
+	message := append([]byte(pairToken), aEncPk...)
+	message = append(message, aSignPk...)
+	message = append(message, bEncPk...)
+	message = append(message, bSignPk...)
+	signatureBase64 := base64.StdEncoding.EncodeToString(ed25519.Sign(aSignSk, message))
+	sendSig := map[string]any{"pair_token": pairToken, "confirmation_sig": signatureBase64}
+	assertConcurrentPairResponses(t, ts.URL+"/pair/send_sig", sendSig, 8, false)
+
+	complete := map[string]any{
+		"pair_token": pairToken, "device_id": "devB-concurrent",
+		"enc_pubkey":       base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey":      base64.StdEncoding.EncodeToString(bSignPk),
+		"confirmation_sig": signatureBase64,
+	}
+	results := assertConcurrentPairResponses(t, ts.URL+"/pair/complete", complete, 8, true)
+	firstPairID := results[0].pairID
+	for index, result := range results[1:] {
+		if result.pairID != firstPairID {
+			t.Fatalf("complete result %d pair_id = %q, want %q", index+1, result.pairID, firstPairID)
+		}
+	}
+}
+
+func TestPairNotifyLiveReplayInterleavingsDeduplicateTransitions(t *testing.T) {
+	for iteration := 0; iteration < 10; iteration++ {
+		t.Run(fmt.Sprintf("iteration-%d", iteration), func(t *testing.T) {
+			srv := newTestServer(t)
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+
+			aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
+			bEncPk, bSignPk, _ := ed25519Keypair(t)
+			pairToken := fmt.Sprintf("tok-interleave-%d", iteration)
+			initPair(t, ts.URL, pairToken, "devA-interleave", aEncPk, aSignPk)
+
+			hello := map[string]any{
+				"pair_token": pairToken, "device_id": "devB-interleave",
+				"enc_pubkey":  base64.StdEncoding.EncodeToString(bEncPk),
+				"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPk),
+			}
+			helloResult := postPairJSONAsync(t, ts.URL+"/pair/hello", hello)
+			wsA := dialPairNotify(t, ts.URL, pairToken, "A")
+			readPairFramesThrough(t, wsA, []string{"peer.hello"})
+			wsA.Close()
+			assertAsyncPairStatus(t, helloResult, http.StatusOK)
+
+			message := append([]byte(pairToken), aEncPk...)
+			message = append(message, aSignPk...)
+			message = append(message, bEncPk...)
+			message = append(message, bSignPk...)
+			signature := ed25519.Sign(aSignSk, message)
+			signatureBase64 := base64.StdEncoding.EncodeToString(signature)
+			sendSig := map[string]any{"pair_token": pairToken, "confirmation_sig": signatureBase64}
+			sigResult := postPairJSONAsync(t, ts.URL+"/pair/send_sig", sendSig)
+			wsB := dialPairNotify(t, ts.URL, pairToken, "B")
+			readPairFramesThrough(t, wsB, []string{"pair.sig"})
+			wsB.Close()
+			assertAsyncPairStatus(t, sigResult, http.StatusOK)
+
+			complete := map[string]any{
+				"pair_token": pairToken, "device_id": "devB-interleave",
+				"enc_pubkey":       base64.StdEncoding.EncodeToString(bEncPk),
+				"sign_pubkey":      base64.StdEncoding.EncodeToString(bSignPk),
+				"confirmation_sig": signatureBase64,
+			}
+			completeResult := postPairJSONAsync(t, ts.URL+"/pair/complete", complete)
+			wsA = dialPairNotify(t, ts.URL, pairToken, "A")
+			wsB = dialPairNotify(t, ts.URL, pairToken, "B")
+			readPairFramesThrough(t, wsA, []string{"peer.hello", "pair.complete"})
+			readPairFramesThrough(t, wsB, []string{"pair.sig", "pair.complete"})
+			wsA.Close()
+			wsB.Close()
+			assertAsyncPairStatus(t, completeResult, http.StatusOK)
+		})
+	}
+}
+
+func TestPairNotifyReplaysCommittedStateAfterStoreReopen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "relay.db")
+	bolt, err := store.OpenBolt(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewWithStore(bolt)
+	ts := httptest.NewServer(srv.Handler())
+
+	aEncPk, aSignPk, aSignSk := ed25519Keypair(t)
+	bEncPk, bSignPk, _ := ed25519Keypair(t)
+	pairToken := "tok-reopen-completed"
+	initPair(t, ts.URL, pairToken, "devA-reopen", aEncPk, aSignPk)
+	hello := map[string]any{
+		"pair_token": pairToken, "device_id": "devB-reopen",
+		"enc_pubkey":  base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey": base64.StdEncoding.EncodeToString(bSignPk),
+	}
+	resp := postPairJSON(t, ts.URL+"/pair/hello", hello)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pair/hello status = %d", resp.StatusCode)
+	}
+	message := append([]byte(pairToken), aEncPk...)
+	message = append(message, aSignPk...)
+	message = append(message, bEncPk...)
+	message = append(message, bSignPk...)
+	signature := ed25519.Sign(aSignSk, message)
+	signatureBase64 := base64.StdEncoding.EncodeToString(signature)
+	sendSig := map[string]any{"pair_token": pairToken, "confirmation_sig": signatureBase64}
+	resp = postPairJSON(t, ts.URL+"/pair/send_sig", sendSig)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pair/send_sig status = %d", resp.StatusCode)
+	}
+	complete := map[string]any{
+		"pair_token": pairToken, "device_id": "devB-reopen",
+		"enc_pubkey":       base64.StdEncoding.EncodeToString(bEncPk),
+		"sign_pubkey":      base64.StdEncoding.EncodeToString(bSignPk),
+		"confirmation_sig": signatureBase64,
+	}
+	resp = postPairJSON(t, ts.URL+"/pair/complete", complete)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("pair/complete status = %d", resp.StatusCode)
+	}
+	var completed map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&completed); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	originalPairID, _ := completed["pair_id"].(string)
+	ts.Close()
+	if err := bolt.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	bolt, err = store.OpenBolt(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bolt.Close()
+	srv = NewWithStore(bolt)
+	ts = httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	wsB := dialPairNotify(t, ts.URL, pairToken, "B")
+	readPairFramesThrough(t, wsB, []string{"pair.sig", "pair.complete"})
+	wsB.Close()
+	resp = postPairJSON(t, ts.URL+"/pair/complete", complete)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("pair/complete retry after reopen status = %d", resp.StatusCode)
+	}
+	var retried map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&retried); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if retried["pair_id"] != originalPairID {
+		t.Fatalf("reopened complete pair_id = %v, want %v", retried["pair_id"], originalPairID)
+	}
+}
+
+func TestPairNotifyRejectsAndCleansUpExpiredToken(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPk, aSignPk, _ := ed25519Keypair(t)
+	pairToken := "tok-expired-notify"
+	if err := srv.pairStore.PutPending(store.PendingPair{
+		PairToken: pairToken, DeviceAID: "devA-expired", AEncPubkey: aEncPk,
+		ASignPubkey: aSignPk, CreatedAt: time.Now().Add(-pairTokenTTL - time.Second).Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wsURL := strings.Replace(ts.URL, "http://", "ws://", 1) + "/pair/notify?token=" + pairToken + "&role=A"
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		t.Fatal("expected expired token dial to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expired token response = %v", resp)
+	}
+	if _, err := srv.pairStore.GetPending(pairToken); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expired token remained persisted: %v", err)
+	}
+}
+
+type asyncPairResult struct {
+	status int
+	pairID string
+	err    error
+}
+
+func assertConcurrentPairResponses(t *testing.T, url string, request map[string]any, count int, decodePairID bool) []asyncPairResult {
+	t.Helper()
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan asyncPairResult, count)
+	start := make(chan struct{})
+	for worker := 0; worker < count; worker++ {
+		go func() {
+			<-start
+			resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+			if err != nil {
+				results <- asyncPairResult{err: err}
+				return
+			}
+			result := asyncPairResult{status: resp.StatusCode}
+			if decodePairID && resp.StatusCode == http.StatusOK {
+				var responseBody map[string]any
+				if err := json.NewDecoder(resp.Body).Decode(&responseBody); err != nil {
+					result.err = err
+				} else {
+					result.pairID, _ = responseBody["pair_id"].(string)
+				}
+			}
+			resp.Body.Close()
+			results <- result
+		}()
+	}
+	close(start)
+	collected := make([]asyncPairResult, 0, count)
+	for index := 0; index < count; index++ {
+		result := <-results
+		if result.err != nil || result.status != http.StatusOK || (decodePairID && result.pairID == "") {
+			t.Fatalf("concurrent response %d = %#v", index, result)
+		}
+		collected = append(collected, result)
+	}
+	return collected
+}
+
+func postPairJSONAsync(t *testing.T, url string, request map[string]any) <-chan asyncPairResult {
+	t.Helper()
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan asyncPairResult, 1)
+	go func() {
+		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			result <- asyncPairResult{err: err}
+			return
+		}
+		resp.Body.Close()
+		result <- asyncPairResult{status: resp.StatusCode}
+	}()
+	return result
+}
+
+func assertAsyncPairStatus(t *testing.T, result <-chan asyncPairResult, want int) {
+	t.Helper()
+	got := <-result
+	if got.err != nil || got.status != want {
+		t.Fatalf("async pair request = status %d, error %v; want %d", got.status, got.err, want)
+	}
+}
+
+func readPairFramesThrough(t *testing.T, conn *websocket.Conn, want []string) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for index, wantType := range want {
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read pair frame %d (%s): %v", index, wantType, err)
+		}
+		var frame map[string]any
+		if err := json.Unmarshal(payload, &frame); err != nil {
+			t.Fatalf("decode pair frame %d: %v", index, err)
+		}
+		if frame["type"] != wantType {
+			t.Fatalf("pair frame %d type = %v, want %s", index, frame["type"], wantType)
+		}
+	}
+}
+
+func postPairJSON(t *testing.T, url string, request map[string]any) *http.Response {
+	t.Helper()
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func clonePairRequest(request map[string]any) map[string]any {
+	cloned := make(map[string]any, len(request))
+	for key, value := range request {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // TestPairNotify_MissingRole verifies that omitting ?role= returns 400.

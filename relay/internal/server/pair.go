@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -53,6 +55,10 @@ func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    time.Now().Unix(),
 	}
 	if err := s.pairStore.PutPending(p); err != nil {
+		if errors.Is(err, store.ErrPairConflict) {
+			http.Error(w, "pair transition conflict", http.StatusConflict)
+			return
+		}
 		http.Error(w, "store", http.StatusInternalServerError)
 		return
 	}
@@ -72,7 +78,7 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown pair_token", http.StatusBadRequest)
 		return
 	}
-	if time.Now().Unix()-pending.CreatedAt > 300 {
+	if pairTokenExpired(pending, time.Now()) {
 		_ = s.pairStore.DeletePending(req.PairToken)
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return
@@ -83,6 +89,11 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad base64", http.StatusBadRequest)
 		return
 	}
+	if (pending.DeviceBID != "" || len(pending.BEncPubkey) != 0 || len(pending.BSignPubkey) != 0) &&
+		(pending.DeviceBID != req.DeviceID || !bytes.Equal(pending.BEncPubkey, encPk) || !bytes.Equal(pending.BSignPubkey, signPk)) {
+		http.Error(w, "pair transition conflict", http.StatusConflict)
+		return
+	}
 	msg := append([]byte(req.PairToken), pending.AEncPubkey...)
 	msg = append(msg, pending.ASignPubkey...)
 	msg = append(msg, encPk...)
@@ -90,6 +101,10 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 	sig, err := base64.StdEncoding.DecodeString(req.ConfirmationSig)
 	if err != nil {
 		http.Error(w, "bad confirmation_sig base64", http.StatusBadRequest)
+		return
+	}
+	if len(pending.ConfirmationSig) != 0 && !bytes.Equal(pending.ConfirmationSig, sig) {
+		http.Error(w, "pair transition conflict", http.StatusConflict)
 		return
 	}
 	if len(pending.ASignPubkey) != ed25519.PublicKeySize {
@@ -118,16 +133,33 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		BSignPubkey:  signPk,
 		BDisplayName: bDisplayName,
 	}
-	if err := s.pairStore.Confirm(cp); err != nil {
+	confirmed, err := s.pairStore.ConfirmPending(req.PairToken, cp, sig)
+	if err != nil {
+		if errors.Is(err, store.ErrPairConflict) {
+			http.Error(w, "pair transition conflict", http.StatusConflict)
+			return
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "unknown pair_token", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "confirm", http.StatusInternalServerError)
 		return
 	}
-	_ = s.pairStore.DeletePending(req.PairToken)
-
-	// Phase 4: pair.sig push is handled by /pair/send_sig before B calls this endpoint.
-	// No redundant push here.
+	pending, err = s.pairStore.GetPending(req.PairToken)
+	if err != nil {
+		http.Error(w, "confirm", http.StatusInternalServerError)
+		return
+	}
+	frame, err := marshalPairComplete(pending)
+	if err != nil {
+		http.Error(w, "confirm", http.StatusInternalServerError)
+		return
+	}
+	s.pairHub.Push(req.PairToken, "A", frame)
+	s.pairHub.Push(req.PairToken, "B", frame)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"pair_id":"` + cp.PairID + `"}`))
+	_, _ = w.Write([]byte(`{"pair_id":"` + confirmed.PairID + `"}`))
 }
