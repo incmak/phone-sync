@@ -2,10 +2,14 @@ package server
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +51,38 @@ func postRevoke(t *testing.T, srv *Server, deviceID string, privateKey ed25519.P
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+func assertRevokePeerClosed(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := conn.ReadMessage()
+	if err == nil {
+		t.Fatal("socket remained open after revocation")
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatalf("socket only reached its read deadline instead of closing: %v", err)
+	}
+	if !errors.Is(err, io.EOF) && !websocket.IsCloseError(err,
+		websocket.CloseNormalClosure,
+		websocket.CloseGoingAway,
+		websocket.CloseNoStatusReceived,
+		websocket.CloseAbnormalClosure,
+	) {
+		t.Fatalf("socket returned non-terminal read error: %v", err)
+	}
+}
+
+func dialRevokeTestWS(t *testing.T, ts *httptest.Server, deviceID string, privateKey ed25519.PrivateKey) *websocket.Conn {
+	t.Helper()
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+mintJWT(t, deviceID, privateKey, ""))
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", header)
+	if err != nil {
+		t.Fatalf("dial %s: %v", deviceID, err)
+	}
+	return conn
 }
 
 func TestRevokeAllowsEitherPairedDevice(t *testing.T) {
@@ -118,19 +154,9 @@ func TestRevokePurgesMailboxesDisconnectsSocketsRejectsOldJWTAndAllowsNewKeys(t 
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	dial := func(deviceID string, privateKey ed25519.PrivateKey) *websocket.Conn {
-		t.Helper()
-		header := http.Header{}
-		header.Set("Authorization", "Bearer "+mintJWT(t, deviceID, privateKey, ""))
-		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", header)
-		if err != nil {
-			t.Fatalf("dial %s: %v", deviceID, err)
-		}
-		return conn
-	}
-	aConn := dial(fixture.pair.DeviceA, fixture.privA)
+	aConn := dialRevokeTestWS(t, ts, fixture.pair.DeviceA, fixture.privA)
 	defer aConn.Close()
-	bConn := dial(fixture.pair.DeviceB, fixture.privB)
+	bConn := dialRevokeTestWS(t, ts, fixture.pair.DeviceB, fixture.privB)
 	defer bConn.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/pair/revoke", strings.NewReader(`{"reason":"user_unpair"}`))
@@ -153,9 +179,13 @@ func TestRevokePurgesMailboxesDisconnectsSocketsRejectsOldJWTAndAllowsNewKeys(t 
 		}
 	}
 	for name, conn := range map[string]*websocket.Conn{"a": aConn, "b": bConn} {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		if _, _, err := conn.ReadMessage(); err == nil {
-			t.Fatalf("socket %s remained open after revocation", name)
+		t.Run("peer close "+name, func(t *testing.T) {
+			assertRevokePeerClosed(t, conn)
+		})
+	}
+	for _, deviceID := range []string{fixture.pair.DeviceA, fixture.pair.DeviceB} {
+		if _, _, online := srv.clientHub.ConnectionForPair(deviceID, fixture.pair.PairID); online {
+			t.Fatalf("old registration for %s survived revocation", deviceID)
 		}
 	}
 
@@ -175,5 +205,200 @@ func TestRevokePurgesMailboxesDisconnectsSocketsRejectsOldJWTAndAllowsNewKeys(t 
 	newKeyRevoke := postRevoke(t, srv, fixture.pair.DeviceA, newAPriv)
 	if newKeyRevoke.Code != http.StatusNoContent {
 		t.Fatalf("new key authentication status=%d body=%s", newKeyRevoke.Code, newKeyRevoke.Body.String())
+	}
+}
+
+func TestRevokeRejectsAuthenticatedSocketRegisteringAfterCommit(t *testing.T) {
+	srv := newTestServer(t)
+	fixture := registerRevokeTestPair(t, srv, "auth-register-old")
+	beforeRegister := make(chan struct{})
+	releaseRegister := make(chan struct{})
+	var once sync.Once
+	srv.webSocketBeforeRegister = func(deviceID, pairID string) {
+		if deviceID == fixture.pair.DeviceA {
+			once.Do(func() { close(beforeRegister) })
+			<-releaseRegister
+		}
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	type dialResult struct {
+		conn *websocket.Conn
+		err  error
+	}
+	dialed := make(chan dialResult, 1)
+	go func() {
+		header := http.Header{}
+		header.Set("Authorization", "Bearer "+mintJWT(t, fixture.pair.DeviceA, fixture.privA, ""))
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", header)
+		dialed <- dialResult{conn: conn, err: err}
+	}()
+	<-beforeRegister
+	if rec := postRevoke(t, srv, fixture.pair.DeviceB, fixture.privB); rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	close(releaseRegister)
+	result := <-dialed
+	if result.err != nil {
+		t.Fatalf("authenticated upgrade failed before generation revalidation: %v", result.err)
+	}
+	defer result.conn.Close()
+	assertRevokePeerClosed(t, result.conn)
+	if _, _, online := srv.clientHub.ConnectionForPair(fixture.pair.DeviceA, fixture.pair.PairID); online {
+		t.Fatal("old generation registered after revocation")
+	}
+}
+
+func TestPairScopedHubOperationsRejectUnboundRegistration(t *testing.T) {
+	hub := NewClientHub()
+	client := hub.Register("dev-a", make(chan []byte, 1))
+	if !hub.SetProtocol(client, protocolV2) {
+		t.Fatal("set protocol")
+	}
+	if _, _, online := hub.ConnectionForPair("dev-a", "pair-a"); online {
+		t.Fatal("pair-scoped lookup accepted an unbound registration")
+	}
+}
+
+func TestRevokeDisconnectDoesNotCloseReboundGeneration(t *testing.T) {
+	srv := newTestServer(t)
+	old := registerRevokeTestPair(t, srv, "disconnect-old")
+	afterCommit := make(chan struct{})
+	releaseDisconnect := make(chan struct{})
+	srv.revokeAfterCommit = func(pairID string) {
+		if pairID == old.pair.PairID {
+			close(afterCommit)
+			<-releaseDisconnect
+		}
+	}
+	revokeDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { revokeDone <- postRevoke(t, srv, old.pair.DeviceA, old.privA) }()
+	<-afterCommit
+
+	newAPub, newAPriv, _ := ed25519.GenerateKey(nil)
+	newBPub, _, _ := ed25519.GenerateKey(nil)
+	newPair := store.ConfirmedPair{
+		PairID: "disconnect-new", DeviceA: old.pair.DeviceA, DeviceB: old.pair.DeviceB,
+		AEncPubkey: []byte("new-a-enc"), ASignPubkey: newAPub,
+		BEncPubkey: []byte("new-b-enc"), BSignPubkey: newBPub,
+	}
+	if err := srv.pairStore.Confirm(newPair); err != nil {
+		t.Fatalf("confirm rebound pair: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	newConn := dialRevokeTestWS(t, ts, newPair.DeviceA, newAPriv)
+	defer newConn.Close()
+	close(releaseDisconnect)
+	if rec := <-revokeDone; rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, _, online := srv.clientHub.ConnectionForPair(newPair.DeviceA, newPair.PairID); !online {
+		t.Fatal("new generation registration was disconnected")
+	}
+	if err := newConn.WriteMessage(websocket.TextMessage, []byte(`{"garbage":true}`)); err != nil {
+		t.Fatalf("write to rebound connection: %v", err)
+	}
+	_ = newConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := newConn.ReadMessage(); err != nil {
+		t.Fatalf("rebound connection did not answer after old disconnect: %v", err)
+	}
+}
+
+func TestRevokeRejectsInFlightOldSessionPutAfterRebind(t *testing.T) {
+	srv := newTestServer(t)
+	old := registerRevokeTestPair(t, srv, "put-old")
+	if err := srv.pairStore.UpdateCapabilities(old.pair.DeviceA, []int{2, 1}, "old-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.pairStore.UpdateCapabilities(old.pair.DeviceB, []int{2, 1}, "old-b"); err != nil {
+		t.Fatal(err)
+	}
+	beforeStore := make(chan struct{})
+	releaseStore := make(chan struct{})
+	srv.relayPutBeforeStore = func(deviceID, pairID, msgID string) {
+		close(beforeStore)
+		<-releaseStore
+	}
+	msgID := "77777777-7777-4777-8777-777777777777"
+	rejected := make(chan string, 1)
+	putDone := make(chan struct{})
+	go func() {
+		defer close(putDone)
+		srv.handleRelayPutForPair(old.pair.DeviceA, old.pair.PairID, RelayPut{
+			V: 2, Type: "relay.put", Envelope: json.RawMessage(`{"v":2,"type":"enc","msg_id":"` + msgID + `","origin_device":"revoke-dev-a","created_at":1786267348000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}`),
+		}, func(any) error { return nil }, func(_ string, reason string) error {
+			rejected <- reason
+			return nil
+		})
+	}()
+	<-beforeStore
+	if rec := postRevoke(t, srv, old.pair.DeviceB, old.privB); rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	newPair := store.ConfirmedPair{PairID: "put-new", DeviceA: old.pair.DeviceA, DeviceB: old.pair.DeviceB}
+	if err := srv.pairStore.Confirm(newPair); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.pairStore.UpdateCapabilities(newPair.DeviceA, []int{2, 1}, "new-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.pairStore.UpdateCapabilities(newPair.DeviceB, []int{2, 1}, "new-b"); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseStore)
+	<-putDone
+	select {
+	case reason := <-rejected:
+		if reason != "not_recipient" {
+			t.Fatalf("old put rejection=%q, want not_recipient", reason)
+		}
+	default:
+		t.Fatal("old generation put was not rejected")
+	}
+	pending, err := srv.mailbox.Pending(newPair.DeviceB, 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("old generation recreated mailbox after purge: %#v, %v", pending, err)
+	}
+}
+
+func TestRevokeRejectsInFlightOldSessionAckAgainstReboundMailbox(t *testing.T) {
+	srv := newTestServer(t)
+	old := registerRevokeTestPair(t, srv, "ack-old")
+	beforeStore := make(chan struct{})
+	releaseStore := make(chan struct{})
+	srv.relayAckBeforeStore = func(deviceID, pairID, msgID string) {
+		close(beforeStore)
+		<-releaseStore
+	}
+	msgID := "88888888-8888-4888-8888-888888888888"
+	digest := strings.Repeat("a", 64)
+	ackDone := make(chan error, 1)
+	go func() {
+		ackDone <- srv.handleRelayAckForPair(old.pair.DeviceB, old.pair.PairID, RelayAck{
+			V: 2, Type: "relay.ack", MsgID: msgID, EnvelopeSHA256: digest,
+		})
+	}()
+	<-beforeStore
+	if rec := postRevoke(t, srv, old.pair.DeviceA, old.privA); rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	newPair := store.ConfirmedPair{PairID: "ack-new", DeviceA: old.pair.DeviceA, DeviceB: old.pair.DeviceB}
+	if err := srv.pairStore.Confirm(newPair); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.mailbox.PutForPair(newPair.PairID, store.MailboxRecord{
+		RecipientDevice: newPair.DeviceB, SenderDevice: newPair.DeviceA,
+		MsgID: msgID, EnvelopeSHA256: digest, Envelope: []byte(`{"v":2}`),
+	}, time.Now()); err != nil {
+		t.Fatalf("put rebound mailbox item: %v", err)
+	}
+	close(releaseStore)
+	if err := <-ackDone; !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("old generation ack error=%v, want ErrNotFound", err)
+	}
+	pending, err := srv.mailbox.Pending(newPair.DeviceB, 10)
+	if err != nil || len(pending) != 1 || pending[0].MsgID != msgID {
+		t.Fatalf("old generation ack mutated rebound mailbox: %#v, %v", pending, err)
 	}
 }

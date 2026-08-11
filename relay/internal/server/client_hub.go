@@ -23,6 +23,7 @@ type ClientHub struct {
 // explicit online-only path.
 type wsClient struct {
 	deviceID            string
+	pairID              string
 	outbound            chan []byte
 	protocol            connectionProtocol
 	protocols           []int
@@ -75,12 +76,16 @@ func (h *ClientHub) SetHandoffResolver(resolve func(*wsClient, []queuedV2Notific
 // The previous client is cancelled so its writer goroutine can exit. The outbound
 // channel remains open because concurrent producers may still hold its reference.
 func (h *ClientHub) Register(deviceID string, out chan []byte) *wsClient {
+	return h.RegisterPair(deviceID, "", out)
+}
+
+func (h *ClientHub) RegisterPair(deviceID, pairID string, out chan []byte) *wsClient {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if prev, ok := h.clients[deviceID]; ok {
 		prev.stop()
 	}
-	c := &wsClient{deviceID: deviceID, outbound: out, done: make(chan struct{})}
+	c := &wsClient{deviceID: deviceID, pairID: pairID, outbound: out, done: make(chan struct{})}
 	h.clients[deviceID] = c
 	return c
 }
@@ -98,9 +103,20 @@ func (h *ClientHub) Unregister(c *wsClient) {
 }
 
 func (h *ClientHub) Stop(deviceID string) {
+	h.stopPair(deviceID, "", false)
+}
+
+func (h *ClientHub) StopPair(deviceID, pairID string) {
+	h.stopPair(deviceID, pairID, false)
+}
+
+func (h *ClientHub) stopPair(deviceID, pairID string, unregister bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if c := h.clients[deviceID]; c != nil {
+	if c := h.clients[deviceID]; c != nil && clientMatchesPair(c, pairID) {
+		if unregister {
+			delete(h.clients, deviceID)
+		}
 		c.stop()
 	}
 }
@@ -108,29 +124,36 @@ func (h *ClientHub) Stop(deviceID string) {
 // Disconnect cancels and unregisters the current connection for deviceID.
 // The private outbound queue stays open because producers may still hold it.
 func (h *ClientHub) Disconnect(deviceID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if c := h.clients[deviceID]; c != nil {
-		delete(h.clients, deviceID)
-		c.stop()
-	}
+	h.stopPair(deviceID, "", true)
+}
+
+func (h *ClientHub) DisconnectPair(deviceID, pairID string) {
+	h.stopPair(deviceID, pairID, true)
 }
 
 // Send forwards a frame to deviceID if currently connected. Returns true on delivery
 // (queued to outbound channel), false if peer is offline or its buffer is full.
 func (h *ClientHub) Send(deviceID string, frame []byte) bool {
-	return h.send(deviceID, frame, func(*wsClient) bool { return true })
+	return h.send(deviceID, "", frame, func(*wsClient) bool { return true })
 }
 
 func (h *ClientHub) SendRawV1(deviceID string, frame []byte) bool {
-	return h.send(deviceID, frame, func(c *wsClient) bool {
+	return h.SendRawV1ForPair(deviceID, "", frame)
+}
+
+func (h *ClientHub) SendRawV1ForPair(deviceID, pairID string, frame []byte) bool {
+	return h.send(deviceID, pairID, frame, func(c *wsClient) bool {
 		return c.protocol == protocolUnknown || c.protocol == protocolLegacy ||
 			(c.protocol == protocolV2 && supportsProtocol(c.protocols, 1))
 	})
 }
 
 func (h *ClientHub) SendLegacy(deviceID string, frame []byte) bool {
-	return h.send(deviceID, frame, func(c *wsClient) bool {
+	return h.SendLegacyForPair(deviceID, "", frame)
+}
+
+func (h *ClientHub) SendLegacyForPair(deviceID, pairID string, frame []byte) bool {
+	return h.send(deviceID, pairID, frame, func(c *wsClient) bool {
 		return c.protocol == protocolLegacy
 	})
 }
@@ -140,11 +163,15 @@ func (h *ClientHub) SendLegacy(deviceID string, frame []byte) bool {
 // initial response and mailbox drain; a full active queue is stopped so the
 // client reconnects and reads the persistent negotiation state.
 func (h *ClientHub) SendCapabilities(deviceID string, selfProtocols []int, frame []byte) {
+	h.SendCapabilitiesForPair(deviceID, "", selfProtocols, frame)
+}
+
+func (h *ClientHub) SendCapabilitiesForPair(deviceID, pairID string, selfProtocols []int, frame []byte) {
 	expectedSelf := append([]int(nil), selfProtocols...)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
-	if !ok {
+	if !ok || !clientMatchesPair(c, pairID) {
 		return
 	}
 	select {
@@ -176,13 +203,17 @@ func (h *ClientHub) SendV2(deviceID, msgID string, sequence, byteSize uint64, fr
 // TransferV2Batch performs only bounded, nonblocking mutation while holding the
 // hub lock. Callers may invoke it from inside a mailbox read transaction.
 func (h *ClientHub) TransferV2Batch(deviceID string, notifications []queuedV2Notification, frames [][]byte) bool {
+	return h.TransferV2BatchForPair(deviceID, "", notifications, frames)
+}
+
+func (h *ClientHub) TransferV2BatchForPair(deviceID, pairID string, notifications []queuedV2Notification, frames [][]byte) bool {
 	if len(notifications) != len(frames) {
 		return false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
-	if !ok {
+	if !ok || !clientMatchesPair(c, pairID) {
 		return false
 	}
 	select {
@@ -348,11 +379,11 @@ func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) bool {
 	}
 }
 
-func (h *ClientHub) send(deviceID string, frame []byte, accepts func(*wsClient) bool) bool {
+func (h *ClientHub) send(deviceID, pairID string, frame []byte, accepts func(*wsClient) bool) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
-	if !ok || !accepts(c) {
+	if !ok || !clientMatchesPair(c, pairID) || !accepts(c) {
 		return false
 	}
 	select {
@@ -399,10 +430,14 @@ func (h *ClientHub) ProtocolFor(deviceID string) (connectionProtocol, bool) {
 }
 
 func (h *ClientHub) ConnectionFor(deviceID string) (connectionProtocol, []int, bool) {
+	return h.ConnectionForPair(deviceID, "")
+}
+
+func (h *ClientHub) ConnectionForPair(deviceID, pairID string) (connectionProtocol, []int, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
-	if !ok {
+	if !ok || !clientMatchesPair(c, pairID) {
 		return protocolUnknown, nil, false
 	}
 	select {
@@ -411,6 +446,10 @@ func (h *ClientHub) ConnectionFor(deviceID string) (connectionProtocol, []int, b
 	default:
 		return c.protocol, append([]int(nil), c.protocols...), true
 	}
+}
+
+func clientMatchesPair(c *wsClient, expectedPairID string) bool {
+	return expectedPairID == "" || c.pairID == expectedPairID
 }
 
 func supportsProtocol(protocols []int, protocol int) bool {

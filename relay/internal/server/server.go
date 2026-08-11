@@ -26,6 +26,10 @@ type Server struct {
 	// relayBeforeDeliveryTransfer is a deterministic test barrier immediately
 	// before the Bolt-view-to-hub-queue linearization point.
 	relayBeforeDeliveryTransfer func(deviceID string)
+	webSocketBeforeRegister     func(deviceID, pairID string)
+	revokeAfterCommit           func(pairID string)
+	relayPutBeforeStore         func(deviceID, pairID, msgID string)
+	relayAckBeforeStore         func(deviceID, pairID, msgID string)
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.

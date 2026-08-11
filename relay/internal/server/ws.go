@@ -37,6 +37,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no device id", http.StatusUnauthorized)
 		return
 	}
+	pairID, ok := PairIDFromContext(r.Context())
+	if !ok || pairID == "" {
+		http.Error(w, "no pair id", http.StatusUnauthorized)
+		return
+	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -70,8 +75,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	outbound := make(chan []byte, mailboxBatchSize)
-	client := s.clientHub.Register(deviceID, outbound)
+	if s.webSocketBeforeRegister != nil {
+		s.webSocketBeforeRegister(deviceID, pairID)
+	}
+	client := s.clientHub.RegisterPair(deviceID, pairID, outbound)
 	defer s.clientHub.Unregister(client)
+	if err := s.pairStore.ValidateSession(deviceID, pairID); err != nil {
+		return
+	}
 	connectionLifetime := make(chan struct{})
 	defer close(connectionLifetime)
 	go func() {
@@ -134,7 +145,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		switch header.V {
 		case 1:
-			if err := s.handleLegacyFrame(deviceID, client, &protocol, msg); err != nil {
+			if err := s.handleLegacyFrameForPair(deviceID, pairID, client, &protocol, msg); err != nil {
 				_ = writeRejected(relayFrameMsgID(msg), "invalid_frame")
 			}
 		case 2:
@@ -159,7 +170,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				var drainedIDs []string
-				if err := s.handleRelayHello(deviceID, client, typed, writeFrame, func(ids []string) {
+				if err := s.handleRelayHelloForPair(deviceID, pairID, client, typed, writeFrame, func(ids []string) {
 					drainedIDs = ids
 				}); err != nil {
 					log.Printf("relay hello for %s: %v", deviceID, err)
@@ -176,13 +187,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					_ = writeRejected(relayFrameMsgID(msg), "invalid_frame")
 					continue
 				}
-				s.handleRelayPut(deviceID, typed, writeFrame, writeRejected)
+				s.handleRelayPutForPair(deviceID, pairID, typed, writeFrame, writeRejected)
 			case RelayAck:
 				if protocol != protocolV2 {
 					_ = writeRejected(typed.MsgID, "invalid_frame")
 					continue
 				}
-				if err := s.handleRelayAck(deviceID, typed); err != nil {
+				if err := s.handleRelayAckForPair(deviceID, pairID, typed); err != nil {
 					_ = writeRejected(typed.MsgID, relayAckErrorCode(err))
 				}
 			}
@@ -193,14 +204,33 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRelayAck(deviceID string, ack RelayAck) error {
-	return s.mailbox.Ack(deviceID, ack.MsgID, ack.EnvelopeSHA256, time.Now())
+	session, err := s.pairStore.SessionFor(deviceID)
+	if err != nil {
+		return err
+	}
+	return s.handleRelayAckForPair(deviceID, session.PairID, ack)
+}
+
+func (s *Server) handleRelayAckForPair(deviceID, pairID string, ack RelayAck) error {
+	if s.relayAckBeforeStore != nil {
+		s.relayAckBeforeStore(deviceID, pairID, ack.MsgID)
+	}
+	return s.mailbox.AckForPair(pairID, deviceID, ack.MsgID, ack.EnvelopeSHA256, time.Now())
 }
 
 func (s *Server) handleLegacyFrame(deviceID string, client *wsClient, protocol *connectionProtocol, raw []byte) error {
+	session, err := s.pairStore.SessionFor(deviceID)
+	if err != nil {
+		return err
+	}
+	return s.handleLegacyFrameForPair(deviceID, session.PairID, client, protocol, raw)
+}
+
+func (s *Server) handleLegacyFrameForPair(deviceID, pairID string, client *wsClient, protocol *connectionProtocol, raw []byte) error {
 	if *protocol == protocolV2 {
 		return errors.New("mixed protocol")
 	}
-	_, _, floor, err := s.pairStore.CapabilitiesFor(deviceID)
+	_, _, floor, err := s.pairStore.CapabilitiesForPair(deviceID, pairID)
 	if err != nil {
 		return err
 	}
@@ -223,11 +253,11 @@ func (s *Server) handleLegacyFrame(deviceID string, client *wsClient, protocol *
 			return errors.New("connection replaced")
 		}
 	}
-	peerID, err := s.pairStore.PeerFor(deviceID)
+	peerID, err := s.pairStore.PeerForPair(deviceID, pairID)
 	if err != nil || peerID == "" {
 		return errors.New("not paired")
 	}
-	_ = s.clientHub.SendRawV1(peerID, raw)
+	_ = s.clientHub.SendRawV1ForPair(peerID, pairID, raw)
 	return nil
 }
 
@@ -238,24 +268,38 @@ func (s *Server) handleRelayHello(
 	writeFrame func(any) error,
 	recordDrained func([]string),
 ) error {
-	peerID, err := s.pairStore.PeerFor(deviceID)
+	session, err := s.pairStore.SessionFor(deviceID)
+	if err != nil {
+		return err
+	}
+	return s.handleRelayHelloForPair(deviceID, session.PairID, client, hello, writeFrame, recordDrained)
+}
+
+func (s *Server) handleRelayHelloForPair(
+	deviceID, pairID string,
+	client *wsClient,
+	hello RelayHello,
+	writeFrame func(any) error,
+	recordDrained func([]string),
+) error {
+	peerID, err := s.pairStore.PeerForPair(deviceID, pairID)
 	if err != nil || peerID == "" {
 		return errors.New("not paired")
 	}
-	priorPeerSelf, priorPeerView, priorPeerFloor, err := s.pairStore.CapabilitiesFor(peerID)
+	priorPeerSelf, priorPeerView, priorPeerFloor, err := s.pairStore.CapabilitiesForPair(peerID, pairID)
 	if err != nil {
 		return err
 	}
 	priorPeerFrame := relayCapabilitiesSnapshot(priorPeerSelf, priorPeerView, priorPeerFloor)
-	if err := s.pairStore.UpdateCapabilities(deviceID, hello.Protocols, hello.AppVersion); err != nil {
+	if err := s.pairStore.UpdateCapabilitiesForPair(deviceID, pairID, hello.Protocols, hello.AppVersion); err != nil {
 		return err
 	}
-	selfCapabilities, peerCapabilities, floor, err := s.pairStore.CapabilitiesFor(deviceID)
+	selfCapabilities, peerCapabilities, floor, err := s.pairStore.CapabilitiesForPair(deviceID, pairID)
 	if err != nil {
 		return err
 	}
 	capabilitiesFrame := relayCapabilitiesSnapshot(selfCapabilities, peerCapabilities, floor)
-	peerSelf, peerPeer, peerFloor, err := s.pairStore.CapabilitiesFor(peerID)
+	peerSelf, peerPeer, peerFloor, err := s.pairStore.CapabilitiesForPair(peerID, pairID)
 	if err != nil {
 		return err
 	}
@@ -265,17 +309,17 @@ func (s *Server) handleRelayHello(
 		if err != nil {
 			return err
 		}
-		s.clientHub.SendCapabilities(peerID, peerCapabilitiesFrame.Self, peerFrame)
+		s.clientHub.SendCapabilitiesForPair(peerID, pairID, peerCapabilitiesFrame.Self, peerFrame)
 	}
 	if err := writeFrame(capabilitiesFrame); err != nil {
 		return err
 	}
 
 	now := time.Now()
-	if _, err := s.mailbox.Expire(now); err != nil {
+	if _, err := s.mailbox.ExpireForPair(pairID, deviceID, now); err != nil {
 		return err
 	}
-	statuses, err := s.mailbox.ExpiryStatuses(deviceID, peerID, mailboxBatchSize, now)
+	statuses, err := s.mailbox.ExpiryStatusesForPair(pairID, deviceID, peerID, mailboxBatchSize, now)
 	if err != nil {
 		return err
 	}
@@ -287,12 +331,12 @@ func (s *Server) handleRelayHello(
 		}
 	}
 	if len(statuses) > 0 {
-		if err := s.mailbox.AdvanceExpiryStatusCursor(deviceID, peerID, statuses[len(statuses)-1].MsgID); err != nil {
+		if err := s.mailbox.AdvanceExpiryStatusCursorForPair(pairID, deviceID, peerID, statuses[len(statuses)-1].MsgID); err != nil {
 			return err
 		}
 	}
 
-	pending, err := s.mailbox.Pending(deviceID, mailboxBatchSize)
+	pending, err := s.mailbox.PendingForPair(pairID, deviceID, mailboxBatchSize)
 	if err != nil {
 		return err
 	}
@@ -305,7 +349,7 @@ func (s *Server) handleRelayHello(
 			msgID: rec.MsgID, sequence: rec.AcceptanceSequence, byteSize: rec.ByteSize,
 		})
 	}
-	drainedIDs, err := s.transferDurableRecords(deviceID, notifications, func(notices []queuedV2Notification, frames [][]byte) bool {
+	drainedIDs, err := s.transferDurableRecords(pairID, deviceID, notifications, func(notices []queuedV2Notification, frames [][]byte) bool {
 		return s.clientHub.TransferHandshakeV2Batch(client, notices, frames)
 	})
 	if err != nil {
@@ -335,6 +379,20 @@ func (s *Server) handleRelayPut(
 	writeFrame func(any) error,
 	writeRejected func(string, string) error,
 ) {
+	session, err := s.pairStore.SessionFor(deviceID)
+	if err != nil {
+		_ = writeRejected(relayFrameMsgID(mustWrapEnvelope(put.Envelope)), "not_recipient")
+		return
+	}
+	s.handleRelayPutForPair(deviceID, session.PairID, put, writeFrame, writeRejected)
+}
+
+func (s *Server) handleRelayPutForPair(
+	deviceID, pairID string,
+	put RelayPut,
+	writeFrame func(any) error,
+	writeRejected func(string, string) error,
+) {
 	var envelope encryptedEnvelopeHeader
 	if err := s.validator.ValidateEncryptedEnvelope(put.Envelope); err != nil {
 		_ = writeRejected(relayFrameMsgID(mustWrapEnvelope(put.Envelope)), "invalid_frame")
@@ -348,18 +406,18 @@ func (s *Server) handleRelayPut(
 		_ = writeRejected(envelope.MsgID, "invalid_frame")
 		return
 	}
-	peerID, err := s.pairStore.PeerFor(deviceID)
+	peerID, err := s.pairStore.PeerForPair(deviceID, pairID)
 	if err != nil || peerID == "" {
 		_ = writeRejected(envelope.MsgID, "not_recipient")
 		return
 	}
 
-	_, persistedPeerCapabilities, floor, err := s.pairStore.CapabilitiesFor(deviceID)
+	_, persistedPeerCapabilities, floor, err := s.pairStore.CapabilitiesForPair(deviceID, pairID)
 	if err != nil {
 		_ = writeRejected(envelope.MsgID, "not_recipient")
 		return
 	}
-	peerProtocol, peerProtocols, peerOnline := s.clientHub.ConnectionFor(peerID)
+	peerProtocol, peerProtocols, peerOnline := s.clientHub.ConnectionForPair(peerID, pairID)
 	if envelope.V == 1 {
 		if floor >= 2 {
 			_ = writeRejected(envelope.MsgID, "peer_legacy")
@@ -368,7 +426,7 @@ func (s *Server) handleRelayPut(
 		if peerOnline {
 			switch peerProtocol {
 			case protocolLegacy:
-				if s.clientHub.SendLegacy(peerID, put.Envelope) {
+				if s.clientHub.SendLegacyForPair(peerID, pairID, put.Envelope) {
 					_ = writeFrame(RelayLegacyForwarded{V: 2, Type: "relay.legacy_forwarded", MsgID: envelope.MsgID})
 					return
 				}
@@ -396,7 +454,10 @@ func (s *Server) handleRelayPut(
 	handoff := s.handoffs.acquire(peerID)
 	defer s.handoffs.release(peerID, handoff)
 	handoff.commitMu.Lock()
-	result, err := s.mailbox.Put(store.MailboxRecord{
+	if s.relayPutBeforeStore != nil {
+		s.relayPutBeforeStore(deviceID, pairID, envelope.MsgID)
+	}
+	result, err := s.mailbox.PutForPair(pairID, store.MailboxRecord{
 		RecipientDevice: peerID,
 		SenderDevice:    deviceID,
 		MsgID:           envelope.MsgID,
@@ -406,9 +467,9 @@ func (s *Server) handleRelayPut(
 	var notification *durableNotification
 	if err == nil && !result.Terminal {
 		var overflow bool
-		notification, overflow = s.handoffs.record(handoff, peerID, envelope.MsgID, result.AcceptanceSequence, uint64(len(put.Envelope)))
+		notification, overflow = s.handoffs.record(handoff, pairID, peerID, envelope.MsgID, result.AcceptanceSequence, uint64(len(put.Envelope)))
 		if overflow {
-			s.clientHub.Stop(peerID)
+			s.clientHub.StopPair(peerID, pairID)
 		}
 	}
 	handoff.commitMu.Unlock()
@@ -429,9 +490,18 @@ func (s *Server) handleRelayPut(
 }
 
 func (s *Server) dispatchDurableNotifications(notifications []durableNotification) {
-	if len(notifications) == 0 {
-		return
+	for start := 0; start < len(notifications); {
+		end := start + 1
+		for end < len(notifications) && notifications[end].pairID == notifications[start].pairID {
+			end++
+		}
+		s.dispatchDurableNotificationBatch(notifications[start:end])
+		start = end
 	}
+}
+
+func (s *Server) dispatchDurableNotificationBatch(notifications []durableNotification) {
+	pairID := notifications[0].pairID
 	recipient := notifications[0].recipient
 	queued := make([]queuedV2Notification, 0, len(notifications))
 	for _, notification := range notifications {
@@ -439,27 +509,27 @@ func (s *Server) dispatchDurableNotifications(notifications []durableNotificatio
 			msgID: notification.msgID, sequence: notification.sequence, byteSize: notification.byteSize,
 		})
 	}
-	_, err := s.transferDurableRecords(recipient, queued, func(notices []queuedV2Notification, frames [][]byte) bool {
+	_, err := s.transferDurableRecords(pairID, recipient, queued, func(notices []queuedV2Notification, frames [][]byte) bool {
 		// Live queue pressure affects latency only. TransferV2Batch stops an
 		// overfull current client so its reconnect drains Bolt in exact order.
-		_ = s.clientHub.TransferV2Batch(recipient, notices, frames)
+		_ = s.clientHub.TransferV2BatchForPair(recipient, pairID, notices, frames)
 		return true
 	})
 	if err != nil {
 		log.Printf("transfer durable relay delivery for %s: %v", recipient, err)
-		s.clientHub.Stop(recipient)
+		s.clientHub.StopPair(recipient, pairID)
 	}
 }
 
 func (s *Server) transferHandoffFrames(client *wsClient, notifications []queuedV2Notification) error {
-	_, err := s.transferDurableRecords(client.deviceID, notifications, func(notices []queuedV2Notification, frames [][]byte) bool {
+	_, err := s.transferDurableRecords(client.pairID, client.deviceID, notifications, func(notices []queuedV2Notification, frames [][]byte) bool {
 		return s.clientHub.TransferHandshakeV2Batch(client, notices, frames)
 	})
 	return err
 }
 
 func (s *Server) transferDurableRecords(
-	recipient string,
+	pairID, recipient string,
 	notifications []queuedV2Notification,
 	enqueue func([]queuedV2Notification, [][]byte) bool,
 ) ([]string, error) {
@@ -471,7 +541,7 @@ func (s *Server) transferDurableRecords(
 		msgIDs = append(msgIDs, notification.msgID)
 	}
 	transferred := []string{}
-	err := s.mailbox.TransferLiveByIDs(recipient, msgIDs, time.Now(), func(records []store.MailboxRecord) error {
+	err := s.mailbox.TransferLiveByIDsForPair(pairID, recipient, msgIDs, time.Now(), func(records []store.MailboxRecord) error {
 		byID := make(map[string]store.MailboxRecord, len(records))
 		for _, rec := range records {
 			byID[rec.MsgID] = rec
@@ -505,6 +575,8 @@ func isBoundedRelayPut(raw []byte) bool {
 
 func relayPutErrorCode(err error) string {
 	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return "not_recipient"
 	case errors.Is(err, store.ErrMailboxFull):
 		return "mailbox_full"
 	case errors.Is(err, store.ErrMessageIDConflict):

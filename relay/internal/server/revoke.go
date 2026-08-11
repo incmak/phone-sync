@@ -13,7 +13,12 @@ func (s *Server) handlePairRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no device id", http.StatusUnauthorized)
 		return
 	}
-	pair, err := s.pairStore.RevokeByDevice(deviceID)
+	pairID, ok := PairIDFromContext(r.Context())
+	if !ok || pairID == "" {
+		http.Error(w, "no pair id", http.StatusUnauthorized)
+		return
+	}
+	pair, err := s.pairStore.RevokeBySession(deviceID, pairID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			http.Error(w, "unknown device", http.StatusUnauthorized)
@@ -22,7 +27,10 @@ func (s *Server) handlePairRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "revoke", http.StatusInternalServerError)
 		return
 	}
-	s.clientHub.Disconnect(pair.DeviceA)
-	s.clientHub.Disconnect(pair.DeviceB)
+	if s.revokeAfterCommit != nil {
+		s.revokeAfterCommit(pair.PairID)
+	}
+	s.clientHub.DisconnectPair(pair.DeviceA, pair.PairID)
+	s.clientHub.DisconnectPair(pair.DeviceB, pair.PairID)
 	w.WriteHeader(http.StatusNoContent)
 }

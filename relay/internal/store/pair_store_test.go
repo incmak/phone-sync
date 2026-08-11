@@ -757,6 +757,10 @@ func TestRevokeByDeviceRollsBackPairDeletionWhenMailboxPurgeFails(t *testing.T) 
 	if _, _, floor, err := ps.CapabilitiesFor(pair.DeviceA); err != nil || floor != 2 {
 		t.Fatalf("capability state did not roll back: floor=%d err=%v", floor, err)
 	}
+	indexedToken, err := b.Get(bucketRetainedTokenByPair, pair.PairID)
+	if err != nil || string(indexedToken) != pending.PairToken {
+		t.Fatalf("retained-token index did not roll back: token=%q err=%v", indexedToken, err)
+	}
 }
 
 func TestRevokeRequiredBeforeConfirmCanRebindDevices(t *testing.T) {
@@ -783,5 +787,157 @@ func TestRevokeRequiredBeforeConfirmCanRebindDevices(t *testing.T) {
 	}
 	if peer, err := ps.PeerFor(candidate.DeviceA); err != nil || peer != candidate.DeviceB {
 		t.Fatalf("rebound device index: peer=%q err=%v", peer, err)
+	}
+}
+
+func TestExpiredMailboxSweepRejectsRevokedSessionAfterRebind(t *testing.T) {
+	b := openTestBolt(t)
+	ps := NewPairStore(b)
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	original := ConfirmedPair{PairID: "expired-sweep-old", DeviceA: "dev-a", DeviceB: "dev-b"}
+	if err := ps.Confirm(original); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.RevokeBySession(original.DeviceA, original.PairID); err != nil {
+		t.Fatal(err)
+	}
+	rebound := ConfirmedPair{PairID: "expired-sweep-new", DeviceA: original.DeviceA, DeviceB: original.DeviceB}
+	if err := ps.Confirm(rebound); err != nil {
+		t.Fatal(err)
+	}
+
+	acceptedAt := time.UnixMilli(1000)
+	rec := testMailboxRecord("77777777-7777-4777-8777-777777777777", "7")
+	if _, err := mailbox.PutForPair(rebound.PairID, rec, acceptedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mailbox.ExpireForPair(original.PairID, original.DeviceA, acceptedAt.Add(DefaultMailboxLimits().Retention+time.Millisecond)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoked generation expiry sweep error = %v, want ErrNotFound", err)
+	}
+	pending, err := mailbox.PendingForPair(rebound.PairID, rec.RecipientDevice, 1)
+	if err != nil || len(pending) != 1 || pending[0].MsgID != rec.MsgID {
+		t.Fatalf("rebound mailbox after revoked sweep = %#v, %v", pending, err)
+	}
+}
+
+func TestRevokeUsesPairScopedRetainedTokenIndexWithoutScanningUnrelatedPending(t *testing.T) {
+	b := openTestBolt(t)
+	ps := NewPairStore(b)
+	for index := 0; index < 256; index++ {
+		if err := ps.PutPending(PendingPair{
+			PairToken: fmt.Sprintf("unrelated-%03d", index), DeviceAID: fmt.Sprintf("unrelated-device-%03d", index),
+			AEncPubkey: []byte("enc"), ASignPubkey: []byte("sign"), CreatedAt: time.Now().Unix(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	committed := PendingPair{
+		PairToken: "indexed-token", DeviceAID: "indexed-a",
+		AEncPubkey: []byte("a-enc"), ASignPubkey: []byte("a-sign"), CreatedAt: time.Now().Unix(),
+	}
+	if err := ps.PutPending(committed); err != nil {
+		t.Fatal(err)
+	}
+	pair := ConfirmedPair{
+		PairID: "indexed-pair", DeviceA: committed.DeviceAID, DeviceB: "indexed-b",
+		AEncPubkey: committed.AEncPubkey, ASignPubkey: committed.ASignPubkey,
+		BEncPubkey: []byte("b-enc"), BSignPubkey: []byte("b-sign"),
+	}
+	if _, err := ps.ConfirmPending(committed.PairToken, pair, []byte("confirmation")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(bucketPending)).Put([]byte("unrelated-corrupt"), []byte("{"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	indexedToken, err := b.Get(bucketRetainedTokenByPair, pair.PairID)
+	if err != nil || string(indexedToken) != committed.PairToken {
+		t.Fatalf("retained token index=%q err=%v", indexedToken, err)
+	}
+
+	if _, err := ps.RevokeByDevice(pair.DeviceA); err != nil {
+		t.Fatalf("indexed revoke consulted unrelated pending state: %v", err)
+	}
+	if _, err := ps.GetPending(committed.PairToken); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("committed token survived revoke: %v", err)
+	}
+	if _, err := ps.GetPending("unrelated-000"); err != nil {
+		t.Fatalf("unrelated token was removed: %v", err)
+	}
+	rawCorrupt, err := b.Get(bucketPending, "unrelated-corrupt")
+	if err != nil || string(rawCorrupt) != "{" {
+		t.Fatalf("unrelated corrupt token changed: %q err=%v", rawCorrupt, err)
+	}
+	indexedToken, err = b.Get(bucketRetainedTokenByPair, pair.PairID)
+	if err != nil || indexedToken != nil {
+		t.Fatalf("retained token index survived revoke: %q err=%v", indexedToken, err)
+	}
+}
+
+func TestPairStoreMigratesLegacyRetainedTokenIndexOnce(t *testing.T) {
+	b := openTestBolt(t)
+	pair := ConfirmedPair{
+		PairID: "legacy-retained-pair", DeviceA: "legacy-a", DeviceB: "legacy-b",
+		AEncPubkey: []byte("a-enc"), ASignPubkey: []byte("a-sign"),
+		BEncPubkey: []byte("b-enc"), BSignPubkey: []byte("b-sign"),
+	}
+	pending := PendingPair{
+		PairToken: "legacy-retained-token", DeviceAID: pair.DeviceA,
+		AEncPubkey: pair.AEncPubkey, ASignPubkey: pair.ASignPubkey,
+		DeviceBID: pair.DeviceB, BEncPubkey: pair.BEncPubkey, BSignPubkey: pair.BSignPubkey,
+		ConfirmationSig: []byte("confirmation"), PairID: pair.PairID, CreatedAt: time.Now().Unix(),
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		pendingBucket, err := tx.CreateBucketIfNotExists([]byte(bucketPending))
+		if err != nil {
+			return err
+		}
+		pendingRaw, err := json.Marshal(pending)
+		if err != nil {
+			return err
+		}
+		if err := pendingBucket.Put([]byte(pending.PairToken), pendingRaw); err != nil {
+			return err
+		}
+		confirmed, err := tx.CreateBucketIfNotExists([]byte(bucketConfirmed))
+		if err != nil {
+			return err
+		}
+		pairRaw, err := json.Marshal(pair)
+		if err != nil {
+			return err
+		}
+		if err := confirmed.Put([]byte(pair.PairID), pairRaw); err != nil {
+			return err
+		}
+		byDevice, err := tx.CreateBucketIfNotExists([]byte(bucketByDevice))
+		if err != nil {
+			return err
+		}
+		if err := byDevice.Put([]byte(pair.DeviceA), []byte(pair.PairID)); err != nil {
+			return err
+		}
+		return byDevice.Put([]byte(pair.DeviceB), []byte(pair.PairID))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ps := NewPairStore(b)
+	indexedToken, err := b.Get(bucketRetainedTokenByPair, pair.PairID)
+	if err != nil || string(indexedToken) != pending.PairToken {
+		t.Fatalf("legacy retained token was not migrated: token=%q err=%v", indexedToken, err)
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(bucketPending)).Put([]byte("post-migration-corrupt"), []byte("{"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ps = NewPairStore(b)
+	if _, err := ps.RevokeByDevice(pair.DeviceB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.GetPending(pending.PairToken); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("migrated retained token survived revoke: %v", err)
 	}
 }

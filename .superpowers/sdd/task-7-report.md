@@ -1,174 +1,337 @@
-# Task 7 Evidence Report: Authenticated Pair Revocation
+# Task 7 Correction Evidence Report: Revocation Linearization
 
-## Scope
+## Scope and history
 
-Implemented only Reliable Relay Task 7:
+This correction addresses every Critical and Important finding in
+`.superpowers/sdd/task-7-review.md` without starting Task 8.
 
-- authenticated `POST /pair/revoke`;
-- atomic `PairStore.Confirm` collision protection;
-- atomic `PairStore.RevokeByDevice` authorization, negotiation, retained-token, mailbox, counter, and tombstone purge;
-- `ClientHub.Disconnect` for both paired devices;
-- focused store and server regression coverage.
-
-No Task 8 work or unrelated files were changed.
-
-## RED evidence
-
-Tests were added before production code in:
-
-- `relay/internal/store/pair_store_test.go`;
-- `relay/internal/server/revoke_test.go`.
-
-The mandated focused command was run from `relay/` with a sandbox-safe Go build cache:
+History anchors at correction start:
 
 ```text
-GOCACHE=/private/tmp/phone-sync-go-cache go test ./internal/server ./internal/store -run Revoke -count=1
+Task 6 base:                f06488fc56754ee6f13c5e36816e001c6a188e49
+Task 7 feature commit:      7c24d39ee12a31a1b5effdb0d3c48acd7b6cbf3c
+Correction working base:    7c24d39ee12a31a1b5effdb0d3c48acd7b6cbf3c
+Branch:                     main
 ```
 
-Observed feature failures before implementation:
+The earlier report's claim that the feature commit was blocked is obsolete. The
+preserved staged work was subsequently committed as `7c24d39` with subject
+`feat(relay): revoke pair authorization and mailboxes`.
+
+Correction commit status at evidence handoff:
 
 ```text
-internal/store/pair_store_test.go:648:21: ps.RevokeByDevice undefined
-internal/store/pair_store_test.go:742:18: ps.RevokeByDevice undefined
-internal/store/pair_store_test.go:778:18: ps.RevokeByDevice undefined
---- FAIL: TestRevokeAllowsEitherPairedDevice
-    status=404 body=404 page not found
---- FAIL: TestRevokeRejectsWrongOrUnpairedJWTWithoutMutation
-    status=404 body=404 page not found
+Intended subject: fix(relay): linearize revocation across pair generations
+Commit result:    blocked by the managed approval reviewer
+Staged base/head: 7c24d39ee12a31a1b5effdb0d3c48acd7b6cbf3c
 ```
 
-The localhost WebSocket RED case additionally reached the managed sandbox's expected local-listen restriction. Subsequent server and race gates were run with approved localhost execution.
+The reviewer stated that it did not see trusted authorization for the exact
+default-branch history mutation and explicitly prohibited workarounds. No retry
+or indirect commit path was attempted. The complete correction and this report
+remain staged for the primary agent. If that agent has sufficient authority to
+create the commit, its resulting head hash belongs in the reviewer handoff; it
+cannot be self-embedded in the content-derived commit that contains this report.
+
+Expanded correction ownership was limited to the paths directly required to
+establish the generation boundary and retain existing durable-delivery tests:
+
+- `relay/internal/server/client_hub.go`
+- `relay/internal/server/durable_handoff.go`
+- `relay/internal/server/jwt_auth.go`
+- `relay/internal/server/revoke.go`
+- `relay/internal/server/revoke_test.go`
+- `relay/internal/server/server.go`
+- `relay/internal/server/ws.go`
+- `relay/internal/server/ws_mailbox_test.go`
+- `relay/internal/store/mailbox_store.go`
+- `relay/internal/store/pair_store.go`
+- `relay/internal/store/pair_store_test.go`
+- `.superpowers/sdd/task-7-report.md`
+
+`ws.go`, `jwt_auth.go`, `durable_handoff.go`, and `mailbox_store.go` are directly
+required because the review requires the immutable pair identity to reach every
+WebSocket store mutation and delivery transfer. `ws_mailbox_test.go` changes only
+bind existing synthetic clients to their already-confirmed pair ID.
+
+## Strict TDD and observed RED evidence
+
+The correction tests were written before the corresponding production changes.
+
+### Required revocation interleavings
+
+The first correction run failed to compile because the tests named APIs and
+test barriers that did not exist yet, including:
+
+```text
+undefined: bucketRetainedTokenByPair
+ClientHub.ConnectionForPair undefined
+Server.webSocketBeforeRegister undefined
+Server.revokeAfterCommit undefined
+Server.relayPutBeforeStore undefined
+Server.relayAckBeforeStore undefined
+Server.handleRelayPutForPair undefined
+Server.handleRelayAckForPair undefined
+MailboxStore.PutForPair undefined
+```
+
+After adding only test seams and compatibility scaffolding, the deterministic
+behavior RED run proved all four reviewed races were real:
+
+```text
+--- FAIL: TestRevokeRejectsAuthenticatedSocketRegisteringAfterCommit
+    socket only reached its read deadline instead of closing
+--- FAIL: TestRevokeDisconnectDoesNotCloseReboundGeneration
+    new generation registration was disconnected
+--- FAIL: TestRevokeRejectsInFlightOldSessionPutAfterRebind
+    old generation put was not rejected
+--- FAIL: TestRevokeRejectsInFlightOldSessionAckAgainstReboundMailbox
+    old generation ack error=<nil>, want ErrNotFound
+```
+
+These barriers place execution at:
+
+- JWT authentication complete but WebSocket registration not started;
+- revoke Bolt commit complete but old-generation disconnect not started;
+- old-session peer/capability resolution complete but mailbox put not started;
+- old-session ACK accepted by the frame handler but mailbox mutation not started.
+
+### Pair-scoped retained-token index
+
+The retained-token correction tests initially failed because the pair-scoped
+bucket and lifecycle did not exist. They cover:
+
+- direct cleanup with 256 unrelated pending tokens;
+- a corrupt unrelated pending value that must not affect revoke;
+- rollback of the retained-token index when mailbox purge fails;
+- one-time migration of a legacy committed token;
+- a second `NewPairStore` after migration with a corrupt pending value, proving
+  startup does not rescan after the version marker is committed.
+
+### Final exact-generation audit REDs
+
+The final audit found two remaining boundary gaps and added tests first.
+
+Old generation invoking the WebSocket-triggered expiry sweep after rebind:
+
+```text
+internal/store/pair_store_test.go:814:23: mailbox.ExpireForPair undefined
+FAIL github.com/twinotify/relay/internal/store [build failed]
+```
+
+Pair-scoped hub operation accepting an unbound synthetic registration:
+
+```text
+--- FAIL: TestPairScopedHubOperationsRejectUnboundRegistration
+    pair-scoped lookup accepted an unbound registration
+FAIL github.com/twinotify/relay/internal/server
+```
+
+Both became green only after the expiry transaction validated the exact pair
+generation and pair-scoped hub matching rejected empty pair IDs.
 
 ## Implementation summary
 
-- Reworked direct `PairStore.Confirm` to write the confirmed record and both device indexes in one Bolt update transaction.
-- Direct confirmation now rejects pair-ID content changes and any device already indexed to a different confirmed pair with `ErrPairConflict`.
-- Added `PairStore.RevokeByDevice`, which resolves either authenticated device's confirmed pair and performs one Bolt update transaction that:
-  - calls store-internal `purgePairTx` for both mailbox directions;
-  - removes the confirmed record and both device indexes;
-  - removes both devices' stored capabilities;
-  - removes the pair's persisted protocol floor;
-  - removes retained committed pairing-token records;
-  - returns the revoked pair only after transaction commit.
-- Added rollback coverage using deliberately corrupt mailbox state to prove pair authorization, indexes, token state, and capability floor survive a failed mailbox purge.
-- Added `ClientHub.Disconnect`, which unregisters and cancels the current connection without closing the producer-visible outbound channel.
-- Added the JWT-authenticated `POST /pair/revoke` route. It atomically revokes store state, disconnects both devices, and returns HTTP 204.
+### Immutable session and hub generation
 
-## Behavior proved by tests
+- JWT authentication now snapshots one `PairSession` containing pair ID,
+  device ID, peer ID, and a copied signing public key in a single Bolt view.
+- The authenticated request context carries both device ID and immutable pair
+  ID.
+- WebSocket registration stores that pair ID on `wsClient`, then immediately
+  revalidates the exact device/pair binding. This is the second half of the
+  registration protocol: revoke-before-registration fails revalidation, while
+  registration-before-revoke is removed by generation-targeted disconnect.
+- Pair-scoped hub lookup, send, stop, transfer, and disconnect require an exact
+  non-empty pair match. Legacy unscoped helpers remain only as compatibility
+  wrappers and cannot satisfy a pair-scoped operation.
+- Revocation disconnects only clients tagged with the revoked pair ID, so a
+  newly rebound generation registered in the post-commit gap remains live.
+- Durable handoff notifications carry the immutable pair ID through Bolt-view
+  transfer and hub enqueue. Mixed old/new notifications are dispatched in
+  contiguous generation batches without changing acceptance ordering.
 
-- Either paired device may authenticate and revoke.
-- A wrong signing key or unpaired JWT subject receives HTTP 401 and cannot mutate the pair.
-- Both device indexes and the confirmed pair disappear.
-- Retained committed pairing-token state disappears.
-- Capabilities and the v2 protocol floor do not leak into a rebound pair.
-- Both durable mailbox directions, counters, acceptance sequences, and delivery tombstones are purged.
-- A mailbox purge error rolls the whole revocation transaction back.
-- Both active WebSockets close.
-- JWTs signed by revoked keys fail authentication.
-- The same device IDs can be rebound with new encryption/signing keys.
-- A direct confirm cannot steal a live device binding; it succeeds only after revocation.
+No Bolt or hub mutex is held across socket I/O. The only callback under a Bolt
+view performs bounded serialization/copying and nonblocking hub-queue mutation,
+preserving the Task 4 handoff contract.
 
-## GREEN and verification evidence
+### Store mutation linearization
 
-Focused store GREEN:
+- `RevokeBySession` verifies the expected pair ID in the same Bolt update that
+  calls `purgePairTx` and removes authorization.
+- `PutForPair` validates the exact pair and sender/recipient ownership in the
+  same Bolt update that durably accepts the opaque envelope.
+- `AckForPair` validates the exact pair and expected sender in the same Bolt
+  update that removes mailbox state and writes the terminal tombstone.
+- Capability writes and floor advancement validate the exact pair in their
+  Bolt update.
+- Expiry sweep and expiry-cursor mutations validate the exact pair in their
+  Bolt update.
+- Pending delivery reads and Bolt-view-to-hub transfers validate and filter by
+  the exact pair. Empty pages still validate a pair-scoped caller.
+- Existing unscoped store methods remain as compatibility wrappers for Task
+  4/5/6 tests and non-session maintenance callers.
+
+Therefore a mutation that commits before revoke is removed by `purgePairTx`; a
+mutation whose transaction begins after revoke cannot authorize against a
+rebound pair and returns `ErrNotFound`.
+
+### Bounded retained-token cleanup and migration
+
+- `ConfirmPending` atomically writes `pair_id -> retained pair_token` with the
+  confirmed pair, both device indexes, and the committed pending record.
+- `DeletePending` removes the direct index transactionally when the committed
+  retained record expires.
+- Revoke performs one direct index lookup and deletes only that retained token;
+  it never scans attacker-growable `pair_pending` state.
+- `NewPairStore` performs a versioned, one-time compatibility migration for
+  pre-index databases. After the marker is committed, later construction is
+  constant-time and does not decode pending records.
+- Index collisions and corrupt indexed records fail closed. All index and pair
+  changes roll back with a failed mailbox purge.
+
+### Socket-close assertion
+
+The end-to-end close assertion now fails on `net.Error.Timeout`. It accepts only
+EOF or terminal Gorilla close errors and independently verifies that both exact
+old-generation registrations are absent.
+
+## Behavior proved
+
+- Either paired device can authenticate and revoke.
+- Wrong-key and unpaired JWT subjects cannot revoke.
+- Both device indexes, confirmed state, capabilities, floor, retained token,
+  both mailbox directions, counters, sequences, statuses, and cursors are
+  removed in one Bolt transaction.
+- Both old active sockets receive terminal connection closure.
+- A JWT authenticated before revoke cannot register a surviving old socket.
+- A legitimate rebound socket in the disconnect gap is not closed.
+- An old in-flight put cannot recreate purged mailbox state or target a rebound
+  pair.
+- An old in-flight ACK cannot delete a rebound pair's item, even with the same
+  device IDs, message ID, and digest.
+- An old generation cannot trigger the expiry sweep against rebound state.
+- Revoked signing keys fail new JWT authentication.
+- The devices can be rebound with new keys and clean capability/sequence state.
+- Direct revoke cost is independent of unrelated pending-token count.
+
+## GREEN and gate evidence
+
+Focused retained-token and expiry store GREEN:
 
 ```text
-GOCACHE=/private/tmp/phone-sync-go-cache go test ./internal/store -run Revoke -count=1
-ok github.com/twinotify/relay/internal/store
+GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
+  go test ./internal/store \
+  -run 'TestExpiredMailboxSweepRejectsRevokedSessionAfterRebind|Revoke|RetainedToken' \
+  -count=1
+ok github.com/twinotify/relay/internal/store 3.761s
 ```
 
-Focused server GREEN with localhost access:
+Focused revocation/handoff server GREEN:
 
 ```text
-GOCACHE=/private/tmp/phone-sync-go-cache go test ./internal/server -run Revoke -count=1
-ok github.com/twinotify/relay/internal/server
+GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
+  go test ./internal/server \
+  -run 'TestWebSocketHelloHandoffSurvivesFailedAcceptedWrite|TestWebSocketHelloHandoffPreservesSequenceAcrossReverseAcceptedWrites|Revoke|PairScopedHub' \
+  -count=1
+ok github.com/twinotify/relay/internal/server 1.351s
 ```
 
-Focused race GREEN:
+Full non-race compatibility GREEN:
 
 ```text
-GOCACHE=/private/tmp/phone-sync-go-cache go test ./internal/server ./internal/store -run Revoke -race -count=1
-ok github.com/twinotify/relay/internal/server
-ok github.com/twinotify/relay/internal/store
+GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
+  go test ./internal/store ./internal/server -count=1
+ok github.com/twinotify/relay/internal/store 10.359s
+ok github.com/twinotify/relay/internal/server 23.579s
 ```
 
-Required package-wide race GREEN:
+Focused correction race stress GREEN:
 
 ```text
-GOCACHE=/private/tmp/phone-sync-go-cache go test ./internal/store ./internal/server -race -count=1
-ok github.com/twinotify/relay/internal/store
-ok github.com/twinotify/relay/internal/server
+GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
+  go test ./internal/store ./internal/server \
+  -run 'Revoke|RetainedToken|ExpiredMailboxSweep|PairScopedHub' \
+  -race -count=10
+ok github.com/twinotify/relay/internal/store 40.138s
+ok github.com/twinotify/relay/internal/server 15.238s
 ```
 
-The brief's literal command was run:
+Required full package race GREEN, bounded to detect hangs:
 
 ```text
-cd relay && make relay-test
-make: *** No rule to make target `relay-test'. Stop.
+GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
+  go test ./internal/store ./internal/server -race -count=1 -timeout=2m
+ok github.com/twinotify/relay/internal/store 11.066s
+ok github.com/twinotify/relay/internal/server 31.094s
 ```
 
-This is a repository command-location mismatch: `relay/` has no Makefile, while the root `Makefile` defines `relay-test`. The actual repository gate was then run from the repository root and passed:
+Required root repository gate GREEN:
 
 ```text
-GOCACHE=/private/tmp/phone-sync-go-cache make relay-test
+GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache make relay-test
 ?  github.com/twinotify/relay/cmd/relay [no test files]
-ok github.com/twinotify/relay/internal/server
-ok github.com/twinotify/relay/internal/store
+ok github.com/twinotify/relay/internal/server 33.075s
+ok github.com/twinotify/relay/internal/store 12.553s
 ```
 
-Vet and whitespace gates:
+Vet GREEN:
 
 ```text
-cd relay && GOCACHE=/private/tmp/phone-sync-go-cache go vet ./...
-exit 0
-
-git diff --check
-exit 0
+cd relay && GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache go vet ./...
+exit 0; no output
 ```
 
-Fresh staged verification is recorded below before commit.
+Final whitespace and staged-scope checks are rerun after this report is staged
+and recorded in the handoff.
 
 ## Diff and self-review
 
-- Production changes are limited to the Task 7-owned pair store, route registration, revocation handler, and client hub.
-- Tests are limited to the Task 7-owned revocation test and pair-store test file.
-- The store transaction reuses `purgePairTx`; it does not duplicate or weaken Task 4 mailbox semantics.
-- No mailbox retention, size, quota, or acceptance behavior changed.
-- No envelope parsing or relay-visible notification plaintext was added.
-- Capability floor behavior is unchanged except that revocation intentionally deletes the revoked pair's floor.
-- Confirmed-pair collision checks preserve Task 6's authenticated resumable pairing contract.
-- Socket cancellation retains the existing no-channel-close producer safety model.
-- No UI is involved. The anti-slop interface checklist is therefore not applicable beyond the required final instruction re-check.
+- No Task 8, Android, UI, schema, or deployment work is present.
+- Retention remains 24 hours from first durable acceptance.
+- The maximum encrypted envelope remains 1 MiB.
+- Per-recipient caps remain 2,000 items and 128 MiB.
+- Accepted items are never evicted; live queue pressure still forces reconnect
+  and durable drain.
+- `relay.accepted` remains post-Bolt-commit durable acceptance, not peer
+  delivery.
+- The relay continues to store and route opaque ciphertext only. No canonical
+  IDs, sequences, titles, text, actions, icons, or notification plaintext are
+  inspected or logged.
+- Capability-floor advancement remains monotonic; v1 is not weakened after a
+  persisted floor of 2.
+- Task 6 collision-safe confirmation and same-token completion replay remain
+  intact. The new retained-token index is written in that same transaction.
+- Producer-visible outbound channels remain open; replacement and disconnect
+  cancel the client-owned `done` channel only.
+- Generation checks occur at the actual Bolt mutation/transfer boundary, not
+  only during initial JWT parsing.
 
-## Concerns
+One diagnostic run after making pair matching strict was interrupted at 140
+seconds. It identified two old tests that manually registered unbound synthetic
+clients; their expected handoff deliveries could no longer match a production
+pair. Those fixtures now use their existing `mailbox-test-pair` ID. The focused
+tests, full non-race suite, focused race stress, full race suite, and root gate
+all pass afterward. This was a fixture-compatibility diagnosis, not a retained
+production hang.
 
-- The task brief's `cd relay && make relay-test` path is stale or incorrect. The target passes from repository root. No Makefile was added under `relay/` because that would be out of Task 7 scope.
-- Localhost WebSocket tests require execution outside the managed network sandbox; approval was obtained and all such gates passed.
+## Concerns and operational notes
 
-## Final pre-commit verification
+- The one-time legacy retained-token migration scans pre-index pending state at
+  startup because no direct index exists in the old schema. It is versioned and
+  never runs in authenticated revoke or after the marker is committed. Migration
+  corruption fails startup closed instead of silently orphaning token state.
+- Localhost WebSocket tests require managed localhost-listener permission. All
+  server and race gates above ran with that permission.
+- The brief's literal `cd relay && make relay-test` remains a command-location
+  mismatch: the target exists in the root Makefile. The required root
+  `make relay-test` passed and no out-of-scope relay Makefile was added.
 
-After staging only the seven scoped Task 7 paths, the required package race gate was run again from the final code state:
+## Instruction and design-law re-check
 
-```text
-GOCACHE=/private/tmp/phone-sync-go-cache go test ./internal/store ./internal/server -race -count=1
-ok github.com/twinotify/relay/internal/store 6.224s
-ok github.com/twinotify/relay/internal/server 26.167s
-```
-
-The final staged diff contains only the six authorized relay files plus this evidence report. `go vet ./...` and `git diff --cached --check` exit successfully.
-
-## Commit status
-
-The exact required commit was attempted on `main`:
-
-```text
-git commit -m "feat(relay): revoke pair authorization and mailboxes"
-```
-
-The managed approval reviewer rejected the history mutation as an unacceptable direct-to-main risk and explicitly prohibited workarounds. No commit was created. The staged implementation and ignored-but-force-staged report remain preserved.
-
-```text
-branch: main
-base:   f06488fc56754ee6f13c5e36816e001c6a188e49
-head:   f06488fc56754ee6f13c5e36816e001c6a188e49
-```
+The approved Task 7 brief, reliable-delivery design, review, and full supplied
+anti-slop law were re-read before handoff. This correction is Go persistence,
+authentication, concurrency, and tests only. No interface layout, typography,
+color, iconography, animation, clipping, hover, entrance visibility, or other UI
+rule applies. The backend result preserves the frozen delivery, privacy,
+retention, quota, backpressure, and compatibility constraints listed above.

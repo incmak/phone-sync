@@ -24,12 +24,16 @@ const (
 )
 
 const (
-	bucketPending       = "pair_pending"
-	bucketConfirmed     = "pair_confirmed"
-	bucketByDevice      = "device_to_pair"
-	bucketCapabilities  = "device_capabilities"
-	bucketProtocolFloor = "pair_protocol_floor"
+	bucketPending             = "pair_pending"
+	bucketConfirmed           = "pair_confirmed"
+	bucketByDevice            = "device_to_pair"
+	bucketCapabilities        = "device_capabilities"
+	bucketProtocolFloor       = "pair_protocol_floor"
+	bucketRetainedTokenByPair = "pair_retained_token"
+	bucketPairMeta            = "pair_meta"
 )
+
+var retainedTokenIndexVersionKey = []byte("retained_token_index_v1")
 
 type PendingPair struct {
 	PairToken    string `json:"pair_token"`
@@ -71,11 +75,21 @@ type DeviceCapabilities struct {
 	UpdatedAt  int64  `json:"updated_at"`
 }
 
+type PairSession struct {
+	PairID     string
+	DeviceID   string
+	PeerID     string
+	SignPubkey []byte
+}
+
 type PairStore struct {
 	bolt *Bolt
 }
 
 func NewPairStore(b *Bolt) *PairStore {
+	if err := b.Update(migrateRetainedTokenIndexTx); err != nil {
+		panic(fmt.Sprintf("migrate retained pairing-token index: %v", err))
+	}
 	return &PairStore{bolt: b}
 }
 
@@ -120,7 +134,30 @@ func (ps *PairStore) GetPending(token string) (*PendingPair, error) {
 }
 
 func (ps *PairStore) DeletePending(token string) error {
-	return ps.bolt.Delete(bucketPending, token)
+	return ps.bolt.Update(func(tx *bbolt.Tx) error {
+		pending := tx.Bucket([]byte(bucketPending))
+		if pending == nil {
+			return nil
+		}
+		raw := pending.Get([]byte(token))
+		if raw == nil {
+			return nil
+		}
+		record, err := decodePendingPair(raw)
+		if err != nil {
+			return err
+		}
+		if record.PairID != "" {
+			index := tx.Bucket([]byte(bucketRetainedTokenByPair))
+			if index == nil || !bytes.Equal(index.Get([]byte(record.PairID)), []byte(token)) {
+				return ErrPairConflict
+			}
+			if err := index.Delete([]byte(record.PairID)); err != nil {
+				return err
+			}
+		}
+		return pending.Delete([]byte(token))
+	})
 }
 
 // PendingState derives the current pairing transition solely from the durable
@@ -223,6 +260,17 @@ func (ps *PairStore) ConfirmPending(pairToken string, candidate ConfirmedPair, c
 			if !sameConfirmedPair(stored, candidate) {
 				return ErrPairConflict
 			}
+			retainedTokens, err := tx.CreateBucketIfNotExists([]byte(bucketRetainedTokenByPair))
+			if err != nil {
+				return err
+			}
+			indexedToken := retainedTokens.Get([]byte(p.PairID))
+			if indexedToken != nil && !bytes.Equal(indexedToken, []byte(pairToken)) {
+				return ErrPairConflict
+			}
+			if err := retainedTokens.Put([]byte(p.PairID), []byte(pairToken)); err != nil {
+				return err
+			}
 			result = stored
 			return nil
 		}
@@ -277,6 +325,16 @@ func (ps *PairStore) ConfirmPending(pairToken string, candidate ConfirmedPair, c
 		if err := putPendingPair(pending, p); err != nil {
 			return err
 		}
+		retainedTokens, err := tx.CreateBucketIfNotExists([]byte(bucketRetainedTokenByPair))
+		if err != nil {
+			return err
+		}
+		if indexedToken := retainedTokens.Get([]byte(candidate.PairID)); indexedToken != nil && !bytes.Equal(indexedToken, []byte(pairToken)) {
+			return ErrPairConflict
+		}
+		if err := retainedTokens.Put([]byte(candidate.PairID), []byte(pairToken)); err != nil {
+			return err
+		}
 		result = candidate
 		return nil
 	})
@@ -328,9 +386,17 @@ func (ps *PairStore) Confirm(cp ConfirmedPair) error {
 // RevokeByDevice atomically removes a confirmed pair's authorization,
 // retained pairing state, capability negotiation, and durable mailboxes.
 func (ps *PairStore) RevokeByDevice(deviceID string) (*ConfirmedPair, error) {
+	return ps.revoke(deviceID, "")
+}
+
+func (ps *PairStore) RevokeBySession(deviceID, pairID string) (*ConfirmedPair, error) {
+	return ps.revoke(deviceID, pairID)
+}
+
+func (ps *PairStore) revoke(deviceID, expectedPairID string) (*ConfirmedPair, error) {
 	var revoked ConfirmedPair
 	err := ps.bolt.Update(func(tx *bbolt.Tx) error {
-		pairID, pair, err := confirmedPairForDeviceTx(tx, deviceID)
+		pairID, pair, err := confirmedPairForSessionTx(tx, deviceID, expectedPairID)
 		if err != nil {
 			return err
 		}
@@ -367,20 +433,30 @@ func (ps *PairStore) RevokeByDevice(deviceID string) (*ConfirmedPair, error) {
 				return err
 			}
 		}
-		if pending := tx.Bucket([]byte(bucketPending)); pending != nil {
-			cursor := pending.Cursor()
-			for key, raw := cursor.First(); key != nil; {
-				nextKey, nextRaw := cursor.Next()
+		if retainedTokens := tx.Bucket([]byte(bucketRetainedTokenByPair)); retainedTokens != nil {
+			pairToken := retainedTokens.Get(pairID)
+			if pairToken != nil {
+				pending := tx.Bucket([]byte(bucketPending))
+				if pending == nil {
+					return ErrPairConflict
+				}
+				raw := pending.Get(pairToken)
+				if raw == nil {
+					return ErrPairConflict
+				}
 				retained, err := decodePendingPair(raw)
 				if err != nil {
 					return err
 				}
-				if retained.PairID == pair.PairID {
-					if err := pending.Delete(key); err != nil {
-						return err
-					}
+				if retained.PairID != pair.PairID {
+					return ErrPairConflict
 				}
-				key, raw = nextKey, nextRaw
+				if err := pending.Delete(pairToken); err != nil {
+					return err
+				}
+				if err := retainedTokens.Delete(pairID); err != nil {
+					return err
+				}
 			}
 		}
 		revoked = pair
@@ -390,6 +466,40 @@ func (ps *PairStore) RevokeByDevice(deviceID string) (*ConfirmedPair, error) {
 		return nil, err
 	}
 	return &revoked, nil
+}
+
+func migrateRetainedTokenIndexTx(tx *bbolt.Tx) error {
+	meta, err := tx.CreateBucketIfNotExists([]byte(bucketPairMeta))
+	if err != nil {
+		return err
+	}
+	if meta.Get(retainedTokenIndexVersionKey) != nil {
+		return nil
+	}
+	index, err := tx.CreateBucketIfNotExists([]byte(bucketRetainedTokenByPair))
+	if err != nil {
+		return err
+	}
+	if pending := tx.Bucket([]byte(bucketPending)); pending != nil {
+		cursor := pending.Cursor()
+		for _, raw := cursor.First(); raw != nil; _, raw = cursor.Next() {
+			record, err := decodePendingPair(raw)
+			if err != nil {
+				return err
+			}
+			if record.PairID == "" {
+				continue
+			}
+			pairID := []byte(record.PairID)
+			if existing := index.Get(pairID); existing != nil && !bytes.Equal(existing, []byte(record.PairToken)) {
+				return ErrPairConflict
+			}
+			if err := index.Put(pairID, []byte(record.PairToken)); err != nil {
+				return err
+			}
+		}
+	}
+	return meta.Put(retainedTokenIndexVersionKey, []byte{1})
 }
 
 func (ps *PairStore) Get(pairID string) (*ConfirmedPair, error) {
@@ -408,54 +518,75 @@ func (ps *PairStore) Get(pairID string) (*ConfirmedPair, error) {
 }
 
 func (ps *PairStore) SignPubkeyFor(deviceID string) ([]byte, error) {
-	pairIDBytes, err := ps.bolt.Get(bucketByDevice, deviceID)
+	session, err := ps.SessionFor(deviceID)
 	if err != nil {
 		return nil, err
 	}
-	if pairIDBytes == nil {
-		return nil, ErrNotFound
-	}
-	cp, err := ps.Get(string(pairIDBytes))
-	if err != nil {
-		return nil, err
-	}
-	if cp.DeviceA == deviceID {
-		return cp.ASignPubkey, nil
-	}
-	if cp.DeviceB == deviceID {
-		return cp.BSignPubkey, nil
-	}
-	return nil, ErrNotFound
+	return session.SignPubkey, nil
+}
+
+func (ps *PairStore) SessionFor(deviceID string) (PairSession, error) {
+	var session PairSession
+	err := ps.bolt.View(func(tx *bbolt.Tx) error {
+		pairID, pair, err := confirmedPairForDeviceTx(tx, deviceID)
+		if err != nil {
+			return err
+		}
+		session = PairSession{PairID: string(pairID), DeviceID: deviceID}
+		switch deviceID {
+		case pair.DeviceA:
+			session.PeerID = pair.DeviceB
+			session.SignPubkey = append([]byte(nil), pair.ASignPubkey...)
+		case pair.DeviceB:
+			session.PeerID = pair.DeviceA
+			session.SignPubkey = append([]byte(nil), pair.BSignPubkey...)
+		default:
+			return ErrNotFound
+		}
+		return nil
+	})
+	return session, err
+}
+
+func (ps *PairStore) ValidateSession(deviceID, pairID string) error {
+	return ps.bolt.View(func(tx *bbolt.Tx) error {
+		_, _, err := confirmedPairForSessionTx(tx, deviceID, pairID)
+		return err
+	})
 }
 
 // PeerFor returns the paired peer's device ID for deviceID, or ErrNotFound.
 func (ps *PairStore) PeerFor(deviceID string) (string, error) {
-	pairIDBytes, err := ps.bolt.Get(bucketByDevice, deviceID)
-	if err != nil {
-		return "", err
-	}
-	if pairIDBytes == nil {
-		return "", ErrNotFound
-	}
-	cp, err := ps.Get(string(pairIDBytes))
-	if err != nil {
-		return "", err
-	}
-	if cp.DeviceA == deviceID {
-		return cp.DeviceB, nil
-	}
-	if cp.DeviceB == deviceID {
-		return cp.DeviceA, nil
-	}
-	return "", ErrNotFound
+	return ps.PeerForPair(deviceID, "")
+}
+
+func (ps *PairStore) PeerForPair(deviceID, pairID string) (string, error) {
+	var peerID string
+	err := ps.bolt.View(func(tx *bbolt.Tx) error {
+		_, pair, err := confirmedPairForSessionTx(tx, deviceID, pairID)
+		if err != nil {
+			return err
+		}
+		if pair.DeviceA == deviceID {
+			peerID = pair.DeviceB
+		} else {
+			peerID = pair.DeviceA
+		}
+		return nil
+	})
+	return peerID, err
 }
 
 // UpdateCapabilities records a confirmed device's advertised protocols and
 // advances its pair's protocol floor atomically. A negotiated floor never
 // decreases automatically.
 func (ps *PairStore) UpdateCapabilities(deviceID string, protocols []int, appVersion string) error {
+	return ps.UpdateCapabilitiesForPair(deviceID, "", protocols, appVersion)
+}
+
+func (ps *PairStore) UpdateCapabilitiesForPair(deviceID, expectedPairID string, protocols []int, appVersion string) error {
 	return ps.bolt.Update(func(tx *bbolt.Tx) error {
-		pairID, pair, err := confirmedPairForDeviceTx(tx, deviceID)
+		pairID, pair, err := confirmedPairForSessionTx(tx, deviceID, expectedPairID)
 		if err != nil {
 			return err
 		}
@@ -503,8 +634,12 @@ func (ps *PairStore) UpdateCapabilities(deviceID string, protocols []int, appVer
 // CapabilitiesFor returns one consistent snapshot of a confirmed pair's
 // advertised capabilities and monotonic negotiated floor.
 func (ps *PairStore) CapabilitiesFor(deviceID string) (self DeviceCapabilities, peer DeviceCapabilities, floor int, err error) {
+	return ps.CapabilitiesForPair(deviceID, "")
+}
+
+func (ps *PairStore) CapabilitiesForPair(deviceID, expectedPairID string) (self DeviceCapabilities, peer DeviceCapabilities, floor int, err error) {
 	err = ps.bolt.View(func(tx *bbolt.Tx) error {
-		pairID, pair, lookupErr := confirmedPairForDeviceTx(tx, deviceID)
+		pairID, pair, lookupErr := confirmedPairForSessionTx(tx, deviceID, expectedPairID)
 		if lookupErr != nil {
 			return lookupErr
 		}
@@ -616,6 +751,17 @@ func confirmedPairForDeviceTx(tx *bbolt.Tx, deviceID string) ([]byte, ConfirmedP
 		return nil, ConfirmedPair{}, ErrNotFound
 	}
 	return append([]byte(nil), pairID...), pair, nil
+}
+
+func confirmedPairForSessionTx(tx *bbolt.Tx, deviceID, expectedPairID string) ([]byte, ConfirmedPair, error) {
+	pairID, pair, err := confirmedPairForDeviceTx(tx, deviceID)
+	if err != nil {
+		return nil, ConfirmedPair{}, err
+	}
+	if expectedPairID != "" && !bytes.Equal(pairID, []byte(expectedPairID)) {
+		return nil, ConfirmedPair{}, ErrNotFound
+	}
+	return pairID, pair, nil
 }
 
 func decodeCapabilities(raw []byte) (DeviceCapabilities, error) {

@@ -24,6 +24,7 @@ type recipientHandoff struct {
 }
 
 type durableNotification struct {
+	pairID    string
 	recipient string
 	msgID     string
 	sequence  uint64
@@ -74,8 +75,9 @@ func (h *durableHandoffs) release(recipient string, lane *recipientHandoff) {
 	}
 }
 
-func (h *durableHandoffs) record(lane *recipientHandoff, recipient, msgID string, sequence, byteSize uint64) (*durableNotification, bool) {
+func (h *durableHandoffs) record(lane *recipientHandoff, pairID, recipient, msgID string, sequence, byteSize uint64) (*durableNotification, bool) {
 	notification := &durableNotification{
+		pairID:    pairID,
 		recipient: recipient,
 		msgID:     msgID,
 		sequence:  sequence,

@@ -48,6 +48,7 @@ type testCapabilitiesFrame struct {
 }
 
 type mailboxTestPair struct {
+	pairID  string
 	deviceA string
 	deviceB string
 	privA   ed25519.PrivateKey
@@ -76,13 +77,14 @@ func registerMailboxTestPairWithoutCapabilities(t *testing.T, srv *Server) mailb
 		t.Fatalf("generate B key: %v", err)
 	}
 	pair := mailboxTestPair{
+		pairID:  "mailbox-test-pair",
 		deviceA: "mailbox-device-a",
 		deviceB: "mailbox-device-b",
 		privA:   aPriv,
 		privB:   bPriv,
 	}
 	if err := srv.pairStore.Confirm(store.ConfirmedPair{
-		PairID:      "mailbox-test-pair",
+		PairID:      pair.pairID,
 		DeviceA:     pair.deviceA,
 		DeviceB:     pair.deviceB,
 		AEncPubkey:  []byte{1},
@@ -822,7 +824,7 @@ func TestWebSocketHelloPartialExpiryWriteDoesNotAdvanceCursor(t *testing.T) {
 		t.Fatalf("expire partial-write items = %#v, %v", expired, err)
 	}
 
-	client := srv.clientHub.Register(pair.deviceA, make(chan []byte, mailboxBatchSize))
+	client := srv.clientHub.RegisterPair(pair.deviceA, pair.pairID, make(chan []byte, mailboxBatchSize))
 	defer srv.clientHub.Unregister(client)
 	if !srv.clientHub.SetProtocolAndCapabilities(client, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set handshake protocol")
@@ -1025,7 +1027,7 @@ func TestWebSocketHelloHandoffSurvivesFailedAcceptedWrite(t *testing.T) {
 	srv := newTestServer(t)
 	pair := registerMailboxTestPair(t, srv)
 	outbound := make(chan []byte, 4)
-	recipient := srv.clientHub.Register(pair.deviceB, outbound)
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
 	defer srv.clientHub.Unregister(recipient)
 	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set recipient handshake protocol")
@@ -1064,7 +1066,7 @@ func TestWebSocketHelloHandoffPreservesSequenceAcrossReverseAcceptedWrites(t *te
 	srv := newTestServer(t)
 	pair := registerMailboxTestPair(t, srv)
 	outbound := make(chan []byte, 4)
-	recipient := srv.clientHub.Register(pair.deviceB, outbound)
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
 	defer srv.clientHub.Unregister(recipient)
 	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set recipient handshake protocol")
@@ -1225,7 +1227,7 @@ func TestWebSocketDeliveryTransferLinearizesConnectionReplacement(t *testing.T) 
 			sequence := pending[0].AcceptanceSequence
 
 			oldOutbound := make(chan []byte, 2)
-			old := srv.clientHub.Register(pair.deviceB, oldOutbound)
+			old := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, oldOutbound)
 			protocol := protocolV2
 			if handshake {
 				protocol = protocolV2Handshake
@@ -1244,7 +1246,7 @@ func TestWebSocketDeliveryTransferLinearizesConnectionReplacement(t *testing.T) 
 				if len(records) != 1 {
 					t.Fatalf("validated records = %d, want 1", len(records))
 				}
-				replacement = srv.clientHub.Register(pair.deviceB, replacementOutbound)
+				replacement = srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, replacementOutbound)
 				if !srv.clientHub.SetProtocolAndCapabilities(replacement, protocol, []int{2, 1}) {
 					t.Fatal("set replacement protocol")
 				}
@@ -1448,13 +1450,13 @@ func TestWebSocketReconnectHandshakeRejectsStalePersistedSelfPropagation(t *test
 	}
 
 	aOutbound := make(chan []byte, 2)
-	reconnectingA := srv.clientHub.Register(pair.deviceA, aOutbound)
+	reconnectingA := srv.clientHub.RegisterPair(pair.deviceA, pair.pairID, aOutbound)
 	defer srv.clientHub.Unregister(reconnectingA)
 	if !srv.clientHub.SetProtocolAndCapabilities(reconnectingA, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set A reconnect handshake")
 	}
 	bOutbound := make(chan []byte, 2)
-	b := srv.clientHub.Register(pair.deviceB, bOutbound)
+	b := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, bOutbound)
 	defer srv.clientHub.Unregister(b)
 	if !srv.clientHub.SetProtocolAndCapabilities(b, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set B peer handshake")
@@ -1520,7 +1522,7 @@ func TestWebSocketLiveDeliveryMutationWinsBeforeTransfer(t *testing.T) {
 			srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 4, MaxBytes: 1 << 20, Retention: time.Hour})
 			pair := registerMailboxTestPair(t, srv)
 			outbound := make(chan []byte, 2)
-			recipient := srv.clientHub.Register(pair.deviceB, outbound)
+			recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
 			defer srv.clientHub.Unregister(recipient)
 			if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2, []int{2, 1}) {
 				t.Fatal("set live recipient protocol")
@@ -1564,7 +1566,7 @@ func TestWebSocketHelloHandoffDoesNotEmitExpiredBufferedItem(t *testing.T) {
 	srv := newMailboxTestServerWithLimits(t, store.MailboxLimits{MaxItems: 2, MaxBytes: 1 << 20, Retention: time.Hour})
 	pair := registerMailboxTestPair(t, srv)
 	outbound := make(chan []byte, 4)
-	recipient := srv.clientHub.Register(pair.deviceB, outbound)
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
 	defer srv.clientHub.Unregister(recipient)
 	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set recipient handshake protocol")
@@ -1604,7 +1606,7 @@ func TestWebSocketHelloHandoffDoesNotEmitPurgedBufferedItem(t *testing.T) {
 	srv := newTestServer(t)
 	pair := registerMailboxTestPair(t, srv)
 	outbound := make(chan []byte, 4)
-	recipient := srv.clientHub.Register(pair.deviceB, outbound)
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
 	defer srv.clientHub.Unregister(recipient)
 	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set recipient handshake protocol")
@@ -1632,7 +1634,7 @@ func TestWebSocketHelloHandoffExpireRefillClosesAtConfiguredBound(t *testing.T) 
 	limits := store.MailboxLimits{MaxItems: 1, MaxBytes: 1 << 20, Retention: time.Hour}
 	srv := newMailboxTestServerWithLimits(t, limits)
 	pair := registerMailboxTestPair(t, srv)
-	recipient := srv.clientHub.Register(pair.deviceB, make(chan []byte, 4))
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, make(chan []byte, 4))
 	defer srv.clientHub.Unregister(recipient)
 	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set recipient handshake protocol")
@@ -1667,7 +1669,7 @@ func TestWebSocketHelloHandoffClosesAtConfiguredByteBound(t *testing.T) {
 	}
 	srv := newMailboxTestServerWithLimits(t, limits)
 	pair := registerMailboxTestPair(t, srv)
-	recipient := srv.clientHub.Register(pair.deviceB, make(chan []byte, 4))
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, make(chan []byte, 4))
 	defer srv.clientHub.Unregister(recipient)
 	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
 		t.Fatal("set recipient handshake protocol")
@@ -2361,7 +2363,7 @@ func TestWebSocketWriterBackpressureDoesNotDeleteMailbox(t *testing.T) {
 	pair := registerMailboxTestPair(t, srv)
 	blocked := make(chan []byte, 1)
 	blocked <- []byte("occupied")
-	fakeRecipient := srv.clientHub.Register(pair.deviceB, blocked)
+	fakeRecipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, blocked)
 	if !srv.clientHub.SetProtocolAndCapabilities(fakeRecipient, protocolV2, []int{2, 1}) {
 		t.Fatal("mark fake recipient v2")
 	}

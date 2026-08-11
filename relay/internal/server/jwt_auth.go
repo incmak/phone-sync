@@ -49,15 +49,24 @@ func (c *JTICache) CheckAndSet(jti string, now time.Time) error {
 
 type ctxKey string
 
-const ctxDeviceID ctxKey = "device_id"
+const (
+	ctxDeviceID ctxKey = "device_id"
+	ctxPairID   ctxKey = "pair_id"
+)
 
-func withDeviceID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxDeviceID, id)
+func withPairSession(ctx context.Context, deviceID, pairID string) context.Context {
+	ctx = context.WithValue(ctx, ctxDeviceID, deviceID)
+	return context.WithValue(ctx, ctxPairID, pairID)
 }
 
 // DeviceIDFromContext is exported for handlers that need to know which paired device is connected.
 func DeviceIDFromContext(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(ctxDeviceID).(string)
+	return id, ok
+}
+
+func PairIDFromContext(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(ctxPairID).(string)
 	return id, ok
 }
 
@@ -71,7 +80,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-		// Parse without verification first to extract sub — needed to look up the right pubkey.
+		// Parse without verification first to extract sub, which selects the right public key.
 		parser := jwt.NewParser()
 		unverified, _, err := parser.ParseUnverified(tokenStr, jwt.MapClaims{})
 		if err != nil {
@@ -89,8 +98,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		signPk, err := s.pairStore.SignPubkeyFor(sub)
-		if err != nil || len(signPk) != ed25519.PublicKeySize {
+		session, err := s.pairStore.SessionFor(sub)
+		if err != nil || len(session.SignPubkey) != ed25519.PublicKeySize {
 			http.Error(w, "unknown device", http.StatusUnauthorized)
 			return
 		}
@@ -100,7 +109,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if t.Method.Alg() != "EdDSA" {
 				return nil, errors.New("bad alg")
 			}
-			return ed25519.PublicKey(signPk), nil
+			return ed25519.PublicKey(session.SignPubkey), nil
 		})
 		if err != nil {
 			http.Error(w, "invalid signature or expired", http.StatusUnauthorized)
@@ -117,7 +126,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		r = r.WithContext(withDeviceID(r.Context(), sub))
+		r = r.WithContext(withPairSession(r.Context(), sub, session.PairID))
 		next.ServeHTTP(w, r)
 	})
 }

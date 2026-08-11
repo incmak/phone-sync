@@ -96,6 +96,14 @@ func NewMailboxStore(b *Bolt, limits MailboxLimits) *MailboxStore {
 }
 
 func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) {
+	return s.putForPair("", rec, now)
+}
+
+func (s *MailboxStore) PutForPair(pairID string, rec MailboxRecord, now time.Time) (PutResult, error) {
+	return s.putForPair(pairID, rec, now)
+}
+
+func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now time.Time) (PutResult, error) {
 	if err := validateMailboxRecord(rec); err != nil {
 		return PutResult{}, err
 	}
@@ -106,6 +114,11 @@ func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) 
 	rec.ExpiresAt = now.Add(s.limits.Retention).UnixMilli()
 	result := PutResult{AcceptedAt: rec.AcceptedAt}
 	err := s.bolt.Update(func(tx *bbolt.Tx) error {
+		if expectedPairID != "" {
+			if _, err := authorizePairDevicesTx(tx, expectedPairID, rec.SenderDevice, rec.RecipientDevice); err != nil {
+				return err
+			}
+		}
 		items, order, stats, statuses, err := mailboxBuckets(tx)
 		if err != nil {
 			return err
@@ -194,15 +207,37 @@ func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) 
 }
 
 func (s *MailboxStore) Pending(recipient string, limit int) ([]MailboxRecord, error) {
+	return s.pendingForPair("", recipient, limit)
+}
+
+func (s *MailboxStore) PendingForPair(pairID, recipient string, limit int) ([]MailboxRecord, error) {
+	return s.pendingForPair(pairID, recipient, limit)
+}
+
+func (s *MailboxStore) pendingForPair(expectedPairID, recipient string, limit int) ([]MailboxRecord, error) {
 	if recipient == "" || strings.ContainsRune(recipient, '\x00') {
 		return nil, errors.New("invalid recipient device")
 	}
-	if limit <= 0 {
+	if limit <= 0 && expectedPairID == "" {
 		return []MailboxRecord{}, nil
 	}
 
-	result := make([]MailboxRecord, 0, limit)
+	result := []MailboxRecord{}
+	if limit > 0 {
+		result = make([]MailboxRecord, 0, limit)
+	}
 	err := s.bolt.View(func(tx *bbolt.Tx) error {
+		var expectedSender string
+		if expectedPairID != "" {
+			_, pair, err := confirmedPairForSessionTx(tx, recipient, expectedPairID)
+			if err != nil {
+				return err
+			}
+			expectedSender = pair.DeviceA
+			if recipient == pair.DeviceA {
+				expectedSender = pair.DeviceB
+			}
+		}
 		items := tx.Bucket([]byte(bucketMailboxItems))
 		order := tx.Bucket([]byte(bucketMailboxOrder))
 		if items == nil || order == nil {
@@ -222,6 +257,9 @@ func (s *MailboxStore) Pending(recipient string, limit int) ([]MailboxRecord, er
 			var rec MailboxRecord
 			if err := json.Unmarshal(raw, &rec); err != nil {
 				return fmt.Errorf("unmarshal mailbox item: %w", err)
+			}
+			if expectedSender != "" && rec.SenderDevice != expectedSender {
+				continue
 			}
 			result = append(result, copyMailboxRecord(rec))
 		}
@@ -246,11 +284,16 @@ func (s *MailboxStore) LiveByIDs(recipient string, msgIDs []string, now time.Tim
 // The callback must do only bounded copying/serialization and nonblocking queue
 // insertion. It must never perform socket I/O or wait for queue capacity.
 func (s *MailboxStore) TransferLiveByIDs(recipient string, msgIDs []string, now time.Time, transfer func([]MailboxRecord) error) error {
+	return s.transferLiveByIDsForPair("", recipient, msgIDs, now, transfer)
+}
+
+func (s *MailboxStore) TransferLiveByIDsForPair(pairID, recipient string, msgIDs []string, now time.Time, transfer func([]MailboxRecord) error) error {
+	return s.transferLiveByIDsForPair(pairID, recipient, msgIDs, now, transfer)
+}
+
+func (s *MailboxStore) transferLiveByIDsForPair(expectedPairID, recipient string, msgIDs []string, now time.Time, transfer func([]MailboxRecord) error) error {
 	if recipient == "" || strings.ContainsRune(recipient, '\x00') {
 		return errors.New("invalid recipient device")
-	}
-	if len(msgIDs) == 0 {
-		return transfer([]MailboxRecord{})
 	}
 	for _, msgID := range msgIDs {
 		if err := validateMailboxKey(recipient, msgID); err != nil {
@@ -260,6 +303,17 @@ func (s *MailboxStore) TransferLiveByIDs(recipient string, msgIDs []string, now 
 
 	result := make([]MailboxRecord, 0, len(msgIDs))
 	return s.bolt.View(func(tx *bbolt.Tx) error {
+		var expectedSender string
+		if expectedPairID != "" {
+			_, pair, err := confirmedPairForSessionTx(tx, recipient, expectedPairID)
+			if err != nil {
+				return err
+			}
+			expectedSender = pair.DeviceA
+			if recipient == pair.DeviceA {
+				expectedSender = pair.DeviceB
+			}
+		}
 		items := tx.Bucket([]byte(bucketMailboxItems))
 		if items != nil {
 			nowMillis := now.UnixMilli()
@@ -275,6 +329,9 @@ func (s *MailboxStore) TransferLiveByIDs(recipient string, msgIDs []string, now 
 				if rec.ExpiresAt <= nowMillis {
 					continue
 				}
+				if expectedSender != "" && rec.SenderDevice != expectedSender {
+					continue
+				}
 				result = append(result, copyMailboxRecord(rec))
 			}
 		}
@@ -283,6 +340,14 @@ func (s *MailboxStore) TransferLiveByIDs(recipient string, msgIDs []string, now 
 }
 
 func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error {
+	return s.ackForPair("", recipient, msgID, digest, now)
+}
+
+func (s *MailboxStore) AckForPair(pairID, recipient, msgID, digest string, now time.Time) error {
+	return s.ackForPair(pairID, recipient, msgID, digest, now)
+}
+
+func (s *MailboxStore) ackForPair(expectedPairID, recipient, msgID, digest string, now time.Time) error {
 	if err := validateMailboxKey(recipient, msgID); err != nil {
 		return err
 	}
@@ -292,6 +357,14 @@ func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error
 	}
 
 	return s.bolt.Update(func(tx *bbolt.Tx) error {
+		var expectedSender string
+		if expectedPairID != "" {
+			peerID, err := authorizePairDeviceTx(tx, expectedPairID, recipient)
+			if err != nil {
+				return err
+			}
+			expectedSender = peerID
+		}
 		items, order, stats, statuses, err := mailboxBuckets(tx)
 		if err != nil {
 			return err
@@ -302,11 +375,23 @@ func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error
 		}
 		raw := items.Get(itemKey(recipient, msgID))
 		if raw == nil {
+			if expectedSender != "" {
+				status, _, found, err := terminalStatusForPut(statuses, statusesByRecipient, recipient, msgID)
+				if err != nil {
+					return err
+				}
+				if !found || status.SenderDevice != expectedSender {
+					return ErrNotFound
+				}
+			}
 			return duplicateAckStatus(statuses, statusesByRecipient, recipient, msgID, wantDigest, now.UnixMilli())
 		}
 		var rec MailboxRecord
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			return fmt.Errorf("unmarshal mailbox item: %w", err)
+		}
+		if expectedSender != "" && rec.SenderDevice != expectedSender {
+			return ErrNotFound
 		}
 		storedDigest, err := decodeDigest(rec.EnvelopeSHA256)
 		if err != nil {
@@ -357,10 +442,48 @@ func (s *MailboxStore) Ack(recipient, msgID, digest string, now time.Time) error
 	})
 }
 
+func authorizePairDeviceTx(tx *bbolt.Tx, expectedPairID, deviceID string) (string, error) {
+	_, pair, err := confirmedPairForSessionTx(tx, deviceID, expectedPairID)
+	if err != nil {
+		return "", err
+	}
+	if pair.DeviceA == deviceID {
+		return pair.DeviceB, nil
+	}
+	return pair.DeviceA, nil
+}
+
+func authorizePairDevicesTx(tx *bbolt.Tx, expectedPairID, deviceID, peerID string) (ConfirmedPair, error) {
+	_, pair, err := confirmedPairForSessionTx(tx, deviceID, expectedPairID)
+	if err != nil {
+		return ConfirmedPair{}, err
+	}
+	if (pair.DeviceA != deviceID || pair.DeviceB != peerID) && (pair.DeviceB != deviceID || pair.DeviceA != peerID) {
+		return ConfirmedPair{}, ErrNotFound
+	}
+	return pair, nil
+}
+
 func (s *MailboxStore) Expire(now time.Time) ([]ExpiredRecord, error) {
+	return s.expireForPair("", "", now)
+}
+
+func (s *MailboxStore) ExpireForPair(pairID, deviceID string, now time.Time) ([]ExpiredRecord, error) {
+	if pairID == "" || deviceID == "" || strings.ContainsRune(deviceID, '\x00') {
+		return nil, errors.New("invalid pair session")
+	}
+	return s.expireForPair(pairID, deviceID, now)
+}
+
+func (s *MailboxStore) expireForPair(expectedPairID, deviceID string, now time.Time) ([]ExpiredRecord, error) {
 	expired := []ExpiredRecord{}
 	nowMillis := now.UnixMilli()
 	err := s.bolt.Update(func(tx *bbolt.Tx) error {
+		if expectedPairID != "" {
+			if _, err := authorizePairDeviceTx(tx, expectedPairID, deviceID); err != nil {
+				return err
+			}
+		}
 		items, order, stats, statuses, err := mailboxBuckets(tx)
 		if err != nil {
 			return err
@@ -497,16 +620,35 @@ func (s *MailboxStore) Statuses(sender string, since time.Time) ([]DeliveryStatu
 // tombstones and removes logically expired entries from canonical and index
 // state in the same bounded transaction. ACK tombstones are never visited.
 func (s *MailboxStore) ExpiryStatuses(sender, recipient string, limit int, now time.Time) ([]DeliveryStatus, error) {
+	return s.expiryStatusesForPair("", sender, recipient, limit, now)
+}
+
+func (s *MailboxStore) ExpiryStatusesForPair(pairID, sender, recipient string, limit int, now time.Time) ([]DeliveryStatus, error) {
+	return s.expiryStatusesForPair(pairID, sender, recipient, limit, now)
+}
+
+func (s *MailboxStore) expiryStatusesForPair(expectedPairID, sender, recipient string, limit int, now time.Time) ([]DeliveryStatus, error) {
 	for _, device := range []string{sender, recipient} {
 		if device == "" || strings.ContainsRune(device, '\x00') {
 			return nil, errors.New("invalid device")
 		}
 	}
-	if limit <= 0 {
+	if limit <= 0 && expectedPairID == "" {
 		return []DeliveryStatus{}, nil
 	}
-	result := make([]DeliveryStatus, 0, limit)
+	result := []DeliveryStatus{}
+	if limit > 0 {
+		result = make([]DeliveryStatus, 0, limit)
+	}
 	err := s.bolt.Update(func(tx *bbolt.Tx) error {
+		if expectedPairID != "" {
+			if _, err := authorizePairDevicesTx(tx, expectedPairID, sender, recipient); err != nil {
+				return err
+			}
+		}
+		if limit <= 0 {
+			return nil
+		}
 		statuses := tx.Bucket([]byte(bucketMailboxStatus))
 		if statuses == nil {
 			return nil
@@ -583,6 +725,14 @@ func (s *MailboxStore) ExpiryStatuses(sender, recipient string, limit int, now t
 // deleting retryability or modifying canonical 24-hour tombstones. The caller
 // must invoke it only after the full returned page was written successfully.
 func (s *MailboxStore) AdvanceExpiryStatusCursor(sender, recipient, msgID string) error {
+	return s.advanceExpiryStatusCursorForPair("", sender, recipient, msgID)
+}
+
+func (s *MailboxStore) AdvanceExpiryStatusCursorForPair(pairID, sender, recipient, msgID string) error {
+	return s.advanceExpiryStatusCursorForPair(pairID, sender, recipient, msgID)
+}
+
+func (s *MailboxStore) advanceExpiryStatusCursorForPair(expectedPairID, sender, recipient, msgID string) error {
 	for _, device := range []string{sender, recipient} {
 		if device == "" || strings.ContainsRune(device, '\x00') {
 			return errors.New("invalid device")
@@ -592,6 +742,11 @@ func (s *MailboxStore) AdvanceExpiryStatusCursor(sender, recipient, msgID string
 		return err
 	}
 	return s.bolt.Update(func(tx *bbolt.Tx) error {
+		if expectedPairID != "" {
+			if _, err := authorizePairDevicesTx(tx, expectedPairID, sender, recipient); err != nil {
+				return err
+			}
+		}
 		pending := tx.Bucket([]byte(bucketMailboxExpiryPending))
 		if pending == nil {
 			return nil
