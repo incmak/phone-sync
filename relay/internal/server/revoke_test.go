@@ -249,6 +249,95 @@ func TestRevokeRejectsAuthenticatedSocketRegisteringAfterCommit(t *testing.T) {
 	}
 }
 
+func TestDelayedRevokedRegistrationCannotEvictReboundGeneration(t *testing.T) {
+	srv := newTestServer(t)
+	old := registerRevokeTestPair(t, srv, "delayed-register-old")
+	beforeOldRegister := make(chan struct{})
+	releaseOldRegister := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseOldRegister) }) })
+	srv.webSocketBeforeRegister = func(deviceID, pairID string) {
+		if deviceID == old.pair.DeviceA && pairID == old.pair.PairID {
+			close(beforeOldRegister)
+			<-releaseOldRegister
+		}
+	}
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	type dialResult struct {
+		conn *websocket.Conn
+		err  error
+	}
+	oldDialed := make(chan dialResult, 1)
+	oldToken := mintJWT(t, old.pair.DeviceA, old.privA, "")
+	go func() {
+		header := http.Header{}
+		header.Set("Authorization", "Bearer "+oldToken)
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", header)
+		oldDialed <- dialResult{conn: conn, err: err}
+	}()
+	select {
+	case <-beforeOldRegister:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old generation did not reach the pre-registration barrier")
+	}
+	oldResult := <-oldDialed
+	if oldResult.err != nil {
+		t.Fatalf("old generation upgrade: %v", oldResult.err)
+	}
+	defer oldResult.conn.Close()
+
+	if rec := postRevoke(t, srv, old.pair.DeviceB, old.privB); rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	newAPub, newAPriv, _ := ed25519.GenerateKey(nil)
+	newBPub, _, _ := ed25519.GenerateKey(nil)
+	rebound := store.ConfirmedPair{
+		PairID: "delayed-register-new", DeviceA: old.pair.DeviceA, DeviceB: old.pair.DeviceB,
+		AEncPubkey: []byte("new-a-enc"), ASignPubkey: newAPub,
+		BEncPubkey: []byte("new-b-enc"), BSignPubkey: newBPub,
+	}
+	if err := srv.pairStore.Confirm(rebound); err != nil {
+		t.Fatalf("confirm rebound pair: %v", err)
+	}
+	newConn := dialRevokeTestWS(t, ts, rebound.DeviceA, newAPriv)
+	defer newConn.Close()
+	if _, _, online := srv.clientHub.ConnectionForPair(rebound.DeviceA, rebound.PairID); !online {
+		t.Fatal("rebound generation did not register")
+	}
+
+	beforeFrame := []byte(`{"generation":"p2-before"}`)
+	if !srv.clientHub.SendRawV1ForPair(rebound.DeviceA, rebound.PairID, beforeFrame) {
+		t.Fatal("rebound generation rejected its own frame before stale registration resumed")
+	}
+	_ = newConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, raw, err := newConn.ReadMessage(); err != nil || string(raw) != string(beforeFrame) {
+		t.Fatalf("rebound frame before stale resume = %q, %v", raw, err)
+	}
+	_ = newConn.SetReadDeadline(time.Time{})
+
+	releaseOnce.Do(func() { close(releaseOldRegister) })
+	assertRevokePeerClosed(t, oldResult.conn)
+	if _, _, online := srv.clientHub.ConnectionForPair(old.pair.DeviceA, old.pair.PairID); online {
+		t.Fatal("old generation remained registered after failed validation")
+	}
+	if _, _, online := srv.clientHub.ConnectionForPair(rebound.DeviceA, rebound.PairID); !online {
+		t.Fatal("delayed old generation evicted the rebound registration")
+	}
+	if srv.clientHub.SendRawV1ForPair(rebound.DeviceA, old.pair.PairID, []byte(`{"generation":"p1"}`)) {
+		t.Fatal("old generation frame crossed into rebound registration")
+	}
+	afterFrame := []byte(`{"generation":"p2-after"}`)
+	if !srv.clientHub.SendRawV1ForPair(rebound.DeviceA, rebound.PairID, afterFrame) {
+		t.Fatal("rebound generation was unusable after stale registration resumed")
+	}
+	_ = newConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, raw, err := newConn.ReadMessage(); err != nil || string(raw) != string(afterFrame) {
+		t.Fatalf("rebound frame after stale resume = %q, %v", raw, err)
+	}
+}
+
 func TestPairScopedHubOperationsRejectUnboundRegistration(t *testing.T) {
 	hub := NewClientHub()
 	client := hub.Register("dev-a", make(chan []byte, 1))
@@ -258,6 +347,81 @@ func TestPairScopedHubOperationsRejectUnboundRegistration(t *testing.T) {
 	if _, _, online := hub.ConnectionForPair("dev-a", "pair-a"); online {
 		t.Fatal("pair-scoped lookup accepted an unbound registration")
 	}
+}
+
+func TestClientHubRegisterPairReplacesOnlySameGeneration(t *testing.T) {
+	hub := NewClientHub()
+	firstOutbound := make(chan []byte, 1)
+	first := hub.RegisterPair("dev-a", "pair-a", firstOutbound)
+	secondOutbound := make(chan []byte, 1)
+	second := hub.RegisterPair("dev-a", "pair-a", secondOutbound)
+	select {
+	case <-first.done:
+	default:
+		t.Fatal("same-generation reconnect did not stop the prior registration")
+	}
+	hub.Unregister(first)
+	if _, _, online := hub.ConnectionForPair("dev-a", "pair-a"); !online {
+		t.Fatal("old same-generation unregister removed the replacement")
+	}
+	frame := []byte(`{"same_generation":true}`)
+	if !hub.SendRawV1ForPair("dev-a", "pair-a", frame) {
+		t.Fatal("same-generation replacement rejected delivery")
+	}
+	select {
+	case got := <-secondOutbound:
+		if string(got) != string(frame) {
+			t.Fatalf("replacement frame = %q, want %q", got, frame)
+		}
+	default:
+		t.Fatal("same-generation replacement received no frame")
+	}
+	select {
+	case got := <-firstOutbound:
+		t.Fatalf("stopped same-generation registration received frame %q", got)
+	default:
+	}
+	hub.Unregister(second)
+	if _, _, online := hub.ConnectionForPair("dev-a", "pair-a"); online {
+		t.Fatal("replacement unregister left an orphaned registration")
+	}
+}
+
+func TestClientHubRegisterPairRejectsDifferentGenerationWithoutEviction(t *testing.T) {
+	hub := NewClientHub()
+	oldOutbound := make(chan []byte, 1)
+	old := hub.RegisterPair("dev-a", "pair-old", oldOutbound)
+	rebound := hub.RegisterPair("dev-a", "pair-new", make(chan []byte, 1))
+	select {
+	case <-rebound.done:
+	default:
+		t.Fatal("different-generation registration was not rejected")
+	}
+	select {
+	case <-old.done:
+		t.Fatal("different-generation registration stopped the current client")
+	default:
+	}
+	hub.Unregister(rebound)
+	if _, _, online := hub.ConnectionForPair("dev-a", "pair-old"); !online {
+		t.Fatal("rejected registration orphaned the current old generation")
+	}
+	if _, _, online := hub.ConnectionForPair("dev-a", "pair-new"); online {
+		t.Fatal("rejected generation became current")
+	}
+	frame := []byte(`{"old_generation":true}`)
+	if !hub.SendRawV1ForPair("dev-a", "pair-old", frame) {
+		t.Fatal("current generation became unusable after rejecting a different generation")
+	}
+	select {
+	case got := <-oldOutbound:
+		if string(got) != string(frame) {
+			t.Fatalf("current generation frame = %q, want %q", got, frame)
+		}
+	default:
+		t.Fatal("current generation received no frame")
+	}
+	hub.Unregister(old)
 }
 
 func TestRevokeDisconnectDoesNotCloseReboundGeneration(t *testing.T) {

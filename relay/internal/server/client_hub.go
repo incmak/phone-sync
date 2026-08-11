@@ -72,22 +72,36 @@ func (h *ClientHub) SetHandoffResolver(resolve func(*wsClient, []queuedV2Notific
 	h.resolveHandoff = resolve
 }
 
-// Register replaces any existing client for the same device (reconnect case).
-// The previous client is cancelled so its writer goroutine can exit. The outbound
-// channel remains open because concurrent producers may still hold its reference.
+// Register replaces an existing unbound client for the same device. It remains
+// available for isolated hub users; authenticated WebSockets use pair-bound
+// registration below.
 func (h *ClientHub) Register(deviceID string, out chan []byte) *wsClient {
 	return h.RegisterPair(deviceID, "", out)
 }
 
+// RegisterPair replaces only an unbound or same-generation registration. A
+// different non-empty generation is returned already stopped and is never
+// installed, so a delayed revoked request cannot evict a rebound connection.
+// The current generation remains authoritative until its exact disconnect or
+// unregister; a legitimate later generation retries after that lifecycle ends.
 func (h *ClientHub) RegisterPair(deviceID, pairID string, out chan []byte) *wsClient {
+	client, _ := h.registerPair(deviceID, pairID, out)
+	return client
+}
+
+func (h *ClientHub) registerPair(deviceID, pairID string, out chan []byte) (*wsClient, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	c := &wsClient{deviceID: deviceID, pairID: pairID, outbound: out, done: make(chan struct{})}
 	if prev, ok := h.clients[deviceID]; ok {
+		if prev.pairID != "" && pairID != "" && prev.pairID != pairID {
+			c.stop()
+			return c, false
+		}
 		prev.stop()
 	}
-	c := &wsClient{deviceID: deviceID, pairID: pairID, outbound: out, done: make(chan struct{})}
 	h.clients[deviceID] = c
-	return c
+	return c, true
 }
 
 // Unregister removes client only if it's still the registered entry for this device.

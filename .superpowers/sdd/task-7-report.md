@@ -335,3 +335,169 @@ authentication, concurrency, and tests only. No interface layout, typography,
 color, iconography, animation, clipping, hover, entrance visibility, or other UI
 rule applies. The backend result preserves the frozen delivery, privacy,
 retention, quota, backpressure, and compatibility constraints listed above.
+
+---
+
+## Second correction: rebound registration isolation
+
+### History and scope
+
+The correction re-review found one remaining availability race in the range
+`7c24d39ee12a31a1b5effdb0d3c48acd7b6cbf3c..1a8bee75cd5ddc688f75ebee84fe3944b76dfbff`.
+This final correction started from:
+
+```text
+base/head: 1a8bee75cd5ddc688f75ebee84fe3944b76dfbff
+subject:   fix(relay): linearize revocation across pair generations
+branch:    main
+```
+
+Only these directly required paths changed:
+
+- `relay/internal/server/client_hub.go`
+- `relay/internal/server/ws.go`
+- `relay/internal/server/revoke_test.go`
+- `.superpowers/sdd/task-7-report.md`
+
+No Task 8 or unrelated work is included.
+
+### Deterministic RED evidence
+
+The combined real-WebSocket regression was added before production changes. It
+pauses a P1 request after JWT authentication and upgrade but before hub
+registration, fully revokes P1, confirms P2, registers and exercises a P2
+socket, then resumes P1.
+
+Observed RED:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache \
+  go test ./internal/server \
+  -run 'TestDelayedRevokedRegistrationCannotEvictReboundGeneration|TestClientHubRegisterPairReplacesOnlySameGeneration' \
+  -count=1 -timeout=20s
+--- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
+    revoke_test.go:326: delayed old generation evicted the rebound registration
+FAIL github.com/twinotify/relay/internal/server
+```
+
+A second hub-level test covers the inverse edge: an old different generation is
+still registered when a later generation attempts registration. It also failed
+against the pre-fix implementation:
+
+```text
+--- FAIL: TestClientHubRegisterPairRejectsDifferentGenerationWithoutEviction
+    revoke_test.go:398: different-generation registration was not rejected
+FAIL github.com/twinotify/relay/internal/server
+```
+
+The same-generation replacement characterization passed during RED, proving the
+new failure was limited to cross-generation eviction rather than ordinary
+reconnect behavior.
+
+### Minimal implementation
+
+- Hub registration now compares the current and incoming pair IDs while holding
+  the existing hub mutex.
+- If both IDs are non-empty and different, the incoming client is stopped and
+  returned as rejected without stopping, replacing, or unregistering the
+  current generation.
+- The WebSocket handler observes the registration result and returns before
+  session validation, writer goroutines, or frame processing when rejected.
+- Same-generation reconnect still replaces and stops the prior client. The old
+  client's deferred unregister cannot remove its replacement.
+- Unbound registrations remain available for isolated legacy hub tests, but an
+  unbound client still cannot satisfy pair-scoped send or lookup.
+- When a valid new generation arrives while a different old generation remains
+  current, it is rejected and closed without evicting the old registration. It
+  retries after the old generation's exact disconnect/unregister completes.
+  This resolves the edge without store access under the hub mutex or any
+  cross-generation eviction.
+
+The hub mutex is never held across Bolt access or network I/O. Rejected and
+replaced clients are cancelled only through their owned `done` channel; no
+producer-visible outbound channel is closed.
+
+### Behavior proved
+
+- Delayed revoked P1 cannot evict a validated, usable P2 socket.
+- P1 closes terminally when released after rebind.
+- P2 remains the exact current registration and receives P2-targeted frames
+  before and after P1 resumes.
+- P1-targeted frames cannot cross into P2, and P2 frames cannot reach P1.
+- A rejected different-generation client is stopped, never installed, and its
+  unregister cannot orphan the current client.
+- Same-generation reconnect replaces the prior client, routes to the
+  replacement, and leaves no registration after final unregister.
+- Existing revoke-before-register and revoke-disconnect-gap ordering tests
+  remain green.
+
+### GREEN and gate evidence
+
+Focused GREEN:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache \
+  go test ./internal/server \
+  -run 'TestDelayedRevokedRegistrationCannotEvictReboundGeneration|TestClientHubRegisterPair(ReplacesOnlySameGeneration|RejectsDifferentGenerationWithoutEviction)|TestRevokeRejectsAuthenticatedSocketRegisteringAfterCommit|TestRevokeDisconnectDoesNotCloseReboundGeneration' \
+  -count=1 -timeout=30s
+ok github.com/twinotify/relay/internal/server 0.823s
+```
+
+Required focused race stress, twenty repetitions:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache \
+  go test ./internal/server \
+  -run 'Revoke|DelayedRevokedRegistration|ClientHubRegisterPair' \
+  -race -count=20 -timeout=3m
+ok github.com/twinotify/relay/internal/server 20.874s
+```
+
+Required full package race:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache \
+  go test ./internal/store ./internal/server -race -count=1 -timeout=2m
+ok github.com/twinotify/relay/internal/store 10.580s
+ok github.com/twinotify/relay/internal/server 29.008s
+```
+
+Required root repository gate:
+
+```text
+GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache make relay-test
+?  github.com/twinotify/relay/cmd/relay [no test files]
+ok github.com/twinotify/relay/internal/server 32.565s
+ok github.com/twinotify/relay/internal/store 9.990s
+```
+
+Vet:
+
+```text
+cd relay && GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache go vet ./...
+exit 0; no output
+```
+
+Final gofmt, whitespace, scope, and committed-range checks are recorded in the
+handoff after staging.
+
+### Final constraint re-check
+
+This registration-only correction does not change retention, envelope size,
+mailbox quotas, durable acceptance, backpressure, ciphertext privacy,
+capability-floor behavior, pairing persistence, or mailbox ordering. The full
+anti-slop law was rechecked; no UI implementation is present, so its interface
+rules are not applicable.
+
+### Commit handoff status
+
+```text
+intended subject: fix(relay): isolate rebound client generations
+commit result:    blocked by the managed approval reviewer
+staged base/head: 1a8bee75cd5ddc688f75ebee84fe3944b76dfbff
+```
+
+The reviewer stated that it did not see trusted authorization for the exact
+default-branch mutation and prohibited workarounds. No retry or indirect commit
+path was attempted. The exact four-path correction remains staged for the
+primary agent, with no unstaged changes.

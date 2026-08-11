@@ -78,8 +78,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if s.webSocketBeforeRegister != nil {
 		s.webSocketBeforeRegister(deviceID, pairID)
 	}
-	client := s.clientHub.RegisterPair(deviceID, pairID, outbound)
+	client, registered := s.clientHub.registerPair(deviceID, pairID, outbound)
 	defer s.clientHub.Unregister(client)
+	if !registered {
+		return
+	}
 	if err := s.pairStore.ValidateSession(deviceID, pairID); err != nil {
 		return
 	}
