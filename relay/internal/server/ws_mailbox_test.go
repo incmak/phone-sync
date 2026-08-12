@@ -129,6 +129,16 @@ func newMailboxTestServerWithBolt(t *testing.T) (*Server, *store.Bolt) {
 	return NewWithStore(b), b
 }
 
+func openPersistentMailboxTestServer(t *testing.T, dbPath string) (*Server, *store.Bolt) {
+	t.Helper()
+	b, err := store.OpenBolt(dbPath)
+	if err != nil {
+		t.Fatalf("open persistent relay Bolt: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	return NewWithStore(b), b
+}
+
 func corruptMailboxPairFloor(t *testing.T, b *store.Bolt, encoding []byte) {
 	t.Helper()
 	if err := b.Update(func(tx *bbolt.Tx) error {
@@ -350,6 +360,60 @@ func TestWebSocketMailboxOfflineDelivery(t *testing.T) {
 	_ = reconnected.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 	if _, raw, err := reconnected.ReadMessage(); err == nil {
 		t.Fatalf("acked message was redelivered: %s", raw)
+	}
+}
+
+func TestWebSocketMailboxDeliveryAndAckSurviveRelayRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "restart-relay.db")
+	firstServer, firstBolt := openPersistentMailboxTestServer(t, dbPath)
+	pair := registerMailboxTestPair(t, firstServer)
+	firstHTTP := httptest.NewServer(firstServer.Handler())
+
+	msgID := "19111111-1111-4111-8111-111111111111"
+	envelope := validMailboxEnvelope(pair.deviceA, msgID)
+	digest := sha256.Sum256(envelope)
+	sender := dialMailboxWS(t, firstHTTP, pair.deviceA, pair.privA)
+	sendMailboxHello(t, sender)
+	writeMailboxFrame(t, sender, map[string]any{
+		"v": 2, "type": "relay.put", "envelope": envelope,
+	})
+	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" || accepted.MsgID != msgID {
+		t.Fatalf("put response = %#v, want relay.accepted for %s", accepted, msgID)
+	}
+	if err := sender.Close(); err != nil {
+		t.Fatalf("close sender: %v", err)
+	}
+	firstHTTP.Close()
+	if err := firstBolt.Close(); err != nil {
+		t.Fatalf("close first relay Bolt: %v", err)
+	}
+
+	restartedServer, restartedBolt := openPersistentMailboxTestServer(t, dbPath)
+	defer restartedBolt.Close()
+	restartedHTTP := httptest.NewServer(restartedServer.Handler())
+	defer restartedHTTP.Close()
+
+	recipient := dialMailboxWS(t, restartedHTTP, pair.deviceB, pair.privB)
+	sendMailboxHello(t, recipient)
+	delivered := readMailboxFrame(t, recipient)
+	deliveredDigest := sha256.Sum256(delivered.Envelope)
+	if delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) || deliveredDigest != digest {
+		t.Fatalf("delivery after restart = %#v, want exact durable envelope %s", delivered, envelope)
+	}
+	writeMailboxFrame(t, recipient, map[string]any{
+		"v": 2, "type": "relay.ack", "msg_id": msgID, "envelope_sha256": hex.EncodeToString(digest[:]),
+	})
+	waitForPendingCount(t, restartedServer, pair.deviceB, 0)
+	if err := recipient.Close(); err != nil {
+		t.Fatalf("close recipient: %v", err)
+	}
+
+	reconnected := dialMailboxWS(t, restartedHTTP, pair.deviceB, pair.privB)
+	defer reconnected.Close()
+	sendMailboxHello(t, reconnected)
+	_ = reconnected.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if _, raw, err := reconnected.ReadMessage(); err == nil {
+		t.Fatalf("acked post-restart envelope was redelivered: %s", raw)
 	}
 }
 

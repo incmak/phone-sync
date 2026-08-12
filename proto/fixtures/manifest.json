@@ -1,0 +1,14 @@
+{
+  "fixtures": [
+    {
+      "file": "v2-valid/relay-put.json",
+      "type": "relay_control",
+      "valid": true
+    },
+    {
+      "file": "v2-invalid/relay-ack-bad-digest.json",
+      "type": "relay_control",
+      "expected_code": "invalid_frame"
+    }
+  ]
+}
