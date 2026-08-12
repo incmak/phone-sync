@@ -19,6 +19,7 @@ class OutboundQueueTest {
         override suspend fun drain(limit: Int): List<OutboundEvent> = list.take(limit)
         override suspend fun ack(id: Long) { list.removeAll { it.id == id } }
         override suspend fun count(): Int = list.size
+        override suspend fun clearAll() { list.clear() }
         override suspend fun dropOldest(n: Int) {
             repeat(n.coerceAtMost(list.size)) { list.removeAt(0) }
         }

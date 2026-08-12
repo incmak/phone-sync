@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -30,6 +30,13 @@ relay-build: sync-proto
 
 deployment-test:
 	./deploy/assert-compose.sh
+
+mobile-verify:
+	cd mobile && npm ci
+	cd mobile && npm run typecheck
+	cd mobile && npx expo-doctor
+	cd mobile && npx expo prebuild --platform android --clean --no-install
+	cd mobile/android && ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
 
 clean:
 	rm -rf relay/internal/server/schemas relay/internal/server/fixtures bin

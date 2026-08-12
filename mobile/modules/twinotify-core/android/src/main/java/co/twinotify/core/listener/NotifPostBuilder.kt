@@ -7,6 +7,8 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.service.notification.StatusBarNotification
 import android.util.Base64
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
 import java.io.ByteArrayOutputStream
 
 data class NotifPostJson(
@@ -119,11 +121,11 @@ object NotifPostBuilder {
             is BitmapDrawable -> {
                 // Guard: createScaledBitmap may return the same reference when dimensions already match.
                 // Always own a distinct bitmap so bm.recycle() never corrupts a framework-held bitmap.
-                val scaled = Bitmap.createScaledBitmap(d.bitmap, px, px, true)
+                val scaled = d.bitmap.scale(px, px)
                 if (scaled === d.bitmap) d.bitmap.copy(d.bitmap.config ?: Bitmap.Config.ARGB_8888, false) else scaled
             }
             else -> {
-                val tmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+                val tmp = createBitmap(px, px)
                 val c = android.graphics.Canvas(tmp)
                 d.setBounds(0, 0, px, px)
                 d.draw(c)

@@ -13,6 +13,8 @@ import co.twinotify.core.storage.NotificationDb
 import kotlin.random.Random
 
 object MirrorPoster {
+    // The tap PendingIntent intentionally targets our receiver, which validates and forwards the URI.
+    @Suppress("LaunchActivityFromNotification")
     suspend fun post(ctx: Context, post: NotifPostJson) {
         NotifChannelSetup.ensureChannels(ctx)
         val localId = Random.nextInt(1, Int.MAX_VALUE)
@@ -55,8 +57,10 @@ object MirrorPoster {
             .build()
             .also { if (!post.is_clearable) it.flags = it.flags or Notification.FLAG_NO_CLEAR }
 
-        // POST_NOTIFICATIONS runtime perm (API 33+) — if missing, notify() is a no-op but no exception thrown
-        NotificationManagerCompat.from(ctx).notify(localTag, localId, nb)
+        val notificationManager = NotificationManagerCompat.from(ctx)
+        if (notificationManager.areNotificationsEnabled()) {
+            notificationManager.notify(localTag, localId, nb)
+        }
 
         val dao = NotificationDb.get(ctx).notificationMapDao()
         dao.putMirror(post.canon_id, extractOrigin(post.canon_id), localId, localTag)

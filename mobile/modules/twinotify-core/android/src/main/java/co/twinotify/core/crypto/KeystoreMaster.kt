@@ -1,6 +1,5 @@
 package co.twinotify.core.crypto
 
-import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
@@ -37,15 +36,13 @@ object KeystoreMaster {
 
         // 1) Try StrongBox (tamper-resistant element — Pixel 3+/6+, some Samsung).
         //    API 28+. Some OEMs report available but throw HARDWARE_TYPE_UNAVAILABLE at generateKey().
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            runCatching {
-                return generate(newBuilder().setIsStrongBoxBacked(true).build())
-            }.onFailure { e ->
-                Log.w(TAG, "StrongBox generation failed, trying TEE: ${e.javaClass.simpleName}: ${e.message}")
-            }
-            // Important: builder may retain setIsStrongBoxBacked(true) internally when reused.
-            // Build a FRESH builder each attempt to guarantee the fallback doesn't re-request StrongBox.
+        runCatching {
+            return generate(newBuilder().setIsStrongBoxBacked(true).build())
+        }.onFailure { e ->
+            Log.w(TAG, "StrongBox generation failed, trying TEE: ${e.javaClass.simpleName}: ${e.message}")
         }
+        // Important: builder may retain setIsStrongBoxBacked(true) internally when reused.
+        // Build a FRESH builder each attempt to guarantee the fallback doesn't re-request StrongBox.
 
         // 2) Try hardware-backed (TEE). Default for most modern Android devices.
         runCatching {

@@ -2,17 +2,14 @@
           xmlns:tools="http://schemas.android.com/tools">
 
   <uses-permission android:name="android.permission.INTERNET" />
-  <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
   <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
-                   android:usesPermissionFlags="neverForLocation"
-                   tools:targetApi="s" />
-  <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK"
-                   tools:targetApi="upside_down_cake" />
+                   android:usesPermissionFlags="neverForLocation" />
+  <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
   <application>
     <service

@@ -3,6 +3,8 @@ package co.twinotify.core
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -79,16 +81,12 @@ class TwinotifyCoreModule : Module() {
             try {
                 val ctx = requireContext()
                 ctx.getSharedPreferences("twinotify_service", Context.MODE_PRIVATE)
-                    .edit().putString("relay_url", relayUrl).apply()
+                    .edit { putString("relay_url", relayUrl) }
                 val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java).apply {
                     action = co.twinotify.core.service.SyncService.ACTION_START
                     putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, relayUrl)
                 }
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    ctx.startForegroundService(intent)
-                } else {
-                    ctx.startService(intent)
-                }
+                ctx.startForegroundService(intent)
                 promise.resolve(null)
             } catch (e: Throwable) { promise.reject("START_SVC", e.message ?: "err", e) }
         }
@@ -124,11 +122,9 @@ class TwinotifyCoreModule : Module() {
         AsyncFunction("isPostNotificationsGranted") { promise: Promise ->
             try {
                 val ctx = requireContext()
-                val granted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                    androidx.core.content.ContextCompat.checkSelfPermission(
-                        ctx, android.Manifest.permission.POST_NOTIFICATIONS
-                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                } else true
+                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                    ctx, android.Manifest.permission.POST_NOTIFICATIONS
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
                 promise.resolve(granted)
             } catch (e: Throwable) { promise.reject("POST_NOTIF", e.message ?: "err", e) }
         }
@@ -138,7 +134,7 @@ class TwinotifyCoreModule : Module() {
                 val ctx = requireContext()
                 val i = android.content.Intent(
                     android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    android.net.Uri.parse("package:${ctx.packageName}")
+                    "package:${ctx.packageName}".toUri()
                 ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                 ctx.startActivity(i)
                 promise.resolve(null)
