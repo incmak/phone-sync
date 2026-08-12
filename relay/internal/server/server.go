@@ -1,9 +1,12 @@
 package server
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,6 +26,10 @@ type Server struct {
 	now                 func() time.Time
 	maintenanceInterval time.Duration
 	trustProxyHeaders   bool
+	mailboxExpiryBatch  int
+	statusExpiryBatch   int
+	maintenanceMu       sync.Mutex
+	maintenanceDone     chan struct{}
 
 	// relayHelloBeforeActivate is a deterministic test seam around the
 	// drain-to-live handoff. Production constructors leave it nil.
@@ -34,6 +41,7 @@ type Server struct {
 	revokeAfterCommit           func(pairID string)
 	relayPutBeforeStore         func(deviceID, pairID, msgID string)
 	relayAckBeforeStore         func(deviceID, pairID, msgID string)
+	maintenanceBeforeUnit       func(unit string)
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -54,7 +62,10 @@ type Config struct {
 	MailboxLimits       store.MailboxLimits
 	PendingPairLimits   store.PendingPairLimits
 	PairingRateLimits   PairingRateLimitConfig
+	JTI                 JTICacheConfig
 	MaintenanceInterval time.Duration
+	MailboxExpiryBatch  int
+	StatusExpiryBatch   int
 	TrustProxyHeaders   bool
 	Now                 func() time.Time
 }
@@ -65,27 +76,49 @@ func DefaultConfig() Config {
 		PendingPairLimits: store.DefaultPendingPairLimits(),
 		PairingRateLimits: PairingRateLimitConfig{
 			IPBurst: 60, TokenBurst: 30, RefillInterval: time.Second, IdleTTL: 10 * time.Minute,
+			MaxEntries: 10_000, CleanupBatch: 256,
 		},
+		JTI:                 JTICacheConfig{TTL: 60 * time.Second, MaxEntries: 100_000, CleanupBatch: 256},
 		MaintenanceInterval: time.Minute,
+		MailboxExpiryBatch:  256,
+		StatusExpiryBatch:   256,
 		Now:                 time.Now,
 	}
 }
 
 func NewWithConfig(b *store.Bolt, config Config) *Server {
-	if config.Now == nil || config.MaintenanceInterval <= 0 {
-		panic("invalid server config")
+	s, err := NewWithConfigChecked(b, config)
+	if err != nil {
+		panic(fmt.Sprintf("initialize relay server: %v", err))
+	}
+	return s
+}
+
+// NewWithConfigChecked is the production initialization path. Persisted index
+// corruption and configuration mismatches are returned to the caller so normal
+// startup can fail closed without a constructor panic.
+func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
+	if config.Now == nil || config.MaintenanceInterval <= 0 || config.MailboxExpiryBatch <= 0 || config.StatusExpiryBatch <= 0 {
+		return nil, errors.New("invalid server config")
 	}
 	v, err := NewValidator()
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	mailbox := store.NewMailboxStore(b, config.MailboxLimits)
+	pairStore, err := store.OpenPairStoreWithLimits(b, config.PendingPairLimits)
+	if err != nil {
+		return nil, err
+	}
+	mailbox, err := store.OpenMailboxStore(b, config.MailboxLimits)
+	if err != nil {
+		return nil, err
+	}
 	clientHub := NewClientHubWithMailboxLimits(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes)
 	s := &Server{
 		router:              chi.NewRouter(),
 		validator:           v,
-		pairStore:           store.NewPairStoreWithLimits(b, config.PendingPairLimits),
-		jtiCache:            NewJTICache(60 * time.Second),
+		pairStore:           pairStore,
+		jtiCache:            NewJTICacheWithConfig(config.JTI),
 		pairHub:             NewPairHub(),
 		clientHub:           clientHub,
 		mailbox:             mailbox,
@@ -94,10 +127,12 @@ func NewWithConfig(b *store.Bolt, config Config) *Server {
 		now:                 config.Now,
 		maintenanceInterval: config.MaintenanceInterval,
 		trustProxyHeaders:   config.TrustProxyHeaders,
+		mailboxExpiryBatch:  config.MailboxExpiryBatch,
+		statusExpiryBatch:   config.StatusExpiryBatch,
 	}
 	clientHub.SetHandoffResolver(s.transferHandoffFrames)
 	s.routes()
-	return s
+	return s, nil
 }
 
 // New is a convenience wrapper that opens BOLT_PATH (or a default) and calls NewWithStore.

@@ -2,9 +2,12 @@ package server
 
 import (
 	"crypto/ed25519"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +16,48 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/twinotify/relay/internal/store"
 )
+
+func TestJTICacheBudgetFailsClosedAndCleanupIsBatched(t *testing.T) {
+	now := time.Unix(5000, 0)
+	cache := NewJTICacheWithConfig(JTICacheConfig{TTL: time.Minute, MaxEntries: 3, CleanupBatch: 1})
+	for _, jti := range []string{"a", "b", "c"} {
+		if err := cache.CheckAndSet(jti, now); err != nil {
+			t.Fatalf("admit %s: %v", jti, err)
+		}
+	}
+	if err := cache.CheckAndSet("overflow", now); !errors.Is(err, ErrJTICapacity) {
+		t.Fatalf("overflow error = %v, want ErrJTICapacity", err)
+	}
+	if got := cache.EntryCount(); got != 3 {
+		t.Fatalf("JTI cardinality = %d, want 3", got)
+	}
+	if err := cache.CheckAndSet("a", now); !errors.Is(err, ErrJTIReplay) {
+		t.Fatalf("existing JTI after overflow = %v, want replay", err)
+	}
+	if inspected := cache.Cleanup(now.Add(2*time.Minute + time.Nanosecond)); inspected != 1 {
+		t.Fatalf("cleanup inspected = %d, want 1", inspected)
+	}
+	if got := cache.EntryCount(); got != 2 {
+		t.Fatalf("JTI cardinality after batch = %d, want 2", got)
+	}
+}
+
+func TestJTICacheConcurrentUniqueFloodNeverExceedsBudget(t *testing.T) {
+	cache := NewJTICacheWithConfig(JTICacheConfig{TTL: time.Minute, MaxEntries: 16, CleanupBatch: 2})
+	now := time.Unix(5100, 0)
+	var wg sync.WaitGroup
+	for index := 0; index < 128; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_ = cache.CheckAndSet(fmt.Sprintf("jti-%d", index), now)
+		}(index)
+	}
+	wg.Wait()
+	if got := cache.EntryCount(); got != 16 {
+		t.Fatalf("JTI cardinality after flood = %d, want 16", got)
+	}
+}
 
 // registerPair puts a confirmed pair directly into the PairStore and returns
 // device A's id + its Ed25519 private key for JWT minting in tests.

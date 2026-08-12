@@ -1,6 +1,7 @@
 package server
 
 import (
+	"container/list"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -12,19 +13,40 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+var ErrJTIReplay = errors.New("jti replay")
+var ErrJTICapacity = errors.New("jti cache capacity reached")
+
+type JTICacheConfig struct {
+	TTL          time.Duration
+	MaxEntries   int
+	CleanupBatch int
+}
+
+type jtiEntry struct {
+	jti    string
+	seenAt time.Time
+}
+
 // JTICache tracks seen JWT IDs to prevent replay attacks.
 // Entries are retained for 2*ttl so the cache outlives the matching JWT's
 // exp window, closing the gap between a GC sweep and JWT expiry.
 type JTICache struct {
 	mu     sync.Mutex
-	seen   map[string]time.Time
-	ttl    time.Duration
-	lastGC time.Time
+	seen   map[string]*list.Element
+	oldest *list.List
+	config JTICacheConfig
 }
 
 // NewJTICache creates a JTICache with the given retention TTL.
 func NewJTICache(ttl time.Duration) *JTICache {
-	return &JTICache{seen: make(map[string]time.Time), ttl: ttl}
+	return NewJTICacheWithConfig(JTICacheConfig{TTL: ttl, MaxEntries: 100_000, CleanupBatch: 256})
+}
+
+func NewJTICacheWithConfig(config JTICacheConfig) *JTICache {
+	if config.TTL <= 0 || config.MaxEntries <= 0 || config.CleanupBatch <= 0 {
+		panic("invalid JTI cache config")
+	}
+	return &JTICache{seen: make(map[string]*list.Element), oldest: list.New(), config: config}
 }
 
 // CheckAndSet records jti or returns an error if already seen within 2*ttl.
@@ -32,30 +54,47 @@ func (c *JTICache) CheckAndSet(jti string, now time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if now.Sub(c.lastGC) > c.ttl {
-		for k, t := range c.seen {
-			if now.Sub(t) > 2*c.ttl {
-				delete(c.seen, k)
-			}
+	if element, ok := c.seen[jti]; ok {
+		entry := element.Value.(*jtiEntry)
+		if now.Sub(entry.seenAt) <= 2*c.config.TTL {
+			return ErrJTIReplay
 		}
-		c.lastGC = now
+		delete(c.seen, jti)
+		c.oldest.Remove(element)
 	}
-	if _, ok := c.seen[jti]; ok {
-		return errors.New("jti replay")
+	if len(c.seen) >= c.config.MaxEntries {
+		return ErrJTICapacity
 	}
-	c.seen[jti] = now
+	c.seen[jti] = c.oldest.PushBack(&jtiEntry{jti: jti, seenAt: now})
 	return nil
 }
 
-func (c *JTICache) Cleanup(now time.Time) {
+func (c *JTICache) Cleanup(now time.Time) int {
+	inspected := 0
+	for inspected < c.config.CleanupBatch {
+		c.mu.Lock()
+		element := c.oldest.Front()
+		if element == nil {
+			c.mu.Unlock()
+			break
+		}
+		entry := element.Value.(*jtiEntry)
+		inspected++
+		if now.Sub(entry.seenAt) <= 2*c.config.TTL {
+			c.mu.Unlock()
+			break
+		}
+		delete(c.seen, entry.jti)
+		c.oldest.Remove(element)
+		c.mu.Unlock()
+	}
+	return inspected
+}
+
+func (c *JTICache) EntryCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for jti, seenAt := range c.seen {
-		if now.Sub(seenAt) > 2*c.ttl {
-			delete(c.seen, jti)
-		}
-	}
-	c.lastGC = now
+	return len(c.seen)
 }
 
 type ctxKey string

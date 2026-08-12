@@ -31,10 +31,13 @@ const (
 	bucketMailboxExpiryCursor      = "mailbox_expiry_cursor"
 	bucketMailboxMeta              = "mailbox_meta"
 	bucketMailboxSequence          = "mailbox_sequence"
+	bucketMailboxItemExpiry        = "mailbox_item_expiry"
+	bucketMailboxStatusExpiry      = "mailbox_status_expiry"
 	statusRetention                = 24 * time.Hour
 )
 
 var statusIndexesVersionKey = []byte("status_indexes_v2")
+var maintenanceExpiryIndexesVersionKey = []byte("maintenance_expiry_indexes_v1")
 
 type MailboxLimits struct {
 	MaxItems  int
@@ -92,7 +95,23 @@ type MailboxStore struct {
 }
 
 func NewMailboxStore(b *Bolt, limits MailboxLimits) *MailboxStore {
-	return &MailboxStore{bolt: b, limits: limits}
+	store, err := OpenMailboxStore(b, limits)
+	if err != nil {
+		panic(fmt.Sprintf("migrate mailbox expiry indexes: %v", err))
+	}
+	return store
+}
+
+func OpenMailboxStore(b *Bolt, limits MailboxLimits) (*MailboxStore, error) {
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		if err := migrateMaintenanceExpiryIndexesTx(tx); err != nil {
+			return err
+		}
+		return validateMaintenanceExpiryIndexesTx(tx)
+	}); err != nil {
+		return nil, fmt.Errorf("migrate mailbox expiry indexes: %w", err)
+	}
+	return &MailboxStore{bolt: b, limits: limits}, nil
 }
 
 func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) {
@@ -140,6 +159,9 @@ func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now 
 			if stored.SenderDevice != rec.SenderDevice || subtle.ConstantTimeCompare(storedDigest, digest) != 1 {
 				return ErrMessageIDConflict
 			}
+			if err := requireMaintenanceExpiryEntry(tx.Bucket([]byte(bucketMailboxItemExpiry)), stored.ExpiresAt, key); err != nil {
+				return err
+			}
 			result.AcceptedAt = stored.AcceptedAt
 			result.AcceptanceSequence = stored.AcceptanceSequence
 			result.Duplicate = true
@@ -152,6 +174,10 @@ func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now 
 		if terminalFound {
 			if status.ExpiresAt <= now.UnixMilli() {
 				if err := statuses.Delete(terminalKey); err != nil {
+					return err
+				}
+				statusExpiry := tx.Bucket([]byte(bucketMailboxStatusExpiry))
+				if err := deleteMaintenanceExpiryEntry(statusExpiry, status.ExpiresAt, terminalKey); err != nil {
 					return err
 				}
 				if err := statusesByRecipient.Delete(itemKey(rec.RecipientDevice, rec.MsgID)); err != nil {
@@ -196,6 +222,13 @@ func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now 
 			return fmt.Errorf("marshal mailbox record: %w", err)
 		}
 		if err := items.Put(key, encoded); err != nil {
+			return err
+		}
+		itemExpiry := tx.Bucket([]byte(bucketMailboxItemExpiry))
+		if itemExpiry == nil {
+			return errors.New("missing mailbox expiry index")
+		}
+		if err := itemExpiry.Put(maintenanceExpiryKey(rec.ExpiresAt, key), key); err != nil {
 			return err
 		}
 		if err := order.Put(orderKey(rec.RecipientDevice, rec.AcceptanceSequence, rec.MsgID), nil); err != nil {
@@ -422,6 +455,14 @@ func (s *MailboxStore) ackForPair(expectedPairID, recipient, msgID, digest strin
 		if err := items.Delete(itemKey(recipient, msgID)); err != nil {
 			return err
 		}
+		itemExpiry := tx.Bucket([]byte(bucketMailboxItemExpiry))
+		statusExpiry := tx.Bucket([]byte(bucketMailboxStatusExpiry))
+		if itemExpiry == nil || statusExpiry == nil {
+			return errors.New("missing mailbox maintenance expiry index")
+		}
+		if err := deleteMaintenanceExpiryEntry(itemExpiry, rec.ExpiresAt, itemKey(recipient, msgID)); err != nil {
+			return err
+		}
 		if err := order.Delete(orderKey(recipient, mailboxOrderValue(rec), msgID)); err != nil {
 			return err
 		}
@@ -430,6 +471,9 @@ func (s *MailboxStore) ackForPair(expectedPairID, recipient, msgID, digest strin
 		}
 		canonicalKey := statusKey(rec.SenderDevice, rec.MsgID)
 		if err := statuses.Put(canonicalKey, statusRaw); err != nil {
+			return err
+		}
+		if err := statusExpiry.Put(maintenanceExpiryKey(status.ExpiresAt, canonicalKey), canonicalKey); err != nil {
 			return err
 		}
 		if err := statusesByRecipient.Put(itemKey(rec.RecipientDevice, rec.MsgID), canonicalKey); err != nil {
@@ -465,25 +509,38 @@ func authorizePairDevicesTx(tx *bbolt.Tx, expectedPairID, deviceID, peerID strin
 }
 
 func (s *MailboxStore) Expire(now time.Time) ([]ExpiredRecord, error) {
-	return s.expireForPair("", "", now)
+	all := []ExpiredRecord{}
+	for {
+		batch, err := s.ExpireBatch(now, 1024)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, batch...)
+		if len(batch) < 1024 {
+			return all, nil
+		}
+	}
 }
 
 func (s *MailboxStore) ExpireForPair(pairID, deviceID string, now time.Time) ([]ExpiredRecord, error) {
 	if pairID == "" || deviceID == "" || strings.ContainsRune(deviceID, '\x00') {
 		return nil, errors.New("invalid pair session")
 	}
-	return s.expireForPair(pairID, deviceID, now)
+	if err := s.bolt.View(func(tx *bbolt.Tx) error {
+		_, err := authorizePairDeviceTx(tx, pairID, deviceID)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return s.ExpireBatch(now, 256)
 }
 
-func (s *MailboxStore) expireForPair(expectedPairID, deviceID string, now time.Time) ([]ExpiredRecord, error) {
-	expired := []ExpiredRecord{}
-	nowMillis := now.UnixMilli()
+func (s *MailboxStore) ExpireBatch(now time.Time, limit int) ([]ExpiredRecord, error) {
+	if limit <= 0 {
+		return []ExpiredRecord{}, nil
+	}
+	expired := make([]ExpiredRecord, 0, limit)
 	err := s.bolt.Update(func(tx *bbolt.Tx) error {
-		if expectedPairID != "" {
-			if _, err := authorizePairDeviceTx(tx, expectedPairID, deviceID); err != nil {
-				return err
-			}
-		}
 		items, order, stats, statuses, err := mailboxBuckets(tx)
 		if err != nil {
 			return err
@@ -492,60 +549,72 @@ func (s *MailboxStore) expireForPair(expectedPairID, deviceID string, now time.T
 		if err != nil {
 			return err
 		}
-		cursor := items.Cursor()
-		for key, raw := cursor.First(); key != nil; {
-			nextKey, nextRaw := cursor.Next()
+		itemExpiry := tx.Bucket([]byte(bucketMailboxItemExpiry))
+		statusExpiry := tx.Bucket([]byte(bucketMailboxStatusExpiry))
+		if itemExpiry == nil || statusExpiry == nil {
+			return errors.New("missing mailbox maintenance expiry index")
+		}
+		for len(expired) < limit {
+			indexKey, canonicalKey := itemExpiry.Cursor().First()
+			if indexKey == nil {
+				break
+			}
+			expiresAt, err := maintenanceExpiryTime(indexKey)
+			if err != nil {
+				return err
+			}
+			if expiresAt > now.UnixMilli() {
+				break
+			}
+			canonicalKey = append([]byte(nil), canonicalKey...)
+			raw := items.Get(canonicalKey)
+			if raw == nil {
+				return errors.New("mailbox expiry index points to missing item")
+			}
 			var rec MailboxRecord
 			if err := json.Unmarshal(raw, &rec); err != nil {
 				return fmt.Errorf("unmarshal mailbox item: %w", err)
 			}
-			if rec.ExpiresAt <= nowMillis {
-				count, bytes := readMailboxStats(stats.Get([]byte(rec.RecipientDevice)))
-				if count == 0 || bytes < rec.ByteSize {
-					return errors.New("invalid mailbox statistics")
-				}
-				status := DeliveryStatus{
-					SenderDevice:     rec.SenderDevice,
-					RecipientDevice:  rec.RecipientDevice,
-					MsgID:            rec.MsgID,
-					Status:           "expired",
-					OccurredAt:       rec.ExpiresAt,
-					ExpiresAt:        now.Add(statusRetention).UnixMilli(),
-					EnvelopeSHA256:   rec.EnvelopeSHA256,
-					AcceptedAt:       rec.AcceptedAt,
-					MailboxExpiresAt: rec.ExpiresAt,
-				}
-				statusRaw, err := json.Marshal(status)
-				if err != nil {
-					return fmt.Errorf("marshal delivery status: %w", err)
-				}
-				if err := items.Delete(key); err != nil {
-					return err
-				}
-				if err := order.Delete(orderKey(rec.RecipientDevice, mailboxOrderValue(rec), rec.MsgID)); err != nil {
-					return err
-				}
-				if err := stats.Put([]byte(rec.RecipientDevice), encodeMailboxStats(count-1, bytes-rec.ByteSize)); err != nil {
-					return err
-				}
-				canonicalKey := statusKey(rec.SenderDevice, rec.MsgID)
-				if err := statuses.Put(canonicalKey, statusRaw); err != nil {
-					return err
-				}
-				if err := statusesByRecipient.Put(itemKey(rec.RecipientDevice, rec.MsgID), canonicalKey); err != nil {
-					return err
-				}
-				if err := expiryPending.Put(expiryStatusKey(rec.SenderDevice, rec.RecipientDevice, rec.MsgID), canonicalKey); err != nil {
-					return err
-				}
-				expired = append(expired, ExpiredRecord{
-					SenderDevice:    rec.SenderDevice,
-					RecipientDevice: rec.RecipientDevice,
-					MsgID:           rec.MsgID,
-					ExpiredAt:       rec.ExpiresAt,
-				})
+			if rec.ExpiresAt != expiresAt || !bytes.Equal(canonicalKey, itemKey(rec.RecipientDevice, rec.MsgID)) {
+				return errors.New("mailbox expiry index identity mismatch")
 			}
-			key, raw = nextKey, nextRaw
+			count, byteCount := readMailboxStats(stats.Get([]byte(rec.RecipientDevice)))
+			if count == 0 || byteCount < rec.ByteSize {
+				return errors.New("invalid mailbox statistics")
+			}
+			status := DeliveryStatus{SenderDevice: rec.SenderDevice, RecipientDevice: rec.RecipientDevice, MsgID: rec.MsgID,
+				Status: "expired", OccurredAt: rec.ExpiresAt, ExpiresAt: now.Add(statusRetention).UnixMilli(),
+				EnvelopeSHA256: rec.EnvelopeSHA256, AcceptedAt: rec.AcceptedAt, MailboxExpiresAt: rec.ExpiresAt}
+			statusRaw, err := json.Marshal(status)
+			if err != nil {
+				return err
+			}
+			if err := items.Delete(canonicalKey); err != nil {
+				return err
+			}
+			if err := itemExpiry.Delete(indexKey); err != nil {
+				return err
+			}
+			if err := order.Delete(orderKey(rec.RecipientDevice, mailboxOrderValue(rec), rec.MsgID)); err != nil {
+				return err
+			}
+			if err := stats.Put([]byte(rec.RecipientDevice), encodeMailboxStats(count-1, byteCount-rec.ByteSize)); err != nil {
+				return err
+			}
+			statusCanonicalKey := statusKey(rec.SenderDevice, rec.MsgID)
+			if err := statuses.Put(statusCanonicalKey, statusRaw); err != nil {
+				return err
+			}
+			if err := statusesByRecipient.Put(itemKey(rec.RecipientDevice, rec.MsgID), statusCanonicalKey); err != nil {
+				return err
+			}
+			if err := expiryPending.Put(expiryStatusKey(rec.SenderDevice, rec.RecipientDevice, rec.MsgID), statusCanonicalKey); err != nil {
+				return err
+			}
+			if err := statusExpiry.Put(maintenanceExpiryKey(status.ExpiresAt, statusCanonicalKey), statusCanonicalKey); err != nil {
+				return err
+			}
+			expired = append(expired, ExpiredRecord{SenderDevice: rec.SenderDevice, RecipientDevice: rec.RecipientDevice, MsgID: rec.MsgID, ExpiredAt: rec.ExpiresAt})
 		}
 		return nil
 	})
@@ -553,7 +622,23 @@ func (s *MailboxStore) expireForPair(expectedPairID, deviceID string, now time.T
 }
 
 func (s *MailboxStore) ExpireStatuses(now time.Time) error {
-	return s.bolt.Update(func(tx *bbolt.Tx) error {
+	for {
+		removed, err := s.ExpireStatusesBatch(now, 1024)
+		if err != nil {
+			return err
+		}
+		if removed < 1024 {
+			return nil
+		}
+	}
+}
+
+func (s *MailboxStore) ExpireStatusesBatch(now time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	removed := 0
+	err := s.bolt.Update(func(tx *bbolt.Tx) error {
 		statuses := tx.Bucket([]byte(bucketMailboxStatus))
 		if statuses == nil {
 			return nil
@@ -562,31 +647,54 @@ func (s *MailboxStore) ExpireStatuses(now time.Time) error {
 		if err != nil {
 			return err
 		}
-		cursor := statuses.Cursor()
-		for key, raw := cursor.First(); key != nil; {
-			nextKey, nextRaw := cursor.Next()
+		statusExpiry := tx.Bucket([]byte(bucketMailboxStatusExpiry))
+		if statusExpiry == nil {
+			return errors.New("missing delivery status expiry index")
+		}
+		for removed < limit {
+			indexKey, key := statusExpiry.Cursor().First()
+			if indexKey == nil {
+				break
+			}
+			expiresAt, err := maintenanceExpiryTime(indexKey)
+			if err != nil {
+				return err
+			}
+			if expiresAt > now.UnixMilli() {
+				break
+			}
+			key = append([]byte(nil), key...)
+			raw := statuses.Get(key)
+			if raw == nil {
+				return errors.New("status expiry index points to missing status")
+			}
 			var status DeliveryStatus
 			if err := json.Unmarshal(raw, &status); err != nil {
 				return fmt.Errorf("unmarshal delivery status: %w", err)
 			}
-			if status.ExpiresAt <= now.UnixMilli() {
-				if err := statuses.Delete(key); err != nil {
-					return err
-				}
-				if err := statusesByRecipient.Delete(itemKey(status.RecipientDevice, status.MsgID)); err != nil {
-					return err
-				}
-				if err := expiryPending.Delete(expiryStatusKey(status.SenderDevice, status.RecipientDevice, status.MsgID)); err != nil {
-					return err
-				}
-				if err := deleteExpiryCursorIfMatches(expiryCursors, status.SenderDevice, status.RecipientDevice, status.MsgID); err != nil {
-					return err
-				}
+			if status.ExpiresAt != expiresAt || !bytes.Equal(key, statusKey(status.SenderDevice, status.MsgID)) {
+				return errors.New("status expiry index identity mismatch")
 			}
-			key, raw = nextKey, nextRaw
+			if err := statuses.Delete(key); err != nil {
+				return err
+			}
+			if err := statusesByRecipient.Delete(itemKey(status.RecipientDevice, status.MsgID)); err != nil {
+				return err
+			}
+			if err := expiryPending.Delete(expiryStatusKey(status.SenderDevice, status.RecipientDevice, status.MsgID)); err != nil {
+				return err
+			}
+			if err := deleteExpiryCursorIfMatches(expiryCursors, status.SenderDevice, status.RecipientDevice, status.MsgID); err != nil {
+				return err
+			}
+			if err := statusExpiry.Delete(indexKey); err != nil {
+				return err
+			}
+			removed++
 		}
 		return nil
 	})
+	return removed, err
 }
 
 func (s *MailboxStore) Statuses(sender string, since time.Time) ([]DeliveryStatus, error) {
@@ -708,6 +816,10 @@ func (s *MailboxStore) expiryStatusesForPair(expectedPairID, sender, recipient s
 				if err := pending.Delete(key); err != nil {
 					return err
 				}
+				statusExpiry := tx.Bucket([]byte(bucketMailboxStatusExpiry))
+				if err := deleteMaintenanceExpiryEntry(statusExpiry, status.ExpiresAt, canonicalKey); err != nil {
+					return err
+				}
 				if err := deleteExpiryCursorIfMatches(cursors, status.SenderDevice, status.RecipientDevice, status.MsgID); err != nil {
 					return err
 				}
@@ -784,6 +896,8 @@ func purgePairTx(tx *bbolt.Tx, deviceA, deviceB string) error {
 	statuses := tx.Bucket([]byte(bucketMailboxStatus))
 	sequences := tx.Bucket([]byte(bucketMailboxSequence))
 	expiryCursors := tx.Bucket([]byte(bucketMailboxExpiryCursor))
+	itemExpiry := tx.Bucket([]byte(bucketMailboxItemExpiry))
+	statusExpiry := tx.Bucket([]byte(bucketMailboxStatusExpiry))
 	var statusesByRecipient, expiryPending *bbolt.Bucket
 	if statuses != nil {
 		var err error
@@ -811,6 +925,9 @@ func purgePairTx(tx *bbolt.Tx, deviceA, deviceB string) error {
 						if err := order.Delete(orderKey(recipient, mailboxOrderValue(rec), rec.MsgID)); err != nil {
 							return err
 						}
+					}
+					if err := deleteMaintenanceExpiryEntry(itemExpiry, rec.ExpiresAt, key); err != nil {
+						return err
 					}
 					removedCount++
 					removedBytes += rec.ByteSize
@@ -858,6 +975,9 @@ func purgePairTx(tx *bbolt.Tx, deviceA, deviceB string) error {
 						return err
 					}
 					if err := expiryPending.Delete(expiryStatusKey(status.SenderDevice, status.RecipientDevice, status.MsgID)); err != nil {
+						return err
+					}
+					if err := deleteMaintenanceExpiryEntry(statusExpiry, status.ExpiresAt, key); err != nil {
 						return err
 					}
 				}
@@ -1002,6 +1122,157 @@ func mailboxStatusIndexes(tx *bbolt.Tx, statuses *bbolt.Bucket) (statusesByRecip
 		return nil, nil, nil, err
 	}
 	return statusesByRecipient, expiryPending, expiryCursors, nil
+}
+
+func migrateMaintenanceExpiryIndexesTx(tx *bbolt.Tx) error {
+	meta, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxMeta))
+	if err != nil {
+		return err
+	}
+	if meta.Get(maintenanceExpiryIndexesVersionKey) != nil {
+		return nil
+	}
+	itemExpiry, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxItemExpiry))
+	if err != nil {
+		return err
+	}
+	statusExpiry, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxStatusExpiry))
+	if err != nil {
+		return err
+	}
+	if items := tx.Bucket([]byte(bucketMailboxItems)); items != nil {
+		if err := items.ForEach(func(key, raw []byte) error {
+			var rec MailboxRecord
+			if err := json.Unmarshal(raw, &rec); err != nil {
+				return fmt.Errorf("migrate mailbox expiry: %w", err)
+			}
+			return itemExpiry.Put(maintenanceExpiryKey(rec.ExpiresAt, key), key)
+		}); err != nil {
+			return err
+		}
+	}
+	if statuses := tx.Bucket([]byte(bucketMailboxStatus)); statuses != nil {
+		if err := statuses.ForEach(func(key, raw []byte) error {
+			var status DeliveryStatus
+			if err := json.Unmarshal(raw, &status); err != nil {
+				return fmt.Errorf("migrate status expiry: %w", err)
+			}
+			return statusExpiry.Put(maintenanceExpiryKey(status.ExpiresAt, key), key)
+		}); err != nil {
+			return err
+		}
+	}
+	return meta.Put(maintenanceExpiryIndexesVersionKey, []byte{1})
+}
+
+func validateMaintenanceExpiryIndexesTx(tx *bbolt.Tx) error {
+	meta := tx.Bucket([]byte(bucketMailboxMeta))
+	if meta == nil || !bytes.Equal(meta.Get(maintenanceExpiryIndexesVersionKey), []byte{1}) {
+		return errors.New("invalid mailbox maintenance expiry marker")
+	}
+	checks := []struct {
+		recordBucket string
+		indexBucket  string
+		decode       func([]byte) (int64, []byte, error)
+	}{
+		{
+			recordBucket: bucketMailboxItems,
+			indexBucket:  bucketMailboxItemExpiry,
+			decode: func(raw []byte) (int64, []byte, error) {
+				var rec MailboxRecord
+				if err := json.Unmarshal(raw, &rec); err != nil {
+					return 0, nil, err
+				}
+				return rec.ExpiresAt, itemKey(rec.RecipientDevice, rec.MsgID), nil
+			},
+		},
+		{
+			recordBucket: bucketMailboxStatus,
+			indexBucket:  bucketMailboxStatusExpiry,
+			decode: func(raw []byte) (int64, []byte, error) {
+				var status DeliveryStatus
+				if err := json.Unmarshal(raw, &status); err != nil {
+					return 0, nil, err
+				}
+				return status.ExpiresAt, statusKey(status.SenderDevice, status.MsgID), nil
+			},
+		},
+	}
+	for _, check := range checks {
+		records := tx.Bucket([]byte(check.recordBucket))
+		index := tx.Bucket([]byte(check.indexBucket))
+		if index == nil {
+			return fmt.Errorf("missing %s", check.indexBucket)
+		}
+		var recordCount, indexCount uint64
+		if records != nil {
+			if err := records.ForEach(func(key, raw []byte) error {
+				expiresAt, canonicalKey, err := check.decode(raw)
+				if err != nil {
+					return fmt.Errorf("decode %s: %w", check.recordBucket, err)
+				}
+				if !bytes.Equal(key, canonicalKey) || !bytes.Equal(index.Get(maintenanceExpiryKey(expiresAt, key)), key) {
+					return fmt.Errorf("missing reciprocal %s entry", check.indexBucket)
+				}
+				recordCount++
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		if err := index.ForEach(func(indexKey, canonicalKey []byte) error {
+			if len(indexKey) < 9 || indexKey[8] != 0 || !bytes.Equal(indexKey[9:], canonicalKey) || records == nil {
+				return fmt.Errorf("malformed or orphan %s entry", check.indexBucket)
+			}
+			raw := records.Get(canonicalKey)
+			if raw == nil {
+				return fmt.Errorf("orphan %s entry", check.indexBucket)
+			}
+			expiresAt, decodedKey, err := check.decode(raw)
+			if err != nil {
+				return fmt.Errorf("decode %s: %w", check.recordBucket, err)
+			}
+			if !bytes.Equal(decodedKey, canonicalKey) || !bytes.Equal(indexKey, maintenanceExpiryKey(expiresAt, canonicalKey)) {
+				return fmt.Errorf("mismatched %s entry", check.indexBucket)
+			}
+			indexCount++
+			return nil
+		}); err != nil {
+			return err
+		}
+		if indexCount != recordCount {
+			return fmt.Errorf("%s count %d, records %d", check.indexBucket, indexCount, recordCount)
+		}
+	}
+	return nil
+}
+
+func requireMaintenanceExpiryEntry(bucket *bbolt.Bucket, expiresAt int64, canonicalKey []byte) error {
+	if bucket == nil || !bytes.Equal(bucket.Get(maintenanceExpiryKey(expiresAt, canonicalKey)), canonicalKey) {
+		return errors.New("missing reciprocal mailbox maintenance expiry entry")
+	}
+	return nil
+}
+
+func deleteMaintenanceExpiryEntry(bucket *bbolt.Bucket, expiresAt int64, canonicalKey []byte) error {
+	if err := requireMaintenanceExpiryEntry(bucket, expiresAt, canonicalKey); err != nil {
+		return err
+	}
+	return bucket.Delete(maintenanceExpiryKey(expiresAt, canonicalKey))
+}
+
+func maintenanceExpiryKey(expiresAt int64, canonicalKey []byte) []byte {
+	key := make([]byte, 9+len(canonicalKey))
+	binary.BigEndian.PutUint64(key[:8], uint64(expiresAt))
+	copy(key[9:], canonicalKey)
+	return key
+}
+
+func maintenanceExpiryTime(key []byte) (int64, error) {
+	if len(key) < 9 {
+		return 0, errors.New("malformed maintenance expiry key")
+	}
+	return int64(binary.BigEndian.Uint64(key[:8])), nil
 }
 
 func mailboxBuckets(tx *bbolt.Tx) (items, order, stats, statuses *bbolt.Bucket, err error) {

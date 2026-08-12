@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -896,6 +897,305 @@ func TestMailboxExpireStatusesRemovesOnlyExpiredTombstones(t *testing.T) {
 	}
 }
 
+func TestMailboxExpiryMaintenanceUsesDedicatedBoundedIndexes(t *testing.T) {
+	b := openTestBolt(t)
+	limits := DefaultMailboxLimits()
+	limits.Retention = time.Hour
+	s := NewMailboxStore(b, limits)
+	now := time.UnixMilli(10_000)
+	records := []MailboxRecord{
+		testMailboxRecord("11111111-1111-4111-8111-111111111111", "1"),
+		testMailboxRecord("22222222-2222-4222-8222-222222222222", "2"),
+		testMailboxRecord("33333333-3333-4333-8333-333333333333", "3"),
+	}
+	for _, rec := range records {
+		if _, err := s.Put(rec, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := mailboxBucketEntryCount(t, b, bucketMailboxItemExpiry); got != 3 {
+		t.Fatalf("live expiry index entries = %d, want 3", got)
+	}
+	expired, err := s.ExpireBatch(now.Add(time.Hour), 2)
+	if err != nil || len(expired) != 2 {
+		t.Fatalf("first live expiry batch = %#v, %v; want 2", expired, err)
+	}
+	if got := mailboxBucketEntryCount(t, b, bucketMailboxItemExpiry); got != 1 {
+		t.Fatalf("live expiry index after batch = %d, want 1", got)
+	}
+	if got := mailboxBucketEntryCount(t, b, bucketMailboxStatusExpiry); got != 2 {
+		t.Fatalf("status expiry index after live expiry = %d, want 2", got)
+	}
+	if err := s.Ack(records[2].RecipientDevice, records[2].MsgID, records[2].EnvelopeSHA256, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := mailboxBucketEntryCount(t, b, bucketMailboxItemExpiry); got != 0 {
+		t.Fatalf("ACK left live expiry index entries = %d", got)
+	}
+	if got := mailboxBucketEntryCount(t, b, bucketMailboxStatusExpiry); got != 3 {
+		t.Fatalf("status expiry index after ACK = %d, want 3", got)
+	}
+	removed, err := s.ExpireStatusesBatch(now.Add(25*time.Hour), 2)
+	if err != nil || removed != 2 {
+		t.Fatalf("first status expiry batch = %d, %v; want 2", removed, err)
+	}
+	if got := mailboxBucketEntryCount(t, b, bucketMailboxStatusExpiry); got != 1 {
+		t.Fatalf("status expiry index after batch = %d, want 1", got)
+	}
+	assertMaintenanceExpiryIndexesExact(t, b)
+}
+
+func TestMailboxMaintenanceExpiryIndexesSurviveMigrationReopenRollbackAndPurge(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "maintenance-index.db")
+	b, err := OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := DefaultMailboxLimits()
+	s, err := OpenMailboxStore(b, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.UnixMilli(1000)
+	acked := testMailboxRecord("11111111-1111-4111-8111-111111111111", "a")
+	live := testMailboxRecord("22222222-2222-4222-8222-222222222222", "b")
+	for _, rec := range []MailboxRecord{acked, live} {
+		if _, err := s.Put(rec, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Ack(acked.RecipientDevice, acked.MsgID, acked.EnvelopeSHA256, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	assertMaintenanceExpiryIndexesExact(t, b)
+
+	before := snapshotMailboxBuckets(t, b)
+	if err := s.Ack(live.RecipientDevice, live.MsgID, strings.Repeat("f", 64), now.Add(2*time.Second)); !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("conflicting ACK = %v, want ErrDigestMismatch", err)
+	}
+	if got := snapshotMailboxBuckets(t, b); !reflect.DeepEqual(got, before) {
+		t.Fatal("failed ACK changed mailbox or expiry indexes")
+	}
+
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err = OpenBolt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	s, err = OpenMailboxStore(b, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMaintenanceExpiryIndexesExact(t, b)
+
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		if err := tx.DeleteBucket([]byte(bucketMailboxItemExpiry)); err != nil {
+			return err
+		}
+		if err := tx.DeleteBucket([]byte(bucketMailboxStatusExpiry)); err != nil {
+			return err
+		}
+		return tx.Bucket([]byte(bucketMailboxMeta)).Delete(maintenanceExpiryIndexesVersionKey)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenMailboxStore(b, limits); err != nil {
+		t.Fatalf("legacy expiry-index migration: %v", err)
+	}
+	assertMaintenanceExpiryIndexesExact(t, b)
+	if err := s.PurgePair("dev-a", "dev-b"); err != nil {
+		t.Fatal(err)
+	}
+	assertMaintenanceExpiryIndexesExact(t, b)
+}
+
+func TestMailboxStoreMarkerPresentExpiryIndexCorruptionFailsOpen(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *Bolt)
+	}{
+		{
+			name: "missing live index bucket",
+			mutate: func(t *testing.T, b *Bolt) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error { return tx.DeleteBucket([]byte(bucketMailboxItemExpiry)) }); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing status index bucket",
+			mutate: func(t *testing.T, b *Bolt) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error { return tx.DeleteBucket([]byte(bucketMailboxStatusExpiry)) }); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing reciprocal live entry",
+			mutate: func(t *testing.T, b *Bolt) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					bucket := tx.Bucket([]byte(bucketMailboxItemExpiry))
+					key, _ := bucket.Cursor().First()
+					return bucket.Delete(key)
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "orphan status entry",
+			mutate: func(t *testing.T, b *Bolt) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					return tx.Bucket([]byte(bucketMailboxStatusExpiry)).Put(maintenanceExpiryKey(1, []byte("orphan")), []byte("orphan"))
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed status entry",
+			mutate: func(t *testing.T, b *Bolt) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					return tx.Bucket([]byte(bucketMailboxStatusExpiry)).Put([]byte{1, 2, 3}, []byte("malformed"))
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "mismatched live entry",
+			mutate: func(t *testing.T, b *Bolt) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					bucket := tx.Bucket([]byte(bucketMailboxItemExpiry))
+					key, value := bucket.Cursor().First()
+					if err := bucket.Delete(key); err != nil {
+						return err
+					}
+					return bucket.Put(maintenanceExpiryKey(1, value), value)
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := openTestBolt(t)
+			s, err := OpenMailboxStore(b, DefaultMailboxLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := testMailboxRecord("11111111-1111-4111-8111-111111111111", "a")
+			if _, err := s.Put(rec, time.UnixMilli(1000)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Ack(rec.RecipientDevice, rec.MsgID, rec.EnvelopeSHA256, time.UnixMilli(2000)); err != nil {
+				t.Fatal(err)
+			}
+			live := testMailboxRecord("22222222-2222-4222-8222-222222222222", "b")
+			if _, err := s.Put(live, time.UnixMilli(3000)); err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(t, b)
+			if _, err := OpenMailboxStore(b, DefaultMailboxLimits()); err == nil {
+				t.Fatal("marker-present mailbox expiry corruption was silently trusted")
+			}
+		})
+	}
+}
+
+func assertMaintenanceExpiryIndexesExact(t *testing.T, b *Bolt) {
+	t.Helper()
+	if err := b.View(func(tx *bbolt.Tx) error {
+		for _, check := range []struct {
+			recordBucket string
+			indexBucket  string
+			decode       func([]byte) (int64, []byte, error)
+		}{
+			{
+				recordBucket: bucketMailboxItems,
+				indexBucket:  bucketMailboxItemExpiry,
+				decode: func(raw []byte) (int64, []byte, error) {
+					var rec MailboxRecord
+					if err := json.Unmarshal(raw, &rec); err != nil {
+						return 0, nil, err
+					}
+					return rec.ExpiresAt, itemKey(rec.RecipientDevice, rec.MsgID), nil
+				},
+			},
+			{
+				recordBucket: bucketMailboxStatus,
+				indexBucket:  bucketMailboxStatusExpiry,
+				decode: func(raw []byte) (int64, []byte, error) {
+					var status DeliveryStatus
+					if err := json.Unmarshal(raw, &status); err != nil {
+						return 0, nil, err
+					}
+					return status.ExpiresAt, statusKey(status.SenderDevice, status.MsgID), nil
+				},
+			},
+		} {
+			records := tx.Bucket([]byte(check.recordBucket))
+			index := tx.Bucket([]byte(check.indexBucket))
+			if index == nil {
+				return fmt.Errorf("missing %s", check.indexBucket)
+			}
+			recordCount := 0
+			if records != nil {
+				if err := records.ForEach(func(key, raw []byte) error {
+					expiresAt, canonicalKey, err := check.decode(raw)
+					if err != nil {
+						return err
+					}
+					if !bytes.Equal(key, canonicalKey) || !bytes.Equal(index.Get(maintenanceExpiryKey(expiresAt, key)), key) {
+						return fmt.Errorf("missing reciprocal %s entry", check.indexBucket)
+					}
+					recordCount++
+					return nil
+				}); err != nil {
+					return err
+				}
+			}
+			indexCount := 0
+			if err := index.ForEach(func(indexKey, canonicalKey []byte) error {
+				if len(indexKey) < 9 || indexKey[8] != 0 || !bytes.Equal(indexKey[9:], canonicalKey) || records == nil {
+					return fmt.Errorf("malformed or orphan %s entry", check.indexBucket)
+				}
+				raw := records.Get(canonicalKey)
+				if raw == nil {
+					return fmt.Errorf("orphan %s entry", check.indexBucket)
+				}
+				expiresAt, decodedKey, err := check.decode(raw)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(decodedKey, canonicalKey) || !bytes.Equal(indexKey, maintenanceExpiryKey(expiresAt, canonicalKey)) {
+					return fmt.Errorf("mismatched %s entry", check.indexBucket)
+				}
+				indexCount++
+				return nil
+			}); err != nil {
+				return err
+			}
+			if indexCount != recordCount {
+				return fmt.Errorf("%s count %d, records %d", check.indexBucket, indexCount, recordCount)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("maintenance expiry indexes are not exact: %v", err)
+	}
+}
+
 func mailboxBucketEntryCount(t *testing.T, b *Bolt, bucketName string) int {
 	t.Helper()
 	count := 0
@@ -941,7 +1241,7 @@ func snapshotMailboxBuckets(t *testing.T, b *Bolt) map[string]map[string]string 
 		for _, name := range []string{
 			bucketMailboxItems, bucketMailboxOrder, bucketMailboxStats, bucketMailboxStatus,
 			bucketMailboxStatusByRecipient, bucketMailboxExpiryPending, bucketMailboxExpiryCursor,
-			bucketMailboxMeta, bucketMailboxSequence,
+			bucketMailboxMeta, bucketMailboxSequence, bucketMailboxItemExpiry, bucketMailboxStatusExpiry,
 		} {
 			entries := make(map[string]string)
 			bucket := tx.Bucket([]byte(name))

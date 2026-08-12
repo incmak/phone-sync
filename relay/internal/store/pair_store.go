@@ -15,6 +15,7 @@ var ErrNotFound = errors.New("not found")
 var ErrInvalidProtocolFloor = errors.New("invalid protocol floor")
 var ErrPairConflict = errors.New("pair transition conflict")
 var ErrPendingPairLimit = errors.New("pending pair limit reached")
+var ErrPairStoreCorrupt = errors.New("pair store index corruption")
 
 type PendingPairState string
 
@@ -39,6 +40,10 @@ const (
 var retainedTokenIndexVersionKey = []byte("retained_token_index_v1")
 var pendingLimitIndexVersionKey = []byte("pending_limit_index_v1")
 var pendingCountKey = []byte("pending_count")
+var pairIndexSchemaVersionKey = []byte("pair_index_schema_v2")
+var pairIndexConfigKey = []byte("pair_index_config_v2")
+
+const pairIndexSchemaVersion = 2
 
 type PendingPairLimits struct {
 	MaxPending int
@@ -107,18 +112,31 @@ func NewPairStore(b *Bolt) *PairStore {
 }
 
 func NewPairStoreWithLimits(b *Bolt, limits PendingPairLimits) *PairStore {
+	ps, err := OpenPairStoreWithLimits(b, limits)
+	if err != nil {
+		panic(fmt.Sprintf("initialize pair store: %v", err))
+	}
+	return ps
+}
+
+func OpenPairStore(b *Bolt) (*PairStore, error) {
+	return OpenPairStoreWithLimits(b, DefaultPendingPairLimits())
+}
+
+// OpenPairStoreWithLimits initializes or validates every persisted pairing
+// index before returning. NewPairStoreWithLimits remains as a compatibility
+// wrapper for tests and older callers that intentionally treat init failure as
+// fatal; production startup uses this error-returning path.
+func OpenPairStoreWithLimits(b *Bolt, limits PendingPairLimits) (*PairStore, error) {
 	if limits.MaxPending <= 0 || limits.TTL <= 0 || limits.SweepBatch <= 0 {
-		panic("invalid pending pair limits")
+		return nil, errors.New("invalid pending pair limits")
 	}
 	if err := b.Update(func(tx *bbolt.Tx) error {
-		if err := migrateRetainedTokenIndexTx(tx); err != nil {
-			return err
-		}
-		return migratePendingLimitIndexTx(tx, limits.TTL)
+		return initializePairStoreIndexesTx(tx, limits)
 	}); err != nil {
-		panic(fmt.Sprintf("migrate retained pairing-token index: %v", err))
+		return nil, fmt.Errorf("initialize pairing indexes: %w", err)
 	}
-	return &PairStore{bolt: b, limits: limits}
+	return &PairStore{bolt: b, limits: limits}, nil
 }
 
 func (ps *PairStore) PutPending(p PendingPair) error {
@@ -209,12 +227,15 @@ func (ps *PairStore) SweepExpired(now time.Time) (int, error) {
 	err := ps.bolt.Update(func(tx *bbolt.Tx) error {
 		expiry := tx.Bucket([]byte(bucketPendingExpiry))
 		if expiry == nil {
-			return nil
+			return fmt.Errorf("%w: missing pending expiry bucket", ErrPairStoreCorrupt)
 		}
 		for removed < ps.limits.SweepBatch {
 			key, token := expiry.Cursor().First()
 			if key == nil {
 				break
+			}
+			if err := validatePendingExpiryEntryTx(tx, key, token, ps.limits.TTL); err != nil {
+				return err
 			}
 			if pendingExpiryUnix(key) > now.Unix() {
 				break
@@ -603,6 +624,190 @@ func migratePendingLimitIndexTx(tx *bbolt.Tx, ttl time.Duration) error {
 	return meta.Put(pendingLimitIndexVersionKey, []byte{1})
 }
 
+type persistedPairIndexConfig struct {
+	Schema     int   `json:"schema"`
+	MaxPending int   `json:"max_pending"`
+	TTLNanos   int64 `json:"ttl_nanos"`
+	SweepBatch int   `json:"sweep_batch"`
+}
+
+func initializePairStoreIndexesTx(tx *bbolt.Tx, limits PendingPairLimits) error {
+	meta := tx.Bucket([]byte(bucketPairMeta))
+	if meta == nil || meta.Get(pairIndexSchemaVersionKey) == nil {
+		if err := rebuildPairStoreIndexesTx(tx, limits); err != nil {
+			return err
+		}
+	}
+	return validatePairStoreIndexesTx(tx, limits)
+}
+
+func rebuildPairStoreIndexesTx(tx *bbolt.Tx, limits PendingPairLimits) error {
+	meta, err := tx.CreateBucketIfNotExists([]byte(bucketPairMeta))
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{bucketPendingExpiry, bucketRetainedTokenByPair} {
+		if err := tx.DeleteBucket([]byte(name)); err != nil && !errors.Is(err, bbolt.ErrBucketNotFound) {
+			return err
+		}
+	}
+	expiry, err := tx.CreateBucket([]byte(bucketPendingExpiry))
+	if err != nil {
+		return err
+	}
+	retained, err := tx.CreateBucket([]byte(bucketRetainedTokenByPair))
+	if err != nil {
+		return err
+	}
+	var count uint64
+	if pending := tx.Bucket([]byte(bucketPending)); pending != nil {
+		cursor := pending.Cursor()
+		for token, raw := cursor.First(); token != nil; token, raw = cursor.Next() {
+			record, err := decodePendingPair(raw)
+			if err != nil {
+				return err
+			}
+			if record.PairToken == "" || record.PairToken != string(token) {
+				return fmt.Errorf("%w: pending token mismatch", ErrPairStoreCorrupt)
+			}
+			if err := expiry.Put(pendingExpiryKey(record.CreatedAt, limits.TTL, record.PairToken), token); err != nil {
+				return err
+			}
+			if record.PairID != "" {
+				pairID := []byte(record.PairID)
+				if prior := retained.Get(pairID); prior != nil && !bytes.Equal(prior, token) {
+					return fmt.Errorf("%w: duplicate retained pair id", ErrPairStoreCorrupt)
+				}
+				if err := retained.Put(pairID, token); err != nil {
+					return err
+				}
+			}
+			count++
+		}
+	}
+	config, err := encodePairIndexConfig(limits)
+	if err != nil {
+		return err
+	}
+	if err := meta.Put(pendingCountKey, encodePendingCount(count)); err != nil {
+		return err
+	}
+	if err := meta.Put(retainedTokenIndexVersionKey, []byte{1}); err != nil {
+		return err
+	}
+	if err := meta.Put(pendingLimitIndexVersionKey, []byte{1}); err != nil {
+		return err
+	}
+	if err := meta.Put(pairIndexConfigKey, config); err != nil {
+		return err
+	}
+	return meta.Put(pairIndexSchemaVersionKey, []byte{pairIndexSchemaVersion})
+}
+
+func encodePairIndexConfig(limits PendingPairLimits) ([]byte, error) {
+	return json.Marshal(persistedPairIndexConfig{
+		Schema: pairIndexSchemaVersion, MaxPending: limits.MaxPending,
+		TTLNanos: int64(limits.TTL), SweepBatch: limits.SweepBatch,
+	})
+}
+
+func validatePairStoreIndexesTx(tx *bbolt.Tx, limits PendingPairLimits) error {
+	corrupt := func(format string, args ...any) error {
+		return fmt.Errorf("%w: %s", ErrPairStoreCorrupt, fmt.Sprintf(format, args...))
+	}
+	meta := tx.Bucket([]byte(bucketPairMeta))
+	if meta == nil || !bytes.Equal(meta.Get(pairIndexSchemaVersionKey), []byte{pairIndexSchemaVersion}) ||
+		!bytes.Equal(meta.Get(retainedTokenIndexVersionKey), []byte{1}) ||
+		!bytes.Equal(meta.Get(pendingLimitIndexVersionKey), []byte{1}) {
+		return corrupt("missing or invalid schema markers")
+	}
+	wantConfig, err := encodePairIndexConfig(limits)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(meta.Get(pairIndexConfigKey), wantConfig) {
+		return corrupt("persisted limits do not match active configuration")
+	}
+	wantCount, err := decodePendingCount(meta.Get(pendingCountKey))
+	if err != nil {
+		return corrupt("invalid pending counter: %v", err)
+	}
+	expiry := tx.Bucket([]byte(bucketPendingExpiry))
+	retained := tx.Bucket([]byte(bucketRetainedTokenByPair))
+	if expiry == nil || retained == nil {
+		return corrupt("missing pairing index bucket")
+	}
+
+	var pendingCount uint64
+	if pending := tx.Bucket([]byte(bucketPending)); pending != nil {
+		cursor := pending.Cursor()
+		for token, raw := cursor.First(); token != nil; token, raw = cursor.Next() {
+			record, decodeErr := decodePendingPair(raw)
+			if decodeErr != nil {
+				return corrupt("invalid pending record: %v", decodeErr)
+			}
+			if record.PairToken == "" || record.PairToken != string(token) {
+				return corrupt("pending token mismatch")
+			}
+			expiryKey := pendingExpiryKey(record.CreatedAt, limits.TTL, record.PairToken)
+			if !bytes.Equal(expiry.Get(expiryKey), token) {
+				return corrupt("missing reciprocal expiry entry for %q", token)
+			}
+			if record.PairID != "" && !bytes.Equal(retained.Get([]byte(record.PairID)), token) {
+				return corrupt("missing reciprocal retained token for %q", token)
+			}
+			pendingCount++
+		}
+	}
+	if pendingCount != wantCount {
+		return corrupt("pending counter is %d, records are %d", wantCount, pendingCount)
+	}
+	var expiryCount uint64
+	expiryCursor := expiry.Cursor()
+	for key, token := expiryCursor.First(); key != nil; key, token = expiryCursor.Next() {
+		if err := validatePendingExpiryEntryTx(tx, key, token, limits.TTL); err != nil {
+			return err
+		}
+		expiryCount++
+	}
+	if expiryCount != pendingCount {
+		return corrupt("expiry entries are %d, records are %d", expiryCount, pendingCount)
+	}
+	retainedCursor := retained.Cursor()
+	for pairID, token := retainedCursor.First(); pairID != nil; pairID, token = retainedCursor.Next() {
+		if len(pairID) == 0 || len(token) == 0 {
+			return corrupt("empty retained token mapping")
+		}
+		pending := tx.Bucket([]byte(bucketPending))
+		if pending == nil {
+			return corrupt("orphan retained token mapping")
+		}
+		record, decodeErr := decodePendingPair(pending.Get(token))
+		if decodeErr != nil || record.PairID != string(pairID) || record.PairToken != string(token) {
+			return corrupt("invalid reciprocal retained token mapping")
+		}
+	}
+	return nil
+}
+
+func validatePendingExpiryEntryTx(tx *bbolt.Tx, key, token []byte, ttl time.Duration) error {
+	if len(key) < 9 || key[8] != 0 || len(token) == 0 || !bytes.Equal(key[9:], token) {
+		return fmt.Errorf("%w: malformed pending expiry entry", ErrPairStoreCorrupt)
+	}
+	pending := tx.Bucket([]byte(bucketPending))
+	if pending == nil || pending.Get(token) == nil {
+		return fmt.Errorf("%w: orphan pending expiry entry", ErrPairStoreCorrupt)
+	}
+	record, err := decodePendingPair(pending.Get(token))
+	if err != nil {
+		return fmt.Errorf("%w: invalid pending expiry record: %v", ErrPairStoreCorrupt, err)
+	}
+	if record.PairToken != string(token) || !bytes.Equal(key, pendingExpiryKey(record.CreatedAt, ttl, record.PairToken)) {
+		return fmt.Errorf("%w: pending expiry entry mismatch", ErrPairStoreCorrupt)
+	}
+	return nil
+}
+
 func deletePendingPairTx(tx *bbolt.Tx, token string, ttl time.Duration) error {
 	pending := tx.Bucket([]byte(bucketPending))
 	if pending == nil {
@@ -636,10 +841,13 @@ func deletePendingPairTx(tx *bbolt.Tx, token string, ttl time.Duration) error {
 	if count == 0 {
 		return errors.New("invalid pending pair count")
 	}
-	if expiry := tx.Bucket([]byte(bucketPendingExpiry)); expiry != nil {
-		if err := expiry.Delete(pendingExpiryKey(record.CreatedAt, ttl, record.PairToken)); err != nil {
-			return err
-		}
+	expiry := tx.Bucket([]byte(bucketPendingExpiry))
+	expiryKey := pendingExpiryKey(record.CreatedAt, ttl, record.PairToken)
+	if expiry == nil || !bytes.Equal(expiry.Get(expiryKey), []byte(token)) {
+		return fmt.Errorf("%w: missing pending expiry entry", ErrPairStoreCorrupt)
+	}
+	if err := expiry.Delete(expiryKey); err != nil {
+		return err
 	}
 	if err := pending.Delete([]byte(token)); err != nil {
 		return err

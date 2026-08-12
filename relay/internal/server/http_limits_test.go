@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,6 +201,56 @@ func TestPairRateLimiterCleanupEvictsOnlyIdleEntries(t *testing.T) {
 	}
 }
 
+func TestPairRateLimiterGlobalBudgetFailsClosedWithoutRefreshingExhaustedKeys(t *testing.T) {
+	now := time.Unix(3500, 0)
+	limiter := newPairingRateLimiter(PairingRateLimitConfig{
+		IPBurst: 1, TokenBurst: 1, RefillInterval: time.Hour, IdleTTL: 10 * time.Minute,
+		MaxEntries: 2, CleanupBatch: 1,
+	})
+	if allowed, _ := limiter.allowIP("192.0.2.1:1", now); !allowed {
+		t.Fatal("first known key was rejected")
+	}
+	if allowed, _ := limiter.allowToken("known", now); !allowed {
+		t.Fatal("second known key was rejected")
+	}
+	if allowed, _ := limiter.allowIP("192.0.2.2:1", now); allowed {
+		t.Fatal("unknown key was admitted over global budget")
+	}
+	if got := limiter.entryCount(); got != 2 {
+		t.Fatalf("entry cardinality = %d, want 2", got)
+	}
+	if allowed, _ := limiter.allowIP("192.0.2.1:2", now); allowed {
+		t.Fatal("exhausted existing key regained a fresh burst after overflow")
+	}
+}
+
+func TestPairRateLimiterCleanupIsBatchedAndAllowsConcurrentProgress(t *testing.T) {
+	now := time.Unix(3600, 0)
+	limiter := newPairingRateLimiter(PairingRateLimitConfig{
+		IPBurst: 1, TokenBurst: 1, RefillInterval: time.Hour, IdleTTL: time.Minute,
+		MaxEntries: 8, CleanupBatch: 2,
+	})
+	for index := 0; index < 6; index++ {
+		limiter.allowToken(fmt.Sprintf("old-%d", index), now)
+	}
+	if inspected := limiter.cleanup(now.Add(time.Minute)); inspected != 2 {
+		t.Fatalf("cleanup inspected = %d, want 2", inspected)
+	}
+	if got := limiter.entryCount(); got != 4 {
+		t.Fatalf("entries after one cleanup batch = %d, want 4", got)
+	}
+	progress := make(chan struct{})
+	go func() {
+		limiter.allowIP("198.51.100.1:1", now.Add(time.Minute))
+		close(progress)
+	}()
+	select {
+	case <-progress:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent limiter allow made no progress")
+	}
+}
+
 func TestHTTPServerTimeoutConfiguration(t *testing.T) {
 	handler := http.NewServeMux()
 	srv := NewHTTPServer(":9999", handler)
@@ -243,6 +295,40 @@ func TestMaintenanceLoopStopsAfterCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("maintenance loop did not stop after cancellation")
+	}
+}
+
+func TestMaintenanceStartIsSingleOwnerAndCancellationStopsBetweenUnits(t *testing.T) {
+	config := DefaultConfig()
+	config.MaintenanceInterval = time.Millisecond
+	config.MailboxExpiryBatch = 1
+	config.StatusExpiryBatch = 1
+	srv := newConfiguredTestServer(t, config)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv.maintenanceBeforeUnit = func(unit string) {
+		if unit == "mailbox" {
+			once.Do(func() { close(entered); <-release })
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	first := srv.StartMaintenance(ctx)
+	second := srv.StartMaintenance(ctx)
+	if first != second {
+		t.Fatal("second maintenance start created a distinct worker")
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("maintenance worker did not enter first unit")
+	}
+	cancel()
+	close(release)
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("maintenance did not join after cancellation")
 	}
 }
 

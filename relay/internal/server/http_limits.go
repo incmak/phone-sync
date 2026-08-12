@@ -1,6 +1,7 @@
 package server
 
 import (
+	"container/list"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -25,9 +26,12 @@ type PairingRateLimitConfig struct {
 	TokenBurst     int
 	RefillInterval time.Duration
 	IdleTTL        time.Duration
+	MaxEntries     int
+	CleanupBatch   int
 }
 
 type limiterEntry struct {
+	key        string
 	tokens     float64
 	lastRefill time.Time
 	lastSeen   time.Time
@@ -36,14 +40,15 @@ type limiterEntry struct {
 type pairingRateLimiter struct {
 	mu      sync.Mutex
 	config  PairingRateLimitConfig
-	entries map[string]limiterEntry
+	entries map[string]*list.Element
+	oldest  *list.List
 }
 
 func newPairingRateLimiter(config PairingRateLimitConfig) *pairingRateLimiter {
-	if config.IPBurst <= 0 || config.TokenBurst <= 0 || config.RefillInterval <= 0 || config.IdleTTL <= 0 {
+	if config.IPBurst <= 0 || config.TokenBurst <= 0 || config.RefillInterval <= 0 || config.IdleTTL <= 0 || config.MaxEntries <= 0 || config.CleanupBatch <= 0 {
 		panic("invalid pairing rate limits")
 	}
-	return &pairingRateLimiter{config: config, entries: make(map[string]limiterEntry)}
+	return &pairingRateLimiter{config: config, entries: make(map[string]*list.Element), oldest: list.New()}
 }
 
 func (l *pairingRateLimiter) allowIP(remoteAddr string, now time.Time) (bool, time.Duration) {
@@ -57,18 +62,23 @@ func (l *pairingRateLimiter) allowToken(token string, now time.Time) (bool, time
 func (l *pairingRateLimiter) allow(key string, burst int, now time.Time) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	entry, exists := l.entries[key]
+	element, exists := l.entries[key]
 	if !exists {
-		entry = limiterEntry{tokens: float64(burst), lastRefill: now}
+		if len(l.entries) >= l.config.MaxEntries {
+			return false, l.config.IdleTTL
+		}
+		element = l.oldest.PushBack(&limiterEntry{key: key, tokens: float64(burst), lastRefill: now})
+		l.entries[key] = element
 	}
+	entry := element.Value.(*limiterEntry)
 	elapsed := now.Sub(entry.lastRefill)
 	if elapsed > 0 {
 		entry.tokens = math.Min(float64(burst), entry.tokens+float64(elapsed)/float64(l.config.RefillInterval))
 		entry.lastRefill = now
 	}
 	entry.lastSeen = now
+	l.oldest.MoveToBack(element)
 	if entry.tokens < 1 {
-		l.entries[key] = entry
 		wait := time.Duration(math.Ceil((1 - entry.tokens) * float64(l.config.RefillInterval)))
 		if wait < time.Second {
 			wait = time.Second
@@ -76,18 +86,29 @@ func (l *pairingRateLimiter) allow(key string, burst int, now time.Time) (bool, 
 		return false, wait
 	}
 	entry.tokens--
-	l.entries[key] = entry
 	return true, 0
 }
 
-func (l *pairingRateLimiter) cleanup(now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for key, entry := range l.entries {
-		if now.Sub(entry.lastSeen) >= l.config.IdleTTL {
-			delete(l.entries, key)
+func (l *pairingRateLimiter) cleanup(now time.Time) int {
+	inspected := 0
+	for inspected < l.config.CleanupBatch {
+		l.mu.Lock()
+		element := l.oldest.Front()
+		if element == nil {
+			l.mu.Unlock()
+			break
 		}
+		entry := element.Value.(*limiterEntry)
+		inspected++
+		if now.Sub(entry.lastSeen) < l.config.IdleTTL {
+			l.mu.Unlock()
+			break
+		}
+		delete(l.entries, entry.key)
+		l.oldest.Remove(element)
+		l.mu.Unlock()
 	}
+	return inspected
 }
 
 func (l *pairingRateLimiter) entryCount() int {
@@ -212,7 +233,13 @@ func NewHTTPServer(addr string, handler http.Handler) *http.Server {
 // StartMaintenance starts the server's single periodic maintenance worker.
 // Cancel ctx and wait for the returned channel before closing the Bolt store.
 func (s *Server) StartMaintenance(ctx context.Context) <-chan struct{} {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	if s.maintenanceDone != nil {
+		return s.maintenanceDone
+	}
 	done := make(chan struct{})
+	s.maintenanceDone = done
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(s.maintenanceInterval)
@@ -222,23 +249,48 @@ func (s *Server) StartMaintenance(ctx context.Context) <-chan struct{} {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.runMaintenance(s.now())
+				s.runMaintenance(ctx, s.now())
 			}
 		}
 	}()
 	return done
 }
 
-func (s *Server) runMaintenance(now time.Time) {
-	if _, err := s.mailbox.Expire(now); err != nil {
+func (s *Server) runMaintenance(ctx context.Context, now time.Time) {
+	if !s.beforeMaintenanceUnit(ctx, "mailbox") {
+		return
+	}
+	if _, err := s.mailbox.ExpireBatch(now, s.mailboxExpiryBatch); err != nil {
 		log.Printf("expire mailboxes: %v", err)
 	}
-	if err := s.mailbox.ExpireStatuses(now); err != nil {
+	if !s.beforeMaintenanceUnit(ctx, "statuses") {
+		return
+	}
+	if _, err := s.mailbox.ExpireStatusesBatch(now, s.statusExpiryBatch); err != nil {
 		log.Printf("expire delivery statuses: %v", err)
+	}
+	if !s.beforeMaintenanceUnit(ctx, "pairs") {
+		return
 	}
 	if _, err := s.pairStore.SweepExpired(now); err != nil {
 		log.Printf("expire pairing tokens: %v", err)
 	}
+	if !s.beforeMaintenanceUnit(ctx, "jti") {
+		return
+	}
 	s.jtiCache.Cleanup(now)
+	if !s.beforeMaintenanceUnit(ctx, "limiter") {
+		return
+	}
 	s.pairLimiter.cleanup(now)
+}
+
+func (s *Server) beforeMaintenanceUnit(ctx context.Context, unit string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if s.maintenanceBeforeUnit != nil {
+		s.maintenanceBeforeUnit(unit)
+	}
+	return ctx.Err() == nil
 }

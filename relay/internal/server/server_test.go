@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,19 @@ func TestHealthEndpoint(t *testing.T) {
 	expected := `{"status":"ok"}`
 	if rec.Body.String() != expected {
 		t.Fatalf("expected body %q, got %q", expected, rec.Body.String())
+	}
+}
+
+func TestProductionServerInitializationReturnsStoreErrors(t *testing.T) {
+	b, err := store.OpenBolt(filepath.Join(t.TempDir(), "checked-server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	config := DefaultConfig()
+	app, err := NewWithConfigChecked(b, config)
+	if err != nil || app == nil {
+		t.Fatalf("healthy checked initialization = %#v, %v", app, err)
 	}
 }
 

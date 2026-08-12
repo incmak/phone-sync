@@ -1,9 +1,9 @@
 {$TWINOTIFY_DOMAIN} {
-    @relay path /health /pair/* /ws
-    handle @relay {
-        reverse_proxy relay:8080
-    }
-    handle {
-        respond 404
-    }
+	@relay path /health /pair/* /ws
+	handle @relay {
+		reverse_proxy relay:8080
+	}
+	handle {
+		respond 404
+	}
 }

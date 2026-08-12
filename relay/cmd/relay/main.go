@@ -31,7 +31,10 @@ func main() {
 
 	config := server.DefaultConfig()
 	config.TrustProxyHeaders = os.Getenv("TRUST_PROXY_HEADERS") == "true"
-	app := server.NewWithConfig(b, config)
+	app, err := server.NewWithConfigChecked(b, config)
+	if err != nil {
+		log.Fatalf("initialize relay: %v", err)
+	}
 	srv := server.NewHTTPServer(addr, app.Handler())
 	maintenanceContext, stopMaintenance := context.WithCancel(context.Background())
 	maintenanceDone := app.StartMaintenance(maintenanceContext)
@@ -41,11 +44,7 @@ func main() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		stopMaintenance()
-		<-maintenanceDone
-		if err := srv.Shutdown(ctx); err != nil {
+		if err := gracefulStop(stopMaintenance, maintenanceDone, 10*time.Second, srv.Shutdown); err != nil {
 			log.Printf("shutdown: %v", err)
 		}
 		close(done)
@@ -56,4 +55,12 @@ func main() {
 		log.Fatal(err)
 	}
 	<-done
+}
+
+func gracefulStop(stopMaintenance context.CancelFunc, maintenanceDone <-chan struct{}, shutdownTimeout time.Duration, shutdown func(context.Context) error) error {
+	stopMaintenance()
+	<-maintenanceDone
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	return shutdown(ctx)
 }

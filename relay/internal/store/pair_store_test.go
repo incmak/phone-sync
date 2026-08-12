@@ -935,6 +935,14 @@ func TestPairStoreMigratesLegacyRetainedTokenIndexOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := OpenPairStore(b); err == nil {
+		t.Fatal("marker-present restart silently trusted a corrupt pending record")
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(bucketPending)).Delete([]byte("post-migration-corrupt"))
+	}); err != nil {
+		t.Fatal(err)
+	}
 	ps = NewPairStore(b)
 	if _, err := ps.RevokeByDevice(pair.DeviceB); err != nil {
 		t.Fatal(err)
@@ -1041,5 +1049,188 @@ func TestPendingPairSweepIsBoundedAndReleasesCapacity(t *testing.T) {
 		AEncPubkey: bytes.Repeat([]byte{3}, 32), ASignPubkey: bytes.Repeat([]byte{4}, 32), CreatedAt: 10 * 60,
 	}); err != nil {
 		t.Fatalf("released capacity was unavailable: %v", err)
+	}
+}
+
+func TestPairStoreRestartIntegrityFailsClosed(t *testing.T) {
+	limits := PendingPairLimits{MaxPending: 8, TTL: 5 * time.Minute, SweepBatch: 2}
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *Bolt, *PairStore)
+		limits PendingPairLimits
+	}{
+		{
+			name: "counter mismatch",
+			mutate: func(t *testing.T, b *Bolt, _ *PairStore) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					return tx.Bucket([]byte(bucketPairMeta)).Put(pendingCountKey, encodePendingCount(0))
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing expiry bucket",
+			mutate: func(t *testing.T, b *Bolt, _ *PairStore) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error { return tx.DeleteBucket([]byte(bucketPendingExpiry)) }); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "orphan expiry entry",
+			mutate: func(t *testing.T, b *Bolt, _ *PairStore) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					return tx.Bucket([]byte(bucketPendingExpiry)).Put(pendingExpiryKey(0, limits.TTL, "orphan"), []byte("orphan"))
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "malformed expiry entry",
+			mutate: func(t *testing.T, b *Bolt, _ *PairStore) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					return tx.Bucket([]byte(bucketPendingExpiry)).Put([]byte{1, 2, 3}, []byte("restart-token"))
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing retained token mapping",
+			mutate: func(t *testing.T, b *Bolt, ps *PairStore) {
+				t.Helper()
+				candidate := ConfirmedPair{
+					PairID: "restart-pair", DeviceA: "restart-a", DeviceB: "restart-b",
+					AEncPubkey: []byte("a-enc"), ASignPubkey: []byte("a-sign"),
+					BEncPubkey: []byte("b-enc"), BSignPubkey: []byte("b-sign"),
+				}
+				if _, err := ps.ConfirmPending("restart-token", candidate, []byte("signature")); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					return tx.Bucket([]byte(bucketRetainedTokenByPair)).Delete([]byte(candidate.PairID))
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "extra retained token mapping",
+			mutate: func(t *testing.T, b *Bolt, _ *PairStore) {
+				t.Helper()
+				if err := b.Update(func(tx *bbolt.Tx) error {
+					return tx.Bucket([]byte(bucketRetainedTokenByPair)).Put([]byte("extra-pair"), []byte("restart-token"))
+				}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:   "changed ttl",
+			mutate: func(*testing.T, *Bolt, *PairStore) {},
+			limits: PendingPairLimits{MaxPending: 8, TTL: 6 * time.Minute, SweepBatch: 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := openTestBolt(t)
+			ps, err := OpenPairStoreWithLimits(b, limits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ps.PutPending(PendingPair{
+				PairToken: "restart-token", DeviceAID: "restart-a", AEncPubkey: []byte("a-enc"),
+				ASignPubkey: []byte("a-sign"), CreatedAt: 100,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(t, b, ps)
+			reopenLimits := tt.limits
+			if reopenLimits.TTL == 0 {
+				reopenLimits = limits
+			}
+			if _, err := OpenPairStoreWithLimits(b, reopenLimits); err == nil {
+				t.Fatal("corrupt persisted pairing indexes were silently trusted")
+			}
+		})
+	}
+}
+
+func TestPairStoreSweepFailsClosedOnOrphanHeadWithoutCountingSuccess(t *testing.T) {
+	b := openTestBolt(t)
+	limits := PendingPairLimits{MaxPending: 8, TTL: 5 * time.Minute, SweepBatch: 2}
+	ps, err := OpenPairStoreWithLimits(b, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(bucketPendingExpiry)).Put(pendingExpiryKey(0, limits.TTL, "orphan"), []byte("orphan"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := ps.SweepExpired(time.Unix(10*60, 0))
+	if err == nil || removed != 0 {
+		t.Fatalf("orphan sweep = %d, %v; want 0 and corruption error", removed, err)
+	}
+}
+
+func TestPairStoreSweepFailsClosedWhenExpiryBucketDisappearsAfterOpen(t *testing.T) {
+	b := openTestBolt(t)
+	ps, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error { return tx.DeleteBucket([]byte(bucketPendingExpiry)) }); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := ps.SweepExpired(time.Now())
+	if removed != 0 || !errors.Is(err, ErrPairStoreCorrupt) {
+		t.Fatalf("sweep without expiry bucket = %d, %v; want 0, ErrPairStoreCorrupt", removed, err)
+	}
+}
+
+func TestPairStoreIndexesRemainExactAcrossTransitionsAndRollback(t *testing.T) {
+	b := openTestBolt(t)
+	limits := PendingPairLimits{MaxPending: 8, TTL: 5 * time.Minute, SweepBatch: 2}
+	ps, err := OpenPairStoreWithLimits(b, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPairStoreIndexesExact(t, b, limits)
+	pending := PendingPair{PairToken: "exact-token", DeviceAID: "a", AEncPubkey: []byte("a-enc"), ASignPubkey: []byte("a-sign"), CreatedAt: 100}
+	if err := ps.PutPending(pending); err != nil {
+		t.Fatal(err)
+	}
+	assertPairStoreIndexesExact(t, b, limits)
+	if err := ps.UpdatePendingB(pending.PairToken, "b", []byte("b-enc"), []byte("b-sign"), "B"); err != nil {
+		t.Fatal(err)
+	}
+	assertPairStoreIndexesExact(t, b, limits)
+	if err := ps.UpdatePendingB(pending.PairToken, "other", []byte("other"), []byte("other"), "other"); !errors.Is(err, ErrPairConflict) {
+		t.Fatalf("conflicting hello = %v", err)
+	}
+	assertPairStoreIndexesExact(t, b, limits)
+	pair := ConfirmedPair{PairID: "exact-pair", DeviceA: "a", DeviceB: "b", AEncPubkey: []byte("a-enc"), ASignPubkey: []byte("a-sign"), BEncPubkey: []byte("b-enc"), BSignPubkey: []byte("b-sign"), BDisplayName: "B"}
+	if _, err := ps.ConfirmPending(pending.PairToken, pair, []byte("signature")); err != nil {
+		t.Fatal(err)
+	}
+	assertPairStoreIndexesExact(t, b, limits)
+	if _, err := ps.RevokeByDevice("a"); err != nil {
+		t.Fatal(err)
+	}
+	assertPairStoreIndexesExact(t, b, limits)
+}
+
+func assertPairStoreIndexesExact(t *testing.T, b *Bolt, limits PendingPairLimits) {
+	t.Helper()
+	if err := b.View(func(tx *bbolt.Tx) error { return validatePairStoreIndexesTx(tx, limits) }); err != nil {
+		t.Fatalf("pair store indexes are not exact: %v", err)
 	}
 }
