@@ -2,13 +2,27 @@
   "fixtures": [
     {
       "file": "v2-valid/relay-put.json",
+      "scope": "server",
       "type": "relay_control",
       "valid": true
     },
     {
+      "file": "v2-valid/peer-receipt-inner.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "valid": true
+    },
+    {
       "file": "v2-invalid/relay-ack-bad-digest.json",
+      "scope": "server",
       "type": "relay_control",
       "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/outer-inner-id-mismatch.json",
+      "scope": "cross_layer",
+      "type": "outer_inner_pair",
+      "expected_code": "outer_inner_id_mismatch"
     }
   ]
 }

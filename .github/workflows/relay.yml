@@ -1,19 +1,22 @@
 name: relay
 on:
   push:
-    paths: ['relay/**', 'proto/**', 'Makefile', '.github/workflows/relay.yml']
+    paths: ['relay/**', 'proto/**', 'deploy/**', 'Makefile', '.github/workflows/relay.yml']
   pull_request:
-    paths: ['relay/**', 'proto/**', 'Makefile', '.github/workflows/relay.yml']
+    paths: ['relay/**', 'proto/**', 'deploy/**', 'Makefile', '.github/workflows/relay.yml']
+
+permissions:
+  contents: read
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.23'
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Download Go modules
         working-directory: relay
         run: go mod download
@@ -25,7 +28,7 @@ jobs:
           make relay-verify 2>&1 | tee relay-race.log
       - name: Upload relay race-test log on failure
         if: failure() && steps.relay-verify.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: relay-race-test-log
           path: relay-race.log
@@ -34,10 +37,15 @@ jobs:
   compose-config:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.23'
       - name: Resolve development Compose configuration
         run: docker compose -f deploy/docker-compose.yml config
       - name: Resolve production Compose configuration
         env:
           TWINOTIFY_DOMAIN: relay.example.test
         run: docker compose -f deploy/docker-compose.prod.yml config
+      - name: Assert deployment security invariants
+        run: make deployment-test

@@ -282,6 +282,21 @@ func readMailboxRejected(t *testing.T, conn *websocket.Conn) testRejectedFrame {
 	return frame
 }
 
+func assertMailboxReadTimesOut(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set no-redelivery deadline: %v", err)
+	}
+	_, raw, err := conn.ReadMessage()
+	if err == nil {
+		t.Fatalf("unexpected mailbox frame before deadline: %s", raw)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("mailbox read failed before deadline instead of timing out: %v", err)
+	}
+}
+
 func sendMailboxHello(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
 	capabilities := sendMailboxHelloWithProtocols(t, conn, []int{2, 1})
@@ -357,10 +372,7 @@ func TestWebSocketMailboxOfflineDelivery(t *testing.T) {
 	reconnected := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
 	defer reconnected.Close()
 	sendMailboxHello(t, reconnected)
-	_ = reconnected.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-	if _, raw, err := reconnected.ReadMessage(); err == nil {
-		t.Fatalf("acked message was redelivered: %s", raw)
-	}
+	assertMailboxReadTimesOut(t, reconnected, 250*time.Millisecond)
 }
 
 func TestWebSocketMailboxDeliveryAndAckSurviveRelayRestart(t *testing.T) {
@@ -411,10 +423,7 @@ func TestWebSocketMailboxDeliveryAndAckSurviveRelayRestart(t *testing.T) {
 	reconnected := dialMailboxWS(t, restartedHTTP, pair.deviceB, pair.privB)
 	defer reconnected.Close()
 	sendMailboxHello(t, reconnected)
-	_ = reconnected.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-	if _, raw, err := reconnected.ReadMessage(); err == nil {
-		t.Fatalf("acked post-restart envelope was redelivered: %s", raw)
-	}
+	assertMailboxReadTimesOut(t, reconnected, 250*time.Millisecond)
 }
 
 func TestWebSocketAcceptsOnlyAfterDurablePut(t *testing.T) {

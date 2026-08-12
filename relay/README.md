@@ -85,6 +85,6 @@ Stable relay WebSocket outcomes are:
 - `relay.rejected` with `digest_mismatch`: acknowledgement digest does not match the stored envelope.
 - `relay.rejected` with `not_recipient`: the authenticated device is not allowed to acknowledge or address that mailbox item.
 - `relay.rejected` with `peer_legacy`: the requested durable path is unavailable for the peer's negotiated protocol state.
-- `relay.rejected` with `invalid_frame`: malformed, out-of-order, or protocol-incompatible input. A frame that exceeds the 1 MiB WebSocket read limit closes the connection before normal frame handling.
+- `relay.rejected` with `invalid_frame`: malformed, out-of-order, or protocol-incompatible input. An encrypted envelope over 1 MiB closes the socket before normal frame handling; the relay-control read limit includes bounded wrapper overhead.
 
 Pairing and revocation endpoints also use normal HTTP status codes for malformed input, authentication failure, rate limiting, state conflict, and capacity exhaustion. Client logic should branch on the stable machine-readable relay reason, never on validator or HTTP prose.
