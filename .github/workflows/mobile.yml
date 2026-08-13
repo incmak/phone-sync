@@ -1,9 +1,9 @@
 name: mobile
 on:
   push:
-    paths: ['mobile/**', '.github/workflows/mobile.yml']
+    paths: ['mobile/**', 'proto/**', 'Makefile', '.github/workflows/mobile.yml']
   pull_request:
-    paths: ['mobile/**', '.github/workflows/mobile.yml']
+    paths: ['mobile/**', 'proto/**', 'Makefile', '.github/workflows/mobile.yml']
 
 permissions:
   contents: read
@@ -43,6 +43,9 @@ jobs:
           java-version: '17'
           cache: gradle
       - run: npm ci
+      - name: Sync committed protocol fixtures
+        run: make sync-proto
+        working-directory: .
       - run: npx expo prebuild --platform android --clean --no-install
       - run: ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
         working-directory: mobile/android
@@ -51,6 +54,19 @@ jobs:
           name: twinotify-debug-apk
           path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+      - name: Upload Android test and lint reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: twinotify-android-verification-reports
+          path: |
+            mobile/android/**/build/test-results/**
+            mobile/android/**/build/reports/tests/**
+            mobile/android/**/build/reports/**/lint-results*.html
+            mobile/modules/twinotify-core/android/build/test-results/**
+            mobile/modules/twinotify-core/android/build/reports/tests/**
+            mobile/modules/twinotify-core/android/build/reports/lint-results-debug.html
+          if-no-files-found: warn
 
   denylist-integrity:
     runs-on: ubuntu-latest

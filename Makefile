@@ -31,7 +31,7 @@ relay-build: sync-proto
 deployment-test:
 	./deploy/assert-compose.sh
 
-mobile-verify:
+mobile-verify: sync-proto
 	cd mobile && npm ci
 	cd mobile && npm run typecheck
 	cd mobile && npx expo-doctor
