@@ -176,6 +176,22 @@ class ReliableDeliveryTransactionTest {
         assertEquals("newer", dao.canonical(CANON_ID)!!.desiredPayloadJson)
     }
 
+    @Test
+    fun inboundJournalAtomicallyDistinguishesSameDigestDuplicateFromIdConflict() = runBlocking {
+        val first = inbound(msgId = "inbound-1", digest = "digest-a")
+
+        assertEquals(InboundDesiredCommitResult.Committed, dao.commitInboundDesired(first, desired = null))
+        assertEquals(
+            InboundDesiredCommitResult.Duplicate(outcome = "PENDING_PLATFORM", receiptMsgId = null),
+            dao.commitInboundDesired(first, desired = null),
+        )
+        assertEquals(
+            InboundDesiredCommitResult.IdConflict(existingSha256 = "digest-a"),
+            dao.commitInboundDesired(first.copy(envelopeSha256 = "digest-b"), desired = null),
+        )
+        assertEquals("digest-a", dao.inbound("inbound-1")?.envelopeSha256)
+    }
+
     private fun activeMessageIds(): List<String> = db.openHelper.readableDatabase.query(
         "SELECT msgId FROM outbound_message ORDER BY msgId",
     ).use { cursor ->
@@ -221,6 +237,20 @@ class ReliableDeliveryTransactionTest {
         state = "NEW",
         lastError = null,
         requiresPeerReceipt = true,
+    )
+
+    private fun inbound(msgId: String, digest: String) = InboundMessage(
+        msgId = msgId,
+        originDevice = ORIGIN,
+        envelopeSha256 = digest,
+        eventType = "peer.receipt",
+        canonId = null,
+        sequence = null,
+        outcome = "PENDING_PLATFORM",
+        committedAt = 1_000,
+        appliedAt = null,
+        receiptMsgId = null,
+        relayAckState = "NONE",
     )
 
     private companion object {

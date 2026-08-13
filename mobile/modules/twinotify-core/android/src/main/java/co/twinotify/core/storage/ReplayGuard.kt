@@ -11,12 +11,15 @@ private val Context.replayDs by preferencesDataStore("twinotify_replay")
 private const val TTL_MS = 48L * 60 * 60 * 1000
 
 /**
- * msg_id dedup table with 48h TTL. First sighting → false (not seen, mark it).
- * Repeat within TTL → true (drop). After TTL → false again (replay window closed).
+ * Legacy v1 compatibility replay guard.
  *
- * Implementation: DataStore preference key "m_<msg_id>" → Long(timestamp_ms).
- * GC: opportunistic sweep on every call, removes entries older than TTL.
+ * Version 2 traffic must first pass `EnvelopeAuthenticator` and then use the transactional
+ * inbound Room journal (`ReliableDeliveryDao.commitInboundDesired`) for its replay decision.
  */
+@Deprecated(
+    message = "V2 replay protection is the inbound Room transaction; retain only for v1 reads",
+    level = DeprecationLevel.WARNING,
+)
 object ReplayGuard {
     private fun keyFor(msgId: String) = longPreferencesKey("m_$msgId")
 

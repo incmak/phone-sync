@@ -17,6 +17,7 @@ android {
   }
   sourceSets {
     androidTest.assets.srcDirs += files("$projectDir/schemas")
+    test.resources.srcDir("${rootProject.projectDir}/../../proto/fixtures")
   }
   lint {
     abortOnError true
