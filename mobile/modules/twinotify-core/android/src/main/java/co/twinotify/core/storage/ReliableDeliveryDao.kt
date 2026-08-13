@@ -49,6 +49,8 @@ sealed interface OutboundStateCommitResult {
 sealed interface SnapshotCommitResult {
     data class Committed(val upserted: Int, val cancelled: Int) : SnapshotCommitResult
     data class Incomplete(val expected: Int, val staged: Int) : SnapshotCommitResult
+    data class DigestMismatch(val expected: String, val actual: String) : SnapshotCommitResult
+    data class Expired(val snapshotAgeMs: Long) : SnapshotCommitResult
     data object MissingBegin : SnapshotCommitResult
 }
 
@@ -59,6 +61,7 @@ sealed interface SnapshotBeginResult {
 sealed interface SnapshotStageResult {
     data object Staged : SnapshotStageResult
     data object MissingBegin : SnapshotStageResult
+    data object OriginMismatch : SnapshotStageResult
 }
 
 sealed interface TerminalMovementResult {
@@ -319,6 +322,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     @Query("SELECT * FROM snapshot_stage WHERE snapshotId=:snapshotId ORDER BY canonId")
     protected abstract suspend fun stagedSnapshot(snapshotId: String): List<SnapshotStage>
 
+    @Query("SELECT DISTINCT snapshotId FROM snapshot_stage WHERE receivedAt < :cutoff")
+    protected abstract suspend fun expiredSnapshotIds(cutoff: Long): List<String>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun putSnapshotStages(rows: List<SnapshotStage>)
 
@@ -329,6 +335,18 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Query("DELETE FROM snapshot_stage WHERE snapshotId=:snapshotId")
     protected abstract suspend fun deleteSnapshot(snapshotId: String): Int
+
+    /** Public read surface for the snapshot coordinator and deterministic tests. */
+    suspend fun snapshotRows(snapshotId: String): List<SnapshotStage> = stagedSnapshot(snapshotId)
+
+    /** Removes complete snapshot staging sessions, never individual rows. */
+    @Transaction
+    open suspend fun expireSnapshotStages(cutoff: Long): Int {
+        require(cutoff >= 0) { "snapshot expiry cutoff must be non-negative" }
+        val ids = expiredSnapshotIds(cutoff)
+        ids.forEach { deleteSnapshot(it) }
+        return ids.size
+    }
 
     @Transaction
     open suspend fun reserveSequence(canonId: String): SequenceReservationResult {
@@ -648,12 +666,31 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         originDevice: String,
         expectedItemCount: Int,
         receivedAt: Long,
+        expectedDigest: String? = null,
     ): SnapshotBeginResult {
         require(snapshotId.isNotEmpty())
         require(originDevice.isNotEmpty())
-        require(expectedItemCount >= 0)
+        require(expectedItemCount in 0..MAX_SNAPSHOT_ITEMS)
+        expectedDigest?.let {
+            require(it.matches(Regex("^[0-9a-f]{64}$"))) { "snapshot digest must be lower-case SHA-256" }
+        }
 
-        deleteSnapshot(snapshotId)
+        val existingBegin = stagedSnapshot(snapshotId).singleOrNull { it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID }
+        if (existingBegin != null) {
+            val existingMarker = parseSnapshotBeginMarker(existingBegin.payloadJson)
+            // Redelivered begin frames are idempotent. Keep already staged items so a duplicate
+            // control frame cannot erase a snapshot currently converging.
+            if (
+                existingMarker.originDevice == originDevice &&
+                existingBegin.sequence == expectedItemCount.toLong() &&
+                (expectedDigest == null || existingMarker.expectedDigest == expectedDigest)
+            ) return SnapshotBeginResult.Started(
+                stagedSnapshot(snapshotId).count { !it.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX) },
+            )
+            deleteSnapshot(snapshotId)
+        } else {
+            deleteSnapshot(snapshotId)
+        }
         val baseline = canonicalsForOrigin(originDevice).filter { it.state != "CANCELLED" }
         putSnapshotStages(
             buildList {
@@ -662,7 +699,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
                         snapshotId = snapshotId,
                         canonId = SNAPSHOT_BEGIN_MARKER_CANON_ID,
                         sequence = expectedItemCount.toLong(),
-                        payloadJson = originDevice,
+                        payloadJson = snapshotBeginMarker(originDevice, expectedDigest),
                         receivedAt = receivedAt,
                     ),
                 )
@@ -684,11 +721,26 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Transaction
     open suspend fun stageSnapshotItem(row: SnapshotStage): SnapshotStageResult {
+        return stageSnapshotItem(row, expectedOriginDevice = null)
+    }
+
+    @Transaction
+    open suspend fun stageSnapshotItem(
+        row: SnapshotStage,
+        expectedOriginDevice: String?,
+    ): SnapshotStageResult {
         require(!row.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX))
-        val hasBegin = stagedSnapshot(row.snapshotId).any {
+        require(row.sequence > 0) { "snapshot sequence must be positive" }
+        require(row.payloadJson.toByteArray(Charsets.UTF_8).size <= MAX_SNAPSHOT_ITEM_BYTES) {
+            "snapshot item payload exceeds bounded size"
+        }
+        val begin = stagedSnapshot(row.snapshotId).singleOrNull {
             it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID
         }
-        if (!hasBegin) return SnapshotStageResult.MissingBegin
+        if (begin == null) return SnapshotStageResult.MissingBegin
+        if (expectedOriginDevice != null && parseSnapshotBeginMarker(begin.payloadJson).originDevice != expectedOriginDevice) {
+            return SnapshotStageResult.OriginMismatch
+        }
         putSnapshotStages(listOf(row))
         return SnapshotStageResult.Staged
     }
@@ -698,12 +750,45 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         snapshotId: String,
         committedAt: Long,
     ): SnapshotCommitResult {
+        return commitSnapshot(snapshotId, expectedDigest = null, committedAt = committedAt)
+    }
+
+    /**
+     * Validates a complete staged snapshot before any desired-state mutation.  The overload
+     * retains the original Task 5 API while allowing the authenticated end frame to supply the
+     * digest that protects the atomic reconciliation boundary.
+     */
+    @Transaction
+    open suspend fun commitSnapshot(
+        snapshotId: String,
+        expectedDigest: String?,
+        committedAt: Long,
+    ): SnapshotCommitResult {
+        return commitSnapshot(snapshotId, expectedDigest, committedAt, expectedOriginDevice = null)
+    }
+
+    @Transaction
+    open suspend fun commitSnapshot(
+        snapshotId: String,
+        expectedDigest: String?,
+        committedAt: Long,
+        expectedOriginDevice: String?,
+    ): SnapshotCommitResult {
         val rows = stagedSnapshot(snapshotId)
         val begin = rows.singleOrNull { it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID }
             ?: return SnapshotCommitResult.MissingBegin
         val expectedItemCount = begin.sequence.toInt()
         check(expectedItemCount >= 0 && expectedItemCount.toLong() == begin.sequence)
-        val originDevice = begin.payloadJson
+        val marker = parseSnapshotBeginMarker(begin.payloadJson)
+        val originDevice = marker.originDevice
+        val snapshotAge = committedAt - begin.receivedAt
+        if (snapshotAge > SNAPSHOT_TTL_MS) {
+            deleteSnapshot(snapshotId)
+            return SnapshotCommitResult.Expired(snapshotAge)
+        }
+        if (expectedOriginDevice != null && expectedOriginDevice != originDevice) {
+            return SnapshotCommitResult.DigestMismatch(expectedOriginDevice, originDevice)
+        }
         val baselineByCanonId = rows.asSequence()
             .filter { it.canonId.startsWith(SNAPSHOT_BASELINE_MARKER_PREFIX) }
             .associate { it.payloadJson to it.sequence }
@@ -712,10 +797,20 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
             return SnapshotCommitResult.Incomplete(expectedItemCount, staged.size)
         }
 
+        val actualDigest = snapshotDigest(staged)
+        val digest = expectedDigest ?: marker.expectedDigest
+        if (digest != null && digest != actualDigest) {
+            return SnapshotCommitResult.DigestMismatch(digest, actualDigest)
+        }
+
         var upserted = 0
         for (item in staged) {
             val current = canonical(item.canonId)
+            // Canonical ownership is immutable. A snapshot from one origin cannot overwrite
+            // state belonging to another origin, even when its sequence is numerically newer.
+            if (current != null && current.originDevice != originDevice) continue
             if (current == null || item.sequence > current.latestSequence) {
+                val mirrorId = current?.mirrorLocalId ?: nextMirrorLocalId()
                 putCanonical(
                     CanonicalNotificationState(
                         canonId = item.canonId,
@@ -725,8 +820,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
                         desiredPayloadJson = item.payloadJson,
                         materializedSequence = current?.materializedSequence ?: 0,
                         sourceNotificationKey = current?.sourceNotificationKey,
-                        mirrorLocalId = current?.mirrorLocalId,
-                        mirrorLocalTag = current?.mirrorLocalTag,
+                        mirrorLocalId = mirrorId,
+                        mirrorLocalTag = current?.mirrorLocalTag ?: stableSnapshotMirrorTag(item.canonId),
                         peerCancelPending = current?.peerCancelPending ?: false,
                         updatedAt = committedAt,
                     ),
@@ -804,5 +899,43 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         const val SNAPSHOT_RESERVED_CANON_PREFIX = "\u0000"
         const val SNAPSHOT_BEGIN_MARKER_CANON_ID = "${SNAPSHOT_RESERVED_CANON_PREFIX}begin"
         const val SNAPSHOT_BASELINE_MARKER_PREFIX = "${SNAPSHOT_RESERVED_CANON_PREFIX}baseline:"
+        const val MAX_SNAPSHOT_ITEMS = 4_096
+        const val MAX_SNAPSHOT_ITEM_BYTES = 512 * 1024
+        const val SNAPSHOT_TTL_MS = 10 * 60 * 1_000L
+
+        private data class SnapshotBeginMarker(val originDevice: String, val expectedDigest: String?)
+
+        fun snapshotBeginMarker(originDevice: String, expectedDigest: String?): String =
+            org.json.JSONObject().apply {
+                put("origin_device", originDevice)
+                put("expected_digest", expectedDigest ?: org.json.JSONObject.NULL)
+            }.toString()
+
+        fun parseSnapshotBeginMarker(raw: String): SnapshotBeginMarker = runCatching {
+            val json = org.json.JSONObject(raw)
+            SnapshotBeginMarker(
+                originDevice = json.getString("origin_device"),
+                expectedDigest = if (json.isNull("expected_digest")) null else json.getString("expected_digest"),
+            )
+        }.getOrElse {
+            // Rows written by the original Task 5 API stored the origin as plain text.
+            SnapshotBeginMarker(raw, null)
+        }
+
+        fun snapshotDigest(rows: List<SnapshotStage>): String {
+            val canonicalLines = rows
+                .filterNot { it.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX) }
+                .sortedBy { it.canonId }
+                .joinToString("\n") { "${it.canonId}\u0000${it.sequence}\u0000ACTIVE" }
+            return java.security.MessageDigest.getInstance("SHA-256")
+                .digest(canonicalLines.toByteArray(Charsets.UTF_8))
+                .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        }
+
+        fun stableSnapshotMirrorTag(canonId: String): String {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(canonId.toByteArray(Charsets.UTF_8))
+            return "mirror-" + digest.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }.take(24)
+        }
     }
 }

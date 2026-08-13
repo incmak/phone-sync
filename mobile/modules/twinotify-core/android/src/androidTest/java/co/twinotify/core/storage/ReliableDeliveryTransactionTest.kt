@@ -8,6 +8,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -145,6 +146,41 @@ class ReliableDeliveryTransactionTest {
         assertEquals("ACTIVE", retained.state)
         assertEquals("after", retained.desiredPayloadJson)
         assertEquals(5, retained.latestSequence)
+    }
+
+    @Test
+    fun snapshotDigestMismatchLeavesCanonicalAndStagingUntouched() = runBlocking {
+        dao.beginSnapshot("digest-mismatch", ORIGIN, expectedItemCount = 1, receivedAt = 100)
+        dao.stageSnapshotItem(
+            SnapshotStage("digest-mismatch", "new-canon", 4, snapshotPayload("new-canon"), 100),
+        )
+
+        val result = dao.commitSnapshot("digest-mismatch", "0".repeat(64), committedAt = 200)
+
+        assertIs<SnapshotCommitResult.DigestMismatch>(result)
+        assertNull(dao.canonical("new-canon"))
+        assertIs<SnapshotCommitResult.Committed>(
+            dao.commitSnapshot("digest-mismatch", snapshotDigest("new-canon", 4), committedAt = 300),
+        )
+    }
+
+    @Test
+    fun validSnapshotAssignsStableMirrorIdentityAndExpiresWholeStage() = runBlocking {
+        dao.beginSnapshot("stable-snapshot", ORIGIN, expectedItemCount = 1, receivedAt = 100)
+        dao.stageSnapshotItem(
+            SnapshotStage("stable-snapshot", "stable-canon", 1, snapshotPayload("stable-canon"), 100),
+        )
+
+        val result = dao.commitSnapshot("stable-snapshot", snapshotDigest("stable-canon", 1), committedAt = 200)
+
+        assertEquals(SnapshotCommitResult.Committed(upserted = 1, cancelled = 0), result)
+        val state = dao.canonical("stable-canon")!!
+        assertTrue(state.mirrorLocalTag?.startsWith("mirror-") == true)
+        assertTrue(state.mirrorLocalId!! > 0)
+
+        dao.beginSnapshot("expired-snapshot", ORIGIN, expectedItemCount = 0, receivedAt = 100)
+        assertEquals(1, dao.expireSnapshotStages(cutoff = 101))
+        assertEquals(SnapshotCommitResult.MissingBegin, dao.commitSnapshot("expired-snapshot", committedAt = 200))
     }
 
     @Test
@@ -286,6 +322,14 @@ class ReliableDeliveryTransactionTest {
         receiptMsgId = null,
         relayAckState = "NONE",
     )
+
+    private fun snapshotPayload(canonId: String) =
+        "{\"type\":\"notif.post\",\"canon_id\":\"$canonId\",\"package_name\":\"pkg\",\"id\":1,\"visibility\":\"private\"}"
+
+    private fun snapshotDigest(canonId: String, sequence: Long): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest("$canonId\u0000$sequence\u0000ACTIVE".toByteArray())
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private companion object {
         const val CANON_ID = "canon-a"

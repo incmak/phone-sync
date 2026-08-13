@@ -37,6 +37,7 @@ class SyncService : Service() {
     private lateinit var legacyStore: co.twinotify.core.storage.LegacyOutboxStore
     private lateinit var outbox: OutboxRepository
     private lateinit var dispatcher: InboundDispatcher
+    private lateinit var snapshotCoordinator: SnapshotCoordinator
 
     override fun onCreate() {
         super.onCreate()
@@ -44,7 +45,18 @@ class SyncService : Service() {
         val dao = NotificationDb.get(this).reliableDeliveryDao()
         legacyStore = dao
         outbox = OutboxRepository(DaoOutboxStore(dao))
-        dispatcher = InboundDispatcher(this)
+        val localDevice = kotlinx.coroutines.runBlocking { DeviceIdentity.getOrCreate(applicationContext) }
+        val capturePersister = co.twinotify.core.listener.DurableCapturePersister(applicationContext)
+        snapshotCoordinator = SnapshotCoordinator(
+            dao = dao,
+            emitter = SnapshotEmitter { event -> capturePersister.persistSnapshotEvent(event) },
+            source = ListenerSnapshotSource(
+                applicationContext,
+                co.twinotify.core.filter.DenylistLoader.load(applicationContext),
+            ),
+            localOriginDevice = localDevice,
+        )
+        dispatcher = InboundDispatcher(this, snapshotCoordinator)
         // Legacy outbound_queue rows must enter the durable outbox before any
         // negotiated floor-1/floor-2 transport flush. The transaction is
         // idempotent, so a crash or service restart cannot duplicate events.
@@ -130,14 +142,22 @@ class SyncService : Service() {
             transport.run(endpoints.webSocket).collect { event ->
                 when (event) {
                     TransportEvent.Connected -> SyncServiceStatus.setState(SyncState.CONNECTING)
-                    is TransportEvent.Authenticated -> SyncServiceStatus.setState(SyncState.CONNECTED)
+                    is TransportEvent.Authenticated -> {
+                        SyncServiceStatus.setState(SyncState.CONNECTED)
+                        scope.launch {
+                            runCatching { snapshotCoordinator.emitLocalDigest(deviceId) }
+                        }
+                    }
                     TransportEvent.LegacyOnlineOnly -> SyncServiceStatus.setState(SyncState.LEGACY_ONLINE_ONLY)
                     is TransportEvent.LegacyForwarded -> SyncServiceStatus.setQueuedCount(outbox.sendable(limit = 2_000).size)
                     is TransportEvent.Delivery -> dispatcher.dispatch(event.envelope)
                     is TransportEvent.RelayAccepted,
                     is TransportEvent.RelayRejected,
-                    is TransportEvent.RelayExpired,
                     -> SyncServiceStatus.setQueuedCount(outbox.sendable(limit = 2_000).size)
+                    is TransportEvent.RelayExpired -> {
+                        SyncServiceStatus.setQueuedCount(outbox.sendable(limit = 2_000).size)
+                        scope.launch { runCatching { snapshotCoordinator.emitLocalDigest(deviceId) } }
+                    }
                     is TransportEvent.Failed,
                     is TransportEvent.Closed,
                     -> if (isActive) SyncServiceStatus.setState(SyncState.OFFLINE_QUEUED)

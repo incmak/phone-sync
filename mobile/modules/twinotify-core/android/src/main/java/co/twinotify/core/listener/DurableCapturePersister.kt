@@ -181,6 +181,115 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         )
     }
 
+    /** Encrypts and durably queues one authenticated snapshot control/item event. */
+    suspend fun persistSnapshotEvent(event: Any) {
+        val originDevice = DeviceIdentity.getOrCreate(appContext)
+        val (type, values) = when (event) {
+            is co.twinotify.core.service.StateDigest -> "state.digest" to Triple(
+                null,
+                null,
+                JSONObject().apply {
+                    put("origin_device", event.originDevice)
+                    put("origin_epoch", event.originEpoch)
+                    put("count", event.count)
+                    put("digest", event.digest)
+                }.toString(),
+            )
+            is co.twinotify.core.service.SnapshotBeginEvent -> "state.snapshot.begin" to Triple(
+                null,
+                null,
+                JSONObject().apply {
+                    put("snapshot_id", event.snapshotId)
+                    put("origin_device", event.originDevice)
+                    put("origin_epoch", event.originEpoch)
+                    put("item_count", event.itemCount)
+                }.toString(),
+            )
+            is co.twinotify.core.service.SnapshotItemEvent -> "state.snapshot.item" to Triple(
+                event.canonId,
+                event.sequence,
+                JSONObject().apply {
+                    put("snapshot_id", event.snapshotId)
+                    put("notification_payload", JSONObject(event.payloadJson))
+                }.toString(),
+            )
+            is co.twinotify.core.service.SnapshotEndEvent -> "state.snapshot.end" to Triple(
+                null,
+                null,
+                JSONObject().apply {
+                    put("snapshot_id", event.snapshotId)
+                    put("origin_device", event.originDevice)
+                    put("digest", event.digest)
+                }.toString(),
+            )
+            else -> error("unsupported snapshot event ${event::class.java.name}")
+        }
+        val (canonId, sequence, payloadJson) = values
+        persistEncryptedControl(
+            originDevice = originDevice,
+            type = type,
+            canonId = canonId,
+            sequence = sequence,
+            payloadJson = payloadJson,
+        )
+    }
+
+    private suspend fun persistEncryptedControl(
+        originDevice: String,
+        type: String,
+        canonId: String?,
+        sequence: Long?,
+        payloadJson: String,
+    ) {
+        val peer = PeerStore.load(appContext)
+            ?: throw CaptureNotPairedException("control event deferred until a peer is paired")
+        val createdAt = System.currentTimeMillis().coerceAtLeast(0L)
+        val expiresAt = createdAt + RETENTION_MS
+        val msgId = UUID.randomUUID().toString()
+        val inner = InnerEventV2(msgId, originDevice, type, canonId, sequence, createdAt, expiresAt, payloadJson)
+        val (box, _) = CryptoStore.loadOrGenerate(appContext)
+        val nonce = NonceSource.next(appContext)
+        val ciphertext = Encrypter.encrypt(
+            plain = ProtocolJson.encodeInner(inner).toByteArray(Charsets.UTF_8),
+            nonce = nonce,
+            peerPubkey = peer.encPubkey,
+            ownSecret = box.secretKey,
+        )
+        val envelope = ProtocolJson.encodeEnvelope(
+            EncryptedEnvelope(
+                version = ProtocolJson.VERSION,
+                msgId = msgId,
+                originDevice = originDevice,
+                createdAt = createdAt,
+                nonceB64 = Base64.encodeToString(nonce, Base64.NO_WRAP),
+                ciphertextB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP),
+            ),
+        )
+        dao.insertOutbound(
+            OutboundMessage(
+                msgId = msgId,
+                canonId = canonId,
+                sequence = sequence,
+                eventType = type,
+                protocolVersion = ProtocolJson.VERSION,
+                envelopeJson = envelope,
+                envelopeSha256 = sha256(envelope),
+                byteSize = envelope.toByteArray(Charsets.UTF_8).size.toLong(),
+                createdAt = createdAt,
+                expiresAt = expiresAt,
+                relayAcceptedAt = null,
+                attempts = 0,
+                nextAttemptAt = createdAt,
+                state = "NEW",
+                lastError = null,
+                // Snapshot controls are idempotent convergence hints. The receiver stages and
+                // validates them atomically; retaining each control until a peer receipt would
+                // create a receipt recursion with no user-visible notification state.
+                requiresPeerReceipt = false,
+            ),
+        )
+    }
+
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }

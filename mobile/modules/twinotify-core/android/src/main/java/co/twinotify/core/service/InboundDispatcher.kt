@@ -17,10 +17,16 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
-class InboundDispatcher(private val ctx: Context) {
+class InboundDispatcher(
+    private val ctx: Context,
+    private val snapshotCoordinator: SnapshotCoordinator = SnapshotCoordinator(
+        NotificationDb.get(ctx.applicationContext).reliableDeliveryDao(),
+    ),
+) {
     private val reliableDao by lazy { NotificationDb.get(ctx.applicationContext).reliableDeliveryDao() }
     private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao)) }
     private val stateMutex = Mutex()
+    private val snapshots get() = snapshotCoordinator
 
     suspend fun dispatch(raw: String) {
         val parsed = runCatching { JSONObject(raw) }.getOrNull()
@@ -101,6 +107,37 @@ class InboundDispatcher(private val ctx: Context) {
                 status = status,
                 reason = reason,
             )
+            return
+        }
+        if (inner.type == "state.digest") {
+            runCatching { snapshots.onDigest(inner) }
+                .onFailure { android.util.Log.w("Twinotify", "snapshot digest rejected", it) }
+            return
+        }
+        if (inner.type == "state.snapshot.begin") {
+            runCatching { snapshots.onBegin(inner) }
+                .onFailure { android.util.Log.w("Twinotify", "snapshot begin rejected", it) }
+            return
+        }
+        if (inner.type == "state.snapshot.item") {
+            runCatching { snapshots.onItem(inner) }
+                .onFailure { android.util.Log.w("Twinotify", "snapshot item rejected", it) }
+            return
+        }
+        if (inner.type == "state.snapshot.end") {
+            val result = runCatching { snapshots.onEnd(inner) }
+                .onFailure { android.util.Log.w("Twinotify", "snapshot end rejected", it) }
+                .getOrNull()
+            if (result is SnapshotConvergence.Committed) {
+                val localDeviceId = DeviceIdentity.getOrCreate(ctx)
+                NotificationMaterializer(
+                    dao = reliableDao,
+                    port = DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao),
+                    receiptFactory = DurableReceiptFactory(ctx),
+                    localDeviceId = localDeviceId,
+                    retryScheduler = materializationStartupScheduler(ctx),
+                ).materializePending()
+            }
             return
         }
         if (inner.type !in setOf("notif.post", "notif.update", "notif.cancel")) {
