@@ -11,6 +11,7 @@ import (
 
 	"github.com/twinotify/phone-sync/e2e/internal/adb"
 	"github.com/twinotify/phone-sync/e2e/internal/control"
+	"github.com/twinotify/phone-sync/e2e/internal/metrics"
 	"github.com/twinotify/phone-sync/e2e/internal/scenario"
 )
 
@@ -51,6 +52,9 @@ func run(ctx context.Context, scenario string) error {
 
 func runWithOptions(ctx context.Context, cfg options) error {
 	if cfg.scenario != "status" && cfg.scenario != "pair" {
+		if err := metrics.ValidateScenarioID(cfg.scenario); err == nil {
+			return scenario.ErrUnsupportedEnvironment
+		}
 		if _, err := scenario.Plan(cfg.scenario); err != nil {
 			return err
 		}
