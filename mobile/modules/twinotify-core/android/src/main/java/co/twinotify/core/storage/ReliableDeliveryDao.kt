@@ -87,6 +87,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     )
     abstract suspend fun markRelayAccepted(msgId: String, acceptedAt: Long, retryAt: Long): Int
 
+    @Query(
+        "UPDATE outbound_message SET attempts=attempts + 1, nextAttemptAt=:retryAt " +
+            "WHERE msgId=:msgId AND state='NEW'",
+    )
+    abstract suspend fun markRelaySent(msgId: String, retryAt: Long): Int
+
     @Query("DELETE FROM outbound_message WHERE msgId=:msgId")
     abstract suspend fun deleteOutbound(msgId: String): Int
 
@@ -108,6 +114,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     )
     abstract suspend fun pendingMaterialization(): List<CanonicalNotificationState>
 
+    @Query("SELECT * FROM canonical_notification_state WHERE originDevice=:originDevice AND state='ACTIVE'")
+    abstract suspend fun activeOriginStates(originDevice: String): List<CanonicalNotificationState>
+
     @Query("SELECT * FROM outbound_queue ORDER BY id ASC LIMIT :limit")
     abstract override suspend fun legacyBatch(limit: Int): List<LegacyOutboundEvent>
 
@@ -122,6 +131,10 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Query("SELECT * FROM origin_sequence WHERE canonId=:canonId")
     protected abstract suspend fun originSequence(canonId: String): OriginSequence?
+
+    /** Read-only hint used to prepare the encrypted payload before the atomic capture commit. */
+    @Query("SELECT nextSequence FROM origin_sequence WHERE canonId=:canonId")
+    abstract suspend fun nextCaptureSequence(canonId: String): Long?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun putOriginSequence(row: OriginSequence)
@@ -304,6 +317,27 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         putCanonical(desired)
         insertOutbound(incoming)
         return OutboundStateCommitResult.Committed(compacted)
+    }
+
+    /**
+     * Capture-specific commit: the prepared row may enter the durable state only when its
+     * sequence reservation is still present. This closes the reservation/commit interleaving
+     * without weakening the lower-level transaction helper used by migration tests.
+     */
+    @Transaction
+    open suspend fun commitCapturedState(
+        desired: CanonicalNotificationState,
+        incoming: OutboundMessage,
+    ): OutboundStateCommitResult {
+        val sequence = requireNotNull(incoming.sequence)
+        val canonId = incoming.canonId ?: return OutboundStateCommitResult.NotStateEvent
+        // Sequence allocation and canonical/outbox mutation share this transaction. The caller
+        // only reads the next value while preparing crypto; this compare-and-increment is the
+        // authoritative reservation and rolls back together with the state/outbox write.
+        val nextSequence = originSequence(canonId)?.nextSequence ?: 1L
+        if (sequence != nextSequence) return OutboundStateCommitResult.Stale(nextSequence - 1L)
+        putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
+        return commitOutboundState(desired, incoming)
     }
 
     @Transaction

@@ -305,6 +305,7 @@ class TwinotifyCoreModule : Module() {
                     val sign = Base64.getDecoder().decode(signB64)
                     val name = peerDisplayName.takeIf { it.isNotBlank() }
                     PeerStore.save(ctx, PeerRecord(peerDeviceId, enc, sign, name))
+                    co.twinotify.core.listener.CaptureCoordinator.get(ctx).resumeDeferred()
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("PEER_STORE", e.message ?: "err", e) }
             }
@@ -361,8 +362,7 @@ class TwinotifyCoreModule : Module() {
                     if (peer != null) {
                         try {
                             val deviceId = DeviceIdentity.getOrCreate(ctx)
-                            co.twinotify.core.listener.TwinotifyNotificationListener
-                                .currentSink()
+                            co.twinotify.core.listener.DurableOutboundSink.get(ctx)
                                 .enqueueUnpair("user_initiated", deviceId, System.currentTimeMillis())
                             // Wait up to 3s for queue to drain
                             val deadline = System.currentTimeMillis() + 3_000L

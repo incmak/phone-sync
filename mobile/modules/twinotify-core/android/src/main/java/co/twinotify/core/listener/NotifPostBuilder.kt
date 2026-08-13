@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.Icon
 import android.service.notification.StatusBarNotification
 import android.util.Base64
 import androidx.core.graphics.createBitmap
@@ -42,9 +43,97 @@ object NotifPostBuilder {
     private val CAR_CATEGORIES = setOf("car_emergency", "car_information", "car_warning")
 
     /**
-     * @return NotifPostJson, or null if privacy filter drops it.
-     * @param originDevice this device's id (DeviceIdentity.getOrCreate(ctx)).
-     * @param isUpdate if true, emits "notif.update"; else "notif.post".
+     * Copies all callback-owned fields before any asynchronous work. Icon handles are retained as
+     * immutable framework handles; bitmap decoding/compression is deliberately deferred to [build].
+     */
+    fun captureSnapshot(
+        sbn: StatusBarNotification,
+        ctx: Context,
+        denylist: Set<String>,
+    ): SourceNotificationSnapshot? {
+        val notif = sbn.notification
+        val pkg = sbn.packageName
+
+        if (notif.visibility == Notification.VISIBILITY_SECRET) return null
+        if ((notif.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return null
+        if (pkg == ANDROID_AUTO_PKG) return null
+        if (notif.category in CAR_CATEGORIES) return null
+        if (pkg in denylist) return null
+
+        val extras = notif.extras
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()?.takeIf { it.isNotBlank() }
+            ?: pkg
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+                ?.lastOrNull()?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.let { msgs ->
+                (msgs.lastOrNull() as? android.os.Bundle)?.getCharSequence("text")?.toString()
+                    ?.takeIf { it.isNotBlank() }
+            }
+            ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_INFO_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+
+        return SourceNotificationSnapshot(
+            sourceKey = sbn.key,
+            packageName = pkg,
+            id = sbn.id,
+            tag = sbn.tag,
+            postTime = sbn.postTime,
+            flags = notif.flags,
+            category = notif.category,
+            visibility = notif.visibility,
+            isGroupSummary = (notif.flags and Notification.FLAG_GROUP_SUMMARY) != 0,
+            isOngoing = (notif.flags and Notification.FLAG_ONGOING_EVENT) != 0,
+            isClearable = sbn.isClearable,
+            appName = pkg,
+            title = title,
+            text = text,
+            subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString(),
+            bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString(),
+            smallIcon = notif.smallIcon,
+            largeIcon = notif.getLargeIcon(),
+        )
+    }
+
+    /** Builds one canonical payload from an immutable callback snapshot. */
+    fun build(
+        snapshot: SourceNotificationSnapshot,
+        ctx: Context,
+        originDevice: String,
+        eventType: String,
+    ): NotifPostJson {
+        require(eventType == "notif.post" || eventType == "notif.update") {
+            "notification event type must be notif.post or notif.update"
+        }
+        return NotifPostJson(
+            type = eventType,
+            canon_id = CanonIdBuilder.build(originDevice, snapshot.packageName, snapshot.id, snapshot.tag),
+            app_name = snapshot.appName,
+            package_name = snapshot.packageName,
+            id = snapshot.id,
+            tag = snapshot.tag,
+            title = snapshot.title,
+            text = snapshot.text,
+            sub_text = snapshot.subText,
+            big_text = snapshot.bigText,
+            visibility = visibilityString(snapshot.visibility),
+            is_group_summary = snapshot.isGroupSummary,
+            is_ongoing = snapshot.isOngoing,
+            is_clearable = snapshot.isClearable,
+            small_icon_png_b64 = snapshot.smallIconPngB64
+                ?: drawableToPngB64(snapshot.smallIcon?.loadDrawable(ctx), SMALL_ICON_PX),
+            large_icon_png_b64 = snapshot.largeIconPngB64
+                ?: drawableToPngB64(snapshot.largeIcon?.loadDrawable(ctx), LARGE_ICON_PX),
+            ts = snapshot.postTime,
+        )
+    }
+
+    /**
+     * Compatibility adapter for callers that still hold a framework callback. New code must
+     * capture first, then submit a [PostCommand] to [CaptureCoordinator].
      */
     fun build(
         sbn: StatusBarNotification,
@@ -52,61 +141,30 @@ object NotifPostBuilder {
         originDevice: String,
         denylist: Set<String>,
         isUpdate: Boolean = false,
-    ): NotifPostJson? {
-        val notif = sbn.notification
-        val pkg = sbn.packageName
-
-        // Spec §4.7.3 privacy filters — hard drops
-        if (notif.visibility == Notification.VISIBILITY_SECRET) return null
-        if (pkg == ANDROID_AUTO_PKG) return null
-        if (notif.category in CAR_CATEGORIES) return null
-        if (pkg in denylist) return null
-
-        val extras = notif.extras
-        // Title fallbacks: EXTRA_TITLE → EXTRA_TITLE_BIG → EXTRA_CONVERSATION_TITLE → app name
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.takeIf { it.isNotBlank() }
-            ?: extras.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString()?.takeIf { it.isNotBlank() }
-            ?: extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()?.takeIf { it.isNotBlank() }
-            ?: pkg
-        // Text fallbacks: EXTRA_TEXT → last line of EXTRA_TEXT_LINES → last MessagingStyle message text
-        //   → EXTRA_BIG_TEXT → EXTRA_SUMMARY_TEXT → EXTRA_INFO_TEXT
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.takeIf { it.isNotBlank() }
-            ?: extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
-                ?.lastOrNull()?.toString()?.takeIf { it.isNotBlank() }
-            ?: extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.let { msgs ->
-                // MessagingStyle messages Bundle — last one's "text" key holds the body
-                (msgs.lastOrNull() as? android.os.Bundle)?.getCharSequence("text")?.toString()?.takeIf { it.isNotBlank() }
-            }
-            ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.takeIf { it.isNotBlank() }
-            ?: extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)?.toString()?.takeIf { it.isNotBlank() }
-            ?: extras.getCharSequence(Notification.EXTRA_INFO_TEXT)?.toString()?.takeIf { it.isNotBlank() }
-        val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()
-        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
-        val appName = pkg // Phase 3: use package name as display name; Phase 7+ loads real app label.
-
-        val smallIconB64 = drawableToPngB64(notif.smallIcon?.loadDrawable(ctx), SMALL_ICON_PX)
-        val largeIconB64 = drawableToPngB64(notif.getLargeIcon()?.loadDrawable(ctx), LARGE_ICON_PX)
-
-        return NotifPostJson(
-            type = if (isUpdate) "notif.update" else "notif.post",
-            canon_id = CanonIdBuilder.build(originDevice, pkg, sbn.id, sbn.tag),
-            app_name = appName,
-            package_name = pkg,
-            id = sbn.id,
-            tag = sbn.tag,
-            title = title,
-            text = text,
-            sub_text = subText,
-            big_text = bigText,
-            visibility = visibilityString(notif.visibility),
-            is_group_summary = (notif.flags and Notification.FLAG_GROUP_SUMMARY) != 0,
-            is_ongoing = (notif.flags and Notification.FLAG_ONGOING_EVENT) != 0,
-            is_clearable = sbn.isClearable,
-            small_icon_png_b64 = smallIconB64,
-            large_icon_png_b64 = largeIconB64,
-            ts = sbn.postTime,
-        )
+    ): NotifPostJson? = captureSnapshot(sbn, ctx, denylist)?.let {
+        build(it, ctx, originDevice, if (isUpdate) "notif.update" else "notif.post")
     }
+
+    fun toPayloadJson(post: NotifPostJson): String = org.json.JSONObject().apply {
+        put("v", post.v)
+        put("type", post.type)
+        put("canon_id", post.canon_id)
+        put("app_name", post.app_name ?: org.json.JSONObject.NULL)
+        put("package_name", post.package_name)
+        put("id", post.id)
+        put("tag", post.tag ?: org.json.JSONObject.NULL)
+        put("title", post.title ?: org.json.JSONObject.NULL)
+        put("text", post.text ?: org.json.JSONObject.NULL)
+        put("sub_text", post.sub_text ?: org.json.JSONObject.NULL)
+        put("big_text", post.big_text ?: org.json.JSONObject.NULL)
+        put("visibility", post.visibility)
+        put("is_group_summary", post.is_group_summary)
+        put("is_ongoing", post.is_ongoing)
+        put("is_clearable", post.is_clearable)
+        put("small_icon_png_b64", post.small_icon_png_b64 ?: org.json.JSONObject.NULL)
+        put("large_icon_png_b64", post.large_icon_png_b64 ?: org.json.JSONObject.NULL)
+        put("ts", post.ts)
+    }.toString()
 
     private fun visibilityString(v: Int): String = when (v) {
         Notification.VISIBILITY_PUBLIC -> "public"

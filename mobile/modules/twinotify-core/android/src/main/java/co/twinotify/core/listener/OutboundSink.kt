@@ -6,15 +6,35 @@ interface OutboundSink {
     suspend fun enqueueUnpair(reason: String, originDevice: String, tsMs: Long)
 }
 
-/** Phase 3 placeholder until SyncService/OutboundQueue land in Task 4. Logs to logcat. */
-object LoggingOutboundSink : OutboundSink {
+/** Application-scoped durable adapter retained for non-listener callers (tap/unpair actions). */
+class DurableOutboundSink private constructor(context: android.content.Context) : OutboundSink {
+    private val appContext = context.applicationContext
+    private val coordinator = CaptureCoordinator.get(appContext)
+    private val persister = DurableCapturePersister(appContext)
+
     override suspend fun enqueuePost(post: NotifPostJson) {
-        android.util.Log.i("Twinotify", "OUTBOUND post: canon=${post.canon_id} title=${post.title?.take(40)}")
+        check(coordinator.submit(PostCommand(
+            canonId = post.canon_id,
+            sourceKey = "",
+            snapshot = SourceNotificationSnapshot.fromPost(post),
+        ))) { "durable capture lane rejected notification post" }
     }
+
     override suspend fun enqueueCancel(canonId: String, reason: String, originDevice: String, tsMs: Long) {
-        android.util.Log.i("Twinotify", "OUTBOUND cancel: canon=$canonId reason=$reason")
+        check(coordinator.submit(RemoveCommand(canonId, "", reason, tsMs))) {
+            "durable capture lane rejected notification cancel"
+        }
     }
+
     override suspend fun enqueueUnpair(reason: String, originDevice: String, tsMs: Long) {
-        android.util.Log.i("Twinotify", "OUTBOUND unpair: reason=$reason origin=$originDevice")
+        persister.persistUnpair(reason, originDevice, tsMs)
+    }
+
+    companion object {
+        @Volatile private var instance: DurableOutboundSink? = null
+
+        fun get(context: android.content.Context): DurableOutboundSink = instance ?: synchronized(this) {
+            instance ?: DurableOutboundSink(context.applicationContext).also { instance = it }
+        }
     }
 }

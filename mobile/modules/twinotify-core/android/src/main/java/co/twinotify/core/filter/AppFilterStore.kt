@@ -18,6 +18,9 @@ object AppFilterStore {
 
     @Volatile private var cached: Set<String>? = null
 
+    /** Non-blocking callback-path snapshot. The listener preloads this during onCreate. */
+    fun cachedOrEmpty(): Set<String> = cached ?: emptySet()
+
     suspend fun load(ctx: Context): Set<String> {
         cached?.let { return it }
         val set = ctx.appFilterDs.data.first()[KEY_DENY] ?: emptySet()

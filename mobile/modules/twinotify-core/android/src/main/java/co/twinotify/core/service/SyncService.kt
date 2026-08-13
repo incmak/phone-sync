@@ -8,7 +8,6 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import co.twinotify.core.auth.JwtMinter
 import co.twinotify.core.crypto.CryptoStore
-import co.twinotify.core.listener.TwinotifyNotificationListener
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.NotificationDb
 import kotlinx.coroutines.CoroutineScope
@@ -37,15 +36,15 @@ class SyncService : Service() {
         const val ACTION_START = "co.twinotify.service.START"
         const val ACTION_STOP  = "co.twinotify.service.STOP"
         private const val KEEPALIVE_S = 30L
+        private const val RETRY_DELAY_MS = 5_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var wsJob: Job? = null
     @Volatile private var currentWs: WebSocket? = null
     private val flushMutex = Mutex()
-    private lateinit var queue: OutboundQueue
+    private lateinit var reliableDao: co.twinotify.core.storage.ReliableDeliveryDao
     private lateinit var dispatcher: InboundDispatcher
-    private lateinit var sink: QueuingOutboundSink
 
     private val client = OkHttpClient.Builder()
         .pingInterval(KEEPALIVE_S, TimeUnit.SECONDS)
@@ -57,15 +56,8 @@ class SyncService : Service() {
         super.onCreate()
         NotifChannelSetup.ensureChannels(this)
         val db = NotificationDb.get(this)
-        queue = OutboundQueue(db.outboundEventDao())
+        reliableDao = db.reliableDeliveryDao()
         dispatcher = InboundDispatcher(this)
-        sink = QueuingOutboundSink(
-            ctx = applicationContext,
-            queue = queue,
-            onEnqueued = { scope.launch { flushIfConnected() } },
-        )
-        // Wire the listener to our real sink (it defaults to LoggingOutboundSink).
-        TwinotifyNotificationListener.installSink(sink)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -112,7 +104,7 @@ class SyncService : Service() {
                 val connected = try { connect(relayUrl) } catch (e: Throwable) { false }
                 if (!isActive) break
                 SyncServiceStatus.setState(SyncState.OFFLINE_QUEUED)
-                SyncServiceStatus.setQueuedCount(queue.count())
+                SyncServiceStatus.setQueuedCount(reliableDao.sendable(Long.MAX_VALUE, 2_000).size)
                 delay(backoff)
                 backoff = (backoff * 2).coerceAtMost(60_000L)
             }
@@ -125,6 +117,7 @@ class SyncService : Service() {
      */
     private suspend fun connect(relayUrl: String): Boolean {
         val deviceId = DeviceIdentity.getOrCreate(applicationContext)
+        LegacyOutboxMigrator(reliableDao).migrate(deviceId)
         val (_, sign) = CryptoStore.loadOrGenerate(applicationContext)
         val jwt = JwtMinter.mint(deviceId, sign.secretKey)
         val req = Request.Builder()
@@ -137,10 +130,24 @@ class SyncService : Service() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 currentWs = ws
                 SyncServiceStatus.setState(SyncState.CONNECTED)
+                ws.send(ReliableRelayFrames.hello("0.8.0"))
                 scope.launch { flushQueue(ws) }
+                scope.launch {
+                    val scheduler = ReliableFlushScheduler()
+                    var lastWakeAt = System.currentTimeMillis()
+                    while (isActive && currentWs === ws) {
+                        delay(scheduler.delayUntil(lastWakeAt))
+                        if (!isActive || currentWs !== ws) break
+                        flushQueue(ws)
+                        lastWakeAt = System.currentTimeMillis()
+                    }
+                }
             }
             override fun onMessage(ws: WebSocket, text: String) {
-                scope.launch { dispatcher.dispatch(text) }
+                scope.launch {
+                    val content = handleReliableControl(text)
+                    if (content != null) dispatcher.dispatch(content)
+                }
             }
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 currentWs = null
@@ -160,28 +167,33 @@ class SyncService : Service() {
     }
 
     private suspend fun flushQueue(ws: WebSocket) = flushMutex.withLock {
-        val originDevice = DeviceIdentity.getOrCreate(applicationContext)
         while (true) {
-            val batch = queue.drain()
+            val batch = reliableDao.sendable(System.currentTimeMillis(), 32)
             if (batch.isEmpty()) break
             var anySent = false
-            for (ev in batch) {
-                val env = EncryptedEnvelope(
-                    msgId = ev.msgId,
-                    originDevice = originDevice,
-                    ts = ev.createdTs,
-                    nonceB64 = ev.nonceB64,
-                    ciphertextB64 = ev.ciphertextB64,
-                )
-                if (ws.send(env.toJson())) {
-                    queue.ack(ev.id)
+            for (row in batch) {
+                val frame = ReliableRelayFrames.put(row.envelopeJson)
+                if (ws.send(frame)) {
                     anySent = true
-                } else {
-                    break  // ws buffer full or closing; reconnect loop will retry
-                }
+                    reliableDao.markRelaySent(row.msgId, System.currentTimeMillis() + RETRY_DELAY_MS)
+                } else break
             }
             if (!anySent) break
         }
-        SyncServiceStatus.setQueuedCount(queue.count())
+        SyncServiceStatus.setQueuedCount(reliableDao.sendable(Long.MAX_VALUE, 2_000).size)
     }
+
+    private suspend fun handleReliableControl(text: String): String? {
+        val frame = runCatching { org.json.JSONObject(text) }.getOrNull() ?: return null
+        when (frame.optString("type")) {
+            "relay.deliver" -> return frame.optJSONObject("envelope")?.toString()
+            "relay.accepted" -> Unit
+            else -> return null
+        }
+        val msgId = frame.optString("msg_id").takeIf { it.isNotEmpty() } ?: return null
+        val acceptedAt = frame.optLong("accepted_at", -1L)
+        if (acceptedAt >= 0) reliableDao.markRelayAccepted(msgId, acceptedAt, acceptedAt + RETRY_DELAY_MS)
+        return null
+    }
+
 }

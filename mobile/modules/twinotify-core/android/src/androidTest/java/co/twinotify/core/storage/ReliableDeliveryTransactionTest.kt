@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import org.junit.After
@@ -177,6 +178,23 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun captureSequenceAndStateRollbackTogetherWhenOutboxInsertConflicts() = runBlocking {
+        // Force the final outbox insert to fail after commitOutboundState has prepared the
+        // canonical row. The capture transaction must roll back both that row and its sequence.
+        dao.insertOutbound(outbound("duplicate", sequence = null, eventType = "unpair"))
+
+        assertFailsWith<android.database.sqlite.SQLiteConstraintException> {
+            dao.commitCapturedState(
+                canonical(sequence = 1, state = "ACTIVE", payload = "capture"),
+                outbound("duplicate", sequence = 1, eventType = "notif.post"),
+            )
+        }
+
+        assertNull(dao.canonical(CANON_ID))
+        assertNull(dao.nextCaptureSequence(CANON_ID))
+    }
+
+    @Test
     fun inboundJournalAtomicallyDistinguishesSameDigestDuplicateFromIdConflict() = runBlocking {
         val first = inbound(msgId = "inbound-1", digest = "digest-a")
 
@@ -220,7 +238,7 @@ class ReliableDeliveryTransactionTest {
             updatedAt = updatedAt,
         )
 
-    private fun outbound(msgId: String, sequence: Long, eventType: String) = OutboundMessage(
+    private fun outbound(msgId: String, sequence: Long?, eventType: String) = OutboundMessage(
         msgId = msgId,
         canonId = CANON_ID,
         sequence = sequence,
@@ -229,11 +247,11 @@ class ReliableDeliveryTransactionTest {
         envelopeJson = "{}",
         envelopeSha256 = "sha-$msgId",
         byteSize = 2,
-        createdAt = sequence,
+        createdAt = sequence ?: 0L,
         expiresAt = 100_000,
         relayAcceptedAt = null,
         attempts = 0,
-        nextAttemptAt = sequence,
+        nextAttemptAt = sequence ?: 0L,
         state = "NEW",
         lastError = null,
         requiresPeerReceipt = true,
