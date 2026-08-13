@@ -11,6 +11,7 @@ import (
 
 	"github.com/twinotify/phone-sync/e2e/internal/adb"
 	"github.com/twinotify/phone-sync/e2e/internal/control"
+	"github.com/twinotify/phone-sync/e2e/internal/scenario"
 )
 
 func main() {
@@ -50,7 +51,9 @@ func run(ctx context.Context, scenario string) error {
 
 func runWithOptions(ctx context.Context, cfg options) error {
 	if cfg.scenario != "status" && cfg.scenario != "pair" {
-		return fmt.Errorf("unsupported scenario %q", cfg.scenario)
+		if _, err := scenario.Plan(cfg.scenario); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(cfg.serialA) == "" || strings.TrimSpace(cfg.serialB) == "" || cfg.serialA == cfg.serialB {
 		return errors.New("two distinct ADB serials are required")
@@ -84,6 +87,10 @@ func runWithOptions(ctx context.Context, cfg options) error {
 	b := control.New(adbDevice{client: adbB, packageName: cfg.packageName}, cfg.serialB, cfg.tokenB, cfg.timeout)
 	if cfg.scenario == "pair" {
 		return control.NewController(a, b, cfg.timeout).Pair(ctx, control.PairOptions{RelayURL: cfg.relayURL, DisplayNameA: "emulator-a", DisplayNameB: "emulator-b"})
+	}
+	if cfg.scenario != "status" {
+		bridge := scenario.ADBBridge{A: a, B: b, ADBA: adbA, ADBB: adbB, Package: cfg.packageName}
+		return scenario.NewExecutor(bridge, cfg.timeout).Run(ctx, cfg.scenario)
 	}
 	for _, device := range []struct {
 		label  string
