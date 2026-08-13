@@ -262,6 +262,40 @@ class ReliableDeliveryTransactionTest {
         assertEquals("digest-a", dao.inbound("inbound-1")?.envelopeSha256)
     }
 
+    @Test
+    fun retentionRemovesTerminalHistoryButKeepsPendingMaterialization() = runBlocking {
+        dao.putCanonical(canonical(sequence = 2, state = "CANCELLED", payload = null, updatedAt = 1))
+        dao.commitInboundDesired(
+            inbound("pending-old", "digest-pending").copy(
+                canonId = CANON_ID,
+                sequence = 2,
+                outcome = "PENDING_PLATFORM",
+                committedAt = 1,
+            ),
+            desired = null,
+        )
+        dao.commitInboundDesired(
+            inbound("applied-old", "digest-applied").copy(
+                outcome = "APPLIED",
+                committedAt = 1,
+            ),
+            desired = null,
+        )
+        db.openHelper.writableDatabase.execSQL(
+            "INSERT INTO activity_event(eventId,msgId,packageName,eventType,status,byteSize,occurredAt,detailCode) " +
+                "VALUES('activity-old','applied-old',NULL,'peer.receipt','applied',1,1,NULL)",
+        )
+
+        dao.sweepRetention(now = 1_000, activityRetentionMs = 100, tombstoneRetentionMs = 100)
+
+        assertNull(dao.inbound("applied-old"))
+        assertTrue(dao.inbound("pending-old") != null)
+        assertTrue(dao.canonical(CANON_ID) != null)
+        db.openHelper.readableDatabase.query("SELECT * FROM activity_event WHERE eventId='activity-old'").use {
+            assertTrue(!it.moveToFirst())
+        }
+    }
+
     private fun activeMessageIds(): List<String> = db.openHelper.readableDatabase.query(
         "SELECT msgId FROM outbound_message ORDER BY msgId",
     ).use { cursor ->

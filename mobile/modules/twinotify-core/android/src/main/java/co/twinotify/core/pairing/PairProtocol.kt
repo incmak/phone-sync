@@ -10,6 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import co.twinotify.core.service.RelayUrlPolicy
 
 /**
  * HTTP client for /pair/init, /pair/hello, /pair/send_sig, and /pair/complete.
@@ -32,6 +33,24 @@ object PairProtocol {
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
+
+    /** Authenticated pair revocation. 401 is terminal only for a caller that persisted intent. */
+    fun revoke(
+        relayUrl: String,
+        bearerJwt: String,
+        debug: Boolean = false,
+        revocationMarkerPresent: Boolean = false,
+    ): RevokeOutcome {
+        val endpoints = RelayUrlPolicy.parse(relayUrl, debug = debug)
+        val request = Request.Builder()
+            .url(endpoints.http.newBuilder().addPathSegment("pair").addPathSegment("revoke").build())
+            .header("Authorization", "Bearer $bearerJwt")
+            .post("{}".toRequestBody(JSON))
+            .build()
+        http.newCall(request).execute().use { response ->
+            return RevocationPolicy.classify(response.code, revocationMarkerPresent)
+        }
+    }
 
     /**
      * Normalizes the user-entered relay URL (e.g. "ws://host:8080/ws") into a plain HTTP origin

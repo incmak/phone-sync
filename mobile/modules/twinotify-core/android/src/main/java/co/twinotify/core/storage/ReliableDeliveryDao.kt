@@ -130,6 +130,68 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     @Query("SELECT * FROM outbound_message WHERE msgId=:msgId")
     abstract suspend fun outboundMessage(msgId: String): OutboundMessage?
 
+    @Query("SELECT COUNT(*) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED')")
+    abstract suspend fun activeOutboundCount(): Int
+
+    @Query("SELECT COALESCE(SUM(byteSize), 0) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED')")
+    abstract suspend fun activeOutboundBytes(): Long
+
+    @Query("DELETE FROM activity_event WHERE occurredAt < :cutoff")
+    protected abstract suspend fun deleteActivityBefore(cutoff: Long): Int
+
+    @Query("DELETE FROM inbound_message WHERE committedAt < :cutoff AND outcome IN ('APPLIED','STALE')")
+    protected abstract suspend fun deleteInboundBefore(cutoff: Long): Int
+
+    @Query("DELETE FROM canonical_notification_state WHERE state='CANCELLED' AND peerCancelPending=0 AND updatedAt < :cutoff AND canonId NOT IN (SELECT canonId FROM inbound_message WHERE outcome='PENDING_PLATFORM')")
+    protected abstract suspend fun deleteCancelledBefore(cutoff: Long): Int
+
+    @Query("DELETE FROM materialization_retry WHERE canonId NOT IN (SELECT canonId FROM canonical_notification_state)")
+    protected abstract suspend fun deleteOrphanMaterializationRetries(): Int
+
+    @Query("DELETE FROM outbound_message WHERE state IN ('TERMINAL','EXPIRED') AND createdAt < :cutoff")
+    protected abstract suspend fun deleteTerminalOutboundBefore(cutoff: Long): Int
+
+    /** Bounded, idempotent maintenance for terminal history and persisted cancellation tombstones. */
+    @Transaction
+    open suspend fun sweepRetention(now: Long, activityRetentionMs: Long, tombstoneRetentionMs: Long): Int {
+        require(activityRetentionMs >= 0)
+        require(tombstoneRetentionMs >= 0)
+        var removed = 0
+        removed += deleteActivityBefore(now - activityRetentionMs)
+        removed += deleteInboundBefore(now - activityRetentionMs)
+        removed += deleteTerminalOutboundBefore(now - activityRetentionMs)
+        removed += deleteCancelledBefore(now - tombstoneRetentionMs)
+        removed += deleteOrphanMaterializationRetries()
+        removed += expireSnapshotStages(now - SNAPSHOT_TTL_MS)
+        return removed
+    }
+
+    @Transaction
+    open suspend fun clearReliableState() {
+        clearOutboundMessages()
+        clearInboundMessages()
+        clearCanonicalStates()
+        clearOriginSequences()
+        clearActivityEvents()
+        clearSnapshotStages()
+        clearMaterializationRetries()
+    }
+
+    @Query("DELETE FROM outbound_message")
+    protected abstract suspend fun clearOutboundMessages()
+    @Query("DELETE FROM inbound_message")
+    protected abstract suspend fun clearInboundMessages()
+    @Query("DELETE FROM canonical_notification_state")
+    protected abstract suspend fun clearCanonicalStates()
+    @Query("DELETE FROM origin_sequence")
+    protected abstract suspend fun clearOriginSequences()
+    @Query("DELETE FROM activity_event")
+    protected abstract suspend fun clearActivityEvents()
+    @Query("DELETE FROM snapshot_stage")
+    protected abstract suspend fun clearSnapshotStages()
+    @Query("DELETE FROM materialization_retry")
+    protected abstract suspend fun clearMaterializationRetries()
+
     @Query(
         "UPDATE outbound_message SET state='ACCEPTED', relayAcceptedAt=:acceptedAt, " +
             "nextAttemptAt=:retryAt WHERE msgId=:msgId AND state='NEW'",

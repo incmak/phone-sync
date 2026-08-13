@@ -7,15 +7,115 @@ import kotlinx.coroutines.flow.StateFlow
 
 enum class SyncState { DISCONNECTED, CONNECTING, CONNECTED, LEGACY_ONLINE_ONLY, OFFLINE_QUEUED }
 
+/** One native health snapshot used by the foreground notification and JS status event. */
+data class SyncHealth(
+    val service: String,
+    val transport: String,
+    val protocolFloor: Int,
+    val queuedCount: Int,
+    val queuedBytes: Long,
+    val listenerConnected: Boolean,
+    val listenerPermission: Boolean,
+    val postPermission: Boolean,
+    val lastReceiptAt: Long?,
+    val lastErrorCode: String?,
+)
+
+fun SyncHealth.toEventMap(): Map<String, Any?> = mapOf(
+    "service" to service,
+    "transport" to transport,
+    "protocolFloor" to protocolFloor,
+    "queuedCount" to queuedCount,
+    "queuedBytes" to queuedBytes,
+    "listenerConnected" to listenerConnected,
+    "listenerPermission" to listenerPermission,
+    "postPermission" to postPermission,
+    "lastReceiptAt" to lastReceiptAt,
+    "lastErrorCode" to lastErrorCode,
+    // Keep the stable legacy key for existing JS consumers.
+    "state" to when (service) {
+        "connected" -> "CONNECTED"
+        "connecting" -> "CONNECTING"
+        "degraded" -> "OFFLINE_QUEUED"
+        else -> "DISCONNECTED"
+    },
+)
+
 object SyncServiceStatus {
     private val _state = MutableStateFlow(SyncState.DISCONNECTED)
     val state: StateFlow<SyncState> = _state
     private val _queuedCount = MutableStateFlow(0)
     val queuedCount: StateFlow<Int> = _queuedCount
+    private val _health = MutableStateFlow(
+        SyncHealth(
+            service = "stopped",
+            transport = "offline",
+            protocolFloor = 1,
+            queuedCount = 0,
+            queuedBytes = 0,
+            listenerConnected = false,
+            listenerPermission = false,
+            postPermission = false,
+            lastReceiptAt = null,
+            lastErrorCode = null,
+        ),
+    )
+    val health: StateFlow<SyncHealth> = _health
     private val _peerUnpaired = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     val peerUnpaired: SharedFlow<Unit> = _peerUnpaired
 
-    fun setState(s: SyncState) { _state.value = s }
-    fun setQueuedCount(n: Int) { _queuedCount.value = n }
+    fun setState(s: SyncState) {
+        _state.value = s
+        _health.value = _health.value.copy(
+            service = when (s) {
+                SyncState.DISCONNECTED -> "stopped"
+                SyncState.CONNECTING -> "connecting"
+                SyncState.CONNECTED -> "connected"
+                SyncState.LEGACY_ONLINE_ONLY -> "degraded"
+                SyncState.OFFLINE_QUEUED -> "degraded"
+            },
+            transport = when (s) {
+                SyncState.CONNECTED, SyncState.LEGACY_ONLINE_ONLY -> "online"
+                SyncState.CONNECTING -> "connecting"
+                SyncState.DISCONNECTED, SyncState.OFFLINE_QUEUED -> "offline"
+            },
+        )
+    }
+
+    fun setQueuedCount(n: Int) {
+        setQueueStats(n, _health.value.queuedBytes)
+    }
+
+    fun setQueueStats(count: Int, bytes: Long) {
+        require(count >= 0) { "queued count must be non-negative" }
+        require(bytes >= 0) { "queued bytes must be non-negative" }
+        _queuedCount.value = count
+        _health.value = _health.value.copy(queuedCount = count, queuedBytes = bytes)
+    }
+
+    fun setProtocolFloor(floor: Int) {
+        require(floor > 0) { "protocol floor must be positive" }
+        _health.value = _health.value.copy(protocolFloor = floor)
+    }
+
+    fun setListenerHealth(connected: Boolean, permission: Boolean) {
+        _health.value = _health.value.copy(
+            listenerConnected = connected,
+            listenerPermission = permission,
+        )
+    }
+
+    fun setPostPermission(granted: Boolean) {
+        _health.value = _health.value.copy(postPermission = granted)
+    }
+
+    fun setLastReceiptAt(at: Long?) {
+        _health.value = _health.value.copy(lastReceiptAt = at)
+    }
+
+    fun setLastError(code: String?) {
+        _health.value = _health.value.copy(lastErrorCode = code?.take(128))
+    }
+
     fun notifyPeerUnpaired() { _peerUnpaired.tryEmit(Unit) }
 }

@@ -39,6 +39,10 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         runBlocking { AppFilterStore.load(ctx) }
         originDevice = runBlocking { DeviceIdentity.getOrCreate(ctx) }
         coordinator = CaptureCoordinator.get(ctx)
+        co.twinotify.core.service.SyncServiceStatus.setListenerHealth(
+            connected = false,
+            permission = true,
+        )
         NotificationListenerBridge.attach(this)
         scope.launch {
             co.twinotify.core.service.NotificationMaterializer(
@@ -52,6 +56,10 @@ class TwinotifyNotificationListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        co.twinotify.core.service.SyncServiceStatus.setListenerHealth(
+            connected = false,
+            permission = false,
+        )
         NotificationListenerBridge.detach(this)
         scope.cancel()
         super.onDestroy()
@@ -64,6 +72,14 @@ class TwinotifyNotificationListener : NotificationListenerService() {
     /** Re-submit the platform's current set after a listener rebind/process restart. */
     override fun onListenerConnected() {
         super.onListenerConnected()
+        co.twinotify.core.service.SyncServiceStatus.setListenerHealth(
+            connected = true,
+            permission = true,
+        )
+        scope.launch {
+            runCatching { co.twinotify.core.service.RetentionCoordinator.sweep(applicationContext) }
+                .onFailure { android.util.Log.w(TAG, "retention sweep unavailable", it) }
+        }
         coordinator.resumeDeferred()
         val active = runCatching { activeNotifications.orEmpty() }.getOrDefault(emptyArray())
         active.forEach(::capturePosted)

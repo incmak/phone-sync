@@ -3,7 +3,6 @@ package co.twinotify.core
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import androidx.core.content.edit
 import androidx.core.net.toUri
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
@@ -15,6 +14,7 @@ import co.twinotify.core.crypto.NonceSource
 import co.twinotify.core.pairing.Fingerprint
 import co.twinotify.core.pairing.PairPayload
 import co.twinotify.core.pairing.PairProtocol
+import co.twinotify.core.service.toEventMap
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.PeerRecord
 import co.twinotify.core.storage.PeerStore
@@ -60,11 +60,9 @@ class TwinotifyCoreModule : Module() {
                 android.util.Log.e("Twinotify", "denylist load failed (non-tamper): ${e.message}", e)
             }
             moduleScope.launch {
-                kotlinx.coroutines.flow.combine(
-                    co.twinotify.core.service.SyncServiceStatus.state,
-                    co.twinotify.core.service.SyncServiceStatus.queuedCount,
-                ) { s, q -> mapOf("state" to s.name, "queuedCount" to q) }
-                    .collect { sendEvent("onSyncStatus", it) }
+                co.twinotify.core.service.SyncServiceStatus.health.collect { health ->
+                    sendEvent("onSyncStatus", health.toEventMap())
+                }
             }
             moduleScope.launch {
                 co.twinotify.core.service.SyncServiceStatus.peerUnpaired.collect {
@@ -78,26 +76,31 @@ class TwinotifyCoreModule : Module() {
         }
 
         AsyncFunction("startSyncService") { relayUrl: String, promise: Promise ->
-            try {
-                val ctx = requireContext()
-                ctx.getSharedPreferences("twinotify_service", Context.MODE_PRIVATE)
-                    .edit { putString("relay_url", relayUrl) }
-                val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java).apply {
-                    action = co.twinotify.core.service.SyncService.ACTION_START
-                    putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, relayUrl)
-                }
-                ctx.startForegroundService(intent)
-                promise.resolve(null)
-            } catch (e: Throwable) { promise.reject("START_SVC", e.message ?: "err", e) }
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    co.twinotify.core.service.ServiceConfigStore.setRelayUrl(ctx, relayUrl)
+                    co.twinotify.core.service.ServiceConfigStore.setEnabled(ctx, true)
+                    val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java).apply {
+                        action = co.twinotify.core.service.SyncService.ACTION_START
+                        putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, relayUrl)
+                    }
+                    ctx.startForegroundService(intent)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("START_SVC", e.message ?: "err", e) }
+            }
         }
 
         AsyncFunction("stopSyncService") { promise: Promise ->
-            try {
-                val ctx = requireContext()
-                val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
-                ctx.stopService(intent)
-                promise.resolve(null)
-            } catch (e: Throwable) { promise.reject("STOP_SVC", e.message ?: "err", e) }
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    co.twinotify.core.service.ServiceConfigStore.setEnabled(ctx, false)
+                    val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
+                    ctx.stopService(intent)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("STOP_SVC", e.message ?: "err", e) }
+            }
         }
 
         AsyncFunction("isNotificationListenerGranted") { promise: Promise ->
@@ -143,10 +146,7 @@ class TwinotifyCoreModule : Module() {
 
         AsyncFunction("getSyncStatus") { promise: Promise ->
             try {
-                promise.resolve(mapOf(
-                    "state" to co.twinotify.core.service.SyncServiceStatus.state.value.name,
-                    "queuedCount" to co.twinotify.core.service.SyncServiceStatus.queuedCount.value,
-                ))
+                promise.resolve(co.twinotify.core.service.SyncServiceStatus.health.value.toEventMap())
             } catch (e: Throwable) { promise.reject("SYNC_STATUS", e.message ?: "err", e) }
         }
 
@@ -357,29 +357,32 @@ class TwinotifyCoreModule : Module() {
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
-                    // Try to notify peer first (best effort, before keys are rotated)
                     val peer = PeerStore.load(ctx)
-                    if (peer != null) {
-                        try {
-                            val deviceId = DeviceIdentity.getOrCreate(ctx)
-                            co.twinotify.core.listener.DurableOutboundSink.get(ctx)
-                                .enqueueUnpair("user_initiated", deviceId, System.currentTimeMillis())
-                            // Wait up to 3s for queue to drain
-                            val deadline = System.currentTimeMillis() + 3_000L
-                            while (System.currentTimeMillis() < deadline) {
-                                if (co.twinotify.core.service.SyncServiceStatus.queuedCount.value == 0) break
-                                kotlinx.coroutines.delay(100)
+                    val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
+                    // Persist intent before stopping anything. This marker makes a lost 204
+                    // retryable as terminal 401 while the old signing key is still available.
+                    val markedConfig = co.twinotify.core.service.ServiceConfigStore.setRevocationRequestedAt(ctx)
+                    co.twinotify.core.pairing.UnpairWorkflow.execute(
+                        stopAndAwait = { co.twinotify.core.service.SyncService.shutdownActive(ctx) },
+                        revokePeer = {
+                            if (peer != null) {
+                                val relayUrl = config.relayUrl ?: error("paired device has no relay URL")
+                                val (_, sign) = CryptoStore.loadOrGenerate(ctx)
+                                val deviceId = DeviceIdentity.getOrCreate(ctx)
+                                val jwt = JwtMinter.mint(deviceId, sign.secretKey)
+                                PairProtocol.revoke(
+                                    relayUrl,
+                                    jwt,
+                                    debug = (ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+                                    revocationMarkerPresent = markedConfig.revocationRequestedAt != null,
+                                )
                             }
-                        } catch (e: Throwable) {
-                            android.util.Log.w("Twinotify", "unpair notify peer failed: ${e.message}")
-                            // Continue with local wipe regardless
-                        }
-                    }
-                    // Stop sync service before wiping state
-                    val stopIntent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
-                    ctx.stopService(stopIntent)
-                    // Wipe all paired state
-                    co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
+                        },
+                        wipeLocal = {
+                            co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
+                            co.twinotify.core.service.SyncServiceStatus.notifyPeerUnpaired()
+                        },
+                    )
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("UNPAIR", e.message ?: "err", e) }
             }

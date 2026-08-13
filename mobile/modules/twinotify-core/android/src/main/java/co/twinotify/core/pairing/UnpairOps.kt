@@ -7,6 +7,9 @@ import co.twinotify.core.filter.AppFilterStore
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.storage.ReplayGuard
+import co.twinotify.core.service.ServiceConfigStore
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /**
  * Atomic (in intent) reset of all paired state. Called by both sides of the unpair flow:
@@ -19,15 +22,20 @@ import co.twinotify.core.storage.ReplayGuard
  */
 object UnpairOps {
     suspend fun wipeAll(ctx: Context) {
-        PeerStore.clear(ctx)
-        AppFilterStore.clear(ctx)
-        val db = NotificationDb.get(ctx)
-        db.notificationMapDao().clearAll()
-        db.outboundEventDao().clearAll()
-        // Rotate crypto state last (allows any in-flight decrypt to finish with old keys)
-        CryptoStore.rotate(ctx)
-        NonceSource.regenerate(ctx)
-        ReplayGuard.clear(ctx)
-        co.twinotify.core.metrics.MetricsStore.clear(ctx)
+        withContext(NonCancellable) {
+            PeerStore.clear(ctx)
+            AppFilterStore.clear(ctx)
+            val db = NotificationDb.get(ctx)
+            db.notificationMapDao().clearAll()
+            db.notificationMapDao().sweepExpired(Long.MAX_VALUE)
+            db.reliableDeliveryDao().clearReliableState()
+            db.outboundEventDao().clearAll()
+            // Rotate crypto state last (allows any in-flight decrypt to finish with old keys)
+            CryptoStore.rotate(ctx)
+            NonceSource.regenerate(ctx)
+            ReplayGuard.clear(ctx)
+            ServiceConfigStore.clear(ctx)
+            co.twinotify.core.metrics.MetricsStore.clear(ctx)
+        }
     }
 }

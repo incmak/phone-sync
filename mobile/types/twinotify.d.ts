@@ -7,6 +7,15 @@ export type SyncState =
 export interface SyncStatus {
   state: SyncState;
   queuedCount: number;
+  service?: 'stopped' | 'connecting' | 'connected' | 'degraded';
+  transport?: 'offline' | 'connecting' | 'online';
+  protocolFloor?: number;
+  queuedBytes?: number;
+  listenerConnected?: boolean;
+  listenerPermission?: boolean;
+  postPermission?: boolean;
+  lastReceiptAt?: number | null;
+  lastErrorCode?: string | null;
 }
 
 export interface KeyPair {
