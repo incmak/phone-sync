@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify verify clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify verify e2e-emulator clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -37,6 +37,9 @@ mobile-verify: sync-proto
 	cd mobile && npx expo-doctor
 	cd mobile && npx expo prebuild --platform android --clean --no-install
 	cd mobile/android && ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
+
+e2e-emulator: relay-build mobile-verify
+	./e2e/scripts/run-two-emulators.sh
 
 verify: proto-test relay-verify mobile-verify
 	./scripts/verify-generated-clean.sh
