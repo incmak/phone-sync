@@ -38,7 +38,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         // Sequence allocation is finalized by commitCapturedState in the same Room transaction
         // as the canonical/outbox mutation. This read only prepares the encrypted payload; a
         // concurrent writer loses the compare-and-increment and is rebuilt with the next value.
-        val sequence = dao.nextCaptureSequence(command.canonId) ?: 1L
+        val sequence = dao.nextCaptureSequenceForEvent(command.canonId)
         val now = when (command) {
             is RemoveCommand -> command.removedAt.coerceAtLeast(0L)
             is PostCommand -> command.snapshot.postTime.coerceAtLeast(0L)
@@ -56,6 +56,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         val msgId = UUID.randomUUID().toString()
         val inner = InnerEventV2(
             msgId = msgId,
+            // The authenticated emitter remains local. Canonical ownership is preserved below.
             originDevice = originDevice,
             type = eventType,
             canonId = command.canonId,
@@ -84,7 +85,9 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         val envelopeJson = ProtocolJson.encodeEnvelope(envelope)
         val desired = CanonicalNotificationState(
             canonId = command.canonId,
-            originDevice = originDevice,
+            // A peer mirror may be cancelled by the local user without transferring canonical
+            // ownership, so the source owner remains stable on both devices.
+            originDevice = current?.originDevice ?: originDevice,
             latestSequence = sequence,
             state = if (eventType == "notif.cancel") "CANCELLED" else "ACTIVE",
             desiredPayloadJson = if (eventType == "notif.cancel") null else payloadJson,

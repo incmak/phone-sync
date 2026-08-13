@@ -43,5 +43,9 @@
         <action android:name="co.twinotify.MIRROR_TAP" />
       </intent-filter>
     </receiver>
+
+    <receiver
+      android:name="co.twinotify.core.service.MaterializationRetryReceiver"
+      android:exported="false" />
   </application>
 </manifest>

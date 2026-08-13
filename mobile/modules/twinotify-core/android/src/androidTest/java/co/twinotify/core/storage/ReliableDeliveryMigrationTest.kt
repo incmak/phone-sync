@@ -55,7 +55,18 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate3To4_createsDurableMaterializationRetryTable() {
+        helper.createDatabase(TEST_DB_V4, 3).close()
+        val db = helper.runMigrationsAndValidate(TEST_DB_V4, 4, true, MIGRATION_3_4)
+        db.query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='materialization_retry'",
+        ).use { assertTrue(it.moveToFirst()) }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
+        const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"
     }
 }

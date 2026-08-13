@@ -54,6 +54,22 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun v2MirrorCancelEchoResolvesAndConsumesPersistedCanonicalTombstone() = runBlocking {
+        dao.putCanonical(
+            canonical(sequence = 3, state = "CANCELLED", payload = null).copy(
+                mirrorLocalTag = "mirror-stable",
+                mirrorLocalId = 42,
+                peerCancelPending = true,
+            ),
+        )
+
+        assertEquals("canon-1", dao.canonicalForMirrorIdentity("mirror-stable", 42))
+        assertEquals(1, dao.consumePeerCancel("canon-1"))
+        assertEquals(0, dao.consumePeerCancel("canon-1"))
+        assertEquals(false, dao.canonical("canon-1")!!.peerCancelPending)
+    }
+
+    @Test
     fun incompleteSnapshotCannotCancelExistingMirror() = runBlocking {
         dao.putCanonical(canonical(sequence = 4, state = "ACTIVE", payload = "payload"))
         dao.beginSnapshot(

@@ -5,12 +5,33 @@ import android.util.Base64
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.Encrypter
 import co.twinotify.core.listener.NotifPostJson
+import co.twinotify.core.protocol.EnvelopeAuthenticator
+import co.twinotify.core.protocol.PayloadDecryptor
+import co.twinotify.core.protocol.ProtocolJson
+import co.twinotify.core.storage.DeviceIdentity
+import co.twinotify.core.storage.InboundMessage
+import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.storage.ReplayGuard
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 class InboundDispatcher(private val ctx: Context) {
+    private val reliableDao by lazy { NotificationDb.get(ctx.applicationContext).reliableDeliveryDao() }
+    private val stateMutex = Mutex()
+
     suspend fun dispatch(raw: String) {
+        val parsed = runCatching { JSONObject(raw) }.getOrNull()
+        if (parsed?.optInt("v", 1) == ProtocolJson.VERSION) {
+            dispatchV2(raw)
+            return
+        }
+        dispatchV1(raw)
+    }
+
+    /** Legacy v1 compatibility path. New relay deliveries use [dispatchV2]. */
+    private suspend fun dispatchV1(raw: String) {
         val env = try { EncryptedEnvelope.fromJson(raw) } catch (e: Throwable) {
             android.util.Log.w("Twinotify", "bad inbound envelope: ${e.message}")
             return
@@ -43,6 +64,102 @@ class InboundDispatcher(private val ctx: Context) {
             "unpair" -> handleUnpair()
             "ack" -> { /* Phase 3: drop */ }
             else -> android.util.Log.i("Twinotify", "unknown inner type: $innerType")
+        }
+    }
+
+    private suspend fun dispatchV2(raw: String) {
+        val peer = PeerStore.load(ctx) ?: run {
+            android.util.Log.w("Twinotify", "no peer paired; dropping v2 inbound")
+            return
+        }
+        val (cryptoBox, _) = CryptoStore.loadOrGenerate(ctx)
+        val opened = try {
+            EnvelopeAuthenticator(
+                decryptor = PayloadDecryptor { envelope ->
+                    Encrypter.decrypt(
+                        ct = Base64.decode(envelope.ciphertextB64, Base64.DEFAULT),
+                        nonce = Base64.decode(envelope.nonceB64, Base64.DEFAULT),
+                        peerPubkey = peer.encPubkey,
+                        ownSecret = cryptoBox.secretKey,
+                    )
+                },
+                peerDeviceId = peer.deviceId,
+            ).open(raw)
+        } catch (error: Throwable) {
+            android.util.Log.w("Twinotify", "v2 authentication failed: ${error.message}")
+            return
+        }
+        val inner = opened.inner
+        if (inner.type !in setOf("notif.post", "notif.update", "notif.cancel")) {
+            // Receipt/control processing belongs to the transport task. Preserve the authenticated
+            // event in the journal only when it has a canonical desired state.
+            return
+        }
+        stateMutex.withLock {
+            val canonId = requireNotNull(inner.canonId)
+            val localDeviceId = DeviceIdentity.getOrCreate(ctx)
+            val current = reliableDao.canonical(canonId)
+            val nextMirrorLocalId = reliableDao.nextMirrorLocalId()
+            val allocator = LocalIdAllocator { nextMirrorLocalId }
+            val authorizedEvent = NotificationStateReducer.authorizePeerCancel(
+                current = current,
+                event = inner,
+                authenticatedPeerId = peer.deviceId,
+            ) ?: run {
+                android.util.Log.w("Twinotify", "v2 cancel origin is not the paired peer")
+                return@withLock
+            }
+            val desired = try {
+                when (
+                    val reduction = NotificationStateReducer.reduce(
+                        current = current,
+                        event = authorizedEvent,
+                        localDeviceId = localDeviceId,
+                        allocator = allocator,
+                    )
+                ) {
+                    is Reduction.Apply -> reduction.state
+                    is Reduction.Stale -> reduction.state
+                }
+            } catch (error: Throwable) {
+                android.util.Log.w("Twinotify", "v2 desired-state reduction rejected event", error)
+                return@withLock
+            }
+            val inbound = InboundMessage(
+                msgId = inner.msgId,
+                originDevice = inner.originDevice,
+                envelopeSha256 = opened.envelopeSha256,
+                eventType = inner.type,
+                canonId = canonId,
+                sequence = inner.sequence,
+                outcome = "PENDING_PLATFORM",
+                committedAt = System.currentTimeMillis(),
+                appliedAt = null,
+                receiptMsgId = null,
+                relayAckState = "NONE",
+            )
+            var commitDesired = desired
+            var commitResult: co.twinotify.core.storage.InboundDesiredCommitResult? = null
+            for (attempt in 0 until 3) {
+                commitResult = reliableDao.commitInboundDesired(inbound, commitDesired)
+                if (commitResult !is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision) {
+                    break
+                }
+                val retryId = reliableDao.nextMirrorLocalId()
+                commitDesired = commitDesired.copy(mirrorLocalId = retryId)
+            }
+            when (val result = commitResult) {
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Committed,
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate,
+                -> NotificationMaterializer(
+                    dao = reliableDao,
+                    port = DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao),
+                    receiptFactory = DurableReceiptFactory(ctx),
+                    localDeviceId = localDeviceId,
+                    retryScheduler = materializationStartupScheduler(ctx),
+                ).materializePending()
+                else -> Unit
+            }
         }
     }
 

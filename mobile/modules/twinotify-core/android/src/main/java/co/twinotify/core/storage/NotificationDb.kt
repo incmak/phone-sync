@@ -78,6 +78,15 @@ val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
+val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""CREATE TABLE IF NOT EXISTS materialization_retry (
+            canonId TEXT NOT NULL PRIMARY KEY, nextAttemptAt INTEGER NOT NULL,
+            attempts INTEGER NOT NULL, lastError TEXT)""")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_materialization_retry_nextAttemptAt ON materialization_retry(nextAttemptAt)")
+    }
+}
+
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
 
@@ -91,7 +100,7 @@ object NotificationDb {
                 super.onOpen(db)
                 db.execSQL("PRAGMA foreign_keys = ON")
             }
-        }).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
+        }).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
     }
 }
 
@@ -106,8 +115,9 @@ object NotificationDb {
         OriginSequence::class,
         ActivityEvent::class,
         SnapshotStage::class,
+        MaterializationRetry::class,
     ],
-    version = 3,
+    version = 4,
 )
 abstract class NotificationDbImpl : RoomDatabase() {
     abstract fun notificationMapDao(): NotificationMapDao

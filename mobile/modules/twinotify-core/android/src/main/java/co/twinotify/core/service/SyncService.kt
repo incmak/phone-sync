@@ -58,6 +58,17 @@ class SyncService : Service() {
         val db = NotificationDb.get(this)
         reliableDao = db.reliableDeliveryDao()
         dispatcher = InboundDispatcher(this)
+        // Resume any desired-state rows left between the Room commit and the Android API call.
+        scope.launch {
+            val localDevice = DeviceIdentity.getOrCreate(applicationContext)
+            NotificationMaterializer(
+                dao = reliableDao,
+                port = DefaultAndroidNotificationPort(applicationContext, localDevice, reliableDao),
+                receiptFactory = DurableReceiptFactory(applicationContext),
+                localDeviceId = localDevice,
+                retryScheduler = materializationStartupScheduler(applicationContext),
+            ).materializePending()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

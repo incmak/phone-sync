@@ -1,6 +1,7 @@
 package co.twinotify.core.service
 
 import android.app.Notification
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -10,16 +11,12 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.storage.NotificationDb
-import kotlin.random.Random
 
 object MirrorPoster {
-    // The tap PendingIntent intentionally targets our receiver, which validates and forwards the URI.
-    @Suppress("LaunchActivityFromNotification")
-    suspend fun post(ctx: Context, post: NotifPostJson) {
+    @SuppressLint("LaunchActivityFromNotification")
+    fun buildNotification(ctx: Context, post: NotifPostJson, localId: Int): Notification {
+        require(localId > 0) { "local notification ID must be positive" }
         NotifChannelSetup.ensureChannels(ctx)
-        val localId = Random.nextInt(1, Int.MAX_VALUE)
-        val localTag = "mirror-${post.canon_id.hashCode()}"
-
         val smallIcon = post.small_icon_png_b64?.let(::decodeBitmap)
         val largeIcon = post.large_icon_png_b64?.let(::decodeBitmap)
 
@@ -31,35 +28,33 @@ object MirrorPoster {
             ctx, localId, tapIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-
-        // Pick best expanded-view content. Many apps (messaging, mail, etc.) don't populate
-        // EXTRA_BIG_TEXT because their originals use MessagingStyle / InboxStyle — NotifPostBuilder
-        // already collapsed those into `text`. Fall back to `text` (or title) so the expanded view
-        // shows SOMETHING instead of null.
         val expandedText = post.big_text?.takeIf { it.isNotBlank() }
             ?: post.text?.takeIf { it.isNotBlank() }
             ?: post.title
-
-        val nb = NotificationCompat.Builder(ctx, NotifChannelSetup.CHANNEL_MIRRORS)
+        return NotificationCompat.Builder(ctx, NotifChannelSetup.CHANNEL_MIRRORS)
             .setContentTitle(post.title ?: "")
             .setContentText(post.text ?: "")
             .setSubText(post.sub_text)
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)  // spec §4.7.3
-            .setAutoCancel(true)                                   // spec §4.7.1
+            .setVisibility(NotifVisibility.toAndroid(post.visibility))
+            .setAutoCancel(true)
             .setContentIntent(tapPi)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)       // fallback — real smallIcon is a Bitmap, not an Icon resource; Phase 3 uses the system one until Phase 7 icon cache lands
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
             .apply {
                 if (largeIcon != null) setLargeIcon(largeIcon)
-                if (!expandedText.isNullOrBlank()) {
-                    setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
-                }
+                if (!expandedText.isNullOrBlank()) setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
             }
             .build()
             .also { if (!post.is_clearable) it.flags = it.flags or Notification.FLAG_NO_CLEAR }
+    }
 
+    // The tap PendingIntent intentionally targets our receiver, which validates and forwards the URI.
+    @Suppress("LaunchActivityFromNotification")
+    suspend fun post(ctx: Context, post: NotifPostJson) {
+        val localId = stableLocalId(post.canon_id)
+        val localTag = co.twinotify.core.service.NotificationStateReducer.stableMirrorTag(post.canon_id)
         val notificationManager = NotificationManagerCompat.from(ctx)
         if (notificationManager.areNotificationsEnabled()) {
-            notificationManager.notify(localTag, localId, nb)
+            notificationManager.notify(localTag, localId, buildNotification(ctx, post, localId))
         }
 
         val dao = NotificationDb.get(ctx).notificationMapDao()
@@ -74,4 +69,22 @@ object MirrorPoster {
     }
 
     private fun extractOrigin(canonId: String): String = canonId.substringBefore(':')
+
+    private fun stableLocalId(canonId: String): Int {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(canonId.toByteArray(Charsets.UTF_8))
+        val raw = ((digest[0].toInt() and 0xff) shl 24) or
+            ((digest[1].toInt() and 0xff) shl 16) or
+            ((digest[2].toInt() and 0xff) shl 8) or
+            (digest[3].toInt() and 0xff)
+        return (raw and Int.MAX_VALUE).coerceAtLeast(1)
+    }
+}
+
+private object NotifVisibility {
+    fun toAndroid(value: String): Int = when (value) {
+        "public" -> NotificationCompat.VISIBILITY_PUBLIC
+        "secret" -> NotificationCompat.VISIBILITY_SECRET
+        else -> NotificationCompat.VISIBILITY_PRIVATE
+    }
 }

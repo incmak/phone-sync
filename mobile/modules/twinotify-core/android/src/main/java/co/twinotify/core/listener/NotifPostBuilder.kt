@@ -31,7 +31,39 @@ data class NotifPostJson(
     val small_icon_png_b64: String?,       // Phase 3: always inline; icon-hash-elide is Phase 7
     val large_icon_png_b64: String?,
     val ts: Long,
-)
+) {
+    companion object {
+        fun fromPayloadJson(raw: String): NotifPostJson {
+            val o = org.json.JSONObject(raw)
+            fun nullable(key: String): String? =
+                if (!o.has(key) || o.isNull(key)) null else o.getString(key)
+            val type = o.getString("type")
+            require(type == "notif.post" || type == "notif.update") {
+                "notification payload type must be notif.post or notif.update"
+            }
+            return NotifPostJson(
+                v = o.optInt("v", 1),
+                type = type,
+                canon_id = o.getString("canon_id"),
+                app_name = nullable("app_name"),
+                package_name = o.getString("package_name"),
+                id = o.getInt("id"),
+                tag = nullable("tag"),
+                title = nullable("title"),
+                text = nullable("text"),
+                sub_text = nullable("sub_text"),
+                big_text = nullable("big_text"),
+                visibility = o.optString("visibility", "private"),
+                is_group_summary = o.optBoolean("is_group_summary", false),
+                is_ongoing = o.optBoolean("is_ongoing", false),
+                is_clearable = o.optBoolean("is_clearable", true),
+                small_icon_png_b64 = nullable("small_icon_png_b64"),
+                large_icon_png_b64 = nullable("large_icon_png_b64"),
+                ts = o.optLong("ts", 0L),
+            )
+        }
+    }
+}
 
 object NotifPostBuilder {
     private const val SMALL_ICON_PX = 96

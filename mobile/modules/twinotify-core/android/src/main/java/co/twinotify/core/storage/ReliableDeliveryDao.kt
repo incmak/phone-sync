@@ -15,6 +15,7 @@ sealed interface InboundDesiredCommitResult {
     data class Duplicate(val outcome: String, val receiptMsgId: String?) : InboundDesiredCommitResult
     data class IdConflict(val existingSha256: String) : InboundDesiredCommitResult
     data class Stale(val latestSequence: Long) : InboundDesiredCommitResult
+    data class MirrorIdentityCollision(val existingCanonId: String) : InboundDesiredCommitResult
 }
 
 sealed interface MaterializationResult {
@@ -23,6 +24,13 @@ sealed interface MaterializationResult {
     data object Superseded : MaterializationResult
     data object Missing : MaterializationResult
     data class ReceiptConflict(val existingSha256: String) : MaterializationResult
+}
+
+sealed interface MaterializationReceiptResult {
+    data object NotNeeded : MaterializationReceiptResult
+    data object Unavailable : MaterializationReceiptResult
+    data class Prepared(val receipt: OutboundMessage) : MaterializationReceiptResult
+    data class Conflict(val existingSha256: String) : MaterializationReceiptResult
 }
 
 sealed interface ReceiptTransitionResult {
@@ -105,17 +113,69 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     @Query("SELECT * FROM canonical_notification_state WHERE canonId=:canonId")
     abstract suspend fun canonical(canonId: String): CanonicalNotificationState?
 
+    @Query(
+        "SELECT canonId FROM canonical_notification_state " +
+            "WHERE mirrorLocalTag=:tag AND mirrorLocalId=:id LIMIT 1",
+    )
+    abstract suspend fun canonicalForMirrorIdentity(tag: String, id: Int): String?
+
+    @Query("SELECT canonId FROM canonical_notification_state WHERE sourceNotificationKey=:key LIMIT 1")
+    abstract suspend fun canonicalForSourceKey(key: String): String?
+
+    /** Consumes a persisted v2 mirror-cancel tombstone atomically with the echo decision. */
+    @Query(
+        "UPDATE canonical_notification_state SET peerCancelPending=0 " +
+            "WHERE canonId=:canonId AND peerCancelPending=1",
+    )
+    abstract suspend fun consumePeerCancel(canonId: String): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun putCanonical(row: CanonicalNotificationState)
 
     @Query(
         "SELECT * FROM canonical_notification_state " +
-            "WHERE latestSequence > materializedSequence ORDER BY updatedAt",
+            "WHERE latestSequence > materializedSequence AND " +
+            "(canonId NOT IN (SELECT canonId FROM materialization_retry) OR " +
+            "canonId IN (SELECT canonId FROM materialization_retry WHERE nextAttemptAt <= :now)) " +
+            "ORDER BY updatedAt",
     )
-    abstract suspend fun pendingMaterialization(): List<CanonicalNotificationState>
+    abstract suspend fun pendingMaterialization(now: Long): List<CanonicalNotificationState>
+
+    @Query("SELECT * FROM materialization_retry WHERE canonId=:canonId")
+    abstract suspend fun materializationRetry(canonId: String): MaterializationRetry?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun putMaterializationRetry(row: MaterializationRetry)
+
+    @Query("DELETE FROM materialization_retry WHERE canonId=:canonId")
+    abstract suspend fun clearMaterializationRetry(canonId: String)
+
+    @Query(
+        "SELECT * FROM inbound_message WHERE canonId=:canonId AND sequence=:sequence " +
+            "AND outcome='PENDING_PLATFORM' ORDER BY committedAt",
+    )
+    abstract suspend fun pendingInboundForMaterialization(
+        canonId: String,
+        sequence: Long,
+    ): List<InboundMessage>
+
+    @Query(
+        "UPDATE canonical_notification_state SET peerCancelPending=1 " +
+            "WHERE canonId=:canonId AND state='CANCELLED'",
+    )
+    abstract suspend fun markPeerCancelPending(canonId: String): Int
+
+    @Query("UPDATE canonical_notification_state SET peerCancelPending=0 WHERE canonId=:canonId")
+    abstract suspend fun clearPeerCancelPending(canonId: String): Int
 
     @Query("SELECT * FROM canonical_notification_state WHERE originDevice=:originDevice AND state='ACTIVE'")
     abstract suspend fun activeOriginStates(originDevice: String): List<CanonicalNotificationState>
+
+    @Query(
+        "SELECT COALESCE(MAX(mirrorLocalId), 0) + 1 FROM canonical_notification_state " +
+            "WHERE mirrorLocalId IS NOT NULL",
+    )
+    abstract suspend fun nextMirrorLocalId(): Int
 
     @Query("SELECT * FROM outbound_queue ORDER BY id ASC LIMIT :limit")
     abstract override suspend fun legacyBatch(limit: Int): List<LegacyOutboundEvent>
@@ -135,6 +195,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     /** Read-only hint used to prepare the encrypted payload before the atomic capture commit. */
     @Query("SELECT nextSequence FROM origin_sequence WHERE canonId=:canonId")
     abstract suspend fun nextCaptureSequence(canonId: String): Long?
+
+    @Transaction
+    open suspend fun nextCaptureSequenceForEvent(canonId: String): Long =
+        originSequence(canonId)?.nextSequence
+            ?: canonical(canonId)?.latestSequence?.plus(1L)
+            ?: 1L
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun putOriginSequence(row: OriginSequence)
@@ -163,6 +229,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Query("UPDATE inbound_message SET relayAckState='READY' WHERE receiptMsgId=:receiptMsgId")
     protected abstract suspend fun markRelayAckReady(receiptMsgId: String): Int
+
+    @Query(
+        "UPDATE inbound_message SET receiptMsgId=:receiptMsgId " +
+            "WHERE msgId=:msgId AND outcome='PENDING_PLATFORM' AND receiptMsgId IS NULL",
+    )
+    protected abstract suspend fun linkMaterializationReceipt(msgId: String, receiptMsgId: String): Int
+
+    @Query("UPDATE outbound_message SET state='NEW' WHERE msgId=:msgId AND state='PENDING_PLATFORM'")
+    protected abstract suspend fun activateMaterializationReceipt(msgId: String): Int
 
     @Query(
         "SELECT * FROM outbound_message WHERE canonId=:canonId AND state='NEW' " +
@@ -218,6 +293,14 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
             require(row.canonId == desired.canonId)
             require(row.sequence == desired.latestSequence)
             val current = canonical(desired.canonId)
+            val mirrorOwner = if (desired.mirrorLocalTag != null && desired.mirrorLocalId != null) {
+                canonicalForMirrorIdentity(desired.mirrorLocalTag, desired.mirrorLocalId)
+            } else {
+                null
+            }
+            if (mirrorOwner != null && mirrorOwner != desired.canonId) {
+                return InboundDesiredCommitResult.MirrorIdentityCollision(mirrorOwner)
+            }
             if (current != null && desired.latestSequence <= current.latestSequence) {
                 insertInbound(row.copy(outcome = "STALE"))
                 return InboundDesiredCommitResult.Stale(current.latestSequence)
@@ -247,12 +330,42 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
                 return MaterializationResult.ReceiptConflict(existingReceipt.envelopeSha256)
             }
             if (existingReceipt == null) insertOutbound(receipt)
+            activateMaterializationReceipt(receipt.msgId)
         }
 
         val pending = pendingInbound(canonId, sequence)
         pending.forEach { markInboundApplied(it.msgId, appliedAt, receipt?.msgId) }
         putCanonical(state.copy(materializedSequence = sequence, updatedAt = appliedAt))
         return MaterializationResult.Completed
+    }
+
+    /** Persist a receipt identity before invoking Android, so a crash can reuse it safely. */
+    @Transaction
+    open suspend fun prepareMaterializationReceipt(
+        canonId: String,
+        sequence: Long,
+        candidate: OutboundMessage?,
+    ): MaterializationReceiptResult {
+        val pending = pendingInbound(canonId, sequence)
+        if (pending.isEmpty()) return MaterializationReceiptResult.NotNeeded
+        val existingIds = pending.mapNotNull { it.receiptMsgId }.distinct()
+        if (existingIds.size > 1) return MaterializationReceiptResult.Conflict("multiple receipt IDs")
+        val existingId = existingIds.singleOrNull()
+        if (existingId != null) {
+            val existing = outbound(existingId)
+                ?: return MaterializationReceiptResult.Conflict("missing receipt $existingId")
+            return MaterializationReceiptResult.Prepared(existing)
+        }
+        val receipt = candidate ?: return MaterializationReceiptResult.Unavailable
+        val existing = outbound(receipt.msgId)
+        if (existing != null && existing.envelopeSha256 != receipt.envelopeSha256) {
+            return MaterializationReceiptResult.Conflict(existing.envelopeSha256)
+        }
+        if (existing == null) {
+            insertOutbound(receipt.copy(state = "PENDING_PLATFORM", requiresPeerReceipt = false))
+        }
+        pending.forEach { linkMaterializationReceipt(it.msgId, receipt.msgId) }
+        return MaterializationReceiptResult.Prepared(existing ?: receipt.copy(state = "PENDING_PLATFORM"))
     }
 
     @Transaction
@@ -334,7 +447,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         // Sequence allocation and canonical/outbox mutation share this transaction. The caller
         // only reads the next value while preparing crypto; this compare-and-increment is the
         // authoritative reservation and rolls back together with the state/outbox write.
-        val nextSequence = originSequence(canonId)?.nextSequence ?: 1L
+        val nextSequence = originSequence(canonId)?.nextSequence
+            ?: canonical(canonId)?.latestSequence?.plus(1L)
+            ?: 1L
         if (sequence != nextSequence) return OutboundStateCommitResult.Stale(nextSequence - 1L)
         putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
         return commitOutboundState(desired, incoming)

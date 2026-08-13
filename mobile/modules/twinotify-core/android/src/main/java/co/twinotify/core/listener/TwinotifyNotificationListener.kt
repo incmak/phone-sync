@@ -40,6 +40,15 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         originDevice = runBlocking { DeviceIdentity.getOrCreate(ctx) }
         coordinator = CaptureCoordinator.get(ctx)
         NotificationListenerBridge.attach(this)
+        scope.launch {
+            co.twinotify.core.service.NotificationMaterializer(
+                dao = reliableDao,
+                port = co.twinotify.core.service.DefaultAndroidNotificationPort(ctx, originDevice, reliableDao),
+                receiptFactory = co.twinotify.core.service.DurableReceiptFactory(ctx),
+                localDeviceId = originDevice,
+                retryScheduler = co.twinotify.core.service.materializationStartupScheduler(ctx),
+            ).materializePending()
+        }
     }
 
     override fun onDestroy() {
@@ -109,12 +118,23 @@ class TwinotifyNotificationListener : NotificationListenerService() {
             // A missing mirror mapping after process death is unrecoverable until a snapshot;
             // never guess from a local id because that could cancel an unrelated notification.
             scope.launch(removalDispatcher) {
-                val canonId = dao.lookupByLocal(sbn.id, sbn.tag) ?: return@launch
+                // v2 mirrors persist their canonical identity; resolve it before falling back to
+                // the legacy mapping so a cancel echo cannot be emitted for a guessed canonId.
+                val canonId = reliableDao.canonicalForMirrorIdentity(sbn.tag.orEmpty(), sbn.id)
+                    ?: dao.lookupByLocal(sbn.id, sbn.tag)
+                    ?: return@launch
+                if (reliableDao.consumePeerCancel(canonId) > 0) {
+                    dao.deleteByCanonId(canonId)
+                    return@launch
+                }
                 processRemoved(sbn, canonId, ownPkg = true, reason, ts)
             }
         } else {
-            val canonId = CanonIdBuilder.build(originDevice, sbn.packageName, sbn.id, sbn.tag)
-            processRemoved(sbn, canonId, ownPkg = false, reason, ts)
+            scope.launch(removalDispatcher) {
+                val canonId = reliableDao.canonicalForSourceKey(sbn.key)
+                    ?: CanonIdBuilder.build(originDevice, sbn.packageName, sbn.id, sbn.tag)
+                processRemoved(sbn, canonId, ownPkg = false, reason, ts)
+            }
         }
     }
 
@@ -127,13 +147,19 @@ class TwinotifyNotificationListener : NotificationListenerService() {
     ) {
         val canonInPending = PendingPeerCancel.consume(canonId)
         when (val result = ReasonCodeFilter.filter(ownPkg, canonInPending, reason)) {
-            is FilterResult.Suppress -> if (ownPkg) scope.launch { dao.deleteByCanonId(canonId) }
+            is FilterResult.Suppress -> if (ownPkg) scope.launch {
+                reliableDao.clearPeerCancelPending(canonId)
+                dao.deleteByCanonId(canonId)
+            }
             is FilterResult.NoEmit -> Unit
             is FilterResult.Emit -> {
                 check(coordinator.submit(RemoveCommand(canonId, sbn.key, result.reason, timestamp))) {
                     android.util.Log.e(TAG, "durable capture lane rejected cancel canon=$canonId")
                 }
-                if (ownPkg) scope.launch { dao.deleteByCanonId(canonId) }
+                if (ownPkg) scope.launch {
+                    reliableDao.clearPeerCancelPending(canonId)
+                    dao.deleteByCanonId(canonId)
+                }
             }
         }
     }

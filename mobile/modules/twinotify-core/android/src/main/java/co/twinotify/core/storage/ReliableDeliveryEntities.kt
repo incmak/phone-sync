@@ -63,6 +63,14 @@ data class CanonicalNotificationState(
     val updatedAt: Long,
 )
 
+@Entity(tableName = "materialization_retry", indices = [Index("nextAttemptAt")])
+data class MaterializationRetry(
+    @PrimaryKey val canonId: String,
+    val nextAttemptAt: Long,
+    val attempts: Int,
+    val lastError: String?,
+)
+
 @Entity(tableName = "origin_sequence")
 data class OriginSequence(
     @PrimaryKey val canonId: String,
