@@ -234,8 +234,12 @@ class TwinotifyCoreModule : Module() {
         AsyncFunction("awaitPeerHello") { relayUrl: String, pairToken: String, promise: Promise ->
             moduleScope.launch {
                 try {
-                    val frame = co.twinotify.core.pairing.PairNotifyClient.awaitFrame(
+                    val ctx = requireContext()
+                    val deviceId = co.twinotify.core.storage.DeviceIdentity.getOrCreate(ctx)
+                    val signSecret = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(ctx).second.secretKey
+                    val frame = co.twinotify.core.pairing.PairNotifyClient.awaitAuthenticatedFrame(
                         relayUrl, pairToken, role = "A", expectedType = "peer.hello",
+                        deviceId = deviceId, signSecretKey = signSecret,
                     )
                     promise.resolve(frame)
                 } catch (e: Throwable) { promise.reject("PAIR_HELLO_WAIT", e.message ?: "err", e) }
@@ -278,7 +282,14 @@ class TwinotifyCoreModule : Module() {
         AsyncFunction("awaitPairSig") { relayUrl: String, pairToken: String, promise: Promise ->
             moduleScope.launch {
                 try {
-                    val sig = co.twinotify.core.pairing.PairNotifyClient.awaitSig(relayUrl, pairToken)
+                    val ctx = requireContext()
+                    val deviceId = co.twinotify.core.storage.DeviceIdentity.getOrCreate(ctx)
+                    val signSecret = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(ctx).second.secretKey
+                    val frame = co.twinotify.core.pairing.PairNotifyClient.awaitAuthenticatedFrame(
+                        relayUrl, pairToken, role = "B", expectedType = "pair.sig",
+                        deviceId = deviceId, signSecretKey = signSecret,
+                    )
+                    val sig = java.util.Base64.getDecoder().decode(org.json.JSONObject(frame).getString("confirmation_sig"))
                     promise.resolve(Base64.getEncoder().encodeToString(sig))
                 } catch (e: Throwable) { promise.reject("PAIR_NOTIFY", e.message ?: "err", e) }
             }

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.pairing.PairPayload
+import co.twinotify.core.pairing.PairNotifyClient
 import co.twinotify.core.pairing.PairProtocol
 import co.twinotify.core.service.ServiceConfigStore
 import co.twinotify.core.service.SyncService
@@ -67,7 +68,8 @@ class E2eControlReceiver : BroadcastReceiver() {
         private const val RESULT_DIR = "e2e-results"
         private const val MAX_REQUEST_ID_LENGTH = 128
         private val ALLOWED_COMMANDS = setOf(
-            "PAIR_INIT", "PAIR_JOIN", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
+            "PAIR_INIT", "PAIR_JOIN", "AWAIT_PEER_HELLO", "SIGN_CONFIRMATION",
+            "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS",
         )
 
@@ -138,6 +140,61 @@ class E2eControlReceiver : BroadcastReceiver() {
             )
             E2eCommandResult(requestId, "ok")
         }
+        "AWAIT_PEER_HELLO" -> {
+            val relayUrl = command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid", "relay_url required")
+            val pairToken = command.param("pair_token") ?: return E2eCommandResult(requestId, "invalid", "pair_token required")
+            val deviceId = DeviceIdentity.getOrCreate(context)
+            val signSecret = CryptoStore.loadOrGenerate(context).second.secretKey
+            val frame = PairNotifyClient.awaitAuthenticatedFrame(
+                relayUrl, pairToken, role = "A", expectedType = "peer.hello",
+                deviceId = deviceId, signSecretKey = signSecret,
+                timeoutMs = command.timeoutMs(),
+            )
+            E2eCommandResult(requestId, "ok", payload = JSONObject(frame))
+        }
+        "SIGN_CONFIRMATION" -> {
+            val pairToken = command.param("pair_token") ?: return E2eCommandResult(requestId, "invalid", "pair_token required")
+            val bEnc = command.param("b_enc_pubkey") ?: return E2eCommandResult(requestId, "invalid", "b_enc_pubkey required")
+            val bSign = command.param("b_sign_pubkey") ?: return E2eCommandResult(requestId, "invalid", "b_sign_pubkey required")
+            val (box, sign) = CryptoStore.loadOrGenerate(context)
+            val signature = PairProtocol.deviceASignConfirmation(
+                pairToken,
+                box.publicKey,
+                sign.publicKey,
+                java.util.Base64.getDecoder().decode(bEnc),
+                java.util.Base64.getDecoder().decode(bSign),
+                sign.secretKey,
+            )
+            E2eCommandResult(requestId, "ok", payload = JSONObject().put(
+                "confirmation_sig", java.util.Base64.getEncoder().encodeToString(signature),
+            ))
+        }
+        "SEND_CONFIRMATION_SIG" -> {
+            val relayUrl = command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid", "relay_url required")
+            val pairToken = command.param("pair_token") ?: return E2eCommandResult(requestId, "invalid", "pair_token required")
+            val signature = command.param("confirmation_sig") ?: return E2eCommandResult(requestId, "invalid", "confirmation_sig required")
+            PairProtocol.sendConfirmationSig(
+                relayUrl,
+                pairToken,
+                java.util.Base64.getDecoder().decode(signature),
+            )
+            E2eCommandResult(requestId, "ok")
+        }
+        "AWAIT_PAIR_SIG" -> {
+            val relayUrl = command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid", "relay_url required")
+            val pairToken = command.param("pair_token") ?: return E2eCommandResult(requestId, "invalid", "pair_token required")
+            val deviceId = DeviceIdentity.getOrCreate(context)
+            val signSecret = CryptoStore.loadOrGenerate(context).second.secretKey
+            val frame = PairNotifyClient.awaitAuthenticatedFrame(
+                relayUrl, pairToken, role = "B", expectedType = "pair.sig",
+                deviceId = deviceId, signSecretKey = signSecret,
+                timeoutMs = command.timeoutMs(),
+            )
+            val signature = java.util.Base64.getDecoder().decode(JSONObject(frame).getString("confirmation_sig"))
+            E2eCommandResult(requestId, "ok", payload = JSONObject().put(
+                "confirmation_sig", java.util.Base64.getEncoder().encodeToString(signature),
+            ))
+        }
         "PAIR_CONFIRM" -> {
             PairProtocol.sendConfirmationSig(
                 command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid", "relay_url required"),
@@ -206,6 +263,9 @@ class E2eControlReceiver : BroadcastReceiver() {
         temporary.writeText(result.toJson().toString())
         check(temporary.renameTo(target)) { "unable to atomically publish E2E result" }
     }
+
+    private fun E2eCommand.timeoutMs(): Long = param("timeout_ms")?.toLongOrNull()?.coerceIn(1_000L, 300_000L)
+        ?: 60_000L
 }
 
 internal object E2eSessionToken {

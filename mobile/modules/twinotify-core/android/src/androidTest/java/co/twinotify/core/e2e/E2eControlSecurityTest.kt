@@ -46,6 +46,18 @@ class E2eControlSecurityTest {
     }
 
     @Test
+    fun pairingWaitAndSignatureCommandsAreAllowlistedButValidateInputs() {
+        val token = E2eSessionToken.forTest(context, "pairing-command-allowlist")
+        listOf("AWAIT_PEER_HELLO", "SIGN_CONFIRMATION", "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG").forEach { command ->
+            val result = E2eControlReceiver().executeForTest(
+                context,
+                E2eCommand(requestId = command, name = command, token = token),
+            )
+            assertEquals("invalid", result.code, "$command must be allowlisted and reject missing parameters")
+        }
+    }
+
+    @Test
     fun stateQueryContainsNoNotificationContent() {
         val token = E2eSessionToken.forTest(context, "state-query")
         val uri = E2eStateProvider.STATE_URI.buildUpon().appendQueryParameter("token", token).build()
