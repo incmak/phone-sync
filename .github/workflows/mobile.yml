@@ -1,9 +1,9 @@
 name: mobile
 on:
   push:
-    paths: ['mobile/**', 'proto/**', 'Makefile', '.github/workflows/mobile.yml']
+    paths: ['mobile/**', 'proto/**', 'Makefile', 'scripts/verify-generated-clean.sh', 'docs/superpowers/specs/**', 'docs/superpowers/plans/**', '.github/workflows/mobile.yml']
   pull_request:
-    paths: ['mobile/**', 'proto/**', 'Makefile', '.github/workflows/mobile.yml']
+    paths: ['mobile/**', 'proto/**', 'Makefile', 'scripts/verify-generated-clean.sh', 'docs/superpowers/specs/**', 'docs/superpowers/plans/**', '.github/workflows/mobile.yml']
 
 permissions:
   contents: read
@@ -54,6 +54,7 @@ jobs:
           name: twinotify-debug-apk
           path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+        if: always()
       - name: Upload Android test and lint reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

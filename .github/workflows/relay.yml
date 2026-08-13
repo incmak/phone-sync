@@ -1,9 +1,9 @@
 name: relay
 on:
   push:
-    paths: ['relay/**', 'proto/**', 'deploy/**', 'Makefile', '.github/workflows/relay.yml']
+    paths: ['relay/**', 'proto/**', 'deploy/**', 'Makefile', 'scripts/verify-generated-clean.sh', 'docs/superpowers/specs/**', 'docs/superpowers/plans/**', '.github/workflows/relay.yml']
   pull_request:
-    paths: ['relay/**', 'proto/**', 'deploy/**', 'Makefile', '.github/workflows/relay.yml']
+    paths: ['relay/**', 'proto/**', 'deploy/**', 'Makefile', 'scripts/verify-generated-clean.sh', 'docs/superpowers/specs/**', 'docs/superpowers/plans/**', '.github/workflows/relay.yml']
 
 permissions:
   contents: read
@@ -26,8 +26,8 @@ jobs:
         run: |
           set -o pipefail
           make relay-verify 2>&1 | tee relay-race.log
-      - name: Upload relay race-test log on failure
-        if: failure() && steps.relay-verify.outcome == 'failure'
+      - name: Upload relay race-test log
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: relay-race-test-log
