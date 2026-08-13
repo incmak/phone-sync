@@ -1,0 +1,160 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "751f0c5145cc2d8c6d3463cd97f7420c",
+    "entities": [
+      {
+        "tableName": "mirrored_from_peer",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`canonId` TEXT NOT NULL, `originDeviceId` TEXT NOT NULL, `createdTs` INTEGER NOT NULL, PRIMARY KEY(`canonId`))",
+        "fields": [
+          {
+            "fieldPath": "canonId",
+            "columnName": "canonId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originDeviceId",
+            "columnName": "originDeviceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdTs",
+            "columnName": "createdTs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "canonId"
+          ]
+        }
+      },
+      {
+        "tableName": "local_to_canon",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `localId` INTEGER NOT NULL, `localTag` TEXT, `canonId` TEXT NOT NULL, `createdTs` INTEGER NOT NULL, FOREIGN KEY(`canonId`) REFERENCES `mirrored_from_peer`(`canonId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localId",
+            "columnName": "localId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localTag",
+            "columnName": "localTag",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "canonId",
+            "columnName": "canonId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdTs",
+            "columnName": "createdTs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_to_canon_localId_localTag",
+            "unique": true,
+            "columnNames": [
+              "localId",
+              "localTag"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_to_canon_localId_localTag` ON `${TABLE_NAME}` (`localId`, `localTag`)"
+          },
+          {
+            "name": "index_local_to_canon_canonId",
+            "unique": false,
+            "columnNames": [
+              "canonId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_to_canon_canonId` ON `${TABLE_NAME}` (`canonId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "mirrored_from_peer",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "canonId"
+            ],
+            "referencedColumns": [
+              "canonId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "outbound_queue",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `ciphertextB64` TEXT NOT NULL, `nonceB64` TEXT NOT NULL, `msgId` TEXT NOT NULL, `createdTs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ciphertextB64",
+            "columnName": "ciphertextB64",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nonceB64",
+            "columnName": "nonceB64",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "msgId",
+            "columnName": "msgId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdTs",
+            "columnName": "createdTs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '751f0c5145cc2d8c6d3463cd97f7420c')"
+    ]
+  }
+}

@@ -8,7 +8,7 @@ import androidx.room.Query
 import androidx.room.Transaction
 
 @Entity(tableName = "outbound_queue")
-data class OutboundEvent(
+data class LegacyOutboundEvent(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val ciphertextB64: String,
     val nonceB64: String,
@@ -16,12 +16,14 @@ data class OutboundEvent(
     val createdTs: Long,
 )
 
+typealias OutboundEvent = LegacyOutboundEvent
+
 @Dao
 abstract class OutboundEventDao {
-    @Insert abstract suspend fun insertRaw(event: OutboundEvent): Long
+    @Insert abstract suspend fun insertRaw(event: LegacyOutboundEvent): Long
 
     @Query("SELECT * FROM outbound_queue ORDER BY id ASC LIMIT :limit")
-    abstract suspend fun drain(limit: Int): List<OutboundEvent>
+    abstract suspend fun drain(limit: Int): List<LegacyOutboundEvent>
 
     @Query("DELETE FROM outbound_queue WHERE id = :id")
     abstract suspend fun ack(id: Long)
@@ -34,7 +36,7 @@ abstract class OutboundEventDao {
 
     /** Atomic cap-checked insert: drops oldest row(s) + inserts in a single write transaction. */
     @Transaction
-    open suspend fun enqueueCapped(event: OutboundEvent, maxSize: Int): Long {
+    open suspend fun enqueueCapped(event: LegacyOutboundEvent, maxSize: Int): Long {
         val size = count()
         if (size >= maxSize) dropOldest(1 + (size - maxSize))
         return insertRaw(event)

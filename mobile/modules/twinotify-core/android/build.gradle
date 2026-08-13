@@ -15,6 +15,9 @@ android {
     versionName "0.8.0"
     testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
   }
+  sourceSets {
+    androidTest.assets.srcDirs += files("$projectDir/schemas")
+  }
   lint {
     abortOnError true
     warningsAsErrors true
@@ -22,6 +25,10 @@ android {
     // source/API correctness check. Dependency upgrades remain deliberate.
     disable 'GradleDependency', 'NewerVersionAvailable'
   }
+}
+
+ksp {
+  arg('room.schemaLocation', "$projectDir/schemas")
 }
 
 dependencies {
