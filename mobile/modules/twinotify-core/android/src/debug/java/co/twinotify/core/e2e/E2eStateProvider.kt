@@ -1,0 +1,112 @@
+package co.twinotify.core.e2e
+
+import android.content.ContentProvider
+import android.content.ContentValues
+import android.content.Context
+import android.database.Cursor
+import android.database.MatrixCursor
+import android.net.Uri
+import android.os.CancellationSignal
+import co.twinotify.core.service.SyncServiceStatus
+import co.twinotify.core.service.toEventMap
+import co.twinotify.core.storage.DeviceIdentity
+import co.twinotify.core.storage.NotificationDb
+import co.twinotify.core.storage.PeerStore
+import java.security.MessageDigest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONObject
+
+/** Content-free, debug-only durable state view for host-side E2E assertions. */
+class E2eStateProvider : ContentProvider() {
+    companion object {
+        const val AUTHORITY = "co.twinotify.app.e2e"
+        val STATE_URI: Uri = Uri.parse("content://$AUTHORITY/state")
+
+        fun snapshotJson(context: Context): String = runBlocking(Dispatchers.IO) {
+            E2eSessionToken.ensure(context)
+            val db = NotificationDb.get(context)
+            val database = db.openHelper.readableDatabase
+            val peer = PeerStore.load(context)
+            val root = JSONObject()
+                .put("device_id", DeviceIdentity.getOrCreate(context))
+                .put("paired_peer", peer?.deviceId)
+                .put("health", JSONObject(SyncServiceStatus.health.value.toEventMap()))
+                .put("active_outbox", scalar(database, "SELECT COUNT(*) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')"))
+                .put("active_inbound", scalar(database, "SELECT COUNT(*) FROM inbound_message WHERE outcome='PENDING_PLATFORM'"))
+                .put("pending_materialization", scalar(database, "SELECT COUNT(*) FROM canonical_notification_state WHERE latestSequence > materializedSequence"))
+            root.put("canonical", canonical(database))
+            root.put("activity", activity(database))
+            root.toString()
+        }
+
+        fun clearActivity(context: Context) {
+            NotificationDb.get(context).openHelper.writableDatabase.execSQL("DELETE FROM activity_event")
+        }
+
+        private fun scalar(database: androidx.sqlite.db.SupportSQLiteDatabase, sql: String): Int =
+            database.query(sql).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+
+        private fun canonical(database: androidx.sqlite.db.SupportSQLiteDatabase): JSONArray {
+            val result = JSONArray()
+            database.query(
+                "SELECT canonId, latestSequence, state, materializedSequence " +
+                    "FROM canonical_notification_state ORDER BY updatedAt LIMIT 200",
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.put(JSONObject()
+                        .put("canon_id_hash", sha256Hex(cursor.getString(0)))
+                        .put("sequence", cursor.getLong(1))
+                        .put("state", cursor.getString(2))
+                        .put("materialized_sequence", cursor.getLong(3)))
+                }
+            }
+            return result
+        }
+
+        private fun activity(database: androidx.sqlite.db.SupportSQLiteDatabase): JSONArray {
+            val result = JSONArray()
+            database.query(
+                "SELECT eventType, status, detailCode FROM activity_event " +
+                    "ORDER BY occurredAt DESC LIMIT 100",
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.put(JSONObject()
+                        .put("event_type", cursor.getString(0))
+                        .put("status", cursor.getString(1))
+                        .put("detail_code", cursor.getString(2)))
+                }
+            }
+            return result
+        }
+
+        private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray())
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    override fun onCreate(): Boolean = true
+
+    override fun query(
+        uri: Uri,
+        projection: Array<out String>?,
+        selection: String?,
+        selectionArgs: Array<out String>?,
+        sortOrder: String?,
+    ): Cursor {
+        require(uri.authority == AUTHORITY && uri.path == "/state") { "unsupported E2E state URI" }
+        val token = uri.getQueryParameter("token")
+        if (!E2eSessionToken.matches(requireNotNull(context), token)) {
+            throw SecurityException("unauthorized E2E state query")
+        }
+        return MatrixCursor(arrayOf("state_json"), 1).apply {
+            addRow(arrayOf(snapshotJson(requireNotNull(context))))
+        }
+    }
+
+    override fun getType(uri: Uri): String = "application/json"
+    override fun insert(uri: Uri, values: ContentValues?): Uri? = error("read-only E2E state")
+    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = error("read-only E2E state")
+    override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = error("read-only E2E state")
+}
