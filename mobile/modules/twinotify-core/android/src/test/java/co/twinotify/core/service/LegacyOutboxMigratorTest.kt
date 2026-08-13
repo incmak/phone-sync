@@ -7,7 +7,6 @@ import co.twinotify.core.storage.OutboundMessage
 import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
-import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -33,8 +32,6 @@ class LegacyOutboxMigratorTest {
         val inserted = store.outbound.single()
         assertEquals(expectedEnvelope, inserted.envelopeJson)
         assertEquals(sha256(expectedEnvelope), inserted.envelopeSha256)
-        assertContentEquals("ct".toByteArray(), extractJsonString(inserted.envelopeJson, "ciphertext").toByteArray())
-        assertContentEquals("nonce".toByteArray(), extractJsonString(inserted.envelopeJson, "nonce").toByteArray())
         assertEquals("NEW", inserted.state)
         assertEquals(1, first.converted)
         assertEquals(0, second.converted)
@@ -73,10 +70,6 @@ class LegacyOutboxMigratorTest {
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
-
-    private fun extractJsonString(json: String, name: String): String =
-        Regex("\\\"$name\\\":\\\"([^\\\"]*)\\\"").find(json)?.groupValues?.get(1)
-            ?: error("missing $name")
 
     private companion object {
         const val MESSAGE_ID = "11111111-1111-4111-8111-111111111111"

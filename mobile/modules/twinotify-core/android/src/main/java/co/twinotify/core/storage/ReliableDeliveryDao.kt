@@ -32,14 +32,25 @@ sealed interface ReceiptTransitionResult {
     data object NotReceipt : ReceiptTransitionResult
 }
 
-sealed interface CompactionResult {
-    data class Compacted(val removed: Int) : CompactionResult
-    data object NotCompactable : CompactionResult
+sealed interface OutboundStateCommitResult {
+    data class Committed(val compacted: Int) : OutboundStateCommitResult
+    data class Stale(val latestSequence: Long) : OutboundStateCommitResult
+    data object NotStateEvent : OutboundStateCommitResult
 }
 
 sealed interface SnapshotCommitResult {
     data class Committed(val upserted: Int, val cancelled: Int) : SnapshotCommitResult
-    data object Empty : SnapshotCommitResult
+    data class Incomplete(val expected: Int, val staged: Int) : SnapshotCommitResult
+    data object MissingBegin : SnapshotCommitResult
+}
+
+sealed interface SnapshotBeginResult {
+    data class Started(val baselineCount: Int) : SnapshotBeginResult
+}
+
+sealed interface SnapshotStageResult {
+    data object Staged : SnapshotStageResult
+    data object MissingBegin : SnapshotStageResult
 }
 
 sealed interface TerminalMovementResult {
@@ -158,6 +169,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     @Query("SELECT * FROM snapshot_stage WHERE snapshotId=:snapshotId ORDER BY canonId")
     protected abstract suspend fun stagedSnapshot(snapshotId: String): List<SnapshotStage>
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun putSnapshotStages(rows: List<SnapshotStage>)
+
     @Query("SELECT * FROM canonical_notification_state WHERE originDevice=:originDevice")
     protected abstract suspend fun canonicalsForOrigin(
         originDevice: String,
@@ -249,30 +263,118 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     }
 
     @Transaction
-    open suspend fun compactUnacceptedState(
-        canonId: String,
-        incomingEventType: String,
-    ): CompactionResult {
-        val candidates = compactableState(canonId)
-        val removable = when (incomingEventType) {
-            "notif.post", "notif.update" -> candidates.filter {
-                it.eventType == "notif.post" || it.eventType == "notif.update"
-            }
-            "notif.cancel" -> candidates
-            else -> return CompactionResult.NotCompactable
+    open suspend fun commitOutboundState(
+        desired: CanonicalNotificationState,
+        incoming: OutboundMessage,
+    ): OutboundStateCommitResult {
+        if (incoming.eventType !in STATE_EVENT_TYPES) {
+            return OutboundStateCommitResult.NotStateEvent
         }
-        if (removable.isEmpty()) return CompactionResult.Compacted(0)
-        return CompactionResult.Compacted(deleteOutboundIds(removable.map { it.msgId }))
+        val canonId = requireNotNull(incoming.canonId)
+        val incomingSequence = requireNotNull(incoming.sequence)
+        require(incoming.state == "NEW")
+        require(desired.canonId == canonId)
+        require(desired.latestSequence == incomingSequence)
+
+        val candidates = compactableState(canonId)
+        val latestSequence = sequenceOf(
+            canonical(canonId)?.latestSequence,
+            candidates.mapNotNull { it.sequence }.maxOrNull(),
+        ).filterNotNull().maxOrNull()
+        if (latestSequence != null && incomingSequence <= latestSequence) {
+            return OutboundStateCommitResult.Stale(latestSequence)
+        }
+
+        val removable = when (incoming.eventType) {
+            "notif.post", "notif.update" -> candidates.filter {
+                it.sequence != null &&
+                    it.sequence < incomingSequence &&
+                    it.eventType in POST_OR_UPDATE_EVENT_TYPES
+            }
+            "notif.cancel" -> candidates.filter {
+                it.sequence != null && it.sequence < incomingSequence
+            }
+            else -> emptyList()
+        }
+        val compacted = if (removable.isEmpty()) {
+            0
+        } else {
+            deleteOutboundIds(removable.map { it.msgId })
+        }
+        putCanonical(desired)
+        insertOutbound(incoming)
+        return OutboundStateCommitResult.Committed(compacted)
+    }
+
+    @Transaction
+    open suspend fun beginSnapshot(
+        snapshotId: String,
+        originDevice: String,
+        expectedItemCount: Int,
+        receivedAt: Long,
+    ): SnapshotBeginResult {
+        require(snapshotId.isNotEmpty())
+        require(originDevice.isNotEmpty())
+        require(expectedItemCount >= 0)
+
+        deleteSnapshot(snapshotId)
+        val baseline = canonicalsForOrigin(originDevice).filter { it.state != "CANCELLED" }
+        putSnapshotStages(
+            buildList {
+                add(
+                    SnapshotStage(
+                        snapshotId = snapshotId,
+                        canonId = SNAPSHOT_BEGIN_MARKER_CANON_ID,
+                        sequence = expectedItemCount.toLong(),
+                        payloadJson = originDevice,
+                        receivedAt = receivedAt,
+                    ),
+                )
+                baseline.forEach { current ->
+                    add(
+                        SnapshotStage(
+                            snapshotId = snapshotId,
+                            canonId = SNAPSHOT_BASELINE_MARKER_PREFIX + current.canonId,
+                            sequence = current.latestSequence,
+                            payloadJson = current.canonId,
+                            receivedAt = receivedAt,
+                        ),
+                    )
+                }
+            },
+        )
+        return SnapshotBeginResult.Started(baseline.size)
+    }
+
+    @Transaction
+    open suspend fun stageSnapshotItem(row: SnapshotStage): SnapshotStageResult {
+        require(!row.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX))
+        val hasBegin = stagedSnapshot(row.snapshotId).any {
+            it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID
+        }
+        if (!hasBegin) return SnapshotStageResult.MissingBegin
+        putSnapshotStages(listOf(row))
+        return SnapshotStageResult.Staged
     }
 
     @Transaction
     open suspend fun commitSnapshot(
         snapshotId: String,
-        originDevice: String,
         committedAt: Long,
     ): SnapshotCommitResult {
-        val staged = stagedSnapshot(snapshotId)
-        if (staged.isEmpty()) return SnapshotCommitResult.Empty
+        val rows = stagedSnapshot(snapshotId)
+        val begin = rows.singleOrNull { it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID }
+            ?: return SnapshotCommitResult.MissingBegin
+        val expectedItemCount = begin.sequence.toInt()
+        check(expectedItemCount >= 0 && expectedItemCount.toLong() == begin.sequence)
+        val originDevice = begin.payloadJson
+        val baselineByCanonId = rows.asSequence()
+            .filter { it.canonId.startsWith(SNAPSHOT_BASELINE_MARKER_PREFIX) }
+            .associate { it.payloadJson to it.sequence }
+        val staged = rows.filter { !it.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX) }
+        if (staged.size != expectedItemCount) {
+            return SnapshotCommitResult.Incomplete(expectedItemCount, staged.size)
+        }
 
         var upserted = 0
         for (item in staged) {
@@ -300,7 +402,13 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         val stagedIds = staged.mapTo(hashSetOf()) { it.canonId }
         var cancelled = 0
         for (current in canonicalsForOrigin(originDevice)) {
-            if (current.canonId !in stagedIds && current.state != "CANCELLED") {
+            val beginSequence = baselineByCanonId[current.canonId]
+            if (
+                current.canonId !in stagedIds &&
+                current.state != "CANCELLED" &&
+                beginSequence != null &&
+                current.latestSequence <= beginSequence
+            ) {
                 putCanonical(
                     current.copy(
                         latestSequence = current.latestSequence + 1,
@@ -352,5 +460,13 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         } else {
             LegacyConversionResult.AlreadyConverted
         }
+    }
+
+    private companion object {
+        val POST_OR_UPDATE_EVENT_TYPES = setOf("notif.post", "notif.update")
+        val STATE_EVENT_TYPES = POST_OR_UPDATE_EVENT_TYPES + "notif.cancel"
+        const val SNAPSHOT_RESERVED_CANON_PREFIX = "\u0000"
+        const val SNAPSHOT_BEGIN_MARKER_CANON_ID = "${SNAPSHOT_RESERVED_CANON_PREFIX}begin"
+        const val SNAPSHOT_BASELINE_MARKER_PREFIX = "${SNAPSHOT_RESERVED_CANON_PREFIX}baseline:"
     }
 }
