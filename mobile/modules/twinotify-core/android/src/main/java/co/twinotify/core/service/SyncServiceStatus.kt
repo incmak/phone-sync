@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
-enum class SyncState { DISCONNECTED, CONNECTING, CONNECTED, OFFLINE_QUEUED }
+enum class SyncState { DISCONNECTED, CONNECTING, CONNECTED, LEGACY_ONLINE_ONLY, OFFLINE_QUEUED }
 
 object SyncServiceStatus {
     private val _state = MutableStateFlow(SyncState.DISCONNECTED)

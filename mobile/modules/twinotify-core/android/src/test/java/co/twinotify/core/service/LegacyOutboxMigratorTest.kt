@@ -9,8 +9,22 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
 class LegacyOutboxMigratorTest {
+    @Test
+    fun startupSeamPropagatesMigrationFailure() = runBlocking {
+        val failure = assertFailsWith<IllegalStateException> {
+            migrateLegacyOutboxBeforeRelay(object : LegacyOutboxStore {
+                override suspend fun legacyBatch(limit: Int): List<LegacyOutboundEvent> =
+                    throw IllegalStateException("database unavailable")
+                override suspend fun convertLegacy(legacyId: Long, row: OutboundMessage): LegacyConversionResult =
+                    error("unreachable")
+            }, "dev-a")
+        }
+        assertEquals("database unavailable", failure.message)
+    }
+
     @Test
     fun migrate_preservesCiphertextAndNonceInExactEnvelopeAndIsIdempotent() = runBlocking {
         val store = FakeLegacyOutboxStore(
@@ -23,8 +37,10 @@ class LegacyOutboxMigratorTest {
             ),
         )
 
-        val first = LegacyOutboxMigrator(store).migrate("dev-a")
-        val second = LegacyOutboxMigrator(store).migrate("dev-a")
+        // Exercise the same startup seam used by SyncService, then prove a
+        // restart cannot duplicate or strand the legacy queue.
+        val first = migrateLegacyOutboxBeforeRelay(store, "dev-a")
+        val second = migrateLegacyOutboxBeforeRelay(store, "dev-a")
 
         val expectedEnvelope =
             "{\"v\":1,\"type\":\"enc\",\"msg_id\":\"$MESSAGE_ID\",\"origin_device\":\"dev-a\"," +

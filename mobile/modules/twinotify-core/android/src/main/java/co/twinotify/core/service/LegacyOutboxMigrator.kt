@@ -105,3 +105,7 @@ class LegacyOutboxMigrator(
         const val LEGACY_RETENTION_MILLIS = 24L * 60L * 60L * 1_000L
     }
 }
+
+/** Startup seam used by SyncService; migration completes before relay flushing begins. */
+suspend fun migrateLegacyOutboxBeforeRelay(store: LegacyOutboxStore, originDevice: String): LegacyMigrationSummary =
+    LegacyOutboxMigrator(store).migrate(originDevice)

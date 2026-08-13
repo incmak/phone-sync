@@ -19,6 +19,7 @@ import org.json.JSONObject
 
 class InboundDispatcher(private val ctx: Context) {
     private val reliableDao by lazy { NotificationDb.get(ctx.applicationContext).reliableDeliveryDao() }
+    private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao)) }
     private val stateMutex = Mutex()
 
     suspend fun dispatch(raw: String) {
@@ -90,6 +91,18 @@ class InboundDispatcher(private val ctx: Context) {
             return
         }
         val inner = opened.inner
+        if (inner.type == "peer.receipt") {
+            val payload = inner.payloadObject()
+            val status = payload.getString("status")
+            val reason = payload.optString("reason").takeIf { it.isNotEmpty() }
+            outbox.onPeerReceipt(
+                ackedMsgId = payload.getString("acked_msg_id"),
+                envelopeSha256 = payload.getString("envelope_sha256"),
+                status = status,
+                reason = reason,
+            )
+            return
+        }
         if (inner.type !in setOf("notif.post", "notif.update", "notif.cancel")) {
             // Receipt/control processing belongs to the transport task. Preserve the authenticated
             // event in the journal only when it has a canonical desired state.

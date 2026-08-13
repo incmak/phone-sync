@@ -73,6 +73,26 @@ sealed interface LegacyConversionResult {
     data class Conflict(val existingSha256: String) : LegacyConversionResult
 }
 
+sealed interface RelayAcceptanceResult {
+    data object Missing : RelayAcceptanceResult
+    data object DeletedReceipt : RelayAcceptanceResult
+    data object Accepted : RelayAcceptanceResult
+    data object AlreadyAccepted : RelayAcceptanceResult
+}
+
+sealed interface RelayReceiptResult {
+    data object Missing : RelayReceiptResult
+    data object Deleted : RelayReceiptResult
+    data object AlreadyTerminal : RelayReceiptResult
+    data class Conflict(val existingDigest: String) : RelayReceiptResult
+}
+
+sealed interface LegacyForwardResult {
+    data object Missing : LegacyForwardResult
+    data object Deleted : LegacyForwardResult
+    data object AlreadyTerminal : LegacyForwardResult
+}
+
 interface LegacyOutboxStore {
     suspend fun legacyBatch(limit: Int): List<LegacyOutboundEvent>
     suspend fun convertLegacy(legacyId: Long, row: OutboundMessage): LegacyConversionResult
@@ -103,6 +123,48 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Query("DELETE FROM outbound_message WHERE msgId=:msgId")
     abstract suspend fun deleteOutbound(msgId: String): Int
+
+    @Query("SELECT * FROM outbound_message WHERE msgId=:msgId")
+    abstract suspend fun outboundMessage(msgId: String): OutboundMessage?
+
+    @Query(
+        "UPDATE outbound_message SET state='ACCEPTED', relayAcceptedAt=:acceptedAt, " +
+            "nextAttemptAt=:retryAt WHERE msgId=:msgId AND state='NEW'",
+    )
+    protected abstract suspend fun acceptNewRelay(msgId: String, acceptedAt: Long, retryAt: Long): Int
+
+    @Query("SELECT msgId, envelopeSha256 FROM inbound_message WHERE relayAckState='READY' ORDER BY committedAt LIMIT :limit")
+    abstract suspend fun readyRelayAcks(limit: Int): List<co.twinotify.core.service.RelayAckRecord>
+
+    @Query("UPDATE inbound_message SET relayAckState='SENT' WHERE msgId=:msgId AND envelopeSha256=:envelopeSha256 AND relayAckState='READY'")
+    abstract suspend fun markRelayAckSent(msgId: String, envelopeSha256: String): Int
+
+    @Transaction
+    open suspend fun markLegacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult {
+        val row = outboundMessage(msgId) ?: return if (activityForMessage(msgId) != null) {
+            LegacyForwardResult.AlreadyTerminal
+        } else {
+            LegacyForwardResult.Missing
+        }
+        if (row.protocolVersion != 1) return LegacyForwardResult.Missing
+        return when (moveToTerminalActivity(
+            msgId,
+            ActivityEvent(
+                eventId = java.util.UUID.randomUUID().toString(),
+                msgId = msgId,
+                packageName = null,
+                eventType = "relay.legacy_forwarded",
+                status = "forwarded",
+                byteSize = row.byteSize,
+                occurredAt = forwardedAt,
+                detailCode = "online_only",
+            ),
+        )) {
+            TerminalMovementResult.Moved -> LegacyForwardResult.Deleted
+            TerminalMovementResult.AlreadyMoved -> LegacyForwardResult.AlreadyTerminal
+            TerminalMovementResult.Missing -> LegacyForwardResult.Missing
+        }
+    }
 
     @Query("SELECT * FROM inbound_message WHERE msgId=:msgId")
     abstract suspend fun inbound(msgId: String): InboundMessage?
@@ -387,6 +449,131 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         markRelayAckReady(receiptMsgId)
         return ReceiptTransitionResult.ReadyForRelayAck
     }
+
+    /** Relay custody transition. Normal rows remain durable until a peer receipt; receipt rows do not. */
+    @Transaction
+    open suspend fun acceptRelay(
+        msgId: String,
+        acceptedAt: Long,
+        retryAt: Long,
+    ): RelayAcceptanceResult {
+        val row = outboundMessage(msgId) ?: return RelayAcceptanceResult.Missing
+        if (!row.requiresPeerReceipt) {
+            return when (acceptReceipt(msgId)) {
+                ReceiptTransitionResult.ReadyForRelayAck,
+                ReceiptTransitionResult.AlreadyTransitioned,
+                -> RelayAcceptanceResult.DeletedReceipt
+                ReceiptTransitionResult.Missing -> RelayAcceptanceResult.Missing
+                ReceiptTransitionResult.NotReceipt -> {
+                    deleteOutbound(msgId)
+                    RelayAcceptanceResult.DeletedReceipt
+                }
+            }
+        }
+        if (row.state == "ACCEPTED") return RelayAcceptanceResult.AlreadyAccepted
+        if (row.state != "NEW") return RelayAcceptanceResult.AlreadyAccepted
+        check(acceptNewRelay(msgId, acceptedAt, retryAt) == 1)
+        return RelayAcceptanceResult.Accepted
+    }
+
+    /** Apply an authenticated peer receipt with digest equality and terminal metadata only. */
+    @Transaction
+    open suspend fun applyPeerReceipt(
+        ackedMsgId: String,
+        envelopeSha256: String,
+        status: String,
+        reason: String?,
+        occurredAt: Long,
+    ): RelayReceiptResult {
+        require(status in setOf("applied", "expired", "rejected", "decrypt_failed"))
+        val row = outboundMessage(ackedMsgId)
+            ?: return if (activityForMessage(ackedMsgId) != null) RelayReceiptResult.AlreadyTerminal
+            else RelayReceiptResult.Missing
+        if (row.envelopeSha256 != envelopeSha256) return RelayReceiptResult.Conflict(row.envelopeSha256)
+        val movement = moveToTerminalActivity(
+            msgId = ackedMsgId,
+            activity = ActivityEvent(
+                eventId = java.util.UUID.randomUUID().toString(),
+                msgId = ackedMsgId,
+                packageName = null,
+                eventType = "peer.receipt",
+                status = status,
+                byteSize = row.byteSize,
+                occurredAt = occurredAt,
+                detailCode = reason?.take(128),
+            ),
+        )
+        return when (movement) {
+            TerminalMovementResult.Moved -> RelayReceiptResult.Deleted
+            TerminalMovementResult.AlreadyMoved -> RelayReceiptResult.AlreadyTerminal
+            TerminalMovementResult.Missing -> RelayReceiptResult.Missing
+        }
+    }
+
+    @Transaction
+    open suspend fun rejectRelay(
+        msgId: String,
+        reason: String,
+        occurredAt: Long,
+        retryAt: Long,
+    ): co.twinotify.core.service.RelayRejectionResult {
+        val row = outboundMessage(msgId) ?: return if (activityForMessage(msgId) != null) {
+            co.twinotify.core.service.RelayRejectionResult.AlreadyTerminal
+        } else {
+            co.twinotify.core.service.RelayRejectionResult.Missing
+        }
+        if (reason == "mailbox_full" || reason == "peer_legacy") {
+            updateRelayRetry(msgId, retryAt, reason)
+            return co.twinotify.core.service.RelayRejectionResult.Retained
+        }
+        return when (
+            moveToTerminalActivity(
+                msgId,
+                ActivityEvent(
+                    eventId = java.util.UUID.randomUUID().toString(),
+                    msgId = msgId,
+                    packageName = null,
+                    eventType = "relay.rejected",
+                    status = reason,
+                    byteSize = row.byteSize,
+                    occurredAt = occurredAt,
+                    detailCode = reason.take(128),
+                ),
+            )
+        ) {
+            TerminalMovementResult.Moved -> co.twinotify.core.service.RelayRejectionResult.Terminal
+            TerminalMovementResult.AlreadyMoved -> co.twinotify.core.service.RelayRejectionResult.AlreadyTerminal
+            TerminalMovementResult.Missing -> co.twinotify.core.service.RelayRejectionResult.Missing
+        }
+    }
+
+    @Transaction
+    open suspend fun expireRelay(msgId: String, expiredAt: Long): RelayReceiptResult {
+        val row = outboundMessage(msgId)
+            ?: return if (activityForMessage(msgId) != null) RelayReceiptResult.AlreadyTerminal else RelayReceiptResult.Missing
+        return when (
+            moveToTerminalActivity(
+                msgId,
+                ActivityEvent(
+                    eventId = java.util.UUID.randomUUID().toString(),
+                    msgId = msgId,
+                    packageName = null,
+                    eventType = "relay.expired",
+                    status = "expired",
+                    byteSize = row.byteSize,
+                    occurredAt = expiredAt,
+                    detailCode = "relay_expired",
+                ),
+            )
+        ) {
+            TerminalMovementResult.Moved -> RelayReceiptResult.Deleted
+            TerminalMovementResult.AlreadyMoved -> RelayReceiptResult.AlreadyTerminal
+            TerminalMovementResult.Missing -> RelayReceiptResult.Missing
+        }
+    }
+
+    @Query("UPDATE outbound_message SET attempts=attempts + 1, nextAttemptAt=:retryAt, lastError=:reason WHERE msgId=:msgId")
+    protected abstract suspend fun updateRelayRetry(msgId: String, retryAt: Long, reason: String): Int
 
     @Transaction
     open suspend fun commitOutboundState(
