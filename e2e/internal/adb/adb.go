@@ -90,16 +90,59 @@ func (c *Client) GrantPackage(ctx context.Context, packageName, permission strin
 
 func (c *Client) Broadcast(ctx context.Context, action string, extras map[string]string) error {
 	args := []string{"shell", "am", "broadcast", "-a", action}
+	return c.broadcastArgs(ctx, args, extras)
+}
+
+// BroadcastReceiver targets a named debug receiver. Android's implicit
+// broadcast resolution is not reliable for this install-scoped control
+// surface, so the host harness must address the receiver explicitly.
+func (c *Client) BroadcastReceiver(ctx context.Context, packageName, receiver, action string, extras map[string]string) error {
+	if !validComponentName(packageName) || !validComponentName(receiver) {
+		return errors.New("package and receiver must be valid Android component names")
+	}
+	// Keep the complete component one remote-shell word as defense in depth;
+	// validation above also prevents malformed CLI input from reaching adb.
+	args := []string{"shell", "am", "broadcast", "-n", shellQuote(packageName + "/" + receiver), "-a", action}
+	return c.broadcastArgs(ctx, args, extras)
+}
+
+func validComponentName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		if part == "" {
+			return false
+		}
+		for i, r := range part {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || (i > 0 && r >= '0' && r <= '9') {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) broadcastArgs(ctx context.Context, args []string, extras map[string]string) error {
 	keys := make([]string, 0, len(extras))
 	for key := range extras {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		args = append(args, "--es", key, extras[key])
+		args = append(args, "--es", key, shellQuote(extras[key]))
 	}
 	_, err := c.run(ctx, args...)
 	return err
+}
+
+// adb shell reparses the command after the host process has assembled argv.
+// Quote every extra as one POSIX shell word so JSON pair payloads and tokens
+// containing quotes, spaces, or shell metacharacters reach am unchanged.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func (c *Client) ReadRunAs(ctx context.Context, packageName, path string) ([]byte, error) {

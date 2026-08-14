@@ -10,6 +10,7 @@ import co.twinotify.core.pairing.PairProtocol
 import co.twinotify.core.service.ServiceConfigStore
 import co.twinotify.core.service.SyncService
 import co.twinotify.core.storage.DeviceIdentity
+import co.twinotify.core.storage.PeerRecord
 import co.twinotify.core.storage.PeerStore
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -139,6 +140,14 @@ class E2eControlReceiver : BroadcastReceiver() {
                 sign.publicKey,
                 command.param("display_name").orEmpty(),
             )
+            PeerStore.save(
+                context,
+                PeerRecord(
+                    deviceId = payload.deviceId,
+                    encPubkey = payload.encPubkey,
+                    signPubkey = payload.signPubkey,
+                ),
+            )
             E2eCommandResult(requestId, "ok")
         }
         "AWAIT_PEER_HELLO" -> {
@@ -150,6 +159,16 @@ class E2eControlReceiver : BroadcastReceiver() {
                 relayUrl, pairToken, role = "A", expectedType = "peer.hello",
                 deviceId = deviceId, signSecretKey = signSecret,
                 timeoutMs = command.timeoutMs(),
+            )
+            val hello = JSONObject(frame)
+            PeerStore.save(
+                context,
+                PeerRecord(
+                    deviceId = hello.getString("device_id"),
+                    encPubkey = java.util.Base64.getDecoder().decode(hello.getString("enc_pubkey")),
+                    signPubkey = java.util.Base64.getDecoder().decode(hello.getString("sign_pubkey")),
+                    displayName = hello.optString("display_name").takeIf { it.isNotBlank() },
+                ),
             )
             E2eCommandResult(requestId, "ok", payload = JSONObject(frame))
         }

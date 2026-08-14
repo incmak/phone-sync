@@ -100,4 +100,14 @@ class ServiceLifecycleTest {
         assertEquals("socket_closed", health.lastErrorCode)
         assertEquals("OFFLINE_QUEUED", health.toEventMap()["state"])
     }
+
+    @Test
+    fun authenticatedRecovery_clearsStaleTransportError() {
+        SyncServiceStatus.setLastError("invalid_relay_url")
+        SyncServiceStatus.setState(SyncState.CONNECTED)
+
+        assertEquals("connected", SyncServiceStatus.health.value.service)
+        assertEquals("online", SyncServiceStatus.health.value.transport)
+        assertEquals(null, SyncServiceStatus.health.value.lastErrorCode)
+    }
 }

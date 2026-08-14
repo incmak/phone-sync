@@ -124,7 +124,7 @@ func (d adbDevice) Broadcast(ctx context.Context, command control.Command) error
 	for key, value := range command.Params {
 		extras[key] = value
 	}
-	if err := d.client.Broadcast(ctx, "co.twinotify.e2e.CONTROL", extras); err != nil {
+	if err := d.client.BroadcastReceiver(ctx, d.packageName, "co.twinotify.core.e2e.E2eControlReceiver", "co.twinotify.e2e.CONTROL", extras); err != nil {
 		if errors.Is(err, adb.ErrDeviceOffline) {
 			return fmt.Errorf("%w: %v", control.ErrDeviceOffline, err)
 		}

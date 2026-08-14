@@ -85,6 +85,9 @@ object SyncServiceStatus {
                 SyncState.CONNECTING -> "connecting"
                 SyncState.DISCONNECTED, SyncState.OFFLINE_QUEUED -> "offline"
             },
+            // A successful authenticated connection supersedes transient startup/transport
+            // failures; retaining them would report a stale error alongside healthy state.
+            lastErrorCode = if (s == SyncState.CONNECTED) null else _health.value.lastErrorCode,
         )
     }
 
