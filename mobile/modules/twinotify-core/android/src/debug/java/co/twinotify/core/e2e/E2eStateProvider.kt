@@ -25,6 +25,8 @@ class E2eStateProvider : ContentProvider() {
         const val AUTHORITY = "co.twinotify.app.e2e"
         val STATE_URI: Uri = "content://$AUTHORITY/state".toUri()
 
+        fun stateUri(context: Context): Uri = "content://${context.packageName}.e2e/state".toUri()
+
         fun snapshotJson(context: Context): String = runBlocking(Dispatchers.IO) {
             E2eSessionToken.ensure(context)
             val db = NotificationDb.get(context)
@@ -96,7 +98,9 @@ class E2eStateProvider : ContentProvider() {
         selectionArgs: Array<out String>?,
         sortOrder: String?,
     ): Cursor {
-        require(uri.authority == AUTHORITY && uri.path == "/state") { "unsupported E2E state URI" }
+        require(uri.authority == "${requireNotNull(context).packageName}.e2e" && uri.path == "/state") {
+            "unsupported E2E state URI"
+        }
         val token = uri.getQueryParameter("token")
         if (!E2eSessionToken.matches(requireNotNull(context), token)) {
             throw SecurityException("unauthorized E2E state query")

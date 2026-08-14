@@ -2,8 +2,8 @@ package co.twinotify.core.e2e
 
 import android.content.Context
 import android.content.Intent
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -14,7 +14,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class E2eControlSecurityTest {
-    private val context: Context = ApplicationProvider.getApplicationContext()
+    private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test
     fun wrongSessionTokenCannotExecuteCommand() {
@@ -80,7 +80,7 @@ class E2eControlSecurityTest {
     @Test
     fun stateQueryContainsNoNotificationContent() {
         val token = E2eSessionToken.forTest(context, "state-query")
-        val uri = E2eStateProvider.STATE_URI.buildUpon().appendQueryParameter("token", token).build()
+        val uri = E2eStateProvider.stateUri(context).buildUpon().appendQueryParameter("token", token).build()
         val cursor = context.contentResolver.query(uri, null, null, null, null)
         assertNotNull(cursor)
         cursor.use {
@@ -97,13 +97,13 @@ class E2eControlSecurityTest {
     @Test
     fun missingStateTokenCannotReadProvider() {
         assertFailsWith<SecurityException> {
-            context.contentResolver.query(E2eStateProvider.STATE_URI, null, null, null, null)
+            context.contentResolver.query(E2eStateProvider.stateUri(context), null, null, null, null)
         }
     }
 
     @Test
     fun wrongStateTokenCannotReadProvider() {
-        val uri = E2eStateProvider.STATE_URI.buildUpon().appendQueryParameter("token", "wrong").build()
+        val uri = E2eStateProvider.stateUri(context).buildUpon().appendQueryParameter("token", "wrong").build()
         assertFailsWith<SecurityException> {
             context.contentResolver.query(uri, null, null, null, null)
         }
