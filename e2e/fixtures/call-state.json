@@ -1,0 +1,7 @@
+{
+  "scenario": "call-state",
+  "mode": "synthetic-debug-only",
+  "states": ["ringing", "active", "idle"],
+  "forbidden_fields": ["phone_number", "contact", "caller", "audio"],
+  "physical_evidence": false
+}

@@ -1,6 +1,7 @@
 package co.twinotify.core.protocol
 
 import java.util.Base64
+import java.util.Locale
 import java.util.UUID
 import org.json.JSONException
 import org.json.JSONObject
@@ -22,6 +23,7 @@ object ProtocolJson {
         "notif.post",
         "notif.update",
         "notif.cancel",
+        "call.state",
         "peer.receipt",
         "state.digest",
         "state.snapshot.begin",
@@ -33,6 +35,7 @@ object ProtocolJson {
         "notif.post",
         "notif.update",
         "notif.cancel",
+        "call.state",
         "state.snapshot.item",
     )
 
@@ -157,6 +160,7 @@ object ProtocolJson {
             throw ProtocolException("inner event payload must be a JSON object", error)
         }
         if (event.type == "peer.receipt") validateReceiptPayload(payload)
+        if (event.type == "call.state") validateCallStatePayload(payload, event.canonId, event.sequence)
     }
 
     private fun validateEnvelope(envelope: EncryptedEnvelope) {
@@ -191,6 +195,30 @@ object ProtocolJson {
             require(value.codePointCount(0, value.length) <= MAX_RECEIPT_REASON_LENGTH) {
                 "peer.receipt payload reason must be at most $MAX_RECEIPT_REASON_LENGTH characters"
             }
+        }
+    }
+
+    private fun validateCallStatePayload(payload: JSONObject, canonId: String?, sequence: Long?) {
+        requireOnlyKeys(
+            payload,
+            setOf("call_session_id", "state", "direction"),
+            "call.state payload",
+        )
+        val sessionId = requiredUuid(payload, "call_session_id", "call.state payload")
+        require(sessionId == UUID.fromString(sessionId).toString()) {
+            "call.state payload call_session_id must be a lower-case canonical UUID"
+        }
+        require(canonId == "call:${sessionId.lowercase(Locale.ROOT)}") {
+            "call.state canon_id must equal call:<call_session_id>"
+        }
+        require(sequence != null && sequence >= 1) { "call.state requires a positive sequence" }
+        val state = requiredString(payload, "state", "call.state payload")
+        require(state in setOf("ringing", "active", "idle")) {
+            "unsupported call.state state $state"
+        }
+        val direction = requiredString(payload, "direction", "call.state payload")
+        require(direction in setOf("incoming", "outgoing", "unknown")) {
+            "unsupported call.state direction $direction"
         }
     }
 

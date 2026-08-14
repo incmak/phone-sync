@@ -7,6 +7,7 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.CancellationSignal
+import androidx.core.net.toUri
 import co.twinotify.core.service.SyncServiceStatus
 import co.twinotify.core.service.toEventMap
 import co.twinotify.core.storage.DeviceIdentity
@@ -22,7 +23,7 @@ import org.json.JSONObject
 class E2eStateProvider : ContentProvider() {
     companion object {
         const val AUTHORITY = "co.twinotify.app.e2e"
-        val STATE_URI: Uri = Uri.parse("content://$AUTHORITY/state")
+        val STATE_URI: Uri = "content://$AUTHORITY/state".toUri()
 
         fun snapshotJson(context: Context): String = runBlocking(Dispatchers.IO) {
             E2eSessionToken.ensure(context)

@@ -957,7 +957,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     private companion object {
         val POST_OR_UPDATE_EVENT_TYPES = setOf("notif.post", "notif.update")
-        val STATE_EVENT_TYPES = POST_OR_UPDATE_EVENT_TYPES + "notif.cancel"
+        val STATE_EVENT_TYPES = POST_OR_UPDATE_EVENT_TYPES + setOf("notif.cancel", "call.state")
         const val SNAPSHOT_RESERVED_CANON_PREFIX = "\u0000"
         const val SNAPSHOT_BEGIN_MARKER_CANON_ID = "${SNAPSHOT_RESERVED_CANON_PREFIX}begin"
         const val SNAPSHOT_BASELINE_MARKER_PREFIX = "${SNAPSHOT_RESERVED_CANON_PREFIX}baseline:"

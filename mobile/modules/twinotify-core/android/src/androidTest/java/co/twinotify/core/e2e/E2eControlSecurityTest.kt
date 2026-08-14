@@ -58,6 +58,26 @@ class E2eControlSecurityTest {
     }
 
     @Test
+    fun syntheticCallStateIsAllowlistedButRejectsMissingAndPhoneFields() {
+        val token = E2eSessionToken.forTest(context, "call-state-allowlist")
+        val missing = E2eControlReceiver().executeForTest(
+            context,
+            E2eCommand(requestId = "call-state-missing", name = "CALL_STATE", token = token),
+        )
+        assertEquals("invalid", missing.code)
+        val forbidden = E2eControlReceiver().executeForTest(
+            context,
+            E2eCommand(
+                requestId = "call-state-phone",
+                name = "CALL_STATE",
+                token = token,
+                params = mapOf("state" to "ringing", "phone_number" to "+15551234567"),
+            ),
+        )
+        assertEquals("invalid", forbidden.code)
+    }
+
+    @Test
     fun stateQueryContainsNoNotificationContent() {
         val token = E2eSessionToken.forTest(context, "state-query")
         val uri = E2eStateProvider.STATE_URI.buildUpon().appendQueryParameter("token", token).build()

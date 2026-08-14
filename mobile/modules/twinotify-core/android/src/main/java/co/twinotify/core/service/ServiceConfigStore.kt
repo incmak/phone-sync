@@ -15,6 +15,7 @@ data class ServiceConfig(
     val enabled: Boolean = false,
     val relayUrl: String? = null,
     val alwaysConnected: Boolean = true,
+    val callCaptureEnabled: Boolean = false,
     val lastUserChangeAt: Long? = null,
     val revocationRequestedAt: Long? = null,
 )
@@ -24,6 +25,7 @@ object ServiceConfigStore {
     private val ENABLED = booleanPreferencesKey("enabled")
     private val RELAY_URL = stringPreferencesKey("relay_url")
     private val ALWAYS_CONNECTED = booleanPreferencesKey("always_connected")
+    private val CALL_CAPTURE_ENABLED = booleanPreferencesKey("call_capture_enabled")
     private val LAST_USER_CHANGE_AT = longPreferencesKey("last_user_change_at")
     private val REVOCATION_REQUESTED_AT = longPreferencesKey("revocation_requested_at")
 
@@ -33,6 +35,7 @@ object ServiceConfigStore {
             enabled = prefs[ENABLED] ?: false,
             relayUrl = prefs[RELAY_URL],
             alwaysConnected = prefs[ALWAYS_CONNECTED] ?: true,
+            callCaptureEnabled = prefs[CALL_CAPTURE_ENABLED] ?: false,
             lastUserChangeAt = prefs[LAST_USER_CHANGE_AT],
             revocationRequestedAt = prefs[REVOCATION_REQUESTED_AT],
         )
@@ -59,6 +62,13 @@ object ServiceConfigStore {
     suspend fun setAlwaysConnected(ctx: Context, alwaysConnected: Boolean): ServiceConfig {
         ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
             prefs[ALWAYS_CONNECTED] = alwaysConnected
+        }
+        return read(ctx)
+    }
+
+    suspend fun setCallCaptureEnabled(ctx: Context, enabled: Boolean): ServiceConfig {
+        ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
+            prefs[CALL_CAPTURE_ENABLED] = enabled
         }
         return read(ctx)
     }

@@ -45,6 +45,11 @@ class ProtocolFixtureTest {
                     val event = ProtocolJson.decodeInner(raw)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
                 }
+                "call_state" -> {
+                    val event = ProtocolJson.decodeInner(raw)
+                    assertEquals("call.state", event.type)
+                    assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
+                }
                 else -> error("unsupported valid fixture type ${entry.getString("type")}")
             }
         }
@@ -79,6 +84,10 @@ class ProtocolFixtureTest {
                     assertEquals("outer and inner msg_id differ", error.message)
                     assertEquals(expectedCode, observedFixtureCode(error))
                 }
+                "call_state" -> {
+                    val error = assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
+                    assertEquals(expectedCode, observedFixtureCode(error))
+                }
                 else -> error("unsupported invalid fixture type $type")
             }
         }
@@ -90,6 +99,10 @@ class ProtocolFixtureTest {
         error is EnvelopeMismatchException && error.message == "outer and inner msg_id differ" ->
             "outer_inner_id_mismatch"
         error is IllegalArgumentException && error.message == "invalid SHA-256 digest" -> "invalid_frame"
+        error is IllegalArgumentException && error.message?.contains("call.state") == true ->
+            "invalid_frame"
+        error is IllegalArgumentException && error.message == "inner event sequence must be positive" ->
+            "invalid_frame"
         else -> error("unclassified protocol rejection: ${error::class.simpleName}: ${error.message}")
     }
 

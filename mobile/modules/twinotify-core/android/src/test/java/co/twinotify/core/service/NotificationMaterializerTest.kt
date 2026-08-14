@@ -127,6 +127,44 @@ class NotificationMaterializerTest {
     }
 
     @Test
+    fun remoteCallUsesDedicatedActionFreeMirrorPort() = runBlocking {
+        val store = FakeStore(
+            canonical(
+                sequence = 1,
+                materialized = 0,
+                origin = "dev-peer",
+                mirrorId = 73,
+                mirrorTag = "call-mirror",
+            ).copy(
+                canonId = "call:11111111-1111-4111-8111-111111111111",
+                desiredPayloadJson = "{\"call_session_id\":\"11111111-1111-4111-8111-111111111111\",\"state\":\"ringing\",\"direction\":\"incoming\"}",
+            ),
+        )
+        var callPosts = 0
+        var genericPosts = 0
+        val result = NotificationMaterializer(
+            store,
+            object : AndroidNotificationPort {
+                override fun postMirror(state: CanonicalNotificationState): Boolean {
+                    genericPosts += 1
+                    return true
+                }
+                override fun postCallMirror(state: CanonicalNotificationState): Boolean {
+                    callPosts += 1
+                    return true
+                }
+                override fun cancelMirror(localTag: String, localId: Int): Boolean = true
+                override fun cancelSource(notificationKey: String): Boolean = true
+            },
+            localDeviceId = "dev-local",
+        ).materializePending()
+
+        assertEquals(1, result.applied)
+        assertEquals(1, callPosts)
+        assertEquals(0, genericPosts)
+    }
+
+    @Test
     fun pairedPeerMirrorSwipeCancelsSourceOnOwnerDevice() = runBlocking {
         val active = canonical(
             sequence = 4,

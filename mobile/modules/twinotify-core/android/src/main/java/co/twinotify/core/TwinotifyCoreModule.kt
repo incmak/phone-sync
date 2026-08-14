@@ -103,6 +103,27 @@ class TwinotifyCoreModule : Module() {
             }
         }
 
+        AsyncFunction("setCallCaptureEnabled") { enabled: Boolean, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    val config = co.twinotify.core.service.ServiceConfigStore.setCallCaptureEnabled(ctx, enabled)
+                    if (!enabled) {
+                        // DataStore persistence alone would leave an already-running callback
+                        // registered until the next service restart. Tear down the live source now.
+                        co.twinotify.core.service.SyncService.stopActiveCallCapture()
+                    } else if (config.enabled) {
+                        val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java).apply {
+                            action = co.twinotify.core.service.SyncService.ACTION_START
+                            config.relayUrl?.let { putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, it) }
+                        }
+                        ctx.startForegroundService(intent)
+                    }
+                    promise.resolve(config.callCaptureEnabled)
+                } catch (e: Throwable) { promise.reject("CALL_CAPTURE", e.message ?: "err", e) }
+            }
+        }
+
         AsyncFunction("isNotificationListenerGranted") { promise: Promise ->
             try {
                 val ctx = requireContext()

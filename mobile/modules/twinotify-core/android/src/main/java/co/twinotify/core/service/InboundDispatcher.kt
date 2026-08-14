@@ -4,6 +4,9 @@ import android.content.Context
 import android.util.Base64
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.Encrypter
+import co.twinotify.core.call.CallDirection
+import co.twinotify.core.call.CallStateEvent
+import co.twinotify.core.call.CallStateReducer
 import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.protocol.EnvelopeAuthenticator
 import co.twinotify.core.protocol.PayloadDecryptor
@@ -142,6 +145,10 @@ class InboundDispatcher(
             }
             return
         }
+        if (inner.type == "call.state") {
+            dispatchCallState(inner, opened.envelopeSha256, peer.deviceId)
+            return
+        }
         if (inner.type !in setOf("notif.post", "notif.update", "notif.cancel")) {
             // Receipt/control processing belongs to the transport task. Preserve the authenticated
             // event in the journal only when it has a canonical desired state.
@@ -211,6 +218,74 @@ class InboundDispatcher(
                     retryScheduler = materializationStartupScheduler(ctx),
                 ).materializePending()
                 else -> Unit
+            }
+        }
+    }
+
+    private suspend fun dispatchCallState(
+        inner: co.twinotify.core.protocol.InnerEventV2,
+        envelopeSha256: String,
+        authenticatedPeerId: String,
+    ) {
+        stateMutex.withLock {
+            if (inner.originDevice != authenticatedPeerId) {
+                android.util.Log.w("Twinotify", "call state origin is not the paired peer")
+                return@withLock
+            }
+            val payload = inner.payloadObject()
+            val event = CallStateEvent(
+                callSessionId = payload.getString("call_session_id"),
+                state = payload.getString("state"),
+                direction = when (payload.getString("direction")) {
+                    "incoming" -> CallDirection.INCOMING
+                    "outgoing" -> CallDirection.OUTGOING
+                    else -> CallDirection.UNKNOWN
+                },
+                sequence = requireNotNull(inner.sequence),
+            )
+            val localDeviceId = DeviceIdentity.getOrCreate(ctx)
+            val current = reliableDao.canonical(requireNotNull(inner.canonId))
+            val nextMirrorId = reliableDao.nextMirrorLocalId()
+            val reduction = runCatching {
+                CallStateReducer.reduceInbound(
+                    current = current,
+                    originDevice = inner.originDevice,
+                    event = event,
+                    localDeviceId = localDeviceId,
+                    allocator = LocalIdAllocator { nextMirrorId },
+                    updatedAt = inner.createdAt,
+                )
+            }.getOrElse {
+                android.util.Log.w("Twinotify", "call state rejected", it)
+                return@withLock
+            }
+            val inbound = InboundMessage(
+                msgId = inner.msgId,
+                originDevice = inner.originDevice,
+                envelopeSha256 = envelopeSha256,
+                eventType = inner.type,
+                canonId = inner.canonId,
+                sequence = inner.sequence,
+                outcome = if (reduction is co.twinotify.core.call.CallReduction.Stale) "STALE" else "PENDING_PLATFORM",
+                committedAt = System.currentTimeMillis(),
+                appliedAt = null,
+                receiptMsgId = null,
+                relayAckState = "NONE",
+            )
+            val commit = reliableDao.commitInboundDesired(
+                inbound,
+                (reduction as? co.twinotify.core.call.CallReduction.Apply)?.state,
+            )
+            if (commit is co.twinotify.core.storage.InboundDesiredCommitResult.Committed ||
+                commit is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate
+            ) {
+                NotificationMaterializer(
+                    dao = reliableDao,
+                    port = DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao),
+                    receiptFactory = DurableReceiptFactory(ctx),
+                    localDeviceId = localDeviceId,
+                    retryScheduler = materializationStartupScheduler(ctx),
+                ).materializePending()
             }
         }
     }

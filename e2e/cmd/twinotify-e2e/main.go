@@ -94,6 +94,10 @@ func runWithOptions(ctx context.Context, cfg options) error {
 	}
 	if cfg.scenario != "status" {
 		bridge := scenario.ADBBridge{A: a, B: b, ADBA: adbA, ADBB: adbB, Package: cfg.packageName}
+		if cfg.scenario == "call-state" {
+			_, err := scenario.RunSyntheticCallState(ctx, bridge, cfg.timeout)
+			return err
+		}
 		return scenario.NewExecutor(bridge, cfg.timeout).Run(ctx, cfg.scenario)
 	}
 	for _, device := range []struct {

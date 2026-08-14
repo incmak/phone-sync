@@ -5,6 +5,8 @@ import android.util.Base64
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.Encrypter
 import co.twinotify.core.crypto.NonceSource
+import co.twinotify.core.call.CallStateEvent
+import co.twinotify.core.call.CallStatePersistResult
 import co.twinotify.core.protocol.EncryptedEnvelope
 import co.twinotify.core.protocol.InnerEventV2
 import co.twinotify.core.protocol.ProtocolJson
@@ -121,6 +123,93 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             is OutboundStateCommitResult.Committed -> return CapturePersistResult(sequence, msgId)
             is OutboundStateCommitResult.Stale -> return persist(command)
             OutboundStateCommitResult.NotStateEvent -> error("capture produced unsupported event type")
+        }
+    }
+
+    /** Authenticated v2 durable boundary for privacy-bounded cellular call state. */
+    suspend fun persistCallState(event: CallStateEvent): CallStatePersistResult {
+        val peer = PeerStore.load(appContext)
+            ?: throw CaptureNotPairedException("call capture deferred until a peer is paired")
+        val originDevice = DeviceIdentity.getOrCreate(appContext)
+        val canonId = "call:${event.callSessionId}"
+        val current = dao.canonical(canonId)
+        val now = System.currentTimeMillis().coerceAtLeast(0L)
+        val payloadJson = JSONObject()
+            .put("call_session_id", event.callSessionId)
+            .put("state", event.state)
+            .put(
+                "direction",
+                when (event.direction) {
+                    co.twinotify.core.call.CallDirection.INCOMING -> "incoming"
+                    co.twinotify.core.call.CallDirection.OUTGOING -> "outgoing"
+                    co.twinotify.core.call.CallDirection.UNKNOWN -> "unknown"
+                },
+            )
+            .toString()
+        val msgId = UUID.randomUUID().toString()
+        val inner = InnerEventV2(
+            msgId = msgId,
+            originDevice = originDevice,
+            type = "call.state",
+            canonId = canonId,
+            sequence = event.sequence,
+            createdAt = now,
+            expiresAt = now + RETENTION_MS,
+            payloadJson = payloadJson,
+        )
+        val (box, _) = CryptoStore.loadOrGenerate(appContext)
+        val nonce = NonceSource.next(appContext)
+        val ciphertext = Encrypter.encrypt(
+            plain = ProtocolJson.encodeInner(inner).toByteArray(Charsets.UTF_8),
+            nonce = nonce,
+            peerPubkey = peer.encPubkey,
+            ownSecret = box.secretKey,
+        )
+        val envelopeJson = ProtocolJson.encodeEnvelope(
+            EncryptedEnvelope(
+                version = ProtocolJson.VERSION,
+                msgId = msgId,
+                originDevice = originDevice,
+                createdAt = now,
+                nonceB64 = Base64.encodeToString(nonce, Base64.NO_WRAP),
+                ciphertextB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP),
+            ),
+        )
+        val row = OutboundMessage(
+            msgId = msgId,
+            canonId = canonId,
+            sequence = event.sequence,
+            eventType = "call.state",
+            protocolVersion = ProtocolJson.VERSION,
+            envelopeJson = envelopeJson,
+            envelopeSha256 = sha256(envelopeJson),
+            byteSize = envelopeJson.toByteArray(Charsets.UTF_8).size.toLong(),
+            createdAt = now,
+            expiresAt = now + RETENTION_MS,
+            relayAcceptedAt = null,
+            attempts = 0,
+            nextAttemptAt = now,
+            state = "NEW",
+            lastError = null,
+            requiresPeerReceipt = true,
+        )
+        val desired = CanonicalNotificationState(
+            canonId = canonId,
+            originDevice = current?.originDevice ?: originDevice,
+            latestSequence = event.sequence,
+            state = if (event.state == "idle") "CANCELLED" else "ACTIVE",
+            desiredPayloadJson = if (event.state == "idle") null else payloadJson,
+            materializedSequence = current?.materializedSequence ?: 0L,
+            sourceNotificationKey = null,
+            mirrorLocalId = current?.mirrorLocalId,
+            mirrorLocalTag = current?.mirrorLocalTag,
+            peerCancelPending = current?.peerCancelPending ?: false,
+            updatedAt = now,
+        )
+        return when (val result = dao.commitCapturedState(desired, row)) {
+            is OutboundStateCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, msgId)
+            is OutboundStateCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
+            OutboundStateCommitResult.NotStateEvent -> error("call capture produced unsupported event type")
         }
     }
 

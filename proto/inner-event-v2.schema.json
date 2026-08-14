@@ -7,7 +7,7 @@
     "v": { "const": 2 },
     "msg_id": { "type": "string", "format": "uuid" },
     "origin_device": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "peer.receipt", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
+    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "call.state", "peer.receipt", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
     "canon_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
     "sequence": { "type": "integer", "minimum": 1 },
     "created_at": { "type": "integer", "minimum": 0 },
@@ -18,6 +18,25 @@
     {
       "if": { "properties": { "type": { "enum": ["notif.post", "notif.update", "notif.cancel", "state.snapshot.item"] } } },
       "then": { "required": ["canon_id", "sequence"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "call.state" } } },
+      "then": {
+        "required": ["canon_id", "sequence"],
+        "properties": {
+          "canon_id": { "type": "string", "pattern": "^call:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+          "payload": {
+            "type": "object",
+            "required": ["call_session_id", "state", "direction"],
+            "properties": {
+              "call_session_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+              "state": { "type": "string", "enum": ["ringing", "active", "idle"] },
+              "direction": { "type": "string", "enum": ["incoming", "outgoing", "unknown"] }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
     }
   ],
   "additionalProperties": false

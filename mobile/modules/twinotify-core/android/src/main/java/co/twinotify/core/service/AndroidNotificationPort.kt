@@ -8,6 +8,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import co.twinotify.core.listener.NotificationListenerBridge
 import co.twinotify.core.listener.NotifPostJson
+import co.twinotify.core.call.CallStateMaterializer
 import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.ReliableDeliveryDao
 
@@ -15,6 +16,8 @@ interface AndroidNotificationPort {
     fun postMirror(state: CanonicalNotificationState): Boolean
     fun cancelMirror(localTag: String, localId: Int): Boolean
     fun cancelSource(notificationKey: String): Boolean
+    fun postCallMirror(state: CanonicalNotificationState): Boolean = postMirror(state)
+    fun cancelCallMirror(localTag: String, localId: Int): Boolean = cancelMirror(localTag, localId)
 }
 
 /** Android side effects used by the durable materializer. */
@@ -41,6 +44,19 @@ class DefaultAndroidNotificationPort(
                 id,
                 MirrorPoster.buildNotification(appContext, post, id),
             )
+            true
+        }.getOrDefault(false)
+    }
+
+    @SuppressLint("MissingPermission")
+    override fun postCallMirror(state: CanonicalNotificationState): Boolean {
+        if (state.originDevice == localDeviceId || state.state != "ACTIVE") return false
+        val id = state.mirrorLocalId ?: return false
+        val tag = state.mirrorLocalTag ?: return false
+        if (!notificationsAvailable()) return false
+        return runCatching {
+            NotifChannelSetup.ensureChannels(appContext)
+            NotificationManagerCompat.from(appContext).notify(tag, id, CallStateMaterializer.build(appContext, state, id))
             true
         }.getOrDefault(false)
     }

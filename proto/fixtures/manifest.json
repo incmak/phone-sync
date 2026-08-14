@@ -13,6 +13,12 @@
       "valid": true
     },
     {
+      "file": "v2-valid/call-state-valid.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "valid": true
+    },
+    {
       "file": "v2-invalid/relay-ack-bad-digest.json",
       "scope": "server",
       "type": "relay_control",
@@ -23,6 +29,60 @@
       "scope": "cross_layer",
       "type": "outer_inner_pair",
       "expected_code": "outer_inner_id_mismatch"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-extra-field.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-canon-mismatch.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-uppercase-canon.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-uppercase-session.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-missing-session.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-session-id.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-sequence.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-state.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-invalid-direction.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
     }
   ]
 }

@@ -19,6 +19,9 @@ data class SyncHealth(
     val postPermission: Boolean,
     val lastReceiptAt: Long?,
     val lastErrorCode: String?,
+    val callCaptureEnabled: Boolean = false,
+    val callCaptureHealthCode: String? = null,
+    val lastCallEventAt: Long? = null,
 )
 
 fun SyncHealth.toEventMap(): Map<String, Any?> = mapOf(
@@ -32,6 +35,9 @@ fun SyncHealth.toEventMap(): Map<String, Any?> = mapOf(
     "postPermission" to postPermission,
     "lastReceiptAt" to lastReceiptAt,
     "lastErrorCode" to lastErrorCode,
+    "callCaptureEnabled" to callCaptureEnabled,
+    "callCaptureHealthCode" to callCaptureHealthCode,
+    "lastCallEventAt" to lastCallEventAt,
     // Keep the stable legacy key for existing JS consumers.
     "state" to when (service) {
         "connected" -> "CONNECTED"
@@ -115,6 +121,17 @@ object SyncServiceStatus {
 
     fun setLastError(code: String?) {
         _health.value = _health.value.copy(lastErrorCode = code?.take(128))
+    }
+
+    fun setCallCapture(enabled: Boolean, healthCode: String?) {
+        _health.value = _health.value.copy(
+            callCaptureEnabled = enabled,
+            callCaptureHealthCode = healthCode?.take(64),
+        )
+    }
+
+    fun setLastCallEventAt(at: Long?) {
+        _health.value = _health.value.copy(lastCallEventAt = at)
     }
 
     fun notifyPeerUnpaired() { _peerUnpaired.tryEmit(Unit) }

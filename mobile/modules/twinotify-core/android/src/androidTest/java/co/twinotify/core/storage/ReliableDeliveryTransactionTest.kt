@@ -247,6 +247,35 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun callStateUsesTheSameAtomicSequenceAndReceiptCustodyBoundary() = runBlocking {
+        val callCanon = "call:11111111-1111-4111-8111-111111111111"
+        val first = CanonicalNotificationState(
+            canonId = callCanon,
+            originDevice = ORIGIN,
+            latestSequence = 1,
+            state = "ACTIVE",
+            desiredPayloadJson = "{\"state\":\"ringing\"}",
+            materializedSequence = 0,
+            sourceNotificationKey = null,
+            mirrorLocalId = null,
+            mirrorLocalTag = null,
+            peerCancelPending = false,
+            updatedAt = 1_000,
+        )
+        val firstRow = outbound("call-1", sequence = 1, eventType = "call.state").copy(
+            canonId = callCanon,
+            requiresPeerReceipt = true,
+        )
+        assertEquals(OutboundStateCommitResult.Committed(compacted = 0), dao.commitCapturedState(first, firstRow))
+        assertEquals(2, dao.nextCaptureSequence(callCanon))
+
+        val stale = first.copy(latestSequence = 1, state = "CANCELLED", desiredPayloadJson = null)
+        val staleRow = firstRow.copy(msgId = "call-1-retry")
+        assertIs<OutboundStateCommitResult.Stale>(dao.commitCapturedState(stale, staleRow))
+        assertEquals(1, activeMessageIds().count { it.startsWith("call-") })
+    }
+
+    @Test
     fun inboundJournalAtomicallyDistinguishesSameDigestDuplicateFromIdConflict() = runBlocking {
         val first = inbound(msgId = "inbound-1", digest = "digest-a")
 

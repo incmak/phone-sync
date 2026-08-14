@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import androidx.core.content.edit
 import org.json.JSONObject
 
 private const val MAX_DETAIL_LENGTH = 256
@@ -70,7 +71,7 @@ class E2eControlReceiver : BroadcastReceiver() {
         private val ALLOWED_COMMANDS = setOf(
             "PAIR_INIT", "PAIR_JOIN", "AWAIT_PEER_HELLO", "SIGN_CONFIRMATION",
             "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
-            "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS",
+            "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
         )
 
         private fun safeRequestId(requestId: String): String = requestId
@@ -234,8 +235,9 @@ class E2eControlReceiver : BroadcastReceiver() {
         "SET_NETWORK_EXPECTED" -> {
             val expected = command.param("expected") ?: return E2eCommandResult(requestId, "invalid", "expected required")
             require(expected == "online" || expected == "offline") { "expected must be online or offline" }
-            context.getSharedPreferences("e2e-control", Context.MODE_PRIVATE).edit()
-                .putString("network_expected", expected).commit()
+            context.getSharedPreferences("e2e-control", Context.MODE_PRIVATE).edit {
+                putString("network_expected", expected)
+            }
             E2eCommandResult(requestId, "ok")
         }
         "RECONCILE" -> {
@@ -246,6 +248,32 @@ class E2eControlReceiver : BroadcastReceiver() {
                 putExtra(SyncService.EXTRA_RELAY_URL, relayUrl)
             })
             E2eCommandResult(requestId, "ok")
+        }
+        "CALL_CAPTURE_ENABLE" -> {
+            if (!SyncService.startDebugCallCapture()) {
+                return E2eCommandResult(requestId, "unsupported", "debug call capture requires an active sync service")
+            }
+            E2eCommandResult(requestId, "ok", payload = JSONObject().put("enabled", true))
+        }
+        "CALL_STATE" -> {
+            val forbidden = setOf("phone_number", "phone", "contact", "caller", "callee", "audio", "recording", "voicemail")
+            if (command.params.keys.any { it.lowercase() in forbidden }) {
+                return E2eCommandResult(requestId, "invalid", "phone/contact/audio fields are forbidden")
+            }
+            val requested = command.param("state") ?: return E2eCommandResult(requestId, "invalid", "state required")
+            if (requested !in setOf("ringing", "active", "idle")) {
+                return E2eCommandResult(requestId, "invalid", "state must be ringing, active, or idle")
+            }
+            val event = SyncService.injectDebugCallState(requested)
+                ?: return E2eCommandResult(requestId, "unsupported", "debug call capture is not active")
+            E2eCommandResult(
+                requestId,
+                "ok",
+                payload = JSONObject()
+                    .put("call_session_id", event.callSessionId)
+                    .put("state", event.state)
+                    .put("sequence", event.sequence),
+            )
         }
         "CLEAR_ACTIVITY" -> {
             E2eStateProvider.clearActivity(context)
@@ -274,6 +302,7 @@ internal object E2eSessionToken {
     private const val TOKEN_FILE = "e2e-token"
 
     @Synchronized
+    @Suppress("ApplySharedPref", "UseKtx")
     fun ensure(context: Context): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val value = prefs.getString(TOKEN, null) ?: java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(

@@ -95,6 +95,11 @@ var plans = map[string][]Step{
 }
 
 func Plan(name string) (ScenarioPlan, error) {
+	if name == "call-state" {
+		// This scenario uses the typed synthetic control flow in call_state.go rather than
+		// the notification shell plans below.
+		return ScenarioPlan{Name: name}, nil
+	}
 	if name == "all-correctness" {
 		var steps []Step
 		for _, child := range []string{"post", "update", "dismiss-origin", "offline", "ack-loss", "sender-offline-after-acceptance", "relay-restart", "sender-kill", "receiver-kill", "reboot", "expiry-snapshot"} {
@@ -112,6 +117,8 @@ func Plan(name string) (ScenarioPlan, error) {
 
 type Observation struct {
 	Health                 string            `json:"health"`
+	CallCaptureEnabled     bool              `json:"call_capture_enabled"`
+	CallCaptureHealthCode  string            `json:"call_capture_health_code,omitempty"`
 	Outbox                 int               `json:"outbox"`
 	ActiveInbound          int               `json:"active_inbound"`
 	PendingMaterialization int               `json:"pending_materialization"`
@@ -120,12 +127,15 @@ type Observation struct {
 	Terminal               bool              `json:"terminal"`
 	LoopEvents             int               `json:"loop_events"`
 	Canonical              map[string]string `json:"-"`
+	CanonicalSequences     map[string]int    `json:"-"`
 }
 
 func ParseObservation(payload []byte) (Observation, error) {
 	var raw struct {
 		Health struct {
-			Service string `json:"service"`
+			Service               string `json:"service"`
+			CallCaptureEnabled    bool   `json:"callCaptureEnabled"`
+			CallCaptureHealthCode string `json:"callCaptureHealthCode"`
 		} `json:"health"`
 		ActiveOutbox           int `json:"active_outbox"`
 		ActiveInbound          int `json:"active_inbound"`
@@ -145,9 +155,20 @@ func ParseObservation(payload []byte) (Observation, error) {
 	if raw.Health.Service == "" {
 		return Observation{}, errors.New("E2E state missing health.service")
 	}
-	state := Observation{Health: raw.Health.Service, Outbox: raw.ActiveOutbox, ActiveInbound: raw.ActiveInbound, PendingMaterialization: raw.PendingMaterialization, Terminal: raw.Health.Service == "connected" && raw.ActiveOutbox == 0 && raw.ActiveInbound == 0 && raw.PendingMaterialization == 0, Canonical: map[string]string{}}
+	state := Observation{
+		Health:                 raw.Health.Service,
+		CallCaptureEnabled:     raw.Health.CallCaptureEnabled,
+		CallCaptureHealthCode:  raw.Health.CallCaptureHealthCode,
+		Outbox:                 raw.ActiveOutbox,
+		ActiveInbound:          raw.ActiveInbound,
+		PendingMaterialization: raw.PendingMaterialization,
+		Terminal:               raw.Health.Service == "connected" && raw.ActiveOutbox == 0 && raw.ActiveInbound == 0 && raw.PendingMaterialization == 0,
+		Canonical:              map[string]string{},
+		CanonicalSequences:     map[string]int{},
+	}
 	for _, item := range raw.Canonical {
 		state.Canonical[item.CanonIDHash] = item.State
+		state.CanonicalSequences[item.CanonIDHash] = item.Sequence
 		if item.State == "ACTIVE" {
 			state.Mirror = true
 		}

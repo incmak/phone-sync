@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -100,10 +101,13 @@ func validateFixtureDeclaration(fixture protocolFixture) error {
 			return fmt.Errorf("unsupported server fixture code %q", fixture.ExpectedCode)
 		}
 	case "cross_layer":
-		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" {
+		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" {
 			return fmt.Errorf("unknown cross-layer fixture type %q", fixture.Type)
 		}
-		if !fixture.Valid && fixture.ExpectedCode != "outer_inner_id_mismatch" {
+		if !fixture.Valid && fixture.Type == "outer_inner_pair" && fixture.ExpectedCode != "outer_inner_id_mismatch" {
+			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
+		}
+		if !fixture.Valid && fixture.Type == "call_state" && fixture.ExpectedCode != "invalid_frame" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
 	default:
@@ -314,7 +318,27 @@ func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []b
 			return fixtureCodeError("outer_inner_id_mismatch")
 		}
 		return nil
+	case "call_state":
+		if err := validateJSON(validator.innerV2, raw); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		var inner struct {
+			Type    string `json:"type"`
+			CanonID string `json:"canon_id"`
+			Payload struct {
+				SessionID string `json:"call_session_id"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &inner); err != nil || inner.Type != "call.state" {
+			return fixtureCodeError("invalid_frame")
+		}
+		if !callSessionIDPattern.MatchString(inner.Payload.SessionID) || inner.CanonID != "call:"+strings.ToLower(inner.Payload.SessionID) {
+			return fixtureCodeError("invalid_frame")
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown cross-layer fixture type %q", fixtureType)
 	}
 }
+
+var callSessionIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

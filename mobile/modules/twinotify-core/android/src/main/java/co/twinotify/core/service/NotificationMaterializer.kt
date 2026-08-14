@@ -21,6 +21,7 @@ import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.ReliableDeliveryDao
 import co.twinotify.core.storage.PeerStore
+import co.twinotify.core.call.CallStateMaterializer
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.launch
@@ -259,7 +260,11 @@ class NotificationMaterializer(
             }
         } else {
             when (state.state) {
-                "ACTIVE" -> port.postMirror(state)
+                "ACTIVE" -> if (CallStateMaterializer.isCall(state.canonId)) {
+                    port.postCallMirror(state)
+                } else {
+                    port.postMirror(state)
+                }
                 "CANCELLED" -> {
                     val localId = state.mirrorLocalId
                     val localTag = state.mirrorLocalTag
@@ -267,7 +272,11 @@ class NotificationMaterializer(
                         true // Nothing was materialized on this device.
                     } else {
                         store.markPeerCancelPending(state.canonId)
-                        port.cancelMirror(localTag, localId)
+                        if (CallStateMaterializer.isCall(state.canonId)) {
+                            port.cancelCallMirror(localTag, localId)
+                        } else {
+                            port.cancelMirror(localTag, localId)
+                        }
                     }
                 }
                 else -> false
