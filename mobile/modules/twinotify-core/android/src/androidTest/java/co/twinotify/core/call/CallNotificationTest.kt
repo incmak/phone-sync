@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
+import android.os.SystemClock
+import android.service.notification.StatusBarNotification
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -44,17 +46,17 @@ class CallNotificationTest {
             val notification = CallStateMaterializer.build(context, state, state.mirrorLocalId!!)
 
             assertEquals(Notification.CATEGORY_CALL, notification.category)
-            assertTrue(notification.actions.isEmpty(), "call mirror must not expose controls")
+            assertTrue(notification.actions?.isEmpty() != false, "call mirror must not expose controls")
             assertEquals(null, notification.contentIntent)
             assertEquals(null, notification.deleteIntent)
             assertEquals(null, notification.fullScreenIntent)
 
             manager.cancel(state.mirrorLocalTag, state.mirrorLocalId!!)
             manager.notify(state.mirrorLocalTag, state.mirrorLocalId!!, notification)
-            val posted = manager.activeNotifications.firstOrNull {
-                it.tag == state.mirrorLocalTag && it.id == state.mirrorLocalId
-            }
-            assertNotNull(posted, "call mirror should be posted under its stable tag/id")
+            assertNotNull(
+                waitForActive(manager, state.mirrorLocalTag!!, state.mirrorLocalId!!, expected = true),
+                "call mirror should be posted under its stable tag/id",
+            )
 
             val idle = assertIs<CallReduction.Apply>(
                 CallStateReducer.reduceInbound(
@@ -69,9 +71,10 @@ class CallNotificationTest {
             assertEquals(state.mirrorLocalTag, idle.state.mirrorLocalTag)
             assertEquals(state.mirrorLocalId, idle.state.mirrorLocalId)
             manager.cancel(idle.state.mirrorLocalTag, idle.state.mirrorLocalId!!)
-            assertFalse(manager.activeNotifications.any {
-                it.tag == idle.state.mirrorLocalTag && it.id == idle.state.mirrorLocalId
-            }, "idle cancellation must remove the stable call mirror")
+            assertFalse(
+                waitForActive(manager, idle.state.mirrorLocalTag!!, idle.state.mirrorLocalId!!, expected = false) != null,
+                "idle cancellation must remove the stable call mirror",
+            )
         } finally {
             manager.cancel(state.mirrorLocalTag, state.mirrorLocalId!!)
             instrumentation.uiAutomation.dropShellPermissionIdentity()
@@ -84,6 +87,20 @@ class CallNotificationTest {
         direction = CallDirection.INCOMING,
         sequence = sequence,
     )
+
+    private fun waitForActive(
+        manager: NotificationManager,
+        tag: String,
+        id: Int,
+        expected: Boolean,
+    ): StatusBarNotification? {
+        repeat(40) {
+            val active = manager.activeNotifications.firstOrNull { it.tag == tag && it.id == id }
+            if ((active != null) == expected) return active
+            SystemClock.sleep(50)
+        }
+        return manager.activeNotifications.firstOrNull { it.tag == tag && it.id == id }
+    }
 
     private companion object {
         const val SESSION = "11111111-1111-4111-8111-111111111111"
