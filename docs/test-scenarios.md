@@ -1,5 +1,10 @@
 # Test Scenarios
 
+> Release note: the emulator procedures below are development checks. They do
+> not constitute physical-device release evidence. A release candidate must
+> satisfy the `PHY-*` protocol at the end of this document and pass
+> `make release-audit RELEASE_EVIDENCE_DIR=<private-directory>`.
+
 ## Phase 1 — Smoke Test
 
 _(Phase 1 smoke test procedure documented separately.)_
@@ -222,3 +227,88 @@ async function smokePhase2() {
 ---
 
 **Phase 3 Pass:** ☐  Date: __________ Devices: __________
+
+---
+
+## Physical release evidence protocol
+
+These scenarios are run on two real Android 14+ phones: one Pixel and one
+Samsung. Use a fresh install for `PHY-PAIR-01`, record only scenario IDs,
+states, timestamps, measurements, and stable error codes, and keep the
+evidence directory private. Never collect notification titles/text, extras,
+payloads, encryption keys, JWTs, nonces, phone numbers, contacts, or unrelated
+logcat.
+
+For every scenario, capture:
+
+1. a sanitized state snapshot before and after each stimulus;
+2. an event timeline with monotonic timestamps and no notification content;
+3. the expected durable-state assertion and Android-visible assertion;
+4. cleanup confirmation (service stopped, test notifications removed, and
+   temporary pairing state cleared where the scenario requires it).
+
+### PHY-PAIR-01 - pairing and restart recovery
+
+On both fresh phones, grant notification and notification-listener access,
+pair using the real QR/fingerprint flow, and verify reciprocal device IDs and
+protocol floor 2. Post one test notification from a separate source app,
+confirm one mirror, force-stop and relaunch both apps, then verify the pair and
+pending state recover without a duplicate mirror. Save the pairing result,
+restart result, and sanitized timeline.
+
+### PHY-DOZE-01 - locked-screen delivery
+
+With both phones paired, lock the screens and leave each phone idle long enough
+for Doze to engage. Introduce a post and an update on the Pixel, then wake the
+Samsung. Verify durable sequence/order, one final mirror, and no duplicate
+delivery after the wake/reconnect. Record the Doze/awake timestamps and the
+sanitized notification-state assertions only.
+
+### PHY-OEM-01 - Samsung background restrictions
+
+On Samsung, record the selected battery/background policy (without account or
+device identifiers), apply the documented unrestricted/optimized states in
+turn, reboot, and verify the listener rebinds and the relay connection returns
+to protocol floor 2. Post while backgrounded and verify queue convergence after
+resume. Capture the policy result, reboot/rebind state, and timeline.
+
+### PHY-NET-01 - network handoff and relay restart
+
+Move the pair between Wi-Fi and mobile data (or a controlled equivalent), then
+restart the relay using the same durable database. Post during the outage and
+after reconnect. Verify outbox/inbound/materialization counters converge to
+zero, sequence numbers do not regress, and no duplicate mirror remains.
+
+### PHY-BATTERY-01 - 24-hour battery protocol
+
+Reset batterystats, start both services, and run for 24 hours at approximately
+100 notifications per day (including updates and dismissals). Record start/end
+charge and the final `dumpsys batterystats` output for each phone. The release
+target is below 1.5% per 24 hours on both devices under this protocol. Store
+only the two batterystats files and aggregate measurements; redact unrelated
+package and account data.
+
+### PHY-RELIABILITY-01 - recovery matrix
+
+Run permission revoke/restore, app update, explicit user stop, process
+force-stop/restart, and reboot in separate bounded rounds. For each round,
+verify that accepted notifications are delivered exactly once, queued work is
+replayed after reconnect, and dismiss/update state does not resurrect. Record
+the round ID, injected fault, durable state, and cleanup result.
+
+### Release evidence layout and audit
+
+Place the APK, sanitized E2E result, sanitized timeline, operator notes, and
+Pixel/Samsung batterystats under one private directory. Write `manifest.json`
+using the contract in [`docs/release-evidence/README.md`](release-evidence/README.md),
+then run:
+
+```bash
+./scripts/verify-release-evidence.sh --self-test
+make release-audit RELEASE_EVIDENCE_DIR=/private/path/twinotify-release
+```
+
+The self-test is fixture-only. It proves verifier behavior and must never be
+used as physical evidence. The audit fails when either device capture is
+missing, any hash or commit does not match the current release, a required
+scenario is not explicitly `pass`, or a required artifact is absent.

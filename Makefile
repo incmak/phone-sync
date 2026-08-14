@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify verify e2e-emulator clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify verify e2e-emulator release-audit clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -43,6 +43,10 @@ e2e-emulator: relay-build mobile-verify
 
 verify: proto-test relay-verify mobile-verify
 	./scripts/verify-generated-clean.sh
+
+release-audit: verify
+	@test -n "$(RELEASE_EVIDENCE_DIR)" || { echo "RELEASE_EVIDENCE_DIR is required" >&2; exit 2; }
+	./scripts/verify-release-evidence.sh "$(RELEASE_EVIDENCE_DIR)"
 
 clean:
 	rm -rf relay/internal/server/schemas relay/internal/server/fixtures bin
