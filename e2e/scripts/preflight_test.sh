@@ -10,6 +10,12 @@ set -e
 [[ "$status" -eq 10 ]] || { echo "expected missing-tool exit 10, got $status" >&2; cat "$tmp/error" >&2; exit 1; }
 grep -Fq "adb is required" "$tmp/error" || { echo "missing actionable adb diagnostic" >&2; exit 1; }
 
+set +e
+/bin/bash "$SCRIPT_DIR/run-two-emulators.sh" --notification-self-test >/dev/null 2>"$tmp/notification-error"
+status=$?
+set -e
+[[ "$status" -eq 0 ]] || { echo "notification shell capability self-test failed with $status" >&2; cat "$tmp/notification-error" >&2; exit 1; }
+
 fakebin="$tmp/bin"
 mkdir -p "$fakebin"
 for tool in adb emulator sdkmanager avdmanager nc curl; do
