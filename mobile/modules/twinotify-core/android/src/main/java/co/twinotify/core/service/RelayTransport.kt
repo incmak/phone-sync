@@ -11,9 +11,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -99,7 +101,10 @@ class RelayTransport(
         var previousDelay = MIN_BACKOFF_MS
         var attempt = 0
         while (isActive) {
-            val session = runSession(url) { event -> trySend(event).isSuccess }
+            // Use a suspending send at the transport boundary. A Delivery is durable only
+            // after SyncService has accepted it into its bounded ordered worker; dropping a
+            // channelFlow trySend here would strand relay custody with no receipt.
+            val session = runSession(url) { event -> send(event) }
             if (!reconnect) break
             if (session.authenticatedForMs >= AUTH_RESET_MS) attempt = 0 else attempt += 1
             if (!isActive) break
@@ -107,33 +112,33 @@ class RelayTransport(
             previousDelay = delayMs
             kotlinx.coroutines.delay(delayMs)
         }
-    }
+    }.buffer(Channel.RENDEZVOUS)
 
-    private suspend fun runSession(url: RelayWebSocketUrl, emit: (TransportEvent) -> Boolean): SessionResult {
+    private suspend fun runSession(url: RelayWebSocketUrl, emit: suspend (TransportEvent) -> Unit): SessionResult {
         val raw = Channel<String>(RAW_FRAME_CAPACITY)
         val closed = CompletableDeferred<SessionResult>()
         val authenticated = AtomicBoolean(false)
         val negotiatedFloor = java.util.concurrent.atomic.AtomicInteger(0)
-        val overflowed = AtomicBoolean(false)
         var authenticatedAt = 0L
         var socketRef: RelaySocket? = null
         val listener = object : RelaySocketListener {
             override fun onOpen(socket: RelaySocket) {
                 socketRef = socket
-                emit(TransportEvent.Connected)
+                // OkHttp callbacks are not suspendable. Control/error events are rare and
+                // must still be lossless, so bridge them synchronously rather than silently
+                // discarding a full channelFlow buffer.
+                runBlocking { emit(TransportEvent.Connected) }
                 socket.send(RelayFrameCodec.encode(RelayFrame.Hello(listOf(2, 1), appVersion)))
             }
             override fun onText(text: String) {
-                if (!RawFrameIngress(raw).offer(text) && overflowed.compareAndSet(false, true)) {
-                    val error = IllegalStateException("relay control frame buffer saturated")
-                    emit(TransportEvent.Failed(error))
-                    closed.complete(SessionResult(if (authenticated.get()) clock() - authenticatedAt else 0, error.message))
-                    socketRef?.close(1009, "relay control frame buffer full")
-                }
+                // OkHttp delivers messages on a single callback thread. Suspend that callback
+                // at the bounded ingress channel instead of closing a healthy session when the
+                // relay sends a mailbox burst. This is backpressure, not an unbounded queue.
+                runCatching { runBlocking { raw.send(text) } }
             }
             override fun onClosed(reason: String?) { closed.complete(SessionResult(if (authenticated.get()) clock() - authenticatedAt else 0, reason)) }
             override fun onFailure(error: Throwable) {
-                emit(TransportEvent.Failed(error))
+                runBlocking { emit(TransportEvent.Failed(error)) }
                 closed.complete(SessionResult(if (authenticated.get()) clock() - authenticatedAt else 0, error.message))
             }
         }
@@ -168,8 +173,9 @@ class RelayTransport(
                     is RelayFrame.Accepted -> {
                         outbox.onRelayAccepted(frame.msgId, frame.acceptedAt)
                         emit(TransportEvent.RelayAccepted(frame.msgId, frame.acceptedAt))
-                        flushReadyAcks(socketRef)
-                        if (negotiatedFloor.get() == 1) flushLegacy(socketRef, emit) else flushV2(socketRef, emit)
+                        // The periodic flusher owns outbound puts. Re-querying the whole
+                        // sendable/ACK sets for every accepted frame can starve raw-frame
+                        // draining during a reconnect burst and trigger the overflow guard.
                     }
                     is RelayFrame.LegacyForwarded -> {
                         outbox.onLegacyForwarded(frame.msgId, clock())
@@ -209,7 +215,7 @@ class RelayTransport(
         return result
     }
 
-    private suspend fun flushV2(socket: RelaySocket?, emit: (TransportEvent) -> Boolean) {
+    private suspend fun flushV2(socket: RelaySocket?, emit: suspend (TransportEvent) -> Unit) {
         if (socket == null) return
         flushReadyAcks(socket)
         // Floor 2 can durably carry both v2 and migrated v1 envelopes. The codec
@@ -220,7 +226,7 @@ class RelayTransport(
         }
     }
 
-    private suspend fun flushLegacy(socket: RelaySocket?, emit: (TransportEvent) -> Boolean) {
+    private suspend fun flushLegacy(socket: RelaySocket?, emit: suspend (TransportEvent) -> Unit) {
         if (socket == null) return
         for (row in outbox.sendable(limit = 32, now = clock()).filter { it.protocolVersion == 1 }) {
             if (!socket.send(RelayFrameCodec.encode(RelayFrame.Put(row.envelopeJson)))) break
@@ -245,14 +251,15 @@ class RelayTransport(
     private data class SessionResult(val authenticatedForMs: Long, val reason: String?)
 
     private companion object {
-        const val RAW_FRAME_CAPACITY = 128
+        // A mailbox record can fan out into delivery, accepted, receipt, and expiry control
+        // frames during reconnect. Keep ingress bounded, but large enough to absorb one relay
+        // handshake burst without closing a healthy session with 1009.
+        // Each legal relay frame may approach 1 MiB. Keep the ingress budget bounded to
+        // Four frames per ingress lane keeps the aggregate worst-case payload below roughly
+        // 17 MiB of UTF-16 storage (the flow boundary itself is rendezvous-buffered).
+        const val RAW_FRAME_CAPACITY = 4
         const val MIN_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L
         const val AUTH_RESET_MS = 30_000L
     }
-}
-
-/** Non-dropping callback bridge: a full channel is a session failure, never a silent loss. */
-internal class RawFrameIngress(private val channel: Channel<String>) {
-    fun offer(frame: String): Boolean = channel.trySend(frame).isSuccess
 }

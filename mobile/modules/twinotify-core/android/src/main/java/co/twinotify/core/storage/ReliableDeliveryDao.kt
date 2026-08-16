@@ -120,7 +120,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Query(
         "UPDATE outbound_message SET attempts=attempts + 1, nextAttemptAt=:retryAt " +
-            "WHERE msgId=:msgId AND state='NEW'",
+            "WHERE msgId=:msgId AND state IN ('NEW','ACCEPTED')",
     )
     abstract suspend fun markRelaySent(msgId: String, retryAt: Long): Int
 

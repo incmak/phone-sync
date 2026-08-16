@@ -199,6 +199,21 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun acceptedRelayRetryAdvancesAttemptBackoff() = runBlocking {
+        dao.insertOutbound(outbound("accepted-retry", sequence = 1, eventType = "notif.post"))
+        assertEquals(
+            RelayAcceptanceResult.Accepted,
+            dao.acceptRelay("accepted-retry", acceptedAt = 100, retryAt = 200),
+        )
+
+        assertEquals(1, dao.markRelaySent("accepted-retry", retryAt = 400))
+        val retried = dao.sendable(now = 400, limit = 1).single()
+        assertEquals("ACCEPTED", retried.state)
+        assertEquals(1, retried.attempts)
+        assertEquals(400, retried.nextAttemptAt)
+    }
+
+    @Test
     fun olderCancelCannotDeleteNewerQueuedState() = runBlocking {
         dao.putCanonical(canonical(sequence = 8, state = "ACTIVE", payload = "newer"))
         dao.insertOutbound(outbound("newer", sequence = 8, eventType = "notif.update"))

@@ -20,6 +20,7 @@ const (
 	maxMessageSize           = 1 << 20
 	maxRelayControlFrameSize = maxMessageSize + (4 << 10)
 	mailboxBatchSize         = 64
+	outboundQueueSize        = 128
 	pongWait                 = 60 * time.Second
 	pingPeriod               = (pongWait * 9) / 10
 	writeWait                = 10 * time.Second
@@ -74,7 +75,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return writeFrame(RelayRejected{V: 2, Type: "relay.rejected", MsgID: normalizedRelayMsgID(msgID), Reason: reason})
 	}
 
-	outbound := make(chan []byte, mailboxBatchSize)
+	outbound := make(chan []byte, outboundQueueSize)
 	if s.webSocketBeforeRegister != nil {
 		s.webSocketBeforeRegister(deviceID, pairID)
 	}

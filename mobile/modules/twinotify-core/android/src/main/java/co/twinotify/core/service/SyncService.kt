@@ -33,6 +33,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.collectLatest
@@ -289,13 +290,27 @@ class SyncService : Service() {
             }
             val deviceId = DeviceIdentity.getOrCreate(applicationContext)
             val (_, signingKeys) = CryptoStore.loadOrGenerate(applicationContext)
-            val jwt = JwtMinter.mint(deviceId, signingKeys.secretKey)
             val transport = RelayTransport(
                 outbox = outbox,
-                authHeadersProvider = { mapOf("Authorization" to "Bearer $jwt") },
+                // RelayTransport reconnects within the same run. Mint per connector attempt so
+                // a retry after the 60-second JWT lifetime is authenticated with a fresh token.
+                authHeadersProvider = {
+                    mapOf("Authorization" to "Bearer " + JwtMinter.mint(deviceId, signingKeys.secretKey))
+                },
             )
-            transport.run(endpoints.webSocket).collect { event ->
-                when (event) {
+            // Keep the downstream delivery budget small because each envelope may approach
+            // the protocol's 1 MiB limit. RelayTransport suspends at its flow boundary until
+            // this ordered worker accepts the next item; no Delivery is silently discarded.
+            val deliveryQueue = Channel<String>(capacity = 4)
+            val deliveryWorker = scope.launch {
+                for (envelope in deliveryQueue) {
+                    runCatching { dispatcher.dispatch(envelope) }
+                        .onFailure { SyncServiceStatus.setLastError("inbound_dispatch") }
+                }
+            }
+            try {
+                transport.run(endpoints.webSocket).collect { event ->
+                    when (event) {
                     TransportEvent.Connected -> {
                         SyncServiceStatus.setState(SyncState.CONNECTING)
                     }
@@ -310,13 +325,13 @@ class SyncService : Service() {
                     TransportEvent.LegacyOnlineOnly -> {
                         SyncServiceStatus.setState(SyncState.LEGACY_ONLINE_ONLY)
                     }
-                    is TransportEvent.LegacyForwarded -> updateQueueHealth(reliableDao)
-                    is TransportEvent.Delivery -> dispatcher.dispatch(event.envelope)
+                    is TransportEvent.LegacyForwarded -> scope.launch { updateQueueHealth(reliableDao) }
+                    is TransportEvent.Delivery -> deliveryQueue.send(event.envelope)
                     is TransportEvent.RelayAccepted,
                     is TransportEvent.RelayRejected,
-                    -> updateQueueHealth(reliableDao)
+                    -> scope.launch { updateQueueHealth(reliableDao) }
                     is TransportEvent.RelayExpired -> {
-                        updateQueueHealth(reliableDao)
+                        scope.launch { updateQueueHealth(reliableDao) }
                         scope.launch { runCatching { snapshotCoordinator.emitLocalDigest(deviceId) } }
                     }
                     is TransportEvent.Failed,
@@ -329,6 +344,10 @@ class SyncService : Service() {
                         updateQueueHealth(reliableDao)
                     }
                 }
+                }
+            } finally {
+                deliveryQueue.close()
+                deliveryWorker.cancelAndJoin()
             }
         }
     }
