@@ -1,6 +1,7 @@
 package co.twinotify.core.storage
 
 import android.content.Context
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.byteArrayPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -123,17 +124,56 @@ object LanPairStore {
      * Phase one persists and verifies the sealed record. Phase two is exactly
      * one [PeerStore] edit that adds the public commit marker.
      */
-    suspend fun commit(context: Context, prepared: PreparedLanBinding) = lock.withLock {
+    suspend fun commit(context: Context, prepared: PreparedLanBinding) = productionStore(context).commit(prepared)
+
+    suspend fun loadValidated(context: Context, peer: PeerRecord): LanBinding? = productionStore(context).loadValidated(peer)
+
+    /** Removes phase-one orphans, without deleting a valid relay-only peer. */
+    suspend fun recover(context: Context, peer: PeerRecord?) = productionStore(context).recover(peer)
+
+    suspend fun clear(context: Context) = productionStore(context).clear()
+
+    private fun productionStore(context: Context) = Store(context.applicationContext, context.applicationContext.lanPairDs, lock)
+
+    /**
+     * An instance-local backend used by production and instrumentation tests.
+     * Production uses the application DataStore singleton; tests can close and
+     * reopen a dedicated client without mutating global store selection.
+     */
+    internal fun openForTest(context: Context, dataStore: DataStore<Preferences>) =
+        Store(context.applicationContext, dataStore, Mutex())
+
+    internal class Store internal constructor(
+        private val context: Context,
+        private val dataStore: DataStore<Preferences>,
+        private val mutex: Mutex,
+    ) {
+        suspend fun commit(prepared: PreparedLanBinding) = mutex.withLock {
+            commitLocked(context, dataStore, prepared)
+        }
+
+        suspend fun loadValidated(peer: PeerRecord): LanBinding? = mutex.withLock {
+            loadValidatedLocked(context, dataStore, peer)
+        }
+
+        suspend fun recover(peer: PeerRecord?) = mutex.withLock {
+            recoverLocked(context, dataStore, peer)
+        }
+
+        suspend fun clear() = mutex.withLock { clearOuter(dataStore) }
+    }
+
+    private suspend fun commitLocked(context: Context, dataStore: DataStore<Preferences>, prepared: PreparedLanBinding) {
         val current = PeerStore.load(context)
             ?: throw LanPairStoreException(LanPairStoreFailure.PEER_CHANGED)
         if (!current.samePublicIdentity(prepared.peer)) {
             throw LanPairStoreException(LanPairStoreFailure.PEER_CHANGED)
         }
 
-        val existing = readOuter(context)
+        val existing = readOuter(dataStore)
         if (current.lanBindingId != null) {
             if (current.lanBindingId == prepared.bindingId && existing != null && verify(existing, prepared)) {
-                return@withLock // exact retry after a process crash or lost caller acknowledgement
+                return // exact retry after a process crash or lost caller acknowledgement
             }
             if (existing != null && isValidFor(existing, current)) {
                 throw LanPairStoreException(LanPairStoreFailure.REPLACEMENT_REJECTED)
@@ -141,55 +181,56 @@ object LanPairStore {
             // An invalid public marker is never LAN trust. Disable it but keep
             // the relay pair, then permit the authenticated caller to upgrade.
             PeerStore.clearLanBinding(context, current.lanBindingId)
-            clearOuter(context)
+            clearOuter(dataStore)
         } else if (existing != null) {
             // A prior crash left a phase-one orphan. It is unusable.
-            clearOuter(context)
+            clearOuter(dataStore)
         }
 
-        writeOuter(context, OuterRecord(prepared.bindingId, prepared.sealed))
-        val written = readOuter(context)
+        writeOuter(dataStore, OuterRecord(prepared.bindingId, prepared.sealed))
+        val written = readOuter(dataStore)
         if (written == null || !verify(written, prepared)) {
-            clearOuterIfId(context, prepared.bindingId)
+            clearOuterIfId(dataStore, prepared.bindingId)
             throw LanPairStoreException(LanPairStoreFailure.SEALED_RECORD_INVALID)
         }
         if (!PeerStore.attachLanBinding(context, prepared.peer, prepared.bindingId)) {
-            clearOuterIfId(context, prepared.bindingId)
+            clearOuterIfId(dataStore, prepared.bindingId)
             throw LanPairStoreException(LanPairStoreFailure.PEER_CHANGED)
         }
     }
 
-    suspend fun loadValidated(context: Context, peer: PeerRecord): LanBinding? = lock.withLock {
-        val marker = peer.lanBindingId ?: return@withLock null
-        val outer = readOuter(context)
+    private suspend fun loadValidatedLocked(context: Context, dataStore: DataStore<Preferences>, peer: PeerRecord): LanBinding? {
+        val marker = peer.lanBindingId ?: return null
+        val outer = readOuter(dataStore)
         if (outer != null && outer.bindingId == marker) {
             val stored = decodeStored(outer)
             if (stored != null && MessageDigest.isEqual(stored.identityDigest, identityDigest(peer))) {
-                return@withLock copyBinding(stored.binding)
+                return copyBinding(stored.binding)
             }
         }
         // A public marker without a verified sealed match only disables LAN.
         PeerStore.clearLanBinding(context, marker)
-        clearOuter(context)
-        null
+        clearOuter(dataStore)
+        return null
     }
 
-    /** Removes phase-one orphans, without deleting a valid relay-only peer. */
-    suspend fun recover(context: Context, peer: PeerRecord?) = lock.withLock {
-        val outer = readOuter(context) ?: run {
+    private suspend fun recoverLocked(context: Context, dataStore: DataStore<Preferences>, peer: PeerRecord?) {
+        // Capture the marker before examining sealed state. A subsequent clear
+        // is compare-and-set so recovery cannot remove a newer LAN binding.
+        val marker = peer?.lanBindingId
+        val outer = readOuter(dataStore)
+        if (outer == null) {
             // A partial/corrupt outer preferences record is not a recoverable
             // binding and must not survive startup as latent state.
-            clearOuter(context)
-            return@withLock
+            clearOuter(dataStore)
+            if (marker != null) PeerStore.clearLanBinding(context, marker)
+            return
         }
-        val marker = peer?.lanBindingId
-        if (peer != null && marker == outer.bindingId && isValidFor(outer, peer)) return@withLock
+        if (peer != null && marker == outer.bindingId && isValidFor(outer, peer)) return
 
-        clearOuterIfId(context, outer.bindingId)
+        clearOuterIfId(dataStore, outer.bindingId)
         if (marker != null) PeerStore.clearLanBinding(context, marker)
     }
-
-    suspend fun clear(context: Context) = lock.withLock { clearOuter(context) }
 
     /** Digest is public, domain-separated, length-delimited, and normalizes NFC names. */
     internal fun identityDigest(peer: PeerRecord): ByteArray = try {
@@ -215,8 +256,8 @@ object LanPairStore {
         throw LanPairStoreException(LanPairStoreFailure.INVALID_BINDING)
     }
 
-    private suspend fun readOuter(context: Context): OuterRecord? {
-        val prefs = context.lanPairDs.data.first()
+    private suspend fun readOuter(dataStore: DataStore<Preferences>): OuterRecord? {
+        val prefs = dataStore.data.first()
         val version = prefs[KEY_VERSION] ?: return null
         val id = prefs[KEY_BINDING_ID] ?: return null
         val ciphertext = prefs[KEY_CIPHERTEXT] ?: return null
@@ -227,8 +268,8 @@ object LanPairStore {
         return OuterRecord(id, Sealed(ciphertext.copyOf(), iv.copyOf()))
     }
 
-    private suspend fun writeOuter(context: Context, record: OuterRecord) {
-        context.lanPairDs.edit { prefs ->
+    private suspend fun writeOuter(dataStore: DataStore<Preferences>, record: OuterRecord) {
+        dataStore.edit { prefs ->
             prefs[KEY_VERSION] = OUTER_VERSION
             prefs[KEY_BINDING_ID] = record.bindingId
             prefs[KEY_CIPHERTEXT] = record.sealed.ciphertext.copyOf()
@@ -236,12 +277,12 @@ object LanPairStore {
         }
     }
 
-    private suspend fun clearOuter(context: Context) {
-        context.lanPairDs.edit { it.clear() }
+    private suspend fun clearOuter(dataStore: DataStore<Preferences>) {
+        dataStore.edit { it.clear() }
     }
 
-    private suspend fun clearOuterIfId(context: Context, bindingId: String) {
-        context.lanPairDs.edit { prefs ->
+    private suspend fun clearOuterIfId(dataStore: DataStore<Preferences>, bindingId: String) {
+        dataStore.edit { prefs ->
             if (prefs[KEY_BINDING_ID] == bindingId) prefs.clear()
         }
     }
@@ -328,13 +369,20 @@ object LanPairStore {
 
     // Instrumentation-only crash simulation seams. They never accept or reveal a secret.
     internal suspend fun writeSealedForTest(context: Context, prepared: PreparedLanBinding) = lock.withLock {
-        writeOuter(context, OuterRecord(prepared.bindingId, prepared.sealed))
+        writeOuter(context.applicationContext.lanPairDs, OuterRecord(prepared.bindingId, prepared.sealed))
     }
 
     internal suspend fun writeCorruptForTest(context: Context) = lock.withLock {
-        val current = readOuter(context) ?: return@withLock
-        writeOuter(context, OuterRecord(current.bindingId, Sealed(byteArrayOf(1), ByteArray(GCM_IV_BYTES))))
+        val dataStore = context.applicationContext.lanPairDs
+        val current = readOuter(dataStore) ?: return@withLock
+        writeOuter(dataStore, OuterRecord(current.bindingId, Sealed(byteArrayOf(1), ByteArray(GCM_IV_BYTES))))
     }
 
-    internal suspend fun sealedBindingIdForTest(context: Context): String? = lock.withLock { readOuter(context)?.bindingId }
+    internal suspend fun writeStructurallyCorruptForTest(context: Context) = lock.withLock {
+        context.lanPairDs.edit { prefs -> prefs[KEY_VERSION] = OUTER_VERSION + 1 }
+    }
+
+    internal suspend fun sealedBindingIdForTest(context: Context): String? = lock.withLock {
+        readOuter(context.applicationContext.lanPairDs)?.bindingId
+    }
 }

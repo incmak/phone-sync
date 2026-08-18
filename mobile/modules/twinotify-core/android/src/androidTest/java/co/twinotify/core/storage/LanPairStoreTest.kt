@@ -2,15 +2,21 @@ package co.twinotify.core.storage
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import java.io.File
+import java.util.UUID
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -58,18 +64,9 @@ class LanPairStoreTest {
             LanPairStore.identityDigest(canonical),
             LanPairStore.identityDigest(peer(name = "Cafe\u0301")),
         )
-        assertNotEquals(
-            LanPairStore.identityDigest(canonical).contentHashCode(),
-            LanPairStore.identityDigest(peer(deviceId = "peer-b")).contentHashCode(),
-        )
-        assertNotEquals(
-            LanPairStore.identityDigest(canonical).contentHashCode(),
-            LanPairStore.identityDigest(peer(encSeed = 0x32)).contentHashCode(),
-        )
-        assertNotEquals(
-            LanPairStore.identityDigest(canonical).contentHashCode(),
-            LanPairStore.identityDigest(peer(signSeed = 0x33)).contentHashCode(),
-        )
+        assertFalse(LanPairStore.identityDigest(canonical).contentEquals(LanPairStore.identityDigest(peer(deviceId = "peer-b"))))
+        assertFalse(LanPairStore.identityDigest(canonical).contentEquals(LanPairStore.identityDigest(peer(encSeed = 0x32))))
+        assertFalse(LanPairStore.identityDigest(canonical).contentEquals(LanPairStore.identityDigest(peer(signSeed = 0x33))))
     }
 
     @Test
@@ -87,6 +84,42 @@ class LanPairStoreTest {
     }
 
     @Test
+    fun recoverWithMissingOuterClearsCapturedLanMarkerAndRetainsRelayPeer() = runBlocking {
+        val peer = peer()
+        PeerStore.save(context, peer)
+        LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding()))
+        val marked = assertNotNull(PeerStore.load(context))
+
+        LanPairStore.clear(context)
+        LanPairStore.recover(context, marked)
+
+        val recovered = assertNotNull(PeerStore.load(context))
+        assertEquals(marked.deviceId, recovered.deviceId)
+        assertContentEquals(marked.encPubkey, recovered.encPubkey)
+        assertContentEquals(marked.signPubkey, recovered.signPubkey)
+        assertNull(recovered.lanBindingId)
+        assertNull(LanPairStore.sealedBindingIdForTest(context))
+    }
+
+    @Test
+    fun recoverWithStructurallyCorruptOuterClearsCapturedLanMarkerAndRetainsRelayPeer() = runBlocking {
+        val peer = peer()
+        PeerStore.save(context, peer)
+        LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding()))
+        val marked = assertNotNull(PeerStore.load(context))
+
+        LanPairStore.writeStructurallyCorruptForTest(context)
+        LanPairStore.recover(context, marked)
+
+        val recovered = assertNotNull(PeerStore.load(context))
+        assertEquals(marked.deviceId, recovered.deviceId)
+        assertContentEquals(marked.encPubkey, recovered.encPubkey)
+        assertContentEquals(marked.signPubkey, recovered.signPubkey)
+        assertNull(recovered.lanBindingId)
+        assertNull(LanPairStore.sealedBindingIdForTest(context))
+    }
+
+    @Test
     fun missingCorruptOrMismatchedBindingDisablesLanButRetainsRelayPeer() = runBlocking {
         val peer = peer()
         PeerStore.save(context, peer)
@@ -94,7 +127,7 @@ class LanPairStoreTest {
         val marked = assertNotNull(PeerStore.load(context))
 
         LanPairStore.clear(context)
-        assertNull(LanPairStore.loadValidated(context, marked))
+        LanPairStore.recover(context, marked)
         assertNull(PeerStore.load(context)?.lanBindingId)
         assertEquals(marked.deviceId, PeerStore.load(context)?.deviceId)
 
@@ -102,7 +135,7 @@ class LanPairStoreTest {
         LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding()))
         val original = assertNotNull(PeerStore.load(context))
         LanPairStore.writeCorruptForTest(context)
-        assertNull(LanPairStore.loadValidated(context, original))
+        LanPairStore.recover(context, original)
         assertNull(PeerStore.load(context)?.lanBindingId)
         assertEquals(original.deviceId, PeerStore.load(context)?.deviceId)
 
@@ -110,13 +143,47 @@ class LanPairStoreTest {
         LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding()))
         val changedIdentity = peer(name = "another name", lanBindingId = PeerStore.load(context)?.lanBindingId)
         PeerStore.save(context, changedIdentity)
-        assertNull(LanPairStore.loadValidated(context, changedIdentity))
+        LanPairStore.recover(context, changedIdentity)
         assertNull(PeerStore.load(context)?.lanBindingId)
         assertEquals(changedIdentity.deviceId, PeerStore.load(context)?.deviceId)
     }
 
     @Test
-    fun committedBindingSurvivesRecreationAndIdempotentCommit() = runBlocking {
+    fun completeCommitLoadsAfterDedicatedDataStoreRecreation() = runBlocking {
+        val peer = peer()
+        PeerStore.save(context, peer)
+        val prepared = LanPairStore.prepare(context, peer, binding())
+        val file = File(context.filesDir, "datastore/lan-pair-recreate-${UUID.randomUUID()}.preferences_pb")
+        val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val initial = LanPairStore.openForTest(
+            context,
+            PreferenceDataStoreFactory.create(scope = firstScope, produceFile = { file }),
+        )
+        val committedId = try {
+            initial.commit(prepared)
+            assertNotNull(PeerStore.load(context)?.lanBindingId)
+        } finally {
+            firstScope.coroutineContext[Job]!!.cancelAndJoin()
+        }
+
+        val recreatedScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val recreated = LanPairStore.openForTest(
+                context,
+                PreferenceDataStoreFactory.create(scope = recreatedScope, produceFile = { file }),
+            )
+            val restored = assertNotNull(recreated.loadValidated(PeerStore.load(context)!!))
+
+            assertEquals(committedId, PeerStore.load(context)?.lanBindingId)
+            assertEquals(1, restored.protocolVersion)
+        } finally {
+            recreatedScope.coroutineContext[Job]!!.cancelAndJoin()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun idempotentCommitRetainsTheExistingBinding() = runBlocking {
         val peer = peer()
         PeerStore.save(context, peer)
         val prepared = LanPairStore.prepare(context, peer, binding())
@@ -124,10 +191,10 @@ class LanPairStoreTest {
         val firstId = PeerStore.load(context)?.lanBindingId
 
         LanPairStore.commit(context, prepared)
-        val recreated = assertNotNull(LanPairStore.loadValidated(context, PeerStore.load(context)!!))
+        val restored = assertNotNull(LanPairStore.loadValidated(context, PeerStore.load(context)!!))
 
         assertEquals(firstId, PeerStore.load(context)?.lanBindingId)
-        assertEquals(1, recreated.protocolVersion)
+        assertEquals(1, restored.protocolVersion)
     }
 
     @Test
