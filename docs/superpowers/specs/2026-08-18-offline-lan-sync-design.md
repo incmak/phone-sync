@@ -1,7 +1,7 @@
 # Twinotify Offline LAN Sync Design
 
 **Date:** 2026-08-18
-**Status:** Approved architecture, written specification awaiting review
+**Status:** Approved specification, implementation plans ready for review
 **Scope:** Android 14+ phone-to-phone pairing and reliable notification/call-state synchronization on a shared local network without internet access
 
 ## 1. Objective
@@ -438,12 +438,14 @@ Screen-off latency is measured and reported rather than inferred. It is only acc
 This feature is too security-sensitive for one monolithic change. It will be implemented through three separately reviewed plans:
 
 1. **Offline pairing and LAN identity**
+   - Plan: `docs/superpowers/plans/2026-08-18-offline-pairing-lan-identity.md`
    - Keystore TLS identity;
    - QR schema and mutual transcript;
    - atomic peer persistence and existing-pair upgrade;
    - pairing UX and security tests.
 
 2. **Direct LAN transport and route coordination**
+   - Plan: `docs/superpowers/plans/2026-08-18-direct-lan-transport.md`
    - NSD adapter, advertisement privacy, and listener;
    - pinned TLS and signed hello;
    - bounded framing and custody integration;
@@ -451,6 +453,7 @@ This feature is too security-sensitive for one monolithic change. It will be imp
    - lifecycle and health reporting.
 
 3. **Product integration and physical reliability proof**
+   - Plan: `docs/superpowers/plans/2026-08-18-lan-product-verification.md`
    - onboarding/home/settings completion;
    - permission and troubleshooting flows;
    - two-device offline, screen-off, fallback, stress, and release evidence;
