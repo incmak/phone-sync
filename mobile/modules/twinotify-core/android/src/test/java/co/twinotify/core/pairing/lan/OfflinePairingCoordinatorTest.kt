@@ -446,6 +446,93 @@ class OfflinePairingCoordinatorTest {
         assertEquals(OfflinePairingApiRole.JOINER, controller.getStatus().role)
     }
 
+    @Test fun `native provider confirm failure releases the runtime and publishes redacted terminal status`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val events = mutableListOf<OfflinePairingPublicStatus>()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory, events::add)
+        val qrJson = controller.start("This phone")
+        val failed = factory.created.single()
+        failed.emit(OfflinePairingApiPhase.VERIFY_CODE, peerDisplayName = "Peer", sas = "654321")
+        failed.confirmFailure = IllegalStateException("token=secret ip=192.0.2.10 port=443")
+
+        val error = assertApiError(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE) {
+            controller.confirm(failed.sessionId)
+        }
+
+        assertEquals(1, failed.confirmCount)
+        assertEquals(1, failed.closeCount)
+        assertTrue(failed.job.isCancelled)
+        assertEquals(OfflinePairingApiPhase.IDLE, controller.getStatus().phase)
+        assertEquals(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE, controller.getStatus().error)
+        assertNull(controller.getStatus().peerDisplayName)
+        assertNull(controller.getStatus().sas)
+        assertFalse(error.toString().contains("secret"))
+        assertFalse(events.last().toString().contains("192.0.2.10"))
+
+        controller.join(qrJson, "Other phone")
+        assertEquals(2, factory.created.size)
+    }
+
+    @Test fun `native terminal confirm exception releases the runtime and keeps its bounded error`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
+        val qrJson = controller.start("This phone")
+        val failed = factory.created.single()
+        failed.emit(OfflinePairingApiPhase.VERIFY_CODE, peerDisplayName = "Peer", sas = "654321")
+        failed.confirmFailure = OfflinePairingApiException(OfflinePairingApiError.IDENTITY_MISMATCH)
+
+        assertApiError(OfflinePairingApiError.IDENTITY_MISMATCH) { controller.confirm(failed.sessionId) }
+
+        assertEquals(1, failed.closeCount)
+        assertTrue(failed.job.isCancelled)
+        assertEquals(OfflinePairingApiPhase.IDLE, controller.getStatus().phase)
+        assertEquals(OfflinePairingApiError.IDENTITY_MISMATCH, controller.getStatus().error)
+        assertNull(controller.getStatus().peerDisplayName)
+        assertNull(controller.getStatus().sas)
+        controller.join(qrJson, "Other phone")
+        assertEquals(2, factory.created.size)
+    }
+
+    @Test fun `native silent child completion releases the runtime and publishes a bounded terminal status`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
+        val qrJson = controller.start("This phone")
+        val completed = factory.created.single()
+        completed.emit(OfflinePairingApiPhase.VERIFY_CODE, peerDisplayName = "Peer", sas = "654321")
+
+        completed.completeSilently()
+
+        assertEquals(1, completed.closeCount)
+        assertFalse(completed.job.isCancelled)
+        assertEquals(OfflinePairingApiPhase.IDLE, controller.getStatus().phase)
+        assertEquals(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE, controller.getStatus().error)
+        assertNull(controller.getStatus().peerDisplayName)
+        assertNull(controller.getStatus().sas)
+        controller.join(qrJson, "Other phone")
+        assertEquals(2, factory.created.size)
+    }
+
+    @Test fun `native stale child completion cannot overwrite a cancelled session or close a new runtime`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
+        val qrJson = controller.start("This phone")
+        val cancelled = factory.created.single()
+        cancelled.emit(OfflinePairingApiPhase.VERIFY_CODE, peerDisplayName = "Peer", sas = "654321")
+
+        controller.cancel(cancelled.sessionId)
+        controller.join(qrJson, "Other phone")
+        val next = factory.created.last()
+        cancelled.completeSilently()
+
+        assertEquals(1, cancelled.closeCount)
+        assertEquals(0, next.closeCount)
+        assertEquals(OfflinePairingApiRole.JOINER, controller.getStatus().role)
+        assertEquals(OfflinePairingApiPhase.RESOLVING, controller.getStatus().phase)
+        assertNull(controller.getStatus().error)
+        assertEquals("Device 1", controller.getStatus().peerDisplayName)
+        assertNull(controller.getStatus().sas)
+    }
+
     @Test fun `native lifecycle validates inputs and redacts runtime exceptions`() {
         val factory = FakeOfflinePairingRuntimeFactory()
         val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
@@ -548,10 +635,16 @@ private class FakeOfflinePairingRuntime(
     var confirmCount = 0
     var cancelCount = 0
     var closeCount = 0
+    var confirmFailure: Throwable? = null
 
-    override fun confirm() { confirmCount++ }
+    override fun confirm() {
+        confirmCount++
+        confirmFailure?.let { throw it }
+    }
     override fun cancel() { cancelCount++ }
     override fun close() { closeCount++ }
+
+    fun completeSilently() { job.complete() }
 
     fun emit(
         phase: OfflinePairingApiPhase,

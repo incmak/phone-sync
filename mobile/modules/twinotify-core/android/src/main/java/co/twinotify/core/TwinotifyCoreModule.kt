@@ -759,9 +759,12 @@ internal class OfflinePairingApiController(
         try {
             active.confirm()
         } catch (error: OfflinePairingApiException) {
+            terminate(active, error.error, cancelCoordinator = true)
             throw error
         } catch (_: Throwable) {
-            throw OfflinePairingApiException(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
+            val bounded = OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE
+            terminate(active, bounded, cancelCoordinator = true)
+            throw OfflinePairingApiException(bounded)
         }
     }
 
@@ -841,6 +844,7 @@ internal class OfflinePairingApiController(
             )
             statusSink(status)
             constructing = false
+            observeCompletion(created, token)
             buffered.forEach { acceptStatus(token, it) }
             return created
         } catch (error: OfflinePairingApiException) {
@@ -858,6 +862,38 @@ internal class OfflinePairingApiController(
         if (update.completed || (update.phase == OfflinePairingApiPhase.IDLE && update.error != null)) {
             release(active, cancelCoordinator = false)
         }
+    }
+
+    private fun observeCompletion(active: OfflinePairingRuntime, token: Long) {
+        active.job.invokeOnCompletion {
+            synchronized(monitor) {
+                if (generation != token || runtime !== active) return@synchronized
+                terminate(active, OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE, cancelCoordinator = false)
+            }
+        }
+    }
+
+    /** Publish a secret-free terminal state before releasing this exact runtime. */
+    private fun terminate(
+        active: OfflinePairingRuntime,
+        error: OfflinePairingApiError,
+        cancelCoordinator: Boolean,
+    ) {
+        if (runtime !== active) return
+        val terminal = OfflinePairingPublicStatus(
+            role = active.role,
+            phase = OfflinePairingApiPhase.IDLE,
+            sessionId = active.sessionId,
+            error = error,
+            peerDisplayName = null,
+            sas = null,
+            completed = false,
+        )
+        if (status != terminal) {
+            status = terminal
+            statusSink(terminal)
+        }
+        release(active, cancelCoordinator)
     }
 
     private fun requireExactSession(sessionId: String): OfflinePairingRuntime {
