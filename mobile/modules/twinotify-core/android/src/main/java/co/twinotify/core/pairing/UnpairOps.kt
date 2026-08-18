@@ -4,6 +4,7 @@ import android.content.Context
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.NonceSource
 import co.twinotify.core.filter.AppFilterStore
+import co.twinotify.core.pairing.lan.LanIdentityStore
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.storage.ReplayGuard
@@ -30,6 +31,9 @@ object UnpairOps {
             db.notificationMapDao().sweepExpired(Long.MAX_VALUE)
             db.reliableDeliveryDao().clearReliableState()
             db.outboundEventDao().clearAll()
+            // The SyncService has already been cancelled and joined by UnpairWorkflow.
+            // Delete LAN TLS material before rotating application identity.
+            LanIdentityStore.delete()
             // Rotate crypto state last (allows any in-flight decrypt to finish with old keys)
             CryptoStore.rotate(ctx)
             NonceSource.regenerate(ctx)
