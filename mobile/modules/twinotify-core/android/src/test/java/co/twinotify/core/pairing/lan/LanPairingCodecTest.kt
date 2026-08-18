@@ -21,9 +21,10 @@ class LanPairingCodecTest {
         assertFailsWith<IllegalArgumentException> {
             LanPairingCodec.decodeQr(encoded.dropLast(1) + ",\"v\":1}")
         }
-        assertFailsWith<IllegalArgumentException> {
-            LanPairingCodec.decodeQr(encoded.dropLast(1) + ",\"unexpected\":true}")
+        val unknownField = assertFailsWith<IllegalArgumentException> {
+            LanPairingCodec.decodeQr(encoded.dropLast(1) + ",\"unexpected\":\"x\"}")
         }
+        assertEquals("invalid LAN pairing QR fields", unknownField.message)
     }
 
     @Test
@@ -71,8 +72,23 @@ class LanPairingCodecTest {
         assertContentEquals(canonical, LanPairingCodec.canonicalTranscript(first))
         assertContentEquals(canonical, LanPairingCodec.canonicalTranscript(reversed))
         assertTrue(canonical.size > 2 * 32)
-        assertFalse(canonical.contentEquals(LanPairingCodec.canonicalTranscript(first.copy(lifetimeMillis = 299_999))))
-        assertFalse(canonical.contentEquals(LanPairingCodec.canonicalTranscript(first.copy(first = initiator.copy(nonce = bytes(32, 17))))))
+        fun assertBound(mutated: LanPairingTranscript) {
+            assertFalse(canonical.contentEquals(LanPairingCodec.canonicalTranscript(mutated)))
+        }
+
+        assertBound(first.copy(sessionId = "a70446b3-a355-46cc-9e62-069a0bfe2e10"))
+        assertBound(first.copy(lifetimeMillis = 299_999))
+        assertFailsWith<IllegalArgumentException> { first.copy(negotiatedVersion = 2) }
+        assertBound(first.copy(first = initiator.copy(deviceId = "dev-b70446b3-a355-46cc-9e62-069a0bfe2e10")))
+        assertBound(first.copy(second = joiner.copy(deviceId = "dev-c70446b3-a355-46cc-9e62-069a0bfe2e10")))
+        assertBound(first.copy(first = initiator.copy(encryptionPublicKey = bytes(32, 17))))
+        assertBound(first.copy(second = joiner.copy(encryptionPublicKey = bytes(32, 18))))
+        assertBound(first.copy(first = initiator.copy(signingPublicKey = bytes(32, 19))))
+        assertBound(first.copy(second = joiner.copy(signingPublicKey = bytes(32, 20))))
+        assertBound(first.copy(first = initiator.copy(tlsSpkiSha256 = bytes(32, 21))))
+        assertBound(first.copy(second = joiner.copy(tlsSpkiSha256 = bytes(32, 22))))
+        assertBound(first.copy(first = initiator.copy(nonce = bytes(32, 23))))
+        assertBound(first.copy(second = joiner.copy(nonce = bytes(32, 24))))
     }
 
     @Test

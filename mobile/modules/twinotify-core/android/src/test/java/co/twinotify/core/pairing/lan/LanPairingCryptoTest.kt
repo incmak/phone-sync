@@ -1,6 +1,5 @@
 package co.twinotify.core.pairing.lan
 
-import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -10,26 +9,23 @@ import kotlin.test.assertTrue
 
 class LanPairingCryptoTest {
     @Test
-    fun transcriptSignatureUsesExistingEd25519IdentityAndRejectsMutation() {
-        val secretKey = ByteArray(64) { (it + 1).toByte() }
-        val publicKey = secretKey.copyOf(32)
-        val transcript = "canonical transcript".encodeToByteArray()
-        LanPairingCrypto.withSignatureOperationsForTests(TestSignatureOperations) {
-            val signature = LanPairingCrypto.signTranscript(transcript, secretKey)
-
-            assertTrue(LanPairingCrypto.verifyTranscript(transcript, signature, publicKey))
-            assertFalse(LanPairingCrypto.verifyTranscript("canonical transcripu".encodeToByteArray(), signature, publicKey))
-            assertFalse(LanPairingCrypto.verifyTranscript(transcript, signature.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }, publicKey))
-        }
-    }
-
-    @Test
     fun sasIsSixDigitsAndDeterministicallyDerivedFromTranscriptDigest() {
         val sas = LanPairingCrypto.shortAuthenticationString("canonical transcript".encodeToByteArray())
 
         assertTrue(sas.matches(Regex("^[0-9]{6}$")))
         assertEquals(sas, LanPairingCrypto.shortAuthenticationString("canonical transcript".encodeToByteArray()))
         assertNotEquals(sas, LanPairingCrypto.shortAuthenticationString("canonical transcript 2".encodeToByteArray()))
+    }
+
+    @Test
+    fun sasRejectsCandidatesAtTheUnbiasedBoundary() {
+        val rejected = candidateMaterial(4_294_000_000L)
+        val accepted = candidateMaterial(4_293_999_999L)
+
+        assertEquals(
+            "999999",
+            LanPairingCrypto.reduceSasCandidateMaterials(sequenceOf(rejected, accepted)),
+        )
     }
 
     @Test
@@ -43,7 +39,10 @@ class LanPairingCryptoTest {
         assertEquals(32, first.size)
         assertContentEquals(first, second)
         assertFalse(first.contentEquals(LanPairingCrypto.derivePairSecret(token, "other transcript".encodeToByteArray())))
-        assertFalse(first.contentEquals(MessageDigest.getInstance("SHA-256").digest(token + transcript)))
+        assertEquals(
+            "d5788b93b1cf98c45b68ce2ea6008ff6cf42d3c1a218ed7e98953f696bdd6ad6",
+            first.toHex(),
+        )
     }
 
     @Test
@@ -56,11 +55,14 @@ class LanPairingCryptoTest {
         assertFalse(error.message.orEmpty().contains(secret.joinToString()))
     }
 
-    private object TestSignatureOperations : LanTranscriptSignatureOperations {
-        override fun sign(transcript: ByteArray, secretKey: ByteArray): ByteArray =
-            MessageDigest.getInstance("SHA-512").digest(secretKey.copyOf(32) + transcript)
-
-        override fun verify(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean =
-            MessageDigest.isEqual(signature, MessageDigest.getInstance("SHA-512").digest(publicKey + transcript))
+    private fun candidateMaterial(candidate: Long): ByteArray = ByteArray(32).also { material ->
+        for (offset in material.indices step 4) {
+            material[offset] = (candidate ushr 24).toByte()
+            material[offset + 1] = (candidate ushr 16).toByte()
+            material[offset + 2] = (candidate ushr 8).toByte()
+            material[offset + 3] = candidate.toByte()
+        }
     }
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 }

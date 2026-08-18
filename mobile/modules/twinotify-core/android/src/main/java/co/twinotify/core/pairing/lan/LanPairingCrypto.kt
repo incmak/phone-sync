@@ -10,27 +10,30 @@ object LanPairingCrypto {
     private const val SHA_256_BYTES = 32
     private const val SAS_MODULUS = 1_000_000L
     private const val SAS_LIMIT = 4_294_000_000L
-    private val signatureLock = Any()
-    @Volatile
-    private var signatureOperationsForTests: LanTranscriptSignatureOperations? = null
     private val secretInfo = "twinotify-lan-pair-secret-v1".encodeToByteArray()
     private val sasLabel = "twinotify-lan-sas-v1".encodeToByteArray()
 
     fun signTranscript(transcript: ByteArray, secretKey: ByteArray): ByteArray {
         require(secretKey.size == ED25519_SECRET_KEY_BYTES) { "invalid Ed25519 signing key" }
-        return signatureOperations().sign(transcript, secretKey)
+        return SodiumTranscriptSignatureOperations.sign(transcript, secretKey)
     }
 
     fun verifyTranscript(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean {
         if (signature.size != ED25519_SIGNATURE_BYTES || publicKey.size != ED25519_PUBLIC_KEY_BYTES) return false
-        return signatureOperations().verify(transcript, signature, publicKey)
+        return SodiumTranscriptSignatureOperations.verify(transcript, signature, publicKey)
     }
 
     fun shortAuthenticationString(transcript: ByteArray): String {
         val transcriptDigest = sha256(transcript)
-        var round = 0
-        while (true) {
-            val material = sha256(sasLabel + transcriptDigest + intBytes(round++))
+        return reduceSasCandidateMaterials(generateSequence(0) { it + 1 }.map { round ->
+            sha256(sasLabel + transcriptDigest + intBytes(round))
+        })
+    }
+
+    /** Pure rejection reduction for SAS candidate blocks; it cannot alter signature authority. */
+    internal fun reduceSasCandidateMaterials(candidateMaterials: Sequence<ByteArray>): String {
+        for (material in candidateMaterials) {
+            require(material.size % 4 == 0) { "invalid SAS candidate material" }
             for (offset in material.indices step 4) {
                 val candidate = ((material[offset].toLong() and 0xff) shl 24) or
                     ((material[offset + 1].toLong() and 0xff) shl 16) or
@@ -39,6 +42,7 @@ object LanPairingCrypto {
                 if (candidate < SAS_LIMIT) return (candidate % SAS_MODULUS).toString().padStart(6, '0')
             }
         }
+        throw IllegalArgumentException("no acceptable SAS candidate")
     }
 
     fun derivePairSecret(sessionToken: ByteArray, transcript: ByteArray): ByteArray {
@@ -59,32 +63,12 @@ object LanPairingCrypto {
         (value ushr 24).toByte(), (value ushr 16).toByte(), (value ushr 8).toByte(), value.toByte(),
     )
 
-    internal fun <T> withSignatureOperationsForTests(
-        operations: LanTranscriptSignatureOperations,
-        block: () -> T,
-    ): T = synchronized(signatureLock) {
-        check(signatureOperationsForTests == null) { "LAN signature test override already installed" }
-        signatureOperationsForTests = operations
-        try {
-            block()
-        } finally {
-            signatureOperationsForTests = null
-        }
-    }
-
-    private fun signatureOperations(): LanTranscriptSignatureOperations =
-        signatureOperationsForTests ?: SodiumTranscriptSignatureOperations
 }
 
-internal interface LanTranscriptSignatureOperations {
-    fun sign(transcript: ByteArray, secretKey: ByteArray): ByteArray
-    fun verify(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean
-}
-
-private object SodiumTranscriptSignatureOperations : LanTranscriptSignatureOperations {
+private object SodiumTranscriptSignatureOperations {
     private val sodium by lazy { LazySodiumAndroid(SodiumAndroid()).sodium }
 
-    override fun sign(transcript: ByteArray, secretKey: ByteArray): ByteArray {
+    fun sign(transcript: ByteArray, secretKey: ByteArray): ByteArray {
         val signature = ByteArray(ED25519_SIGNATURE_BYTES)
         check(sodium.crypto_sign_detached(signature, null, transcript, transcript.size.toLong(), secretKey) == 0) {
             "LAN transcript signing failed"
@@ -92,7 +76,7 @@ private object SodiumTranscriptSignatureOperations : LanTranscriptSignatureOpera
         return signature
     }
 
-    override fun verify(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean =
+    fun verify(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean =
         sodium.crypto_sign_verify_detached(signature, transcript, transcript.size.toLong(), publicKey) == 0
 }
 
