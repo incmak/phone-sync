@@ -1,4 +1,13 @@
 import { NativeModule, requireNativeModule } from 'expo-modules-core';
+import type { OfflinePairingStatus, OfflinePairingStatusEvent } from './TwinotifyCore.types';
+
+export type {
+  OfflinePairingErrorCode,
+  OfflinePairingPhase,
+  OfflinePairingRole,
+  OfflinePairingStatus,
+  OfflinePairingStatusEvent,
+} from './TwinotifyCore.types';
 
 export type KeyPair = { encPubkey: string; signPubkey: string };
 export type EncryptResult = { ciphertext: string; nonce: string };
@@ -32,10 +41,16 @@ export interface PeerHelloPayload {
 declare class TwinotifyCoreModuleType extends NativeModule<{
   onSyncStatus: (evt: SyncStatus) => void;
   onPeerUnpair: () => void;
+  onOfflinePairingStatus: OfflinePairingStatusEvent;
 }> {
   getDeviceId(): Promise<string>;
   getPublicKeys(): Promise<KeyPair>;
   getDeviceDisplayName(): Promise<string>;
+  startOfflinePairing(displayName: string): Promise<string>;
+  joinOfflinePairing(qrJson: string, displayName: string): Promise<void>;
+  confirmOfflinePairing(sessionId: string): Promise<void>;
+  cancelOfflinePairing(sessionId: string): Promise<void>;
+  getOfflinePairingStatus(): Promise<OfflinePairingStatus>;
   // Updated signature: requires displayName
   startPairInitiator(relayUrl: string, displayName: string): Promise<string>;
   sendPeerHello(relayUrl: string, pairToken: string, displayName: string): Promise<void>;

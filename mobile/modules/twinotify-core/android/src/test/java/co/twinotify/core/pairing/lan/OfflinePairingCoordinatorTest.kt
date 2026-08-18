@@ -1,7 +1,17 @@
 package co.twinotify.core.pairing.lan
 
+import co.twinotify.core.OfflinePairingApiController
+import co.twinotify.core.OfflinePairingApiError
+import co.twinotify.core.OfflinePairingApiException
+import co.twinotify.core.OfflinePairingApiPhase
+import co.twinotify.core.OfflinePairingApiRole
+import co.twinotify.core.OfflinePairingPublicStatus
+import co.twinotify.core.OfflinePairingRuntime
+import co.twinotify.core.OfflinePairingRuntimeFactory
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -339,12 +349,217 @@ class OfflinePairingCoordinatorTest {
         assertFalse(pair.initiatorEvents.any { it.contains(pair.qr.sessionToken.copy().joinToString()) })
     }
 
+    @Test fun `native status map is an exact bounded allowlist`() {
+        val status = OfflinePairingPublicStatus(
+            role = OfflinePairingApiRole.JOINER,
+            phase = OfflinePairingApiPhase.VERIFY_CODE,
+            sessionId = UUID.randomUUID().toString(),
+            error = OfflinePairingApiError.IDENTITY_MISMATCH,
+            peerDisplayName = "Peer phone",
+            sas = "012345",
+            completed = false,
+        )
+
+        assertEquals(
+            setOf("role", "phase", "sessionId", "errorCode", "peerDisplayName", "sas", "completed"),
+            status.toEventMap().keys,
+        )
+        val serialized = status.toEventMap().toString().lowercase()
+        listOf("token", "transcript", "key", "pin", "secret", "ip", "port").forEach {
+            assertFalse(serialized.contains(it))
+        }
+    }
+
+    @Test fun `native lifecycle owns one runtime and requires exact session for confirm and cancel`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val events = mutableListOf<OfflinePairingPublicStatus>()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory, events::add)
+
+        val qrJson = controller.start("This phone")
+        val sessionId = LanPairingCodec.decodeQr(qrJson).sessionId
+        assertEquals(listOf(OfflinePairingApiPhase.ADVERTISING), events.map { it.phase })
+        assertApiError(OfflinePairingApiError.PAIR_SESSION_ACTIVE) { controller.join(qrJson, "Other phone") }
+        assertApiError(OfflinePairingApiError.PAIR_SESSION_MISMATCH) {
+            controller.confirm(UUID.randomUUID().toString())
+        }
+
+        controller.confirm(sessionId)
+        assertEquals(1, factory.created.single().confirmCount)
+        factory.created.single().emit(
+            OfflinePairingApiPhase.VERIFY_CODE,
+            peerDisplayName = "Peer",
+            sas = "123456",
+        )
+        controller.cancel(sessionId)
+        assertEquals(1, factory.created.single().cancelCount)
+        assertEquals(1, factory.created.single().closeCount)
+        assertTrue(factory.created.single().job.isCancelled)
+        assertEquals(OfflinePairingApiError.CANCELLED, controller.getStatus().error)
+        assertNull(controller.getStatus().peerDisplayName)
+        assertNull(controller.getStatus().sas)
+        assertApiError(OfflinePairingApiError.PAIR_SESSION_NOT_FOUND) { controller.cancel(sessionId) }
+    }
+
+    @Test fun `native lifecycle serializes statuses and ignores a closed runtime`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val events = mutableListOf<OfflinePairingPublicStatus>()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory, events::add)
+        val qrJson = controller.start("This phone")
+        val first = factory.created.single()
+
+        first.emit(OfflinePairingApiPhase.TLS_AUTHENTICATED)
+        first.emit(OfflinePairingApiPhase.VERIFY_CODE, peerDisplayName = "Peer", sas = "654321")
+        first.emit(OfflinePairingApiPhase.COMPLETE, peerDisplayName = "Peer", completed = true)
+        first.emit(OfflinePairingApiPhase.IDLE, error = OfflinePairingApiError.INVALID_FRAME)
+
+        assertEquals(
+            listOf(
+                OfflinePairingApiPhase.ADVERTISING,
+                OfflinePairingApiPhase.TLS_AUTHENTICATED,
+                OfflinePairingApiPhase.VERIFY_CODE,
+                OfflinePairingApiPhase.COMPLETE,
+            ),
+            events.map { it.phase },
+        )
+        assertEquals(1, first.closeCount)
+        assertTrue(first.job.isCancelled)
+
+        controller.join(qrJson, "Other phone")
+        assertEquals(OfflinePairingApiRole.JOINER, controller.getStatus().role)
+        assertEquals(OfflinePairingApiPhase.RESOLVING, controller.getStatus().phase)
+    }
+
+    @Test fun `native terminal error closes runtime and permits a fresh session`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
+        val qrJson = controller.start("This phone")
+        val failed = factory.created.single()
+
+        failed.emit(OfflinePairingApiPhase.VERIFY_CODE, peerDisplayName = "Peer", sas = "654321")
+        failed.emit(OfflinePairingApiPhase.IDLE, error = OfflinePairingApiError.IDENTITY_MISMATCH)
+
+        assertTrue(failed.job.isCancelled)
+        assertEquals(1, failed.closeCount)
+        assertEquals(OfflinePairingApiError.IDENTITY_MISMATCH, controller.getStatus().error)
+        controller.join(qrJson, "Other phone")
+        assertEquals(2, factory.created.size)
+        assertEquals(OfflinePairingApiRole.JOINER, controller.getStatus().role)
+    }
+
+    @Test fun `native lifecycle validates inputs and redacts runtime exceptions`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
+
+        assertApiError(OfflinePairingApiError.PAIR_INVALID_DISPLAY_NAME) { controller.start(" ") }
+        assertApiError(OfflinePairingApiError.PAIR_INVALID_DISPLAY_NAME) { controller.start("x".repeat(257)) }
+        assertApiError(OfflinePairingApiError.PAIR_INVALID_QR) { controller.join("{\"token\":\"secret\"}", "Phone") }
+        assertEquals(0, factory.createCount)
+
+        factory.throwOnCreate = IllegalStateException("token=secret ip=192.0.2.10 port=443")
+        val error = assertApiError(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE) { controller.start("Phone") }
+        assertEquals(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE.code, error.message)
+        assertFalse(error.toString().contains("secret"))
+        assertFalse(error.toString().contains("192.0.2.10"))
+    }
+
+    @Test fun `native lifecycle destroy closes transport and clears provisional status`() {
+        val factory = FakeOfflinePairingRuntimeFactory()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
+        controller.start("This phone")
+        val runtime = factory.created.single()
+        runtime.emit(OfflinePairingApiPhase.VERIFY_CODE, peerDisplayName = "Peer", sas = "123456")
+
+        controller.destroy()
+
+        assertEquals(1, runtime.cancelCount)
+        assertEquals(1, runtime.closeCount)
+        assertTrue(runtime.job.isCancelled)
+        assertEquals(OfflinePairingApiPhase.IDLE, controller.getStatus().phase)
+        assertNull(controller.getStatus().sas)
+        assertNull(controller.getStatus().peerDisplayName)
+    }
+
+    private fun assertApiError(
+        expected: OfflinePairingApiError,
+        block: () -> Unit,
+    ): OfflinePairingApiException {
+        val error = try {
+            block()
+            throw AssertionError("expected ${expected.code}")
+        } catch (error: OfflinePairingApiException) {
+            error
+        }
+        assertEquals(expected, error.error)
+        return error
+    }
+
     private fun assertCancellation(coordinator: OfflinePairingCoordinator, port: FakePort) {
         assertEquals(OfflinePairingState.IDLE, coordinator.status.state)
         assertNull(coordinator.status.sas)
         assertEquals(0, coordinator.provisionalSignatureSizeForTest())
         assertTrue(port.closed)
     }
+}
+
+private class FakeOfflinePairingRuntimeFactory : OfflinePairingRuntimeFactory {
+    val created = mutableListOf<FakeOfflinePairingRuntime>()
+    var createCount = 0
+    var throwOnCreate: Throwable? = null
+
+    override fun start(
+        scope: CoroutineScope,
+        displayName: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit,
+    ): OfflinePairingRuntime = create(
+        scope,
+        OfflinePairingApiRole.INITIATOR,
+        qr(identity(1), 60_000).let(LanPairingCodec::encodeQr),
+        statusSink,
+    )
+
+    override fun join(
+        scope: CoroutineScope,
+        qr: LanPairingQr,
+        displayName: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit,
+    ): OfflinePairingRuntime = create(scope, OfflinePairingApiRole.JOINER, null, statusSink, qr.sessionId)
+
+    private fun create(
+        scope: CoroutineScope,
+        role: OfflinePairingApiRole,
+        qrJson: String?,
+        statusSink: (OfflinePairingPublicStatus) -> Unit,
+        sessionId: String = qrJson?.let(LanPairingCodec::decodeQr)?.sessionId ?: UUID.randomUUID().toString(),
+    ): FakeOfflinePairingRuntime {
+        createCount++
+        throwOnCreate?.let { throw it }
+        return FakeOfflinePairingRuntime(scope, role, sessionId, qrJson, statusSink).also(created::add)
+    }
+}
+
+private class FakeOfflinePairingRuntime(
+    scope: CoroutineScope,
+    override val role: OfflinePairingApiRole,
+    override val sessionId: String,
+    override val qrJson: String?,
+    private val statusSink: (OfflinePairingPublicStatus) -> Unit,
+) : OfflinePairingRuntime {
+    override val job = Job(scope.coroutineContext[Job])
+    var confirmCount = 0
+    var cancelCount = 0
+    var closeCount = 0
+
+    override fun confirm() { confirmCount++ }
+    override fun cancel() { cancelCount++ }
+    override fun close() { closeCount++ }
+
+    fun emit(
+        phase: OfflinePairingApiPhase,
+        error: OfflinePairingApiError? = null,
+        peerDisplayName: String? = null,
+        sas: String? = null,
+        completed: Boolean = false,
+    ) = statusSink(OfflinePairingPublicStatus(role, phase, sessionId, error, peerDisplayName, sas, completed))
 }
 
 private class PairHarness(

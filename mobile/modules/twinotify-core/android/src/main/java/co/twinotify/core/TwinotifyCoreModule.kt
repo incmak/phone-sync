@@ -14,12 +14,15 @@ import co.twinotify.core.crypto.NonceSource
 import co.twinotify.core.pairing.Fingerprint
 import co.twinotify.core.pairing.PairPayload
 import co.twinotify.core.pairing.PairProtocol
+import co.twinotify.core.pairing.lan.LanPairingCodec
+import co.twinotify.core.pairing.lan.LanPairingQr
 import co.twinotify.core.service.toEventMap
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.PeerRecord
 import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.storage.ReplayGuard
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -33,10 +36,22 @@ import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.text.Normalizer
 
-class TwinotifyCoreModule : Module() {
+class TwinotifyCoreModule internal constructor(
+    offlinePairingRuntimeFactory: OfflinePairingRuntimeFactory,
+) : Module() {
+
+    constructor() : this(UnavailableOfflinePairingRuntimeFactory)
 
     private val moduleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val offlinePairing = OfflinePairingApiController(
+        moduleScope,
+        offlinePairingRuntimeFactory,
+    ) { status ->
+        mainHandler.post { sendEvent("onOfflinePairingStatus", status.toEventMap()) }
+    }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -49,7 +64,7 @@ class TwinotifyCoreModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("TwinotifyCore")
 
-        Events("onSyncStatus", "onPeerUnpair")
+        Events("onSyncStatus", "onPeerUnpair", "onOfflinePairingStatus")
 
         OnCreate {
             try {
@@ -72,6 +87,7 @@ class TwinotifyCoreModule : Module() {
         }
 
         OnDestroy {
+            offlinePairing.destroy()
             moduleScope.cancel()
         }
 
@@ -187,6 +203,60 @@ class TwinotifyCoreModule : Module() {
                         ))
                     }
                 } catch (e: Throwable) { promise.reject("PAIR_STATUS", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("startOfflinePairing") { displayName: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val qrJson = offlinePairing.start(displayName)
+                    resolveOnMain(promise, qrJson)
+                } catch (error: Throwable) {
+                    rejectOfflinePairingOnMain(promise, error)
+                }
+            }
+        }
+
+        AsyncFunction("joinOfflinePairing") { qrJson: String, displayName: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    offlinePairing.join(qrJson, displayName)
+                    resolveOnMain(promise, null)
+                } catch (error: Throwable) {
+                    rejectOfflinePairingOnMain(promise, error)
+                }
+            }
+        }
+
+        AsyncFunction("confirmOfflinePairing") { sessionId: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    offlinePairing.confirm(sessionId)
+                    resolveOnMain(promise, null)
+                } catch (error: Throwable) {
+                    rejectOfflinePairingOnMain(promise, error)
+                }
+            }
+        }
+
+        AsyncFunction("cancelOfflinePairing") { sessionId: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    offlinePairing.cancel(sessionId)
+                    resolveOnMain(promise, null)
+                } catch (error: Throwable) {
+                    rejectOfflinePairingOnMain(promise, error)
+                }
+            }
+        }
+
+        AsyncFunction("getOfflinePairingStatus") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    resolveOnMain(promise, offlinePairing.getStatus().toEventMap())
+                } catch (error: Throwable) {
+                    rejectOfflinePairingOnMain(promise, error)
+                }
             }
         }
 
@@ -521,4 +591,360 @@ class TwinotifyCoreModule : Module() {
             }
         }
     }
+
+    private fun resolveOnMain(promise: Promise, value: Any?) {
+        mainHandler.post { promise.resolve(value) }
+    }
+
+    private fun rejectOfflinePairingOnMain(promise: Promise, failure: Throwable) {
+        val error = (failure as? OfflinePairingApiException)?.error
+            ?: OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE
+        mainHandler.post { promise.reject(error.code, error.code, null) }
+    }
 }
+
+internal enum class OfflinePairingApiRole(val code: String) {
+    INITIATOR("initiator"),
+    JOINER("joiner"),
+}
+
+internal enum class OfflinePairingApiPhase(val code: String) {
+    IDLE("idle"),
+    ADVERTISING("advertising"),
+    RESOLVING("resolving"),
+    TLS_AUTHENTICATED("tls_authenticated"),
+    VERIFY_CODE("verify_code"),
+    LOCAL_CONFIRMED("local_confirmed"),
+    MUTUALLY_SIGNED("mutually_signed"),
+    COMMITTED("committed"),
+    COMPLETE("complete"),
+}
+
+internal enum class OfflinePairingApiError(val code: String) {
+    PAIR_SESSION_ACTIVE("pair_session_active"),
+    PAIR_SESSION_NOT_FOUND("pair_session_not_found"),
+    PAIR_SESSION_MISMATCH("pair_session_mismatch"),
+    PAIR_INVALID_DISPLAY_NAME("pair_invalid_display_name"),
+    PAIR_INVALID_QR("pair_invalid_qr"),
+    PAIR_RUNTIME_UNAVAILABLE("pair_runtime_unavailable"),
+    EXPIRED("expired"),
+    IDENTITY_MISMATCH("identity_mismatch"),
+    INVALID_FRAME("invalid_frame"),
+    COMMIT_FAILED("commit_failed"),
+    CANCELLED("cancelled"),
+}
+
+internal class OfflinePairingApiException(
+    val error: OfflinePairingApiError,
+) : RuntimeException(error.code)
+
+/** The complete, secret-free native-to-JS pairing status allowlist. */
+internal data class OfflinePairingPublicStatus(
+    val role: OfflinePairingApiRole?,
+    val phase: OfflinePairingApiPhase,
+    val sessionId: String?,
+    val error: OfflinePairingApiError?,
+    val peerDisplayName: String?,
+    val sas: String?,
+    val completed: Boolean,
+) {
+    init {
+        if (sessionId != null) requireCanonicalSessionId(sessionId)
+        require(peerDisplayName == null || peerDisplayName == normalizedDisplayName(peerDisplayName)) {
+            "pair_invalid_status"
+        }
+        require(sas == null || SAS_PATTERN.matches(sas)) { "pair_invalid_status" }
+        require(completed == (phase == OfflinePairingApiPhase.COMPLETE)) { "pair_invalid_status" }
+        require((role == null) == (sessionId == null)) { "pair_invalid_status" }
+        require(phase != OfflinePairingApiPhase.IDLE || !completed) { "pair_invalid_status" }
+    }
+
+    fun toEventMap(): Map<String, Any?> = linkedMapOf(
+        "role" to role?.code,
+        "phase" to phase.code,
+        "sessionId" to sessionId,
+        "errorCode" to error?.code,
+        "peerDisplayName" to peerDisplayName,
+        "sas" to sas,
+        "completed" to completed,
+    )
+}
+
+/**
+ * Task 7 may provide the Android coordinator/transport adapter through this
+ * narrow seam. Task 6 never reports fake success while that final adapter is
+ * absent.
+ */
+internal interface OfflinePairingRuntimeFactory {
+    fun start(
+        scope: CoroutineScope,
+        displayName: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit,
+    ): OfflinePairingRuntime
+
+    fun join(
+        scope: CoroutineScope,
+        qr: LanPairingQr,
+        displayName: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit,
+    ): OfflinePairingRuntime
+}
+
+internal interface OfflinePairingRuntime {
+    val role: OfflinePairingApiRole
+    val sessionId: String
+    val qrJson: String?
+    val job: Job
+    fun confirm()
+    fun cancel()
+    fun close()
+}
+
+private object UnavailableOfflinePairingRuntimeFactory : OfflinePairingRuntimeFactory {
+    override fun start(
+        scope: CoroutineScope,
+        displayName: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit,
+    ): OfflinePairingRuntime = unavailable()
+
+    override fun join(
+        scope: CoroutineScope,
+        qr: LanPairingQr,
+        displayName: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit,
+    ): OfflinePairingRuntime = unavailable()
+
+    private fun unavailable(): Nothing = throw OfflinePairingApiException(
+        OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE,
+    )
+}
+
+/** Serial owner of exactly one provisional pairing runtime and child job. */
+internal class OfflinePairingApiController(
+    private val scope: CoroutineScope,
+    private val factory: OfflinePairingRuntimeFactory,
+    private val statusSink: (OfflinePairingPublicStatus) -> Unit,
+) {
+    private val monitor = Any()
+    private var generation = 0L
+    private var runtime: OfflinePairingRuntime? = null
+    private var status = idleStatus()
+
+    fun start(displayName: String): String = synchronized(monitor) {
+        ensureNoActiveSession()
+        val normalizedName = requireDisplayName(displayName)
+        val created = create(OfflinePairingApiRole.INITIATOR, OfflinePairingApiPhase.ADVERTISING) { sink ->
+            factory.start(scope, normalizedName, sink)
+        }
+        val rawQr = created.qrJson ?: failCreated(created, OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
+        val decoded = decodeQr(rawQr)
+        if (decoded.sessionId != created.sessionId || rawQr.encodeToByteArray().size > MAX_QR_BYTES) {
+            failCreated(created, OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
+        }
+        rawQr
+    }
+
+    fun join(qrJson: String, displayName: String) = synchronized(monitor) {
+        ensureNoActiveSession()
+        val qr = decodeQr(qrJson)
+        val normalizedName = requireDisplayName(displayName)
+        create(OfflinePairingApiRole.JOINER, OfflinePairingApiPhase.RESOLVING, qr.displayName) { sink ->
+            factory.join(scope, qr, normalizedName, sink)
+        }
+        Unit
+    }
+
+    fun confirm(sessionId: String) = synchronized(monitor) {
+        val active = requireExactSession(sessionId)
+        try {
+            active.confirm()
+        } catch (error: OfflinePairingApiException) {
+            throw error
+        } catch (_: Throwable) {
+            throw OfflinePairingApiException(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
+        }
+    }
+
+    fun cancel(sessionId: String) = synchronized(monitor) {
+        val active = requireExactSession(sessionId)
+        try {
+            active.cancel()
+        } catch (_: Throwable) {
+            // Cancellation still closes the child job and transport. Provider
+            // details are never allowed across the native boundary.
+        } finally {
+            if (runtime === active) {
+                val terminal = OfflinePairingPublicStatus(
+                    role = active.role,
+                    phase = OfflinePairingApiPhase.IDLE,
+                    sessionId = active.sessionId,
+                    error = status.error ?: OfflinePairingApiError.CANCELLED,
+                    peerDisplayName = null,
+                    sas = null,
+                    completed = false,
+                )
+                if (status != terminal) {
+                    status = terminal
+                    statusSink(terminal)
+                }
+            }
+            release(active, cancelCoordinator = false)
+        }
+    }
+
+    fun getStatus(): OfflinePairingPublicStatus = synchronized(monitor) { status }
+
+    fun destroy() = synchronized(monitor) {
+        runtime?.let { release(it, cancelCoordinator = true) }
+        status = idleStatus()
+    }
+
+    private fun create(
+        expectedRole: OfflinePairingApiRole,
+        initialPhase: OfflinePairingApiPhase,
+        peerDisplayName: String? = null,
+        creator: ((OfflinePairingPublicStatus) -> Unit) -> OfflinePairingRuntime,
+    ): OfflinePairingRuntime {
+        val token = ++generation
+        val buffered = mutableListOf<OfflinePairingPublicStatus>()
+        var constructing = true
+        val callback: (OfflinePairingPublicStatus) -> Unit = { update ->
+            synchronized(monitor) {
+                if (generation == token) {
+                    if (constructing) buffered += update else acceptStatus(token, update)
+                }
+            }
+        }
+        val created = try {
+            creator(callback)
+        } catch (error: OfflinePairingApiException) {
+            generation++
+            throw error
+        } catch (_: Throwable) {
+            generation++
+            throw OfflinePairingApiException(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
+        }
+        try {
+            requireCanonicalSessionId(created.sessionId)
+            if (created.role != expectedRole || !created.job.isActive) {
+                failCreated(created, OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
+            }
+            runtime = created
+            status = OfflinePairingPublicStatus(
+                expectedRole,
+                initialPhase,
+                created.sessionId,
+                null,
+                peerDisplayName,
+                null,
+                false,
+            )
+            statusSink(status)
+            constructing = false
+            buffered.forEach { acceptStatus(token, it) }
+            return created
+        } catch (error: OfflinePairingApiException) {
+            throw error
+        } catch (_: Throwable) {
+            failCreated(created, OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
+        }
+    }
+
+    private fun acceptStatus(token: Long, update: OfflinePairingPublicStatus) {
+        val active = runtime ?: return
+        if (generation != token || update.role != active.role || update.sessionId != active.sessionId) return
+        status = update
+        statusSink(update)
+        if (update.completed || (update.phase == OfflinePairingApiPhase.IDLE && update.error != null)) {
+            release(active, cancelCoordinator = false)
+        }
+    }
+
+    private fun requireExactSession(sessionId: String): OfflinePairingRuntime {
+        val active = runtime ?: throw OfflinePairingApiException(OfflinePairingApiError.PAIR_SESSION_NOT_FOUND)
+        val canonical = try {
+            requireCanonicalSessionId(sessionId)
+            sessionId
+        } catch (_: IllegalArgumentException) {
+            throw OfflinePairingApiException(OfflinePairingApiError.PAIR_SESSION_MISMATCH)
+        }
+        if (active.sessionId != canonical) {
+            throw OfflinePairingApiException(OfflinePairingApiError.PAIR_SESSION_MISMATCH)
+        }
+        return active
+    }
+
+    private fun release(active: OfflinePairingRuntime, cancelCoordinator: Boolean) {
+        if (runtime !== active) return
+        generation++
+        runtime = null
+        if (cancelCoordinator) runCatching { active.cancel() }
+        active.job.cancel()
+        runCatching { active.close() }
+    }
+
+    private fun failCreated(created: OfflinePairingRuntime, error: OfflinePairingApiError): Nothing {
+        if (runtime === created) runtime = null
+        generation++
+        created.job.cancel()
+        runCatching { created.cancel() }
+        runCatching { created.close() }
+        throw OfflinePairingApiException(error)
+    }
+
+    private fun ensureNoActiveSession() {
+        if (runtime != null) throw OfflinePairingApiException(OfflinePairingApiError.PAIR_SESSION_ACTIVE)
+    }
+
+    private fun decodeQr(raw: String): LanPairingQr {
+        if (raw.encodeToByteArray().size > MAX_QR_BYTES) {
+            throw OfflinePairingApiException(OfflinePairingApiError.PAIR_INVALID_QR)
+        }
+        return try {
+            LanPairingCodec.decodeQr(raw)
+        } catch (_: Throwable) {
+            throw OfflinePairingApiException(OfflinePairingApiError.PAIR_INVALID_QR)
+        }
+    }
+
+    private companion object {
+        const val MAX_QR_BYTES = 4_096
+    }
+}
+
+private val SAS_PATTERN = Regex("[0-9]{6}")
+private const val MAX_DISPLAY_NAME_CODE_POINTS = 128
+private const val MAX_DISPLAY_NAME_BYTES = 256
+
+private fun requireDisplayName(value: String): String = try {
+    normalizedDisplayName(value)
+} catch (_: IllegalArgumentException) {
+    throw OfflinePairingApiException(OfflinePairingApiError.PAIR_INVALID_DISPLAY_NAME)
+}
+
+private fun normalizedDisplayName(value: String): String {
+    val normalized = Normalizer.normalize(value.trim(), Normalizer.Form.NFC)
+    require(normalized.isNotBlank()) { "pair_invalid_display_name" }
+    require(normalized.codePointCount(0, normalized.length) <= MAX_DISPLAY_NAME_CODE_POINTS) {
+        "pair_invalid_display_name"
+    }
+    require(normalized.encodeToByteArray().size <= MAX_DISPLAY_NAME_BYTES) { "pair_invalid_display_name" }
+    require(normalized.none { it == '\u0000' || it == '\r' || it == '\n' || Character.isISOControl(it) }) {
+        "pair_invalid_display_name"
+    }
+    return normalized
+}
+
+private fun requireCanonicalSessionId(value: String) {
+    require(value.length == 36 && UUID.fromString(value).toString() == value) { "pair_invalid_session" }
+}
+
+private fun idleStatus() = OfflinePairingPublicStatus(
+    role = null,
+    phase = OfflinePairingApiPhase.IDLE,
+    sessionId = null,
+    error = null,
+    peerDisplayName = null,
+    sas = null,
+    completed = false,
+)
