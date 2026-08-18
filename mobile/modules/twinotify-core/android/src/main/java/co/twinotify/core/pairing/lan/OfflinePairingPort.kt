@@ -37,6 +37,12 @@ sealed class OfflinePairingFrame {
         }
         val signature: ByteArray get() = storedSignature.copyOf()
     }
+
+    class Cancel(
+        override val sessionId: String,
+    ) : OfflinePairingFrame() {
+        init { validateSessionId(sessionId) }
+    }
 }
 
 enum class OfflinePairingRole { INITIATOR, JOINER }
@@ -59,6 +65,9 @@ enum class OfflinePairingError(val code: String) {
     INVALID_FRAME("invalid_frame"),
     COMMIT_FAILED("commit_failed"),
     CANCELLED("cancelled"),
+    PEER_REJECTED("peer_rejected"),
+    WIFI_PERMISSION_DENIED("wifi_permission_denied"),
+    WIFI_UNAVAILABLE("wifi_unavailable"),
 }
 
 /** A secret-free status intended for UI and logs. */
@@ -66,6 +75,7 @@ data class OfflinePairingStatus(
     val state: OfflinePairingState,
     val error: OfflinePairingError? = null,
     val sas: String? = null,
+    val peerDisplayName: String? = null,
 )
 
 class OfflinePairingIdentity(
@@ -83,7 +93,7 @@ class OfflinePairingIdentity(
 
     init {
         validateDeviceId(deviceId)
-        require(displayName.isNotBlank()) { "invalid LAN pairing display name" }
+        require(displayName == normalizeLanDisplayName(displayName)) { "invalid LAN pairing display name" }
         require(encryption.size == 32 && signing.size == 32 && signingSecret.size == 64 && tlsPin.size == 32) {
             "invalid LAN pairing identity"
         }
@@ -112,6 +122,7 @@ class OfflinePairingExistingPeer(deviceId: String, encryptionPublicKey: ByteArra
 
 class OfflinePairingCommit(
     val peerDeviceId: String,
+    val peerDisplayName: String,
     peerEncryptionPublicKey: ByteArray,
     peerSigningPublicKey: ByteArray,
     peerTlsSpkiSha256: ByteArray,
@@ -125,6 +136,7 @@ class OfflinePairingCommit(
 
     init {
         validateDeviceId(peerDeviceId)
+        require(peerDisplayName == normalizeLanDisplayName(peerDisplayName)) { "invalid LAN pairing display name" }
         require(encryption.size == 32 && signing.size == 32 && tlsPin.size == 32 && secret.size == 32 && protocolVersion == 1) {
             "invalid LAN pairing commit"
         }

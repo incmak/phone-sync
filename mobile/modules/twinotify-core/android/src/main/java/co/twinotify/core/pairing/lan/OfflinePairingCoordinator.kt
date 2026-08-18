@@ -98,6 +98,7 @@ class OfflinePairingCoordinator(
         when (frame) {
             is OfflinePairingFrame.Hello -> receiveHello(session, frame)
             is OfflinePairingFrame.Signature -> receiveSignature(frame)
+            is OfflinePairingFrame.Cancel -> abort(OfflinePairingError.PEER_REJECTED)
         }
     }
 
@@ -138,8 +139,13 @@ class OfflinePairingCoordinator(
     fun cancel() = submitPublic {
         val now = monotonicOrNull()
         if (now != null && expiredAt(now)) abort(OfflinePairingError.EXPIRED)
-        else abort(OfflinePairingError.CANCELLED)
+        else {
+            qr?.let { session -> runCatching { port.send(OfflinePairingFrame.Cancel(session.sessionId)) } }
+            abort(OfflinePairingError.CANCELLED)
+        }
     }
+
+    fun fail(error: OfflinePairingError) = submitPublic { abort(error) }
 
     internal fun provisionalSignatureSizeForTest(): Int = peerSignature?.size ?: pendingPeerSignature?.size ?: 0
 
@@ -289,7 +295,7 @@ class OfflinePairingCoordinator(
                     return@continuation
                 }
                 val value = try {
-                    OfflinePairingCommit(peer.deviceId, peer.encryptionPublicKey.copy(), peer.signingPublicKey.copy(),
+                    OfflinePairingCommit(peer.deviceId, peer.displayName, peer.encryptionPublicKey.copy(), peer.signingPublicKey.copy(),
                         peer.tlsSpkiSha256.copy(), secret, session.version)
                 } catch (_: IllegalArgumentException) {
                     secret.fill(0)
@@ -375,7 +381,7 @@ class OfflinePairingCoordinator(
     }
 
     private fun transition(state: OfflinePairingState, sas: String? = status.sas) {
-        val snapshot = OfflinePairingStatus(state, null, sas)
+        val snapshot = OfflinePairingStatus(state, null, sas, peerHello?.displayName)
         status = snapshot
         val token = generation
         enqueueInternal {
@@ -424,6 +430,7 @@ class OfflinePairingCoordinator(
 
     private fun matchesQrPeer(session: LanPairingQr, peer: LanPairingHello): Boolean = role != OfflinePairingRole.JOINER ||
         (session.deviceId == peer.deviceId &&
+            session.displayName == peer.displayName &&
             MessageDigest.isEqual(session.encryptionPublicKey.copy(), peer.encryptionPublicKey.copy()) &&
             MessageDigest.isEqual(session.signingPublicKey.copy(), peer.signingPublicKey.copy()) &&
             MessageDigest.isEqual(session.tlsSpkiSha256.copy(), peer.tlsSpkiSha256.copy()))
@@ -433,12 +440,13 @@ class OfflinePairingCoordinator(
     } ?: false
 
     private fun localHello(nonce: ByteArray) = LanPairingHello(
-        localIdentity.deviceId, LanPairingBytes(localIdentity.encryptionPublicKey), LanPairingBytes(localIdentity.signingPublicKey),
+        localIdentity.deviceId, localIdentity.displayName, LanPairingBytes(localIdentity.encryptionPublicKey), LanPairingBytes(localIdentity.signingPublicKey),
         LanPairingBytes(localIdentity.tlsSpkiSha256), LanPairingBytes(nonce),
     )
 
     private fun sameHello(first: LanPairingHello, second: LanPairingHello): Boolean =
-        first.deviceId == second.deviceId && MessageDigest.isEqual(first.encryptionPublicKey.copy(), second.encryptionPublicKey.copy()) &&
+        first.deviceId == second.deviceId && first.displayName == second.displayName &&
+            MessageDigest.isEqual(first.encryptionPublicKey.copy(), second.encryptionPublicKey.copy()) &&
             MessageDigest.isEqual(first.signingPublicKey.copy(), second.signingPublicKey.copy()) &&
             MessageDigest.isEqual(first.tlsSpkiSha256.copy(), second.tlsSpkiSha256.copy()) &&
             MessageDigest.isEqual(first.nonce.copy(), second.nonce.copy())

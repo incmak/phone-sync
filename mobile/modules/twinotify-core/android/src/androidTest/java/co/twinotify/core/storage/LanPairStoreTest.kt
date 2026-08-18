@@ -47,6 +47,23 @@ class LanPairStoreTest {
     }
 
     @Test
+    fun freshOfflineCommitCreatesPeerAndMarkerOnlyAfterSealedVerification() = runBlocking {
+        val peer = peer(deviceId = "dev-00000000-0000-0000-0000-000000000011", name = "Fresh phone")
+        assertNull(PeerStore.load(context))
+
+        LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding()))
+
+        val committed = assertNotNull(PeerStore.load(context))
+        assertEquals(peer.deviceId, committed.deviceId)
+        assertContentEquals(peer.encPubkey, committed.encPubkey)
+        assertContentEquals(peer.signPubkey, committed.signPubkey)
+        assertEquals(peer.displayName, committed.displayName)
+        assertNotNull(committed.lanBindingId)
+        assertNotNull(LanPairStore.loadValidated(context, committed))
+        Unit
+    }
+
+    @Test
     fun peerRecordStoresOnlyPublicLanBindingMarker() = runBlocking {
         val peer = peer()
         PeerStore.save(context, peer)

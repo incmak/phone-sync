@@ -1,6 +1,7 @@
 package co.twinotify.core.pairing.lan
 
 import java.security.MessageDigest
+import java.text.Normalizer
 import java.util.UUID
 
 private const val LAN_PAIRING_VERSION = 1
@@ -53,6 +54,7 @@ data class LanPairingQr(
 
 data class LanPairingHello(
     val deviceId: String,
+    val displayName: String,
     val encryptionPublicKey: LanPairingBytes,
     val signingPublicKey: LanPairingBytes,
     val tlsSpkiSha256: LanPairingBytes,
@@ -60,6 +62,7 @@ data class LanPairingHello(
 ) {
     init {
         validateDeviceId(deviceId)
+        require(displayName == normalizeLanDisplayName(displayName)) { "invalid LAN pairing display name" }
         require(encryptionPublicKey.copy().size == APPLICATION_KEY_BYTES) { "invalid LAN encryption public key" }
         require(signingPublicKey.copy().size == APPLICATION_KEY_BYTES) { "invalid LAN signing public key" }
         require(tlsSpkiSha256.copy().size == TLS_PIN_BYTES) { "invalid LAN TLS pin" }
@@ -107,7 +110,18 @@ internal fun validateLifetime(value: Long) {
 }
 
 private fun validateDisplayName(value: String) {
-    require(value.isNotBlank() && value.codePointCount(0, value.length) <= MAX_DISPLAY_NAME_CODE_POINTS) {
+    require(value == normalizeLanDisplayName(value)) {
         "invalid LAN pairing display name"
     }
+}
+
+internal fun normalizeLanDisplayName(value: String): String {
+    val normalized = Normalizer.normalize(value.trim(), Normalizer.Form.NFC)
+    require(normalized.isNotBlank() && normalized.codePointCount(0, normalized.length) <= MAX_DISPLAY_NAME_CODE_POINTS) {
+        "invalid LAN pairing display name"
+    }
+    require(normalized.encodeToByteArray().size <= 256 && normalized.none { Character.isISOControl(it) }) {
+        "invalid LAN pairing display name"
+    }
+    return normalized
 }

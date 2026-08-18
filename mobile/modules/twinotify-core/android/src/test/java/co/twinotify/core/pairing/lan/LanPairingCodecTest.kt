@@ -89,6 +89,7 @@ class LanPairingCodecTest {
         assertBound(first.copy(second = joiner.copy(tlsSpkiSha256 = bytes(32, 22))))
         assertBound(first.copy(first = initiator.copy(nonce = bytes(32, 23))))
         assertBound(first.copy(second = joiner.copy(nonce = bytes(32, 24))))
+        assertBound(first.copy(first = initiator.copy(displayName = "Renamed phone")))
     }
 
     @Test
@@ -119,6 +120,7 @@ class LanPairingCodecTest {
 
     private fun hello(deviceId: String, seed: Int) = LanPairingHello(
         deviceId = deviceId,
+        displayName = "Phone $seed",
         encryptionPublicKey = bytes(32, seed),
         signingPublicKey = bytes(32, seed + 1),
         tlsSpkiSha256 = bytes(32, seed + 2),

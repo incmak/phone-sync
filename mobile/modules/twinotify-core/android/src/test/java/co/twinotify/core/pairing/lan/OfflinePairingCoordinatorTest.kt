@@ -316,6 +316,7 @@ class OfflinePairingCoordinatorTest {
         pair.joiner.onTlsAuthenticated(pair.initiatorIdentity.tlsSpkiSha256)
         val forged = LanPairingHello(
             deviceId = "dev-00000000-0000-0000-0000-000000000077",
+            displayName = "Forged phone",
             encryptionPublicKey = LanPairingBytes(bytes(77)),
             signingPublicKey = LanPairingBytes(bytes(78)),
             tlsSpkiSha256 = LanPairingBytes(pair.initiatorIdentity.tlsSpkiSha256),
@@ -717,7 +718,7 @@ private class PairHarness(
         nonce: ByteArray = bytes(20),
     ) = OfflinePairingFrame.Hello(
         sessionId, qr.lifetimeMillis,
-        LanPairingHello(joinerIdentity.deviceId, LanPairingBytes(encryptionKey), LanPairingBytes(joinerIdentity.signingPublicKey), LanPairingBytes(tlsPin), LanPairingBytes(nonce)),
+        LanPairingHello(joinerIdentity.deviceId, joinerIdentity.displayName, LanPairingBytes(encryptionKey), LanPairingBytes(joinerIdentity.signingPublicKey), LanPairingBytes(tlsPin), LanPairingBytes(nonce)),
     )
 
     fun joinerSignature(using: OfflinePairingCrypto = crypto): OfflinePairingFrame.Signature {
@@ -728,7 +729,7 @@ private class PairHarness(
     }
 
     private fun initiatorHello() = LanPairingHello(
-        initiatorIdentity.deviceId, LanPairingBytes(initiatorIdentity.encryptionPublicKey), LanPairingBytes(initiatorIdentity.signingPublicKey),
+        initiatorIdentity.deviceId, initiatorIdentity.displayName, LanPairingBytes(initiatorIdentity.encryptionPublicKey), LanPairingBytes(initiatorIdentity.signingPublicKey),
         LanPairingBytes(initiatorIdentity.tlsSpkiSha256), LanPairingBytes(bytes(10)),
     )
 }

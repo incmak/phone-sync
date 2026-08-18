@@ -37,6 +37,7 @@ class LanPairingCryptoInstrumentedTest {
 
     private fun hello(deviceId: String, seed: Int) = LanPairingHello(
         deviceId = deviceId,
+        displayName = "Phone $seed",
         encryptionPublicKey = bytes(seed),
         signingPublicKey = bytes(seed + 1),
         tlsSpkiSha256 = bytes(seed + 2),

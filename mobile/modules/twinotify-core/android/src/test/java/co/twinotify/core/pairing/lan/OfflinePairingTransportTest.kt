@@ -107,6 +107,22 @@ class OfflinePairingTransportTest {
     }
 
     @Test
+    fun authenticatedPairCancelRoundTripsAsBoundedPeerRejection() {
+        val bytes = ByteArrayOutputStream().also {
+            OfflinePairingFrameCodec.write(
+                it,
+                OfflinePairingFrame.Cancel(sessionId),
+                FrameBudget(1, 4096),
+            )
+        }.toByteArray()
+
+        val decoded = OfflinePairingFrameCodec.read(ByteArrayInputStream(bytes), FrameBudget(1, 4096))
+
+        assertTrue(decoded is OfflinePairingFrame.Cancel)
+        assertEquals(sessionId, decoded.sessionId)
+    }
+
+    @Test
     fun frameParserRejectsZeroOversizeInvalidUtf8UnknownAndTrailingData() {
         val invalid = listOf(
             prefixed(byteArrayOf()),
@@ -198,6 +214,22 @@ class OfflinePairingTransportTest {
         assertTrue(server.closed)
         assertEquals(1, adapter.unregisterCalls)
         assertTrue(adapter.registeredHandle === adapter.unregisteredHandle)
+    }
+
+    @Test
+    fun acceptedTlsConnectionWithoutClientCertificatePinIsRejectedBeforeFrameRead() = runBlocking {
+        val input = CountingInputStream(prefixed("not-a-pairing-frame".encodeToByteArray()))
+        val socket = RecordingSocket(input)
+        val adapter = FakeNsdAdapter(null)
+        val server = FakeTlsServer(connection = PairingConnection(socket, null))
+
+        val failure = assertFailsWith<PairingTransportException> {
+            OfflinePairingTransport(adapter, tlsServer = server).accept(sessionId)
+        }
+
+        assertEquals(PairingTransportFailure.TLS_FAILED, failure.failure)
+        assertEquals(0, input.readCount)
+        assertTrue(socket.closed)
     }
 
     @Test
@@ -437,10 +469,12 @@ class OfflinePairingTransportTest {
         }
     }
 
-    private class FakeTlsServer : PairingTlsServer {
+    private class FakeTlsServer(
+        private val connection: PairingConnection? = null,
+    ) : PairingTlsServer {
         var closed = false
         override val localPort: Int = 0
-        override suspend fun accept(): PairingConnection = CompletableDeferred<PairingConnection>().await()
+        override suspend fun accept(): PairingConnection = connection ?: CompletableDeferred<PairingConnection>().await()
         override fun close() { closed = true }
     }
 

@@ -165,13 +165,12 @@ object LanPairStore {
 
     private suspend fun commitLocked(context: Context, dataStore: DataStore<Preferences>, prepared: PreparedLanBinding) {
         val current = PeerStore.load(context)
-            ?: throw LanPairStoreException(LanPairStoreFailure.PEER_CHANGED)
-        if (!current.samePublicIdentity(prepared.peer)) {
+        if (current != null && !current.samePublicIdentity(prepared.peer)) {
             throw LanPairStoreException(LanPairStoreFailure.PEER_CHANGED)
         }
 
         val existing = readOuter(dataStore)
-        if (current.lanBindingId != null) {
+        if (current?.lanBindingId != null) {
             if (current.lanBindingId == prepared.bindingId && existing != null && verify(existing, prepared)) {
                 return // exact retry after a process crash or lost caller acknowledgement
             }
@@ -193,7 +192,7 @@ object LanPairStore {
             clearOuterIfId(dataStore, prepared.bindingId)
             throw LanPairStoreException(LanPairStoreFailure.SEALED_RECORD_INVALID)
         }
-        if (!PeerStore.attachLanBinding(context, prepared.peer, prepared.bindingId)) {
+        if (!PeerStore.commitLanBinding(context, current, prepared.peer, prepared.bindingId)) {
             clearOuterIfId(dataStore, prepared.bindingId)
             throw LanPairStoreException(LanPairStoreFailure.PEER_CHANGED)
         }

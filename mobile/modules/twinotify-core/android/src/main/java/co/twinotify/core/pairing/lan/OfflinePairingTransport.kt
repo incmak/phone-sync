@@ -90,6 +90,7 @@ internal object OfflinePairingFrameCodec {
             put("lifetime_ms", frame.lifetimeMillis)
             put("hello", JSONObject().apply {
                 put("device_id", frame.hello.deviceId)
+                put("display_name", frame.hello.displayName)
                 put("encryption_key", base64(frame.hello.encryptionPublicKey.copy()))
                 put("signing_key", base64(frame.hello.signingPublicKey.copy()))
                 put("tls_pin", base64(frame.hello.tlsSpkiSha256.copy()))
@@ -101,6 +102,10 @@ internal object OfflinePairingFrameCodec {
             put("session", frame.sessionId)
             put("signature", base64(frame.signature))
         }.toString()
+        is OfflinePairingFrame.Cancel -> JSONObject().apply {
+            put("type", "pair.cancel")
+            put("session", frame.sessionId)
+        }.toString()
     }
 
     private fun decode(raw: String): OfflinePairingFrame = try {
@@ -111,7 +116,7 @@ internal object OfflinePairingFrameCodec {
             "pair.hello" -> {
                 value.requireKeys(setOf("type", "session", "lifetime_ms", "hello"))
                 val hello = value.get("hello") as? JSONObject ?: invalidFrame()
-                hello.requireKeys(setOf("device_id", "encryption_key", "signing_key", "tls_pin", "nonce"))
+                hello.requireKeys(setOf("device_id", "display_name", "encryption_key", "signing_key", "tls_pin", "nonce"))
                 val lifetime = value.get("lifetime_ms") as? Number ?: invalidFrame()
                 val lifetimeLong = lifetime.toLong()
                 if (lifetime.toDouble() != lifetimeLong.toDouble()) invalidFrame()
@@ -120,6 +125,7 @@ internal object OfflinePairingFrameCodec {
                     lifetimeMillis = lifetimeLong,
                     hello = LanPairingHello(
                         deviceId = hello.requiredString("device_id"),
+                        displayName = hello.requiredString("display_name"),
                         encryptionPublicKey = LanPairingBytes(hello.requiredBytes("encryption_key", 32)),
                         signingPublicKey = LanPairingBytes(hello.requiredBytes("signing_key", 32)),
                         tlsSpkiSha256 = LanPairingBytes(hello.requiredBytes("tls_pin", 32)),
@@ -133,6 +139,10 @@ internal object OfflinePairingFrameCodec {
                     value.requiredString("session"),
                     value.requiredBytes("signature", 64),
                 )
+            }
+            "pair.cancel" -> {
+                value.requireKeys(setOf("type", "session"))
+                OfflinePairingFrame.Cancel(value.requiredString("session"))
             }
             else -> invalidFrame()
         }
@@ -171,20 +181,26 @@ internal object OfflinePairingFrameCodec {
     private fun invalidFrame(): Nothing = throw PairingTransportException(PairingTransportFailure.INVALID_FRAME)
 }
 
+internal interface RuntimePairingConnection : Closeable {
+    val peerSpkiSha256: ByteArray?
+    suspend fun read(): OfflinePairingFrame
+    fun write(frame: OfflinePairingFrame)
+}
+
 class PairingConnection internal constructor(
     private val socket: Socket,
     peerSpkiSha256: ByteArray?,
     inboundBudget: FrameBudget = FrameBudget(DEFAULT_MAX_FRAMES, DEFAULT_MAX_BYTES),
     outboundBudget: FrameBudget = FrameBudget(DEFAULT_MAX_FRAMES, DEFAULT_MAX_BYTES),
     private val readTimeoutMillis: Long = DEFAULT_READ_TIMEOUT_MILLIS,
-) : Closeable {
+) : RuntimePairingConnection {
     private val peerPin = peerSpkiSha256?.copyOf()
     private val inbound = inboundBudget
     private val outbound = outboundBudget
 
-    val peerSpkiSha256: ByteArray? get() = peerPin?.copyOf()
+    override val peerSpkiSha256: ByteArray? get() = peerPin?.copyOf()
 
-    suspend fun read(): OfflinePairingFrame {
+    override suspend fun read(): OfflinePairingFrame {
         val cancellationCloser = currentCoroutineContext().closeOnCancellation(::close)
         try {
             socket.soTimeout = readTimeoutMillis.toSocketTimeout()
@@ -208,7 +224,7 @@ class PairingConnection internal constructor(
         }
     }
 
-    fun write(frame: OfflinePairingFrame) = OfflinePairingFrameCodec.write(socket.getOutputStream(), frame, outbound)
+    override fun write(frame: OfflinePairingFrame) = OfflinePairingFrameCodec.write(socket.getOutputStream(), frame, outbound)
 
     override fun close() = socket.close()
 
@@ -295,7 +311,10 @@ internal class JssePairingTlsServer private constructor(
             accepted.useClientMode = false
             accepted.soTimeout = operationTimeoutMillis.toSocketTimeout()
             runInterruptible(Dispatchers.IO) { accepted.startHandshake() }
-            return PairingConnection(accepted, null)
+            val certificate = accepted.session.peerCertificates.firstOrNull() as? X509Certificate
+                ?: throw PairingTransportException(PairingTransportFailure.TLS_FAILED)
+            val peerPin = MessageDigest.getInstance("SHA-256").digest(certificate.publicKey.encoded)
+            return PairingConnection(accepted, peerPin)
         } catch (error: CancellationException) {
             accepted.close()
             throw error
@@ -318,7 +337,7 @@ internal class JssePairingTlsServer private constructor(
         ): JssePairingTlsServer {
             val socket = context.serverSocketFactory.createServerSocket(0) as SSLServerSocket
             socket.useClientMode = false
-            socket.needClientAuth = false
+            socket.needClientAuth = true
             socket.soTimeout = operationTimeoutMillis.toSocketTimeout()
             return JssePairingTlsServer(socket, operationTimeoutMillis)
         }
@@ -390,7 +409,7 @@ class OfflinePairingTransport internal constructor(
         var advertisement: PairingAdvertisement? = null
         try {
             advertisement = nsd.register(sessionId, server.localPort)
-            return withTimeout(acceptTimeoutMillis) {
+            val connection = withTimeout(acceptTimeoutMillis) {
                 val cancellationCloser = currentCoroutineContext().closeOnCancellation(server::close)
                 try {
                     server.accept()
@@ -398,6 +417,11 @@ class OfflinePairingTransport internal constructor(
                     cancellationCloser.dispose()
                 }
             }
+            if (connection.peerSpkiSha256 == null) {
+                connection.close()
+                throw PairingTransportException(PairingTransportFailure.TLS_FAILED)
+            }
+            return connection
         } catch (_: TimeoutCancellationException) {
             throw PairingTransportException(PairingTransportFailure.ACCEPT_TIMEOUT)
         } catch (error: PairingTransportException) {

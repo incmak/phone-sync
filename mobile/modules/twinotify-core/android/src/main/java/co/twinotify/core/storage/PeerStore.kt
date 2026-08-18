@@ -78,6 +78,39 @@ object PeerStore {
         return committed
     }
 
+    /**
+     * One DataStore edit either creates the first public peer with its marker,
+     * or attaches only the marker to an unchanged relay peer. It never replaces
+     * a concurrently created or rebound identity.
+     */
+    internal suspend fun commitLanBinding(
+        ctx: Context,
+        expectedCurrent: PeerRecord?,
+        proposedPeer: PeerRecord,
+        bindingId: String,
+    ): Boolean {
+        var committed = false
+        ctx.peerDs.edit { prefs ->
+            val current = record(prefs)
+            if (expectedCurrent == null) {
+                if (current == null) {
+                    prefs[KEY_PEER_DEVICE] = proposedPeer.deviceId
+                    prefs[KEY_PEER_ENC] = proposedPeer.encPubkey
+                    prefs[KEY_PEER_SIGN] = proposedPeer.signPubkey
+                    proposedPeer.displayName?.let { prefs[KEY_PEER_NAME] = it } ?: prefs.remove(KEY_PEER_NAME)
+                    prefs[KEY_LAN_BINDING] = bindingId
+                    committed = true
+                }
+            } else if (current != null && current.samePublicIdentity(expectedCurrent) &&
+                (current.lanBindingId == null || current.lanBindingId == bindingId)
+            ) {
+                prefs[KEY_LAN_BINDING] = bindingId
+                committed = true
+            }
+        }
+        return committed
+    }
+
     /** Disables only LAN for the current pair, leaving its relay identity intact. */
     internal suspend fun clearLanBinding(ctx: Context, expectedBindingId: String? = null) {
         ctx.peerDs.edit { prefs ->

@@ -16,6 +16,7 @@ import co.twinotify.core.pairing.PairPayload
 import co.twinotify.core.pairing.PairProtocol
 import co.twinotify.core.pairing.lan.LanPairingCodec
 import co.twinotify.core.pairing.lan.LanPairingQr
+import co.twinotify.core.pairing.lan.AndroidOfflinePairingRuntimeFactory
 import co.twinotify.core.service.toEventMap
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.PeerRecord
@@ -39,16 +40,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.text.Normalizer
 
 class TwinotifyCoreModule internal constructor(
-    offlinePairingRuntimeFactory: OfflinePairingRuntimeFactory,
+    offlinePairingRuntimeFactory: OfflinePairingRuntimeFactory?,
 ) : Module() {
 
-    constructor() : this(UnavailableOfflinePairingRuntimeFactory)
+    constructor() : this(null)
 
     private val moduleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val offlinePairing = OfflinePairingApiController(
         moduleScope,
-        offlinePairingRuntimeFactory,
+        offlinePairingRuntimeFactory ?: defaultOfflinePairingRuntimeFactory(::requireContext),
     ) { status ->
         mainHandler.post { sendEvent("onOfflinePairingStatus", status.toEventMap()) }
     }
@@ -632,6 +633,9 @@ internal enum class OfflinePairingApiError(val code: String) {
     INVALID_FRAME("invalid_frame"),
     COMMIT_FAILED("commit_failed"),
     CANCELLED("cancelled"),
+    PEER_REJECTED("peer_rejected"),
+    WIFI_PERMISSION_DENIED("wifi_permission_denied"),
+    WIFI_UNAVAILABLE("wifi_unavailable"),
 }
 
 internal class OfflinePairingApiException(
@@ -670,11 +674,7 @@ internal data class OfflinePairingPublicStatus(
     )
 }
 
-/**
- * Task 7 may provide the Android coordinator/transport adapter through this
- * narrow seam. Task 6 never reports fake success while that final adapter is
- * absent.
- */
+/** Factory seam retained for deterministic API-controller tests. */
 internal interface OfflinePairingRuntimeFactory {
     fun start(
         scope: CoroutineScope,
@@ -700,24 +700,9 @@ internal interface OfflinePairingRuntime {
     fun close()
 }
 
-private object UnavailableOfflinePairingRuntimeFactory : OfflinePairingRuntimeFactory {
-    override fun start(
-        scope: CoroutineScope,
-        displayName: String,
-        statusSink: (OfflinePairingPublicStatus) -> Unit,
-    ): OfflinePairingRuntime = unavailable()
-
-    override fun join(
-        scope: CoroutineScope,
-        qr: LanPairingQr,
-        displayName: String,
-        statusSink: (OfflinePairingPublicStatus) -> Unit,
-    ): OfflinePairingRuntime = unavailable()
-
-    private fun unavailable(): Nothing = throw OfflinePairingApiException(
-        OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE,
-    )
-}
+internal fun defaultOfflinePairingRuntimeFactory(
+    contextProvider: () -> Context,
+): OfflinePairingRuntimeFactory = AndroidOfflinePairingRuntimeFactory(contextProvider)
 
 /** Serial owner of exactly one provisional pairing runtime and child job. */
 internal class OfflinePairingApiController(

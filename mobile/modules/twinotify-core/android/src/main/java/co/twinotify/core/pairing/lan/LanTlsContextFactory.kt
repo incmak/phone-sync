@@ -23,7 +23,9 @@ object LanTlsContextFactory {
      * Uses the installation's Android Keystore TLS identity. There is no
      * caller-supplied key material and no export of the private key.
      */
-    fun serverContext(): SSLContext = serverOperations.serverContext()
+    fun serverContext(expectedClientSpkiSha256: ByteArray? = null): SSLContext = serverOperations.serverContext(
+        arrayOf<TrustManager>(clientCertificateTrustManager(expectedClientSpkiSha256)),
+    )
 
     /**
      * Client-only context for a pin that was authenticated in the pairing
@@ -31,7 +33,7 @@ object LanTlsContextFactory {
      */
     fun clientContext(expectedSpkiSha256: ByteArray): SSLContext = try {
         SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf<TrustManager>(pinningTrustManager(expectedSpkiSha256)), null)
+            init(serverOperations.keyManagers(), arrayOf<TrustManager>(pinningTrustManager(expectedSpkiSha256)), null)
         }
     } catch (error: LanIdentityException) {
         throw error
@@ -47,6 +49,13 @@ object LanTlsContextFactory {
         }
         return SpkiPinningTrustManager(expectedSpkiSha256.copyOf())
     }
+
+    fun clientCertificateTrustManager(expectedSpkiSha256: ByteArray? = null): X509TrustManager {
+        if (expectedSpkiSha256 != null && expectedSpkiSha256.size != SHA256_PIN_LENGTH) {
+            throw LanIdentityException(LanIdentityFailure.INVALID_PIN)
+        }
+        return PairingClientCertificateTrustManager(expectedSpkiSha256?.copyOf())
+    }
 }
 
 /**
@@ -60,14 +69,12 @@ internal class LanTlsContextOperations(
     private val keyManagerFactoryLoader: () -> KeyManagerFactory,
     private val sslContextLoader: () -> SSLContext,
 ) {
-    fun serverContext(): SSLContext {
+    fun keyManagers(): Array<javax.net.ssl.KeyManager> {
         identityLoader()
         return try {
             val keyManagerFactory = keyManagerFactoryLoader()
             keyManagerFactory.init(keyStoreLoader(), null)
-            sslContextLoader().apply {
-                init(keyManagerFactory.keyManagers, null, null)
-            }
+            keyManagerFactory.keyManagers
         } catch (error: LanIdentityException) {
             throw error
         } catch (error: CancellationException) {
@@ -75,6 +82,17 @@ internal class LanTlsContextOperations(
         } catch (_: Exception) {
             throw LanIdentityException(LanIdentityFailure.TLS_CONTEXT_FAILED)
         }
+    }
+
+
+    fun serverContext(trustManagers: Array<TrustManager>? = null): SSLContext = try {
+        sslContextLoader().apply { init(keyManagers(), trustManagers, null) }
+    } catch (error: LanIdentityException) {
+        throw error
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        throw LanIdentityException(LanIdentityFailure.TLS_CONTEXT_FAILED)
     }
 }
 
@@ -93,6 +111,29 @@ private class SpkiPinningTrustManager(
         if (!MessageDigest.isEqual(expectedPin, actualPin)) {
             throw CertificateException("lan_tls_pin_mismatch")
         }
+    }
+
+    override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+}
+
+@Suppress("CustomX509TrustManager")
+private class PairingClientCertificateTrustManager(
+    private val expectedPin: ByteArray?,
+) : X509TrustManager {
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
+        val certificate = chain.firstOrNull()
+            ?: throw CertificateException("lan_tls_client_certificate_required")
+        certificate.checkValidity()
+        expectedPin?.let { expected ->
+            val actual = MessageDigest.getInstance("SHA-256").digest(certificate.publicKey.encoded)
+            if (!MessageDigest.isEqual(expected, actual)) {
+                throw CertificateException("lan_tls_client_pin_mismatch")
+            }
+        }
+    }
+
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+        throw CertificateException("lan_tls_server_trust_not_supported")
     }
 
     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()

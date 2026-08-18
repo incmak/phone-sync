@@ -61,6 +61,7 @@ object LanPairingCodec {
             writeField(output, intBytes(value.negotiatedVersion))
             participants.forEach { participant ->
                 writeField(output, participant.deviceId.encodeToByteArray())
+                writeField(output, participant.displayName.encodeToByteArray())
                 writeField(output, participant.encryptionPublicKey.copy())
                 writeField(output, participant.signingPublicKey.copy())
                 writeField(output, participant.tlsSpkiSha256.copy())
