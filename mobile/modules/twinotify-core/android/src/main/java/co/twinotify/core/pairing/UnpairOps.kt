@@ -6,6 +6,7 @@ import co.twinotify.core.crypto.NonceSource
 import co.twinotify.core.filter.AppFilterStore
 import co.twinotify.core.pairing.lan.LanIdentityStore
 import co.twinotify.core.storage.NotificationDb
+import co.twinotify.core.storage.LanPairStore
 import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.storage.ReplayGuard
 import co.twinotify.core.service.ServiceConfigStore
@@ -34,6 +35,7 @@ object UnpairOps {
             // The SyncService has already been cancelled and joined by UnpairWorkflow.
             // Delete LAN TLS material before rotating application identity.
             UnpairWipeOrder(
+                clearLanBinding = { LanPairStore.clear(ctx) },
                 deleteLanIdentity = { LanIdentityStore.delete() },
             ).beforeApplicationKeyRotation {
                 CryptoStore.rotate(ctx)
@@ -49,9 +51,11 @@ object UnpairOps {
 
 /** Local ordering boundary used by the full wipe; it has no lifecycle responsibilities. */
 internal class UnpairWipeOrder(
+    private val clearLanBinding: suspend () -> Unit = {},
     private val deleteLanIdentity: suspend () -> Unit,
 ) {
     suspend fun beforeApplicationKeyRotation(rotateApplicationKeys: suspend () -> Unit) {
+        clearLanBinding()
         deleteLanIdentity()
         rotateApplicationKeys()
     }

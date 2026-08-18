@@ -2,6 +2,7 @@ package co.twinotify.core.crypto
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import co.twinotify.core.pairing.UnpairWipeOrder
 import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -29,5 +30,17 @@ class CryptoStoreTest {
         CryptoStore.rotate(ctx)
         val (secondBox, _) = CryptoStore.loadOrGenerate(ctx)
         assertTrue(!firstBox.publicKey.contentEquals(secondBox.publicKey), "rotation produces new keys")
+    }
+
+    @Test
+    fun lanBindingIsClearedBeforeApplicationKeyRotation() = runBlocking {
+        val steps = mutableListOf<String>()
+
+        UnpairWipeOrder(
+            clearLanBinding = { steps += "lan-binding" },
+            deleteLanIdentity = { steps += "lan-identity" },
+        ).beforeApplicationKeyRotation { steps += "application-keys" }
+
+        assertTrue(steps.indexOf("lan-binding") < steps.indexOf("application-keys"))
     }
 }
