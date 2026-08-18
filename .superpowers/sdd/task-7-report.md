@@ -1,635 +1,229 @@
-# Task 7 Correction Evidence Report: Revocation Linearization
+# Task 7 report: offline pairing and LAN upgrade UI
 
-## Scope and history
+## Result
 
-This correction addresses every Critical and Important finding in
-`.superpowers/sdd/task-7-review.md` without starting Task 8.
+Status at correction handoff: **DONE_WITH_CONCERNS**.
 
-History anchors at correction start:
+The Task 7 UI, tests, package foundation, relay fallback, and nearby-upgrade entry point are implemented. Automated verification and the Android debug build pass. One physical M2012K11AI (API 36) was available and accepted the APK. Physical screen inspection could not proceed because the phone remained behind a secure keyguard; no unlock bypass was attempted. A second physical phone was not present.
 
-```text
-Task 6 base:                f06488fc56754ee6f13c5e36816e001c6a188e49
-Task 7 feature commit:      7c24d39ee12a31a1b5effdb0d3c48acd7b6cbf3c
-Correction working base:    7c24d39ee12a31a1b5effdb0d3c48acd7b6cbf3c
-Branch:                     main
-```
+Baseline: `cf5f527` on branch `codex/offline-lan-sync`.
+Feature commit: `5659a70` (`feat(mobile): pair nearby without internet`).
+Native TLS mapping correction: `ff2aaa6` (`fix(mobile): distinguish nearby pin failures`).
+UI hardening correction base: `ff2aaa6`; intended subject `fix(mobile): harden nearby pairing flow`.
 
-The earlier report's claim that the feature commit was blocked is obsolete. The
-preserved staged work was subsequently committed as `7c24d39` with subject
-`feat(relay): revoke pair authorization and mailboxes`.
+The original feature commit did not change native files. The follow-up `ff2aaa6` intentionally changed the bounded native TLS mapping and its tests, as documented below. No sensitive pairing material was written to screenshots, logs, snapshots, test names, or this report.
 
-Correction commit status at evidence handoff:
+## Strict TDD evidence
 
-```text
-Intended subject: fix(relay): linearize revocation across pair generations
-Commit result:    blocked by the managed approval reviewer
-Staged base/head: 7c24d39ee12a31a1b5effdb0d3c48acd7b6cbf3c
-```
+The test foundation and all behavior tests were created before the production UI changes.
 
-The reviewer stated that it did not see trusted authorization for the exact
-default-branch history mutation and explicitly prohibited workarounds. No retry
-or indirect commit path was attempted. The complete correction and this report
-remain staged for the primary agent. If that agent has sufficient authority to
-create the commit, its resulting head hash belongs in the reviewer handoff; it
-cannot be self-embedded in the content-derived commit that contains this report.
+- Initial RED command: `cd mobile && npm test -- --runInBand app/pair/__tests__/offlinePairingFlow.test.tsx`
+- Initial RED observable: exit 1, one suite failed, 15/15 tests failed because the nearby choice, screens, bridge behavior, repair states, completion gate, upgrade action, and accessibility behavior did not exist.
+- Initial RED artifact: `.omo/evidence/task-7/red-ui-tests.log`
+- Refactor RED command: `cd mobile && npm test -- --runInBand -t 'keeps a native-complete pairing finished'`
+- Refactor RED observable: exit 1; the screen fell back to `Finishing pairing…` when relay sync restart rejected after native completion.
+- Refactor correction: relay restart is now best-effort after native completion is committed; pairing completion remains visible and actionable.
+- Final GREEN command: `cd mobile && npm test -- --runInBand`
+- Final GREEN observable: exit 0, 1/1 suite, 17/17 tests, 0 snapshots.
+- Final GREEN artifact: `.omo/evidence/task-7/jest-full.log`
 
-Expanded correction ownership was limited to the paths directly required to
-establish the generation boundary and retain existing durable-delivery tests:
-
-- `relay/internal/server/client_hub.go`
-- `relay/internal/server/durable_handoff.go`
-- `relay/internal/server/jwt_auth.go`
-- `relay/internal/server/revoke.go`
-- `relay/internal/server/revoke_test.go`
-- `relay/internal/server/server.go`
-- `relay/internal/server/ws.go`
-- `relay/internal/server/ws_mailbox_test.go`
-- `relay/internal/store/mailbox_store.go`
-- `relay/internal/store/pair_store.go`
-- `relay/internal/store/pair_store_test.go`
-- `.superpowers/sdd/task-7-report.md`
-
-`ws.go`, `jwt_auth.go`, `durable_handoff.go`, and `mailbox_store.go` are directly
-required because the review requires the immutable pair identity to reach every
-WebSocket store mutation and delivery transfer. `ws_mailbox_test.go` changes only
-bind existing synthetic clients to their already-confirmed pair ID.
-
-## Strict TDD and observed RED evidence
-
-The correction tests were written before the corresponding production changes.
-
-### Required revocation interleavings
-
-The first correction run failed to compile because the tests named APIs and
-test barriers that did not exist yet, including:
-
-```text
-undefined: bucketRetainedTokenByPair
-ClientHub.ConnectionForPair undefined
-Server.webSocketBeforeRegister undefined
-Server.revokeAfterCommit undefined
-Server.relayPutBeforeStore undefined
-Server.relayAckBeforeStore undefined
-Server.handleRelayPutForPair undefined
-Server.handleRelayAckForPair undefined
-MailboxStore.PutForPair undefined
-```
-
-After adding only test seams and compatibility scaffolding, the deterministic
-behavior RED run proved all four reviewed races were real:
-
-```text
---- FAIL: TestRevokeRejectsAuthenticatedSocketRegisteringAfterCommit
-    socket only reached its read deadline instead of closing
---- FAIL: TestRevokeDisconnectDoesNotCloseReboundGeneration
-    new generation registration was disconnected
---- FAIL: TestRevokeRejectsInFlightOldSessionPutAfterRebind
-    old generation put was not rejected
---- FAIL: TestRevokeRejectsInFlightOldSessionAckAgainstReboundMailbox
-    old generation ack error=<nil>, want ErrNotFound
-```
-
-These barriers place execution at:
-
-- JWT authentication complete but WebSocket registration not started;
-- revoke Bolt commit complete but old-generation disconnect not started;
-- old-session peer/capability resolution complete but mailbox put not started;
-- old-session ACK accepted by the frame handler but mailbox mutation not started.
-
-### Pair-scoped retained-token index
-
-The retained-token correction tests initially failed because the pair-scoped
-bucket and lifecycle did not exist. They cover:
-
-- direct cleanup with 256 unrelated pending tokens;
-- a corrupt unrelated pending value that must not affect revoke;
-- rollback of the retained-token index when mailbox purge fails;
-- one-time migration of a legacy committed token;
-- a second `NewPairStore` after migration with a corrupt pending value, proving
-  startup does not rescan after the version marker is committed.
-
-### Final exact-generation audit REDs
-
-The final audit found two remaining boundary gaps and added tests first.
-
-Old generation invoking the WebSocket-triggered expiry sweep after rebind:
-
-```text
-internal/store/pair_store_test.go:814:23: mailbox.ExpireForPair undefined
-FAIL github.com/twinotify/relay/internal/store [build failed]
-```
-
-Pair-scoped hub operation accepting an unbound synthetic registration:
-
-```text
---- FAIL: TestPairScopedHubOperationsRejectUnboundRegistration
-    pair-scoped lookup accepted an unbound registration
-FAIL github.com/twinotify/relay/internal/server
-```
-
-Both became green only after the expiry transaction validated the exact pair
-generation and pair-scoped hub matching rejected empty pair IDs.
+The Jest setup explicitly mocks Expo Router, camera, storage, QR rendering, and the native Expo module. Tests exercise native bridge calls and status events, including exact session cancellation, raw scanner-text forwarding, explicit confirmation, and COMPLETE-driven onboarding state.
 
 ## Implementation summary
 
-### Immutable session and hub generation
-
-- JWT authentication now snapshots one `PairSession` containing pair ID,
-  device ID, peer ID, and a copied signing public key in a single Bolt view.
-- The authenticated request context carries both device ID and immutable pair
-  ID.
-- WebSocket registration stores that pair ID on `wsClient`, then immediately
-  revalidates the exact device/pair binding. This is the second half of the
-  registration protocol: revoke-before-registration fails revalidation, while
-  registration-before-revoke is removed by generation-targeted disconnect.
-- Pair-scoped hub lookup, send, stop, transfer, and disconnect require an exact
-  non-empty pair match. Legacy unscoped helpers remain only as compatibility
-  wrappers and cannot satisfy a pair-scoped operation.
-- Revocation disconnects only clients tagged with the revoked pair ID, so a
-  newly rebound generation registered in the post-commit gap remains live.
-- Durable handoff notifications carry the immutable pair ID through Bolt-view
-  transfer and hub enqueue. Mixed old/new notifications are dispatched in
-  contiguous generation batches without changing acceptance ordering.
-
-No Bolt or hub mutex is held across socket I/O. The only callback under a Bolt
-view performs bounded serialization/copying and nonblocking hub-queue mutation,
-preserving the Task 4 handoff contract.
-
-### Store mutation linearization
-
-- `RevokeBySession` verifies the expected pair ID in the same Bolt update that
-  calls `purgePairTx` and removes authorization.
-- `PutForPair` validates the exact pair and sender/recipient ownership in the
-  same Bolt update that durably accepts the opaque envelope.
-- `AckForPair` validates the exact pair and expected sender in the same Bolt
-  update that removes mailbox state and writes the terminal tombstone.
-- Capability writes and floor advancement validate the exact pair in their
-  Bolt update.
-- Expiry sweep and expiry-cursor mutations validate the exact pair in their
-  Bolt update.
-- Pending delivery reads and Bolt-view-to-hub transfers validate and filter by
-  the exact pair. Empty pages still validate a pair-scoped caller.
-- Existing unscoped store methods remain as compatibility wrappers for Task
-  4/5/6 tests and non-session maintenance callers.
-
-Therefore a mutation that commits before revoke is removed by `purgePairTx`; a
-mutation whose transaction begins after revoke cannot authorize against a
-rebound pair and returns `ErrNotFound`.
-
-### Bounded retained-token cleanup and migration
-
-- `ConfirmPending` atomically writes `pair_id -> retained pair_token` with the
-  confirmed pair, both device indexes, and the committed pending record.
-- `DeletePending` removes the direct index transactionally when the committed
-  retained record expires.
-- Revoke performs one direct index lookup and deletes only that retained token;
-  it never scans attacker-growable `pair_pending` state.
-- `NewPairStore` performs a versioned, one-time compatibility migration for
-  pre-index databases. After the marker is committed, later construction is
-  constant-time and does not decode pending records.
-- Index collisions and corrupt indexed records fail closed. All index and pair
-  changes roll back with a failed mailbox purge.
-
-### Socket-close assertion
-
-The end-to-end close assertion now fails on `net.Error.Timeout`. It accepts only
-EOF or terminal Gorilla close errors and independently verifies that both exact
-old-generation registrations are absent.
-
-## Behavior proved
-
-- Either paired device can authenticate and revoke.
-- Wrong-key and unpaired JWT subjects cannot revoke.
-- Both device indexes, confirmed state, capabilities, floor, retained token,
-  both mailbox directions, counters, sequences, statuses, and cursors are
-  removed in one Bolt transaction.
-- Both old active sockets receive terminal connection closure.
-- A JWT authenticated before revoke cannot register a surviving old socket.
-- A legitimate rebound socket in the disconnect gap is not closed.
-- An old in-flight put cannot recreate purged mailbox state or target a rebound
-  pair.
-- An old in-flight ACK cannot delete a rebound pair's item, even with the same
-  device IDs, message ID, and digest.
-- An old generation cannot trigger the expiry sweep against rebound state.
-- Revoked signing keys fail new JWT authentication.
-- The devices can be rebound with new keys and clean capability/sequence state.
-- Direct revoke cost is independent of unrelated pending-token count.
-
-## GREEN and gate evidence
-
-Focused retained-token and expiry store GREEN:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
-  go test ./internal/store \
-  -run 'TestExpiredMailboxSweepRejectsRevokedSessionAfterRebind|Revoke|RetainedToken' \
-  -count=1
-ok github.com/twinotify/relay/internal/store 3.761s
-```
-
-Focused revocation/handoff server GREEN:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
-  go test ./internal/server \
-  -run 'TestWebSocketHelloHandoffSurvivesFailedAcceptedWrite|TestWebSocketHelloHandoffPreservesSequenceAcrossReverseAcceptedWrites|Revoke|PairScopedHub' \
-  -count=1
-ok github.com/twinotify/relay/internal/server 1.351s
-```
-
-Full non-race compatibility GREEN:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
-  go test ./internal/store ./internal/server -count=1
-ok github.com/twinotify/relay/internal/store 10.359s
-ok github.com/twinotify/relay/internal/server 23.579s
-```
-
-Focused correction race stress GREEN:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
-  go test ./internal/store ./internal/server \
-  -run 'Revoke|RetainedToken|ExpiredMailboxSweep|PairScopedHub' \
-  -race -count=10
-ok github.com/twinotify/relay/internal/store 40.138s
-ok github.com/twinotify/relay/internal/server 15.238s
-```
-
-Required full package race GREEN, bounded to detect hangs:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache \
-  go test ./internal/store ./internal/server -race -count=1 -timeout=2m
-ok github.com/twinotify/relay/internal/store 11.066s
-ok github.com/twinotify/relay/internal/server 31.094s
-```
-
-Required root repository gate GREEN:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache make relay-test
-?  github.com/twinotify/relay/cmd/relay [no test files]
-ok github.com/twinotify/relay/internal/server 33.075s
-ok github.com/twinotify/relay/internal/store 12.553s
-```
-
-Vet GREEN:
-
-```text
-cd relay && GOCACHE=/private/tmp/phone-sync-task7-fix-go-cache go vet ./...
-exit 0; no output
-```
-
-Final whitespace and staged-scope checks are rerun after this report is staged
-and recorded in the handoff.
-
-## Diff and self-review
-
-- No Task 8, Android, UI, schema, or deployment work is present.
-- Retention remains 24 hours from first durable acceptance.
-- The maximum encrypted envelope remains 1 MiB.
-- Per-recipient caps remain 2,000 items and 128 MiB.
-- Accepted items are never evicted; live queue pressure still forces reconnect
-  and durable drain.
-- `relay.accepted` remains post-Bolt-commit durable acceptance, not peer
-  delivery.
-- The relay continues to store and route opaque ciphertext only. No canonical
-  IDs, sequences, titles, text, actions, icons, or notification plaintext are
-  inspected or logged.
-- Capability-floor advancement remains monotonic; v1 is not weakened after a
-  persisted floor of 2.
-- Task 6 collision-safe confirmation and same-token completion replay remain
-  intact. The new retained-token index is written in that same transaction.
-- Producer-visible outbound channels remain open; replacement and disconnect
-  cancel the client-owned `done` channel only.
-- Generation checks occur at the actual Bolt mutation/transfer boundary, not
-  only during initial JWT parsing.
-
-One diagnostic run after making pair matching strict was interrupted at 140
-seconds. It identified two old tests that manually registered unbound synthetic
-clients; their expected handoff deliveries could no longer match a production
-pair. Those fixtures now use their existing `mailbox-test-pair` ID. The focused
-tests, full non-race suite, focused race stress, full race suite, and root gate
-all pass afterward. This was a fixture-compatibility diagnosis, not a retained
-production hang.
-
-## Concerns and operational notes
-
-- The one-time legacy retained-token migration scans pre-index pending state at
-  startup because no direct index exists in the old schema. It is versioned and
-  never runs in authenticated revoke or after the marker is committed. Migration
-  corruption fails startup closed instead of silently orphaning token state.
-- Localhost WebSocket tests require managed localhost-listener permission. All
-  server and race gates above ran with that permission.
-- The brief's literal `cd relay && make relay-test` remains a command-location
-  mismatch: the target exists in the root Makefile. The required root
-  `make relay-test` passed and no out-of-scope relay Makefile was added.
-
-## Instruction and design-law re-check
-
-The approved Task 7 brief, reliable-delivery design, review, and full supplied
-anti-slop law were re-read before handoff. This correction is Go persistence,
-authentication, concurrency, and tests only. No interface layout, typography,
-color, iconography, animation, clipping, hover, entrance visibility, or other UI
-rule applies. The backend result preserves the frozen delivery, privacy,
-retention, quota, backpressure, and compatibility constraints listed above.
-
----
-
-## Second correction: rebound registration isolation
-
-### History and scope
-
-The correction re-review found one remaining availability race in the range
-`7c24d39ee12a31a1b5effdb0d3c48acd7b6cbf3c..1a8bee75cd5ddc688f75ebee84fe3944b76dfbff`.
-This final correction started from:
-
-```text
-base/head: 1a8bee75cd5ddc688f75ebee84fe3944b76dfbff
-subject:   fix(relay): linearize revocation across pair generations
-branch:    main
-```
-
-Only these directly required paths changed:
-
-- `relay/internal/server/client_hub.go`
-- `relay/internal/server/ws.go`
-- `relay/internal/server/revoke_test.go`
-- `.superpowers/sdd/task-7-report.md`
-
-No Task 8 or unrelated work is included.
-
-### Deterministic RED evidence
-
-The combined real-WebSocket regression was added before production changes. It
-pauses a P1 request after JWT authentication and upgrade but before hub
-registration, fully revokes P1, confirms P2, registers and exercises a P2
-socket, then resumes P1.
-
-Observed RED:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache \
-  go test ./internal/server \
-  -run 'TestDelayedRevokedRegistrationCannotEvictReboundGeneration|TestClientHubRegisterPairReplacesOnlySameGeneration' \
-  -count=1 -timeout=20s
---- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
-    revoke_test.go:326: delayed old generation evicted the rebound registration
-FAIL github.com/twinotify/relay/internal/server
-```
-
-A second hub-level test covers the inverse edge: an old different generation is
-still registered when a later generation attempts registration. It also failed
-against the pre-fix implementation:
-
-```text
---- FAIL: TestClientHubRegisterPairRejectsDifferentGenerationWithoutEviction
-    revoke_test.go:398: different-generation registration was not rejected
-FAIL github.com/twinotify/relay/internal/server
-```
-
-The same-generation replacement characterization passed during RED, proving the
-new failure was limited to cross-generation eviction rather than ordinary
-reconnect behavior.
-
-### Minimal implementation
-
-- Hub registration now compares the current and incoming pair IDs while holding
-  the existing hub mutex.
-- If both IDs are non-empty and different, the incoming client is stopped and
-  returned as rejected without stopping, replacing, or unregistering the
-  current generation.
-- The WebSocket handler observes the registration result and returns before
-  session validation, writer goroutines, or frame processing when rejected.
-- Same-generation reconnect still replaces and stops the prior client. The old
-  client's deferred unregister cannot remove its replacement.
-- Unbound registrations remain available for isolated legacy hub tests, but an
-  unbound client still cannot satisfy pair-scoped send or lookup.
-- When a valid new generation arrives while a different old generation remains
-  current, it is rejected and closed without evicting the old registration. It
-  retries after the old generation's exact disconnect/unregister completes.
-  This resolves the edge without store access under the hub mutex or any
-  cross-generation eviction.
-
-The hub mutex is never held across Bolt access or network I/O. Rejected and
-replaced clients are cancelled only through their owned `done` channel; no
-producer-visible outbound channel is closed.
-
-### Behavior proved
-
-- Delayed revoked P1 cannot evict a validated, usable P2 socket.
-- P1 closes terminally when released after rebind.
-- P2 remains the exact current registration and receives P2-targeted frames
-  before and after P1 resumes.
-- P1-targeted frames cannot cross into P2, and P2 frames cannot reach P1.
-- A rejected different-generation client is stopped, never installed, and its
-  unregister cannot orphan the current client.
-- Same-generation reconnect replaces the prior client, routes to the
-  replacement, and leaves no registration after final unregister.
-- Existing revoke-before-register and revoke-disconnect-gap ordering tests
-  remain green.
-
-### GREEN and gate evidence
-
-Focused GREEN:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache \
-  go test ./internal/server \
-  -run 'TestDelayedRevokedRegistrationCannotEvictReboundGeneration|TestClientHubRegisterPair(ReplacesOnlySameGeneration|RejectsDifferentGenerationWithoutEviction)|TestRevokeRejectsAuthenticatedSocketRegisteringAfterCommit|TestRevokeDisconnectDoesNotCloseReboundGeneration' \
-  -count=1 -timeout=30s
-ok github.com/twinotify/relay/internal/server 0.823s
-```
-
-Required focused race stress, twenty repetitions:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache \
-  go test ./internal/server \
-  -run 'Revoke|DelayedRevokedRegistration|ClientHubRegisterPair' \
-  -race -count=20 -timeout=3m
-ok github.com/twinotify/relay/internal/server 20.874s
-```
-
-Required full package race:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache \
-  go test ./internal/store ./internal/server -race -count=1 -timeout=2m
-ok github.com/twinotify/relay/internal/store 10.580s
-ok github.com/twinotify/relay/internal/server 29.008s
-```
-
-Required root repository gate:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache make relay-test
-?  github.com/twinotify/relay/cmd/relay [no test files]
-ok github.com/twinotify/relay/internal/server 32.565s
-ok github.com/twinotify/relay/internal/store 9.990s
-```
-
-Vet:
-
-```text
-cd relay && GOCACHE=/private/tmp/phone-sync-task7-fix2-go-cache go vet ./...
-exit 0; no output
-```
-
-Final gofmt, whitespace, scope, and committed-range checks are recorded in the
-handoff after staging.
-
-### Final constraint re-check
-
-This registration-only correction does not change retention, envelope size,
-mailbox quotas, durable acceptance, backpressure, ciphertext privacy,
-capability-floor behavior, pairing persistence, or mailbox ordering. The full
-anti-slop law was rechecked; no UI implementation is present, so its interface
-rules are not applicable.
-
-### Committed correction status
-
-The primary agent subsequently committed the complete second correction:
-
-```text
-base:    1a8bee75cd5ddc688f75ebee84fe3944b76dfbff
-commit:  3f7d905fd74b8d590a41527643bb2bb50f9ba470
-subject: fix(relay): isolate rebound client generations
-status:  clean worktree and index at final correction re-review
-```
-
----
-
-## Final test-only correction: deterministic rebound registration
-
-### History and scope
-
-The final correction review approved the production behavior in `3f7d905` and
-identified only a scheduler race in its integration test plus the stale status
-above. This test-only correction started from:
-
-```text
-base/head: 3f7d905fd74b8d590a41527643bb2bb50f9ba470
-subject:   fix(relay): isolate rebound client generations
-branch:    main
-```
-
-Only these paths change:
-
-- `relay/internal/server/revoke_test.go`
-- `.superpowers/sdd/task-7-report.md`
-
-Production source is unchanged, and no Task 8 work is included.
-
-### Reproduced failure
-
-Before editing the test, the current integration regression was run in
-isolation for 100 race-instrumented repetitions:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache \
-  go test ./internal/server \
-  -run TestDelayedRevokedRegistrationCannotEvictReboundGeneration \
-  -race -count=100 -timeout=3m
---- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
-    revoke_test.go:307: rebound generation did not register
---- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
-    revoke_test.go:307: rebound generation did not register
---- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
-    revoke_test.go:307: rebound generation did not register
---- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
-    revoke_test.go:307: rebound generation did not register
---- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
-    revoke_test.go:307: rebound generation did not register
---- FAIL: TestDelayedRevokedRegistrationCannotEvictReboundGeneration
-    revoke_test.go:307: rebound generation did not register
-FAIL github.com/twinotify/relay/internal/server 8.305s
-```
-
-The six failures confirm the reviewed scheduling race: WebSocket Dial observed
-the completed HTTP upgrade before the handler installed the exact P2 hub
-registration.
-
-### Test-only synchronization fix
-
-- Added a bounded helper that polls `ConnectionForPair(deviceID, pairID)` for
-  the exact expected P2 generation.
-- The helper uses a two-second deadline and a one-millisecond ticker. It does not
-  use an arbitrary sleep or treat a different generation as success.
-- The combined P1/P2 regression waits for that exact registration before
-  asserting online state, injecting the pre-resume P2 frame, or releasing P1.
-- The existing delayed-P1 barrier remains unchanged, so revoke, rebind, verified
-  P2 registration, and P1 resume retain deterministic ordering.
-- No production test seam or production source change was necessary.
-
-### GREEN and gate evidence
-
-Required isolated race stress, 100 repetitions:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache \
-  go test ./internal/server \
-  -run TestDelayedRevokedRegistrationCannotEvictReboundGeneration \
-  -race -count=100 -timeout=3m
-ok github.com/twinotify/relay/internal/server 9.189s
-```
-
-Required combined relevant race stress, 20 repetitions:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache \
-  go test ./internal/server \
-  -run 'Revoke|DelayedRevokedRegistration|ClientHubRegisterPair' \
-  -race -count=20 -timeout=3m
-ok github.com/twinotify/relay/internal/server 15.916s
-```
-
-Required full package race:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache \
-  go test ./internal/store ./internal/server -race -count=1 -timeout=2m
-ok github.com/twinotify/relay/internal/store 11.804s
-ok github.com/twinotify/relay/internal/server 28.488s
-```
-
-Required root repository gate:
-
-```text
-GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache make relay-test
-?  github.com/twinotify/relay/cmd/relay [no test files]
-ok github.com/twinotify/relay/internal/server 30.756s
-ok github.com/twinotify/relay/internal/store 11.954s
-```
-
-Vet:
-
-```text
-cd relay && GOCACHE=/private/tmp/phone-sync-task7-fix3-go-cache go vet ./...
-exit 0; no output
-```
-
-Final gofmt, whitespace, exact two-path scope, and commit status are recorded in
-the handoff after staging.
-
-### Constraint and design-law re-check
-
-This is a test/report-only correction. Production authorization, registration,
-mailbox, pairing, capability-floor, retention, quota, backpressure, ordering,
-and privacy behavior are byte-for-byte unchanged from `3f7d905`. The supplied
-anti-slop law was rechecked; no UI implementation is present.
-
-### Test-only commit handoff status
-
-```text
-intended subject: test(relay): synchronize rebound registration
-commit result:    blocked by the managed approval reviewer
-staged base/head: 3f7d905fd74b8d590a41527643bb2bb50f9ba470
-```
-
-The reviewer stated that it did not see trusted authorization for the exact
-default-branch mutation and prohibited workarounds. No retry or indirect commit
-path was attempted. The exact test/report correction remains staged for the
-primary agent, with no unstaged changes.
+- Added an explicit onboarding choice between nearby-without-internet and relay pairing.
+- Added initiator and joiner nearby flows backed only by the approved native bridge.
+- The initiator renders the opaque native pairing image in memory and does not parse, log, snapshot, or persist its contents.
+- The scanner forwards only the scanned string plus local display name to native validation in nearby mode. Existing relay parsing and handshake remain available in relay mode.
+- Both roles render the same native six-digit SAS and must explicitly confirm it.
+- Nearby and verification back/cancel paths cancel the exact native session; gestures are disabled on those screens so navigation cannot bypass cleanup.
+- Added bounded, distinct recovery copy for timeout, isolated/unavailable Wi-Fi, permission denial, TLS pin failure, malformed secure data, identity mismatch, peer rejection, invalid scan, and unavailable runtime.
+- Success remains pending until native reports COMPLETE; an already committed pair stays complete if relay service restart fails.
+- Paired-device settings can enable nearby sync without unpairing or overwriting the relay identity. Identity mismatch copy explicitly says the existing relay pair is unchanged.
+- Existing relay flow remains routed and functional.
+- Fixed the pre-existing apostrophe lint errors in touched `pair/fail.tsx` and `pair/fingerprint.tsx`.
+
+## Success criteria and evidence
+
+| Scenario | Invocation | Binary observable | Artifact |
+|---|---|---|---|
+| Explicit nearby and relay choice | Jest full suite | Named controls found and actionable | `.omo/evidence/task-7/jest-full.log` |
+| Native initiator image remains ephemeral | Jest full suite | Native start called; no console/storage write; native event routes to verification | `.omo/evidence/task-7/jest-full.log` |
+| Joiner forwards scanned text only | Jest full suite | `joinOfflinePairing(scannedText, displayName)` called; relay hello not called | `.omo/evidence/task-7/jest-full.log` |
+| Identical SAS and explicit confirmation | Jest full suite, initiator + joiner cases | Formatted six digits shown; no implicit confirm; exact-session confirm after press | `.omo/evidence/task-7/jest-full.log` |
+| Back/cancel cleanup | Jest full suite | Exact native session ID cancelled before router back | `.omo/evidence/task-7/jest-full.log` |
+| Distinct repair branches | Jest table over seven native error states | Each state renders its own title and retry action | `.omo/evidence/task-7/jest-full.log` |
+| COMPLETE gate | Jest incomplete then COMPLETE states | Storage remains incomplete before COMPLETE and is marked after COMPLETE | `.omo/evidence/task-7/jest-full.log` |
+| Relay restart is non-fatal after commit | Jest with rejected `startSyncService` | Completed screen remains `Twinned.` | `.omo/evidence/task-7/jest-full.log` |
+| Existing relay pair nearby upgrade | Jest paired settings + identity mismatch | Upgrade route exists; no unpair or peer-key overwrite calls | `.omo/evidence/task-7/jest-full.log` |
+| Accessible controls/default visibility | Jest rendered styles/roles/labels | Named control has >=48dp target, opacity > 0, no hidden overflow | `.omo/evidence/task-7/jest-full.log` |
+| Light/dark contrast | WCAG contrast calculation against repository tokens | All audited text/background pairs >= 5.06:1; camera error pair 13.48:1 | `.omo/evidence/task-7/contrast-audit.log` |
+| Type safety | `cd mobile && npm run typecheck` | exit 0 | `.omo/evidence/task-7/typecheck.log` |
+| Expo compatibility | `cd mobile && npx expo-doctor` | 18/18 checks passed | `.omo/evidence/task-7/expo-doctor.log` |
+| Touched-file lint | scoped `npx eslint` command | exit 0, zero touched-file errors/warnings | `.omo/evidence/task-7/lint-scoped.log` |
+| Full lint | `cd mobile && npm run lint` | exit 0; 0 errors, 5 warnings in untouched files | `.omo/evidence/task-7/lint-full.log` |
+| Debug Android build | `cd mobile/android && ANDROID_HOME=/Users/mak/Library/Android/sdk ./gradlew --no-daemon assembleDebug` | BUILD SUCCESSFUL, 483 tasks | `.omo/evidence/task-7/debug-apk-build.log` |
+| Physical install | `adb -s <explicit-serial> install -r mobile/android/app/build/outputs/apk/debug/app-debug.apk` | Performing Streamed Install / Success | `.omo/evidence/task-7/adb-install.log` |
+
+Debug APK: `mobile/android/app/build/outputs/apk/debug/app-debug.apk` (227 MB).
+
+## Dependency foundation
+
+Installed versions verified by `npm ls`:
+
+- Expo 54.0.37
+- jest-expo 54.0.18
+- @testing-library/react-native 13.3.3
+- react-test-renderer 19.1.0
+- expo-asset 12.0.13
+- expo-constants 18.0.14
+
+Artifact: `.omo/evidence/task-7/dependency-versions.log`. Testing Library 13.3.3 was selected because the available 14.x prerelease used an async rendering contract incompatible with this Expo SDK test surface. Expo and its direct packages were aligned to the patch versions required by Expo Doctor.
+
+## Physical device and screen matrix
+
+ADB inventory found exactly one physical device:
+
+- Serial: `adb-b13d3d82-Wu4k6u (2)._adb-tls-connect._tcp`
+- Model/product: M2012K11AI / aliothin
+- Android API: 36
+- Install: passed
+- Original font scale: 1.0
+- Original night mode: custom schedule
+
+Inventory artifact: `.omo/evidence/task-7/adb-inventory.log`.
+
+The safe wake plus `wm dismiss-keyguard` attempt left `showing=true` and focus on `NotificationShade`. This indicates a secure keyguard. No input, PIN, biometric, or other unlock bypass was attempted. Therefore no physical screenshot was captured and no phone setting was changed.
+
+| Touched screen | Automated/render audit | Physical portrait, large font, light/dark |
+|---|---|---|
+| onboarding role | Scroll-safe and accessible role controls audited | Not completed: secure keyguard |
+| onboarding connect | Rendered behavior, target, visibility, contrast tested | Not completed: secure keyguard |
+| onboarding relay | Type/lint and scroll/target audit | Not completed: secure keyguard |
+| pair nearby | Rendered bridge/event/cancel/repair behavior tested | Not completed: secure keyguard |
+| pair verify | Both roles rendered; SAS/confirm/cancel tested | Not completed: secure keyguard |
+| pair scan | Camera mock rendered; nearby and relay dispatch tested | Not completed: secure keyguard |
+| pair QR relay | Type/lint and relay-routing audit | Not completed: secure keyguard |
+| pair fingerprint | Type/lint and touched-file cleanup audit | Not completed: secure keyguard |
+| pair success | Incomplete/COMPLETE/restart-failure states rendered | Not completed: secure keyguard |
+| pair fail | Type/lint, scrolling, copy, and icon audit | Not completed: secure keyguard |
+| settings pair | Paired upgrade and identity-preservation behavior rendered | Not completed: secure keyguard |
+
+Physical boundary artifact: `.omo/evidence/task-7/physical-visual-boundary.log`. A second phone was not present, so a two-phone end-to-end pairing run was not performed.
+
+## Mandatory anti-slop audit
+
+The full AGENTS.md anti-slop law was re-read before completion. Each relevant category was checked across every touched UI file:
+
+- **Existing language and cohesion:** kept the repository Theme/tokens, type scale, spacing, corner language, QR component, camera, fingerprint, and button primitives. No generic visual system or new font/palette was introduced.
+- **No generic effects:** no gradient, glow, glass, background halo, candy aurora, grain overlay, grid, fake shadow, hover lift/boop, underline animation, entrance animation, floating card, decorative accent bar, or fixed background was added.
+- **No decorative component clichés:** removed the colored phone emoji tile and the alert icon tile. No eyebrow pill, status-chip field, gradient icon tile, logo box, decorative quote, pricing/testimonial/CTA template, fake app window, fake code window, or decorative rule was added.
+- **Controls are real:** both connection choices route and persist their mode; nearby start/join/confirm/cancel call native; relay pairing remains live; retry, mismatch, back, Done, and settings-upgrade controls have real handlers. Tests assert bridge calls and navigation rather than copy alone.
+- **CTA composition:** transactional screens use one clear action followed vertically by a quiet text action where needed. No stock side-by-side fill-plus-outline pair was added.
+- **Visible by default:** no content begins at opacity 0 or translated away. Loading content is explicit. Source audit found no hidden entrance state.
+- **Clipping and edges:** ScrollViews with `flexGrow` replace fixed-height content on touched text-heavy screens. No content container uses hidden overflow or clipping. Text retains 24dp or larger horizontal gutters.
+- **Large text:** explicit line heights, scrollable content, flexible sections, and bottom padding are present. Fixed dimensions are limited to the pairing image, viewfinder, and centered back control; live text is not placed inside those bounds.
+- **Targets and accessibility:** new Pressables expose button/radio/image/alert semantics and labels; interactive targets are at least 48dp. Hardware-back cancellation and gesture disabling protect native cleanup.
+- **Centering:** viewfinder, SAS, pairing image, back glyph, and bare alert mark use explicit alignment. No clipped or off-center text is embedded in custom geometry.
+- **Contrast:** initial audit found tertiary dark text on a filled surface at 4.34:1. New/touched filled-option copy was corrected to `ink2`; final audited pairs are >=5.06:1. Camera overlay copy is white on black or dark red.
+- **Color discipline:** reused the product's warm neutrals and existing single accent. No new saturated competing accent or hard color seam was introduced.
+- **Typography:** reused the established app fonts because the brief requires the current product visual language. No new Google/default display choice, mono house voice, gradient headline, cramped display copy, or repeated tracked-caps treatment was introduced.
+- **Copy:** recovery text is terse, bounded, actionable, and distinct. Em dashes and decorative quotation styling were not added. Sensitive material never appears in logs, screenshots, snapshots, names, or this report.
+- **Layout-template checks:** these are compact native transactional screens, not marketing pages. None uses split-hero, kicker/H2, pricing grid, testimonial, logo wall, pre-footer CTA, standard footer, numbered rail, email pill, or SaaS page skeleton.
+- **Imagery/signature guidance:** no decorative hero or fabricated brand/customer imagery was appropriate for this native security flow. Functional camera, pairing image, fingerprints, and existing product marks remain the only visuals.
+- **Motion:** existing router transition remains; no content-gating or decorative motion was added. Reduced-motion-specific work was unnecessary because Task 7 adds no authored animation.
+- **Final corrections from audit:** removed obsolete phase comments, removed icon containers, made role/relay/success/fail content scroll-safe, raised back/input targets to 48dp, added labels/roles, corrected filled-surface contrast, preserved completion across relay restart failure, and fixed the two apostrophe lint findings.
+
+## Known concerns and limitations
+
+1. Resolved in the follow-up native correction below: transport `TLS_PIN_MISMATCH` now publishes the bounded public `tls_pin_mismatch` code, while application hello/key mismatches remain `identity_mismatch`.
+2. Physical portrait, large-font, and light/dark screen inspection did not complete because the only connected phone was securely locked. No screenshots were captured.
+3. Only one physical phone was available. Two-phone end-to-end nearby pairing was not run.
+4. Full lint reports five warnings in untouched `home.tsx`, `onboarding/oem.tsx`, and `components/primitives/TwIcon.tsx`; all touched files have zero findings.
+
+## Independent-review correction
+
+The correction was developed RED-first against `.superpowers/sdd/task-7-review.md` using the receiving-code-review and TDD procedures.
+
+### Correction RED and GREEN
+
+- RED command: `cd mobile && npm test -- --runInBand app/pair/__tests__/offlinePairingFlow.test.tsx components/primitives/__tests__/TwButton.test.tsx`
+- RED observable: exit 1, 10 failed and 20 passed. Failures covered shared-button semantics, visible/hardware/unmount scanner cleanup, stale-session handling, nearby completion with an existing relay pair, rejected confirmation repair, representative touched controls, and the relay/fingerprint anti-slop structures.
+- RED artifact: `.omo/evidence/task-7/correction-red.log`
+- Additional retry RED: the retry transition did not cancel exact session `11111111-1111-4111-8111-111111111111`; artifact `.omo/evidence/task-7/correction-red-retry.log`.
+- Focused GREEN command: the same two-suite command after production changes.
+- Focused GREEN observable before the final pre-join guard: 31/31 passed, 0 snapshots.
+- Focused GREEN artifact: `.omo/evidence/task-7/correction-green-focused.log`.
+- Full GREEN command: `cd mobile && npm test -- --runInBand`.
+- Additional pre-join RED: leaving during deferred display-name lookup still called native join; artifact `.omo/evidence/task-7/correction-red-prejoin.log`. The corrected continuation checks the mounted/leaving boundary before invoking native.
+- Additional cancellation-retry RED: a transient exact-cancel rejection prevented late continuation cleanup from retrying; artifact `.omo/evidence/task-7/correction-red-cancel-retry.log`. Failed session IDs are now released for one later exact retry.
+- Full GREEN observable: 2/2 suites, 33/33 passed, 0 snapshots.
+- Full GREEN artifact: `.omo/evidence/task-7/correction-jest-full.log`.
+
+### Review finding closure matrix
+
+| Review finding | Correction | Behavior evidence |
+|---|---|---|
+| Nearby COMPLETE bypass through relay `paired=true` | Success predicate now reads persisted mode. Nearby requires exact `phase=complete && completed=true`; relay mode uses relay pair status. | Incomplete and COMPLETE nearby states both run with an existing relay identity; relay mode has a separate passing case. |
+| Scanner session leak and late navigation | Visible back, hardware back, and unmount set a leaving boundary, query current native status, cancel its exact session once, and recheck cleanup after a deferred join settles. Relay continuations are also suppressed after exit. | Three deferred-join tests assert exact cancellation and no late `/pair/nearby` replacement. |
+| Shared button semantics | `TwButton` now defaults to role button, infers string/number names, accepts explicit labels/hints/test IDs, publishes disabled/busy state, and uses flexible minimum heights of 48dp or more. | Focused primitive tests cover small target, inferred name, explicit loading name, disabled and busy; scanner permission controls provide representative screen coverage. |
+| Confirmation rejection | Rejections are caught, mapped to the bounded repair table, and rendered as an alert with a working return action. | Rejecting native mock produces `Pairing session changed` without an unhandled promise; exact mismatch cancellation is separately tested. |
+| Behavior breadth | Both connection choices are pressed; retry cancels then starts; stale session events are ignored; subscriptions are removed; scanner back paths, pre-join exit and transient cleanup retry, relay/nearby completion, dark theme, 2x font-scale flexible layout, and anti-slop action order are exercised. | 33-test suite in `.omo/evidence/task-7/correction-jest-full.log`. |
+| Relay QR/fingerprint anti-slop | Countdown is plain type with a descriptive accessibility label; pulsing status halo is removed from the QR screen; fingerprint confirmation is the primary full-width action followed by a quiet full-width mismatch action. | Rendering test asserts uncontained countdown styling and ranked accessible action order; source audit confirms `TwStatusDot` is absent from the screen. |
+
+### Correction verification
+
+| Gate | Observable | Artifact |
+|---|---|---|
+| TypeScript | exit 0 | `.omo/evidence/task-7/correction-typecheck.log` |
+| Full Jest | 33/33 passed | `.omo/evidence/task-7/correction-jest-full.log` |
+| Expo Doctor | 18/18 checks passed | `.omo/evidence/task-7/correction-expo-doctor.log` |
+| Scoped correction lint | zero errors and zero warnings | `.omo/evidence/task-7/correction-lint-scoped.log` |
+| Full lint | exit 0; five unchanged warnings outside touched files | `.omo/evidence/task-7/correction-lint-full.log` |
+| Debug APK | BUILD SUCCESSFUL, 483 tasks | `.omo/evidence/task-7/correction-debug-apk-build.log` |
+| Physical inventory | one M2012K11AI only | `.omo/evidence/task-7/correction-adb-inventory.log` |
+| APK install | install command exit 0; package manager returned the installed `com.twinotify.app` base path | `.omo/evidence/task-7/correction-adb-install.log` |
+
+### Correction physical boundary
+
+Read-only ADB inventory still found one phone. Its state remained font scale 1.0, night mode custom schedule, `showing=true`, with focus on `NotificationShade`. No keyguard bypass was attempted and no system setting was changed. Therefore the correction does **not** claim two-phone pairing, sanitized screenshots, portrait inspection, 2x font rendering on hardware, light/dark device rendering, TalkBack semantics, or real camera-overlay behavior. Artifact: `.omo/evidence/task-7/correction-physical-boundary.log`.
+
+### Correction anti-slop matrix
+
+| Law category | Result and correction |
+|---|---|
+| Cohesion and existing design system | Pass. Existing warm-neutral theme, typography, spacing, QR, fingerprint, and primitive language remain; no new visual system or font was added. |
+| Pills, badges, halos, glows, glass, gradients | Pass after correction. The relay countdown capsule and pairing pulse were removed. No new pill, glow, gradient, glass, bloom, halo, grain, or grid was added. |
+| Button composition | Pass after correction. Fingerprint actions are vertically ranked primary then quiet action, not a side-by-side filled/destructive or filled/outline preset. |
+| Real controls and semantics | Pass in source/runtime tests. Shared buttons now expose role, name, disabled/loading state and >=48dp flexible targets; every changed control retains a real handler. Physical TalkBack remains unverified. |
+| Visible-by-default content | Pass. No opacity-zero, translated-away, timed entrance, hidden section, or animation-gated content exists in the correction. |
+| Clipping, fixed heights, large text | Source/test pass. `TwButton` fixed heights were replaced by minimum height plus vertical padding; text screens remain scrollable; 2x font-scale render asserts flexible controls and no hidden overflow. Physical large-font inspection remains unverified. |
+| Motion | Pass after correction. The repeating pairing halo is no longer used on relay QR; no entrance reveal, hover lift, underline fill, or decorative motion was added. Existing press feedback and router transitions remain functional native interaction. |
+| Color and contrast | Pass from prior token audit. The correction introduces no color. Plain timer and fingerprint actions use existing readable token pairs. |
+| Icons and decorative containers | Pass. No new icon tile, logo box, fake mark, oversized glyph container, or fabricated brand asset was introduced. |
+| Layout and marketing templates | Pass. Transactional screens contain no split hero, kicker/H2, pricing/testimonial grid, pre-footer CTA, fake product window, numbered rail, or SaaS skeleton. |
+| Copy and security | Pass. Confirmation failure has bounded actionable copy. Sensitive pairing material remains absent from logs, screenshots, snapshots, test names, and report content. |
+| Edges, centering, and gutters | Source pass. Existing deliberate gutters and centered QR/SAS/camera geometry remain. Physical optical inspection remains unverified. |
+
+## Native pin-error correction evidence
+
+This follow-up keeps the Task 7 UI contract but fixes the native transport-to-status boundary. No wire schema, pairing frame, or UI file changed.
+
+| Scenario | Invocation | Binary observable | Artifact |
+|---|---|---|---|
+| RED: TLS pin transport failure was incorrectly published as application identity mismatch | `cd mobile/android && ANDROID_HOME=/Users/mak/Library/Android/sdk ./gradlew --no-daemon :twinotify-core:testDebugUnitTest --tests co.twinotify.core.pairing.lan.OfflinePairingRuntimeAdapterTest.tlsPinTransportFailurePublishesBoundedPinErrorAndIdentityMismatchStaysApplicationScoped` before the correction | Test failed at the expected assertion (`identity_mismatch` != `tls_pin_mismatch`); the captured log includes `BUILD FAILED` | `.omo/evidence/task-7/red-native-tls-pin.log` |
+| GREEN: TLS pin and application identity errors remain distinct at the native public event boundary | Same focused Gradle test after the correction | `BUILD SUCCESSFUL`; terminal status and closed-world event map carry exact `tls_pin_mismatch`, while `OfflinePairingError.IDENTITY_MISMATCH` remains `identity_mismatch` | `.omo/evidence/task-7/green-native-tls-pin.log` |
+| Repeatability | Same focused Gradle test a second time | `BUILD SUCCESSFUL` | `.omo/evidence/task-7/green-native-tls-pin-repeat.log` |
+| Native gates | `cd mobile/android && ANDROID_HOME=/Users/mak/Library/Android/sdk ./gradlew --no-daemon :twinotify-core:testDebugUnitTest :twinotify-core:compileDebugAndroidTestKotlin :twinotify-core:lintDebug` | All three tasks passed; `BUILD SUCCESSFUL` | `.omo/evidence/task-7/native-gap-full-gates.log` |
+| TypeScript contract | `cd mobile && npm run typecheck` | exit 0 with the closed `OfflinePairingErrorCode` union including TLS pin, peer rejection, and Wi-Fi errors | `.omo/evidence/task-7/native-gap-typecheck.log` |
+| Existing mobile behavior | `cd mobile && npm test -- --runInBand` | 1 suite, 17 tests passed; existing UI TLS-pin repair branch remains covered | `.omo/evidence/task-7/native-gap-jest.log` |
+| Diff hygiene | `git diff --check` | passed | `.omo/evidence/task-7/native-gap-diff-check.log` |
+
+The focused test uses a transport that throws `PairingTransportFailure.TLS_PIN_MISMATCH`, asserts the resulting public code and exact event-map key set, and separately asserts application identity mismatch remains unchanged. The native mappings are exhaustive `when` expressions, so future enum additions fail compilation until explicitly assigned a bounded public code.
+
+## Final workspace checks
+
+- `git diff --check`: passed; artifact `.omo/evidence/task-7/git-diff-check.log`.
+- Commit `5659a70` contains only the exact Task 7 paths listed in the brief.
+- No generated `mobile/android/` content is staged.
+- No push is performed.

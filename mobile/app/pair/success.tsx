@@ -17,8 +17,11 @@ export default function PairSuccessScreen() {
       try {
         const offline = await TwinotifyCoreModule.getOfflinePairingStatus();
         const ps = await TwinotifyCoreModule.getPairStatus();
-        const complete = offline.completed && offline.phase === 'complete';
-        if (!complete && !ps.paired) return;
+        const pairingMode = await OnboardingState.getPairingMode();
+        const complete = pairingMode === 'nearby'
+          ? offline.completed && offline.phase === 'complete'
+          : ps.paired;
+        if (!complete) return;
         await OnboardingState.markComplete();
         setVerifiedComplete(true);
         if (ps.peerDisplayName?.trim()) {

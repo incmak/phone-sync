@@ -156,25 +156,24 @@ export default function FingerprintScreen() {
             <Text style={{ color: theme.ink3, fontFamily: theme.fonts.ui }}>Working…</Text>
           </View>
         ) : (
-          <View style={{ flexDirection: 'row', gap: 10, marginTop: 24 }}>
-            <TwButton
-              variant="destructive"
-              style={{ flex: 1 }}
-              onPress={() => router.replace('/pair/fail')}
-            >
-              {"Don't match"}
-            </TwButton>
-
+          <View style={{ gap: 8, marginTop: 24 }}>
             {role === 'A' && (
-              <TwButton variant="primary" style={{ flex: 1 }} onPress={handleAConfirmMatch}>
+              <TwButton variant="primary" fullWidth onPress={handleAConfirmMatch}>
                 They match
               </TwButton>
             )}
             {role === 'B' && (
-              <TwButton variant="primary" style={{ flex: 1 }} onPress={handleBConfirmMatch}>
+              <TwButton variant="primary" fullWidth onPress={handleBConfirmMatch}>
                 They match
               </TwButton>
             )}
+            <TwButton
+              variant="ghost"
+              fullWidth
+              onPress={() => router.replace('/pair/fail')}
+            >
+              {"Don't match"}
+            </TwButton>
           </View>
         )}
       </ScrollView>

@@ -1,9 +1,10 @@
 /* global jest */
 
 const mockReact = require('react');
-const { View: mockView } = require('react-native');
+const { BackHandler: mockBackHandler, View: mockView } = require('react-native');
 
 const mockStorage = new Map();
+let mockDarkTheme = false;
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn(async (key) => mockStorage.get(key) ?? null),
@@ -16,7 +17,7 @@ jest.mock('./components/Theme', () => {
   const { twTheme } = jest.requireActual('./components/tokens');
   return {
     ThemeProvider: ({ children }) => children,
-    useTheme: () => twTheme({ hue: 180, dark: false }),
+    useTheme: () => twTheme({ hue: 180, dark: mockDarkTheme }),
     useThemeControls: () => ({
       theme: twTheme({ hue: 180, dark: false }),
       hue: 'mint',
@@ -42,7 +43,11 @@ jest.mock('expo-router', () => ({
   useNavigation: () => ({ addListener: jest.fn(() => jest.fn()) }),
 }));
 
-let offlineStatusListener = null;
+let activeOfflineStatusListener = null;
+let lastOfflineStatusListener = null;
+let lastOfflineSubscriptionRemove = jest.fn();
+let hardwareBackHandler = null;
+let mockCameraPermission = { granted: true };
 const idleStatus = {
   role: null,
   phase: 'idle',
@@ -61,8 +66,14 @@ const mockTwinotifyCore = {
   cancelOfflinePairing: jest.fn(),
   getOfflinePairingStatus: jest.fn(async () => idleStatus),
   addListener: jest.fn((event, listener) => {
-    if (event === 'onOfflinePairingStatus') offlineStatusListener = listener;
-    return { remove: jest.fn() };
+    if (event === 'onOfflinePairingStatus') {
+      activeOfflineStatusListener = listener;
+      lastOfflineStatusListener = listener;
+      lastOfflineSubscriptionRemove = jest.fn(() => {
+        if (activeOfflineStatusListener === listener) activeOfflineStatusListener = null;
+      });
+    }
+    return { remove: lastOfflineSubscriptionRemove };
   }),
   getPairStatus: jest.fn(async () => ({ paired: false })),
   startPairInitiator: jest.fn(),
@@ -86,7 +97,7 @@ jest.mock('./modules/twinotify-core/src/TwinotifyCoreModule', () => ({
 
 jest.mock('expo-camera', () => ({
   CameraView: (props) => mockReact.createElement(mockView, { ...props, testID: 'camera-view' }),
-  useCameraPermissions: jest.fn(() => [{ granted: true }, jest.fn()]),
+  useCameraPermissions: jest.fn(() => [mockCameraPermission, jest.fn()]),
 }));
 
 jest.mock('react-native-qrcode-svg', () => ({
@@ -97,11 +108,28 @@ jest.mock('react-native-qrcode-svg', () => ({
 global.__TEST_ROUTER__ = mockRouter;
 global.__SET_SEARCH_PARAMS__ = (params) => { mockLocalSearchParams = params; };
 global.__TWINOTIFY_CORE__ = mockTwinotifyCore;
-global.__EMIT_OFFLINE_STATUS__ = (status) => { offlineStatusListener?.(status); };
+jest.spyOn(mockBackHandler, 'addEventListener').mockImplementation((event, listener) => {
+  if (event === 'hardwareBackPress') hardwareBackHandler = listener;
+  return { remove: jest.fn(() => {
+    if (hardwareBackHandler === listener) hardwareBackHandler = null;
+  }) };
+});
+
+global.__EMIT_OFFLINE_STATUS__ = (status) => { activeOfflineStatusListener?.(status); };
+global.__EMIT_STALE_OFFLINE_STATUS__ = (status) => { lastOfflineStatusListener?.(status); };
+global.__GET_LAST_OFFLINE_REMOVE__ = () => lastOfflineSubscriptionRemove;
+global.__PRESS_HARDWARE_BACK__ = () => hardwareBackHandler?.();
+global.__SET_CAMERA_PERMISSION__ = (permission) => { mockCameraPermission = permission; };
+global.__SET_DARK_THEME__ = (dark) => { mockDarkTheme = dark; };
 global.__RESET_OFFLINE_TEST_STATE__ = () => {
   mockStorage.clear();
   mockLocalSearchParams = {};
-  offlineStatusListener = null;
+  activeOfflineStatusListener = null;
+  lastOfflineStatusListener = null;
+  lastOfflineSubscriptionRemove = jest.fn();
+  hardwareBackHandler = null;
+  mockCameraPermission = { granted: true };
+  mockDarkTheme = false;
   Object.values(mockRouter).forEach((mock) => mock.mockClear());
   Object.values(mockTwinotifyCore).forEach((mock) => {
     if (typeof mock?.mockClear === 'function') mock.mockClear();

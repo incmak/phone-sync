@@ -1,5 +1,12 @@
 import React, { useCallback } from 'react';
-import { Pressable, Text, StyleSheet, ActivityIndicator, ViewStyle } from 'react-native';
+import {
+  Pressable,
+  Text,
+  StyleSheet,
+  ActivityIndicator,
+  type PressableProps,
+  type ViewStyle,
+} from 'react-native';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -11,7 +18,7 @@ import { TW_SEMANTIC, hexWithAlpha } from '../tokens';
 export type TwButtonVariant = 'primary' | 'accent' | 'secondary' | 'ghost' | 'destructive';
 export type TwButtonSize = 'sm' | 'md' | 'lg';
 
-interface TwButtonProps {
+interface TwButtonProps extends Pick<PressableProps, 'accessibilityHint' | 'accessibilityLabel' | 'testID'> {
   variant?: TwButtonVariant;
   size?: TwButtonSize;
   icon?: React.ReactNode;
@@ -24,9 +31,9 @@ interface TwButtonProps {
 }
 
 const SIZE_CONFIG = {
-  sm: { height: 36, paddingHorizontal: 14, fontSize: 13 },
-  md: { height: 48, paddingHorizontal: 18, fontSize: 15 },
-  lg: { height: 56, paddingHorizontal: 22, fontSize: 16 },
+  sm: { minHeight: 48, paddingHorizontal: 14, paddingVertical: 12, fontSize: 13 },
+  md: { minHeight: 48, paddingHorizontal: 18, paddingVertical: 12, fontSize: 15 },
+  lg: { minHeight: 56, paddingHorizontal: 22, paddingVertical: 15, fontSize: 16 },
 } as const;
 
 export function TwButton({
@@ -39,10 +46,17 @@ export function TwButton({
   loading,
   fullWidth,
   style,
+  accessibilityHint,
+  accessibilityLabel,
+  testID,
 }: TwButtonProps) {
   const theme = useTheme();
   const scale = useSharedValue(1);
   const s = SIZE_CONFIG[size];
+  const isDisabled = Boolean(disabled || loading);
+  const inferredLabel = typeof children === 'string' || typeof children === 'number'
+    ? String(children)
+    : undefined;
 
   const animStyle = useAnimatedStyle(() => ({
     transform: [{ scale: scale.value }],
@@ -91,20 +105,27 @@ export function TwButton({
   return (
     <Animated.View style={[animStyle, fullWidth && styles.fullWidth, style]}>
       <Pressable
+        accessible
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel ?? inferredLabel}
+        accessibilityHint={accessibilityHint}
+        accessibilityState={{ disabled: isDisabled, busy: Boolean(loading) }}
+        testID={testID}
         onPress={onPress}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
-        disabled={disabled || loading}
+        disabled={isDisabled}
         style={[
           styles.base,
           {
-            height: s.height,
+            minHeight: s.minHeight,
             paddingHorizontal: s.paddingHorizontal,
+            paddingVertical: s.paddingVertical,
             backgroundColor: bg,
             borderColor: borderColor,
             borderWidth: borderColor ? 1 : 0,
             borderRadius: theme.radius.md,
-            opacity: disabled ? 0.4 : 1,
+            opacity: isDisabled ? 0.4 : 1,
           },
           fullWidth && styles.fullWidth,
         ]}

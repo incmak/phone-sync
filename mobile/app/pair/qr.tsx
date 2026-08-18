@@ -7,7 +7,6 @@ import {
   TwButton,
   TwQR,
   TwWordmark,
-  TwStatusDot,
 } from '../../components';
 import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import type { PeerHelloPayload } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
@@ -115,15 +114,12 @@ export default function PairQRScreen() {
       <View style={{ flex: 1, padding: 20 }}>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
           <TwWordmark size={16} />
-          <View style={{
-            paddingHorizontal: 10, paddingVertical: 6,
-            backgroundColor: theme.fill,
-            borderRadius: 999,
-          }}>
-            <Text style={{ fontFamily: theme.fonts.mono, fontSize: 13, color: theme.ink3 }}>
-              {mm}:{ss}
-            </Text>
-          </View>
+          <Text
+            accessibilityLabel={`Pairing time remaining ${mm} minutes ${ss} seconds`}
+            style={{ fontFamily: theme.fonts.mono, fontSize: 13, lineHeight: 20, color: theme.ink3 }}
+          >
+            {mm}:{ss}
+          </Text>
         </View>
 
         <Text style={{
@@ -155,7 +151,6 @@ export default function PairQRScreen() {
         </View>
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
-          {status === 'waiting' && <TwStatusDot state="pairing" size={8} />}
           <Text style={{ fontSize: 14, color: theme.ink3, fontFamily: theme.fonts.ui }}>
             {status === 'starting' && 'Starting pairing…'}
             {status === 'waiting' && 'Waiting for Phone B…'}

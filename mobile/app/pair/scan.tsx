@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { BackHandler, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -54,10 +54,56 @@ export default function PairScanScreen() {
   const [scanned, setScanned] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const scannedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const leavingRef = useRef(false);
+  const cancelledSessionIdsRef = useRef(new Set<string>());
+  const modeRef = useRef<PairingMode | null>(mode);
+
+  const cancelCurrentNearbySession = useCallback(async () => {
+    let sessionId: string | null = null;
+    try {
+      const current = await TwinotifyCoreModule.getOfflinePairingStatus();
+      if (!current.sessionId || cancelledSessionIdsRef.current.has(current.sessionId)) return;
+      sessionId = current.sessionId;
+      cancelledSessionIdsRef.current.add(sessionId);
+      await TwinotifyCoreModule.cancelOfflinePairing(sessionId);
+    } catch {
+      if (sessionId) cancelledSessionIdsRef.current.delete(sessionId);
+    }
+  }, []);
+
+  const leaveScanner = useCallback(async () => {
+    leavingRef.current = true;
+    if (mode === 'nearby') await cancelCurrentNearbySession();
+    if (mountedRef.current) router.back();
+  }, [cancelCurrentNearbySession, mode]);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      leavingRef.current = true;
+      if (modeRef.current === 'nearby') void cancelCurrentNearbySession();
+    };
+  }, [cancelCurrentNearbySession]);
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      void leaveScanner();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [leaveScanner]);
 
   useEffect(() => {
     if (mode) return;
-    void OnboardingState.getPairingMode().then((stored) => setMode(stored ?? 'relay'));
+    void OnboardingState.getPairingMode().then((stored) => {
+      if (mountedRef.current) setMode(stored ?? 'relay');
+    });
   }, [mode]);
 
   async function onBarcode({ data }: { data: string }) {
@@ -69,9 +115,18 @@ export default function PairScanScreen() {
       setErrorMsg(null);
       try {
         const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
+        if (!mountedRef.current || leavingRef.current) return;
         await TwinotifyCoreModule.joinOfflinePairing(data, displayName);
+        if (!mountedRef.current || leavingRef.current) {
+          await cancelCurrentNearbySession();
+          return;
+        }
         router.replace('/pair/nearby');
       } catch {
+        if (!mountedRef.current || leavingRef.current) {
+          await cancelCurrentNearbySession();
+          return;
+        }
         scannedRef.current = false;
         setScanned(false);
         setErrorMsg('This is not a valid nearby pairing code. Create a new code on the other phone and scan again.');
@@ -85,7 +140,9 @@ export default function PairScanScreen() {
     setScanned(true);
     try {
       const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
+      if (!mountedRef.current || leavingRef.current) return;
       await TwinotifyCoreModule.sendPeerHello(payload.relayUrl, payload.pairToken, displayName);
+      if (!mountedRef.current || leavingRef.current) return;
       router.push({
         pathname: '/pair/fingerprint',
         params: {
@@ -99,6 +156,7 @@ export default function PairScanScreen() {
         },
       });
     } catch (error: unknown) {
+      if (!mountedRef.current || leavingRef.current) return;
       scannedRef.current = false;
       setScanned(false);
       setErrorMsg(error instanceof Error ? error.message : 'Could not contact the relay.');
@@ -124,7 +182,7 @@ export default function PairScanScreen() {
         </Text>
         <View style={styles.permissionActions}>
           <TwButton variant="primary" fullWidth onPress={() => { void requestPermission(); }}>Allow camera</TwButton>
-          <TwButton variant="ghost" fullWidth onPress={() => router.back()}>Go back</TwButton>
+          <TwButton variant="ghost" fullWidth onPress={() => { void leaveScanner(); }}>Go back</TwButton>
         </View>
       </SafeAreaView>
     );
@@ -143,7 +201,7 @@ export default function PairScanScreen() {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Go back"
-            onPress={() => router.back()}
+            onPress={() => { void leaveScanner(); }}
             style={({ pressed }) => [styles.backButton, { opacity: pressed ? 0.72 : 1 }]}
           >
             <Text style={styles.backGlyph}>‹</Text>

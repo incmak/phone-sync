@@ -7,6 +7,14 @@ import { useTheme } from '../../components';
 import TwinotifyCoreModule, {
   type OfflinePairingStatus,
 } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
+import { repairForOfflineError } from './nearby';
+
+function errorCodeFrom(error: unknown): string {
+  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
+    return error.code;
+  }
+  return 'pair_runtime_unavailable';
+}
 
 function VerifyAction({ label, onPress, quiet, disabled }: {
   label: string;
@@ -41,6 +49,7 @@ export default function VerifyNearbyScreen() {
   const theme = useTheme();
   const [status, setStatus] = useState<OfflinePairingStatus | null>(null);
   const [working, setWorking] = useState(false);
+  const [confirmationError, setConfirmationError] = useState<string | null>(null);
 
   const applyStatus = useCallback((next: OfflinePairingStatus) => {
     setStatus(next);
@@ -62,7 +71,7 @@ export default function VerifyNearbyScreen() {
     };
   }, [applyStatus]);
 
-  const cancel = useCallback(async (destination: 'back' | 'fail') => {
+  const cancel = useCallback(async (destination: 'back' | 'fail' | 'repair') => {
     if (status?.sessionId) {
       try {
         await TwinotifyCoreModule.cancelOfflinePairing(status.sessionId);
@@ -71,7 +80,11 @@ export default function VerifyNearbyScreen() {
       }
     }
     if (destination === 'back') router.back();
-    else router.replace({ pathname: '/pair/fail', params: { reason: 'identity_mismatch' } });
+    else if (destination === 'fail') {
+      router.replace({ pathname: '/pair/fail', params: { reason: 'identity_mismatch' } });
+    } else {
+      router.replace('/pair/nearby');
+    }
   }, [status?.sessionId]);
 
   useEffect(() => {
@@ -85,8 +98,11 @@ export default function VerifyNearbyScreen() {
   const confirm = useCallback(async () => {
     if (!status?.sessionId) return;
     setWorking(true);
+    setConfirmationError(null);
     try {
       await TwinotifyCoreModule.confirmOfflinePairing(status.sessionId);
+    } catch (error: unknown) {
+      setConfirmationError(errorCodeFrom(error));
     } finally {
       setWorking(false);
     }
@@ -96,6 +112,9 @@ export default function VerifyNearbyScreen() {
     const sas = status?.sas ?? '';
     return sas.length === 6 ? `${sas.slice(0, 3)} ${sas.slice(3)}` : 'Waiting…';
   }, [status?.sas]);
+  const confirmationRepair = confirmationError
+    ? repairForOfflineError(confirmationError)
+    : null;
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>
@@ -117,14 +136,28 @@ export default function VerifyNearbyScreen() {
           {status?.peerDisplayName ? `Comparing with ${status.peerDisplayName}` : 'Waiting for the other phone'}
         </Text>
 
-        <View style={styles.actions}>
-          <VerifyAction
-            label="Codes match"
-            disabled={!status?.sessionId || !status.sas || working}
-            onPress={() => { void confirm(); }}
-          />
-          <VerifyAction label="Codes do not match" quiet onPress={() => { void cancel('fail'); }} />
-        </View>
+        {confirmationRepair ? (
+          <View style={styles.repair} accessibilityRole="alert">
+            <Text style={[styles.repairTitle, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
+              {confirmationRepair.title}
+            </Text>
+            <Text style={[styles.body, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
+              {confirmationRepair.body}
+            </Text>
+            <View style={styles.actions}>
+              <VerifyAction label="Return to nearby pairing" onPress={() => { void cancel('repair'); }} />
+            </View>
+          </View>
+        ) : (
+          <View style={styles.actions}>
+            <VerifyAction
+              label="Codes match"
+              disabled={!status?.sessionId || !status.sas || working}
+              onPress={() => { void confirm(); }}
+            />
+            <VerifyAction label="Codes do not match" quiet onPress={() => { void cancel('fail'); }} />
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -138,6 +171,8 @@ const styles = StyleSheet.create({
   codeSurface: { minHeight: 112, borderRadius: 14, marginTop: 36, paddingHorizontal: 16, paddingVertical: 20, justifyContent: 'center' },
   code: { fontSize: 38, lineHeight: 48, letterSpacing: 5, textAlign: 'center' },
   peer: { fontSize: 14, lineHeight: 20, marginTop: 18, textAlign: 'center' },
+  repair: { marginTop: 24 },
+  repairTitle: { fontSize: 18, lineHeight: 24, marginBottom: 4 },
   actions: { gap: 8, marginTop: 'auto', paddingTop: 32 },
   action: { minHeight: 48, borderRadius: 14, paddingHorizontal: 18, paddingVertical: 12, justifyContent: 'center', alignItems: 'center' },
   actionLabel: { fontSize: 15, lineHeight: 21, textAlign: 'center' },

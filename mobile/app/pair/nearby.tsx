@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BackHandler,
   Pressable,
@@ -70,6 +70,13 @@ export function repairForOfflineError(errorCode: string | null): Repair {
         title: 'Nearby pairing is unavailable',
         body: 'Restart Twinotify on both phones. If it continues, check that Android allows Nearby devices.',
       };
+    case 'pair_session_active':
+    case 'pair_session_not_found':
+    case 'pair_session_mismatch':
+      return {
+        title: 'Pairing session changed',
+        body: 'Return to nearby pairing and create or scan a new code before confirming again.',
+      };
     default:
       return DEFAULT_REPAIR;
   }
@@ -123,8 +130,15 @@ export default function NearbyPairingScreen() {
   const [qrValue, setQrValue] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
   const [starting, setStarting] = useState(true);
+  const activeSessionIdRef = useRef<string | null>(null);
 
   const applyStatus = useCallback((next: OfflinePairingStatus) => {
+    if (
+      next.sessionId
+      && activeSessionIdRef.current
+      && next.sessionId !== activeSessionIdRef.current
+    ) return;
+    if (next.sessionId) activeSessionIdRef.current = next.sessionId;
     setStatus(next);
     setErrorCode(next.errorCode === null ? null : String(next.errorCode));
     if (next.completed && next.phase === 'complete') {
@@ -156,6 +170,19 @@ export default function NearbyPairingScreen() {
       setStarting(false);
     }
   }, [applyStatus]);
+
+  const restartForRole = useCallback(async (requestedRole: Role) => {
+    const activeSessionId = activeSessionIdRef.current;
+    if (activeSessionId) {
+      try {
+        await TwinotifyCoreModule.cancelOfflinePairing(activeSessionId);
+      } catch {
+        // Native start will return a bounded error if cleanup did not finish.
+      }
+    }
+    activeSessionIdRef.current = null;
+    await startForRole(requestedRole);
+  }, [startForRole]);
 
   useEffect(() => {
     let mounted = true;
@@ -232,7 +259,7 @@ export default function NearbyPairingScreen() {
             <View style={styles.actions}>
               <PairAction
                 label="Try nearby pairing again"
-                onPress={() => { void startForRole(role ?? 'A'); }}
+                onPress={() => { void restartForRole(role ?? 'A'); }}
               />
               <PairAction label="Cancel nearby pairing" quiet onPress={() => { void cancelAndLeave(); }} />
             </View>
