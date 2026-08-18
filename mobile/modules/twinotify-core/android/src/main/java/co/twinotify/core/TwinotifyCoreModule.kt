@@ -632,6 +632,7 @@ internal enum class OfflinePairingApiError(val code: String) {
     PAIR_INVALID_QR("pair_invalid_qr"),
     PAIR_RUNTIME_UNAVAILABLE("pair_runtime_unavailable"),
     EXPIRED("expired"),
+    TLS_PIN_MISMATCH("tls_pin_mismatch"),
     IDENTITY_MISMATCH("identity_mismatch"),
     INVALID_FRAME("invalid_frame"),
     COMMIT_FAILED("commit_failed"),

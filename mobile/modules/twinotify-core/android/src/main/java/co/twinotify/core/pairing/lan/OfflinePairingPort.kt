@@ -67,6 +67,7 @@ enum class OfflinePairingState(val code: String) {
 
 enum class OfflinePairingError(val code: String) {
     EXPIRED("expired"),
+    TLS_PIN_MISMATCH("tls_pin_mismatch"),
     IDENTITY_MISMATCH("identity_mismatch"),
     INVALID_FRAME("invalid_frame"),
     COMMIT_FAILED("commit_failed"),

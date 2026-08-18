@@ -33,10 +33,14 @@ export type OfflinePairingErrorCode =
   | 'pair_invalid_qr'
   | 'pair_runtime_unavailable'
   | 'expired'
+  | 'tls_pin_mismatch'
   | 'identity_mismatch'
   | 'invalid_frame'
   | 'commit_failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'peer_rejected'
+  | 'wifi_permission_denied'
+  | 'wifi_unavailable';
 
 /** Secret-free native status. Raw QR/session material never belongs here. */
 export interface OfflinePairingStatus {

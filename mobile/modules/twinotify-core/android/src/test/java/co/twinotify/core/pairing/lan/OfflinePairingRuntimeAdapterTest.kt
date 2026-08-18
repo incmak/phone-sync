@@ -49,6 +49,38 @@ class OfflinePairingRuntimeAdapterTest {
     }
 
     @Test
+    fun tlsPinTransportFailurePublishesBoundedPinErrorAndIdentityMismatchStaysApplicationScoped() = runBlocking {
+        val identity = runtimeIdentity("dev-00000000-0000-0000-0000-000000000004", "Pin test", 31)
+        val qr = runtimeQr(identity, lifetimeMillis = 5_000)
+        val statuses = mutableListOf<OfflinePairingPublicStatus>()
+        val runtime = OfflinePairingRuntimeAdapter(
+            CoroutineScope(Job()),
+            OfflinePairingRole.INITIATOR,
+            qr,
+            identity,
+            RecordingCommitter(),
+            FailingTransport(PairingTransportException(PairingTransportFailure.TLS_PIN_MISMATCH)),
+            ByteArray(32) { 9 },
+            LanPairingCodec.encodeQr(qr),
+            statuses::add,
+            TestRuntimeCrypto,
+            monotonicMillis = { 1_000 },
+            actorDispatcher = Dispatchers.IO,
+        )
+
+        withTimeout(1_000) { runtime.job.join() }
+
+        val terminal = statuses.last()
+        assertEquals("tls_pin_mismatch", terminal.error?.code)
+        assertEquals("tls_pin_mismatch", terminal.toEventMap()["errorCode"])
+        assertEquals(
+            setOf("role", "phase", "sessionId", "errorCode", "peerDisplayName", "sas", "completed"),
+            terminal.toEventMap().keys,
+        )
+        assertEquals("identity_mismatch", OfflinePairingError.IDENTITY_MISMATCH.toApiError().code)
+    }
+
+    @Test
     fun everyNsdSecurityBoundaryMapsToWifiPermissionDenied() {
         listOf("register", "discover", "resolve", "multicast").forEach { boundary ->
             assertEquals(
@@ -386,6 +418,16 @@ private class MemoryTransport(
     }
     fun loseNetwork() = checkNotNull(onNetworkLost).invoke()
     override fun close() { closeCount++ }
+}
+
+private class FailingTransport(private val failure: Throwable) : OfflinePairingSessionTransport {
+    override suspend fun open(
+        role: OfflinePairingRole,
+        qr: LanPairingQr,
+        onNetworkLost: () -> Unit,
+    ): RuntimePairingConnection = throw failure
+
+    override fun close() = Unit
 }
 
 private class MemoryConnection(

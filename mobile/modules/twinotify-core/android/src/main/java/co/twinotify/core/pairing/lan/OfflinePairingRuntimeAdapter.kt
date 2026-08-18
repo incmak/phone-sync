@@ -212,17 +212,7 @@ internal class OfflinePairingRuntimeAdapter(
                 } else OfflinePairingError.WIFI_UNAVAILABLE,
             )
         } catch (error: PairingTransportException) {
-            coordinator.fail(
-                when (error.failure) {
-                    PairingTransportFailure.TLS_PIN_MISMATCH -> OfflinePairingError.IDENTITY_MISMATCH
-                    PairingTransportFailure.CONNECT_TIMEOUT,
-                    PairingTransportFailure.ACCEPT_TIMEOUT,
-                    PairingTransportFailure.READ_TIMEOUT,
-                    PairingTransportFailure.NSD_FAILED -> OfflinePairingError.WIFI_UNAVAILABLE
-                    PairingTransportFailure.PERMISSION_DENIED -> OfflinePairingError.WIFI_PERMISSION_DENIED
-                    else -> OfflinePairingError.INVALID_FRAME
-                },
-            )
+            coordinator.fail(error.failure.toOfflinePairingError())
         } catch (_: Throwable) {
             coordinator.fail(OfflinePairingError.INVALID_FRAME)
         } finally {
@@ -331,7 +321,29 @@ internal class OfflinePairingRuntimeAdapter(
 
 internal fun OfflinePairingState.toApiPhase(): OfflinePairingApiPhase = OfflinePairingApiPhase.valueOf(name)
 
-internal fun OfflinePairingError.toApiError(): OfflinePairingApiError = OfflinePairingApiError.valueOf(name)
+internal fun PairingTransportFailure.toOfflinePairingError(): OfflinePairingError = when (this) {
+    PairingTransportFailure.TLS_PIN_MISMATCH -> OfflinePairingError.TLS_PIN_MISMATCH
+    PairingTransportFailure.CONNECT_TIMEOUT,
+    PairingTransportFailure.ACCEPT_TIMEOUT,
+    PairingTransportFailure.READ_TIMEOUT,
+    PairingTransportFailure.NSD_FAILED -> OfflinePairingError.WIFI_UNAVAILABLE
+    PairingTransportFailure.PERMISSION_DENIED -> OfflinePairingError.WIFI_PERMISSION_DENIED
+    PairingTransportFailure.INVALID_FRAME,
+    PairingTransportFailure.FRAME_BUDGET_EXCEEDED,
+    PairingTransportFailure.TLS_FAILED -> OfflinePairingError.INVALID_FRAME
+}
+
+internal fun OfflinePairingError.toApiError(): OfflinePairingApiError = when (this) {
+    OfflinePairingError.EXPIRED -> OfflinePairingApiError.EXPIRED
+    OfflinePairingError.TLS_PIN_MISMATCH -> OfflinePairingApiError.TLS_PIN_MISMATCH
+    OfflinePairingError.IDENTITY_MISMATCH -> OfflinePairingApiError.IDENTITY_MISMATCH
+    OfflinePairingError.INVALID_FRAME -> OfflinePairingApiError.INVALID_FRAME
+    OfflinePairingError.COMMIT_FAILED -> OfflinePairingApiError.COMMIT_FAILED
+    OfflinePairingError.CANCELLED -> OfflinePairingApiError.CANCELLED
+    OfflinePairingError.PEER_REJECTED -> OfflinePairingApiError.PEER_REJECTED
+    OfflinePairingError.WIFI_PERMISSION_DENIED -> OfflinePairingApiError.WIFI_PERMISSION_DENIED
+    OfflinePairingError.WIFI_UNAVAILABLE -> OfflinePairingApiError.WIFI_UNAVAILABLE
+}
 
 internal fun PairingWifiNetworkException.toApiError(): OfflinePairingApiError = when (failure) {
     PairingWifiNetworkFailure.PERMISSION_DENIED -> OfflinePairingApiError.WIFI_PERMISSION_DENIED
