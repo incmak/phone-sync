@@ -388,6 +388,47 @@ git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/Tw
 git commit -m "feat(mobile): expose offline pairing state"
 ```
 
+## Task 6A: Wire the production offline-pairing runtime
+
+**Create:**
+
+- `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/pairing/lan/OfflinePairingRuntimeAdapter.kt`
+- `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/pairing/lan/AndroidOfflinePairingRuntimeFactory.kt`
+- `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/pairing/lan/PairingWifiNetworkSelector.kt`
+- `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/pairing/lan/OfflinePairingRuntimeAdapterTest.kt`
+- `mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/pairing/lan/OfflinePairingRuntimeLoopbackTest.kt`
+
+**Modify:** the Task 1-6 pairing models/codec/TLS/port/coordinator/transport/store boundaries, their focused tests, and `TwinotifyCoreModule.kt` only as required to compose the production runtime.
+
+### Step 1: Close prerequisite REDs
+
+Prove before implementation that pairing-only TLS is not mutual, accepted connections expose no peer SPKI pin, fresh offline pairing cannot atomically create a peer plus LAN marker, display name is not transcript-bound, startup recovery has no production caller, and the native module still defaults to `pair_runtime_unavailable`.
+
+### Step 2: Compose the bounded production runtime
+
+- Add pairing-only mTLS: both roles present the AndroidKeyStore certificate, both capture the transport-observed peer SPKI pin, and no frame is read until certificate and QR pin checks pass.
+- Bind normalized peer display name into hello, canonical transcript, status, identity digest, and persistence.
+- Add an Android Wi-Fi `Network` lease that requires `TRANSPORT_WIFI` but not `INTERNET` or `VALIDATED`, with distinct bounded permission and unavailable codes.
+- Use a single bounded actor to own the connection, reader, serialized writer, coordinator callbacks, network lease, NSD registration/discovery, deadlines, and exactly-once cleanup.
+- Add bounded `pair.cancel`; distinguish local cancellation from authenticated peer rejection.
+- Make fresh commit atomically create the public peer plus LAN marker after sealed verification. Existing relay upgrade requires exact device ID and application-key match and adds only LAN trust.
+- Call `LanPairStore.recover(context, PeerStore.load(context))` during runtime initialization/startup.
+- Install `AndroidOfflinePairingRuntimeFactory` as the native module default; retain injected factories only for tests.
+
+No UI, direct-notification LAN transport, route selection, or `SyncService` changes belong here.
+
+### Step 3: Verify the real composition
+
+Run deterministic JVM actor tests for both roles, equal SAS, mutual-only commit, fresh/upgrade persistence, mismatch preservation, bounded queues, timeout, network loss, cancellation, peer rejection, and every cleanup boundary. Run instrumentation storage recovery and real JSSE mTLS loopback tests proving non-null pins on both sides and missing/wrong client certificate rejection before frames. Run on a physical Android 14+ phone, then run native JVM/compile/lint, TypeScript typecheck, and `git diff --check`.
+
+The two-device no-uplink discovery/mTLS smoke may reuse Task 5's instrumentation role, but full persisted two-phone pairing remains Task 8.
+
+### Step 4: Commit
+
+```bash
+git commit -m "feat(android): wire offline pairing runtime"
+```
+
 ## Task 7: Integrate offline pairing and LAN upgrade UI
 
 **Create:**
