@@ -49,17 +49,21 @@ class AndroidPairingNsdAdapter(
             continuation.invokeOnCancellation { listener.cancelRegistration() }
             try {
                 nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, executor, listener)
-            } catch (_: Throwable) {
-                listener.failRegistration()
+            } catch (error: Throwable) {
+                listener.failRegistration(mapPairingNsdThrowable(error))
             }
         }
     }
 
     override suspend fun resolve(sessionId: String): PairingNsdEndpoint {
         validateSessionId(sessionId)
-        val multicastLock = wifi.createMulticastLock("twinotify-pair-discovery").apply {
-            setReferenceCounted(false)
-            acquire()
+        val multicastLock = try {
+            wifi.createMulticastLock("twinotify-pair-discovery").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (error: Throwable) {
+            throw mapPairingNsdThrowable(error)
         }
         try {
             return suspendCancellableCoroutine { continuation ->
@@ -75,8 +79,8 @@ class AndroidPairingNsdAdapter(
                     runCatching { nsd.stopServiceDiscovery(discovery) }
                 }
 
-                fun fail() {
-                    continuation.resumeFailure()
+                fun fail(error: Throwable = PairingTransportException(PairingTransportFailure.NSD_FAILED)) {
+                    continuation.resumeFailure(error)
                     stopListeners()
                 }
 
@@ -115,8 +119,8 @@ class AndroidPairingNsdAdapter(
                         if (!activeResolution.compareAndSet(null, resolver)) return
                         try {
                             nsd.resolveService(serviceInfo, executor, resolver)
-                        } catch (_: Throwable) {
-                            fail()
+                        } catch (error: Throwable) {
+                            fail(mapPairingNsdThrowable(error))
                         }
                     }
 
@@ -142,8 +146,8 @@ class AndroidPairingNsdAdapter(
                         executor,
                         discovery,
                     )
-                } catch (_: Throwable) {
-                    fail()
+                } catch (error: Throwable) {
+                    fail(mapPairingNsdThrowable(error))
                 }
             }
         } finally {
@@ -193,8 +197,10 @@ private class AndroidRegistrationListener(
         if (registered.get()) runCatching { nsd.unregisterService(this) }
     }
 
-    fun failRegistration() {
-        registration.getAndSet(null)?.resumeFailure()
+    fun failRegistration(
+        error: Throwable = PairingTransportException(PairingTransportFailure.NSD_FAILED),
+    ) {
+        registration.getAndSet(null)?.resumeFailure(error)
     }
 
     fun beginUnregister(continuation: CancellableContinuation<Unit>) {
@@ -234,9 +240,11 @@ private class AndroidRegistrationListener(
     override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = failUnregistration()
 }
 
-private fun <T> CancellableContinuation<T>.resumeFailure() {
+private fun <T> CancellableContinuation<T>.resumeFailure(
+    error: Throwable = PairingTransportException(PairingTransportFailure.NSD_FAILED),
+) {
     if (isActive) runCatching {
-        resumeWith(Result.failure(PairingTransportException(PairingTransportFailure.NSD_FAILED)))
+        resumeWith(Result.failure(error))
     }
 }
 

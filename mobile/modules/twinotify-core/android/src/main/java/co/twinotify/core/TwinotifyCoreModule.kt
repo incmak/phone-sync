@@ -466,7 +466,10 @@ class TwinotifyCoreModule internal constructor(
                     // retryable as terminal 401 while the old signing key is still available.
                     val markedConfig = co.twinotify.core.service.ServiceConfigStore.setRevocationRequestedAt(ctx)
                     co.twinotify.core.pairing.UnpairWorkflow.execute(
-                        stopAndAwait = { co.twinotify.core.service.SyncService.shutdownActive(ctx) },
+                        stopAndAwait = {
+                            offlinePairing.quiesceAndAwait()
+                            co.twinotify.core.service.SyncService.shutdownActive(ctx)
+                        },
                         revokePeer = {
                             if (peer != null) {
                                 val relayUrl = config.relayUrl ?: error("paired device has no relay URL")
@@ -696,7 +699,7 @@ internal interface OfflinePairingRuntime {
     val qrJson: String?
     val job: Job
     fun confirm()
-    fun cancel()
+    suspend fun cancel()
     fun close()
 }
 
@@ -713,6 +716,7 @@ internal class OfflinePairingApiController(
     private val monitor = Any()
     private var generation = 0L
     private var runtime: OfflinePairingRuntime? = null
+    private var cancellingRuntime: OfflinePairingRuntime? = null
     private var status = idleStatus()
 
     fun start(displayName: String): String = synchronized(monitor) {
@@ -753,38 +757,53 @@ internal class OfflinePairingApiController(
         }
     }
 
-    fun cancel(sessionId: String) = synchronized(monitor) {
-        val active = requireExactSession(sessionId)
+    suspend fun cancel(sessionId: String) {
+        val active = synchronized(monitor) {
+            requireExactSession(sessionId).also { cancellingRuntime = it }
+        }
         try {
             active.cancel()
         } catch (_: Throwable) {
             // Cancellation still closes the child job and transport. Provider
             // details are never allowed across the native boundary.
         } finally {
-            if (runtime === active) {
-                val terminal = OfflinePairingPublicStatus(
-                    role = active.role,
-                    phase = OfflinePairingApiPhase.IDLE,
-                    sessionId = active.sessionId,
-                    error = status.error ?: OfflinePairingApiError.CANCELLED,
-                    peerDisplayName = null,
-                    sas = null,
-                    completed = false,
-                )
-                if (status != terminal) {
-                    status = terminal
-                    statusSink(terminal)
+            synchronized(monitor) {
+                if (cancellingRuntime === active) cancellingRuntime = null
+                if (runtime === active) {
+                    val terminal = OfflinePairingPublicStatus(
+                        role = active.role,
+                        phase = OfflinePairingApiPhase.IDLE,
+                        sessionId = active.sessionId,
+                        error = status.error ?: OfflinePairingApiError.CANCELLED,
+                        peerDisplayName = null,
+                        sas = null,
+                        completed = false,
+                    )
+                    if (status != terminal) {
+                        status = terminal
+                        statusSink(terminal)
+                    }
                 }
+                release(active, cancelCoordinator = false)
             }
-            release(active, cancelCoordinator = false)
         }
     }
 
     fun getStatus(): OfflinePairingPublicStatus = synchronized(monitor) { status }
 
     fun destroy() = synchronized(monitor) {
-        runtime?.let { release(it, cancelCoordinator = true) }
+        runtime?.let { release(it, cancelCoordinator = false) }
         status = idleStatus()
+    }
+
+    suspend fun quiesceAndAwait() {
+        val active = synchronized(monitor) { runtime?.also { cancellingRuntime = it } } ?: return
+        runCatching { active.cancel() }
+        synchronized(monitor) {
+            if (cancellingRuntime === active) cancellingRuntime = null
+            if (runtime === active) release(active, cancelCoordinator = false)
+            status = idleStatus()
+        }
     }
 
     private fun create(
@@ -831,6 +850,11 @@ internal class OfflinePairingApiController(
             constructing = false
             observeCompletion(created, token)
             buffered.forEach { acceptStatus(token, it) }
+            if (runtime !== created || generation != token || !created.job.isActive) {
+                val retained = status.error ?: OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE
+                if (runtime === created) failCreated(created, retained)
+                throw OfflinePairingApiException(retained)
+            }
             return created
         } catch (error: OfflinePairingApiException) {
             throw error
@@ -842,17 +866,18 @@ internal class OfflinePairingApiController(
     private fun acceptStatus(token: Long, update: OfflinePairingPublicStatus) {
         val active = runtime ?: return
         if (generation != token || update.role != active.role || update.sessionId != active.sessionId) return
+        if (cancellingRuntime === active) return
         status = update
         statusSink(update)
         if (update.completed || (update.phase == OfflinePairingApiPhase.IDLE && update.error != null)) {
-            release(active, cancelCoordinator = false)
+            if (cancellingRuntime !== active) release(active, cancelCoordinator = false)
         }
     }
 
     private fun observeCompletion(active: OfflinePairingRuntime, token: Long) {
         active.job.invokeOnCompletion {
             synchronized(monitor) {
-                if (generation != token || runtime !== active) return@synchronized
+                if (generation != token || runtime !== active || cancellingRuntime === active) return@synchronized
                 terminate(active, OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE, cancelCoordinator = false)
             }
         }
@@ -899,7 +924,8 @@ internal class OfflinePairingApiController(
         if (runtime !== active) return
         generation++
         runtime = null
-        if (cancelCoordinator) runCatching { active.cancel() }
+        if (cancellingRuntime === active) cancellingRuntime = null
+        if (cancelCoordinator) active.job.cancel()
         active.job.cancel()
         runCatching { active.close() }
     }
@@ -908,7 +934,6 @@ internal class OfflinePairingApiController(
         if (runtime === created) runtime = null
         generation++
         created.job.cancel()
-        runCatching { created.cancel() }
         runCatching { created.close() }
         throw OfflinePairingApiException(error)
     }

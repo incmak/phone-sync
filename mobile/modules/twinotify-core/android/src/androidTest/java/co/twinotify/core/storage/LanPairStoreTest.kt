@@ -5,6 +5,11 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import co.twinotify.core.pairing.lan.AndroidOfflinePairingCommitter
+import co.twinotify.core.pairing.lan.OfflinePairingCommit
+import co.twinotify.core.pairing.lan.OfflinePairingCommitFence
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -17,6 +22,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -61,6 +68,39 @@ class LanPairStoreTest {
         assertNotNull(committed.lanBindingId)
         assertNotNull(LanPairStore.loadValidated(context, committed))
         Unit
+    }
+
+    @Test
+    fun unpairFenceWaitsForPausedProductionCommitThenWipeCannotBeResurrected() = runBlocking {
+        val enteredStoreBoundary = CountDownLatch(1)
+        val releaseStoreBoundary = CountDownLatch(1)
+        val fence = OfflinePairingCommitFence()
+        val committer = AndroidOfflinePairingCommitter(context, null, fence) {
+            enteredStoreBoundary.countDown()
+            check(releaseStoreBoundary.await(5, TimeUnit.SECONDS))
+        }
+        val value = OfflinePairingCommit(
+            "dev-00000000-0000-0000-0000-000000000099",
+            "Paused peer",
+            bytes(0x21), bytes(0x31), bytes(0x51), bytes(0x61), 1,
+        )
+        val commit = async(Dispatchers.IO) { committer.commit(value) }
+        assertTrue(enteredStoreBoundary.await(5, TimeUnit.SECONDS))
+
+        val unpair = async(Dispatchers.IO) {
+            fence.close()
+            PeerStore.clear(context)
+            LanPairStore.clear(context)
+        }
+        delay(100)
+        assertFalse(unpair.isCompleted, "wipe must wait until an entered commit leaves the fence")
+
+        releaseStoreBoundary.countDown()
+        assertTrue(commit.await())
+        unpair.await()
+
+        assertNull(PeerStore.load(context))
+        assertNull(LanPairStore.sealedBindingIdForTest(context))
     }
 
     @Test

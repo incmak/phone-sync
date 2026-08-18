@@ -98,7 +98,10 @@ class OfflinePairingCoordinator(
         when (frame) {
             is OfflinePairingFrame.Hello -> receiveHello(session, frame)
             is OfflinePairingFrame.Signature -> receiveSignature(frame)
-            is OfflinePairingFrame.Cancel -> abort(OfflinePairingError.PEER_REJECTED)
+            is OfflinePairingFrame.Cancel -> {
+                if (peerHello == null) abort(OfflinePairingError.INVALID_FRAME)
+                else abort(OfflinePairingError.PEER_REJECTED)
+            }
         }
     }
 

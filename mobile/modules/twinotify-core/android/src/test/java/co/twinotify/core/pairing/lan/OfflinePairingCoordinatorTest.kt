@@ -12,6 +12,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -253,6 +254,26 @@ class OfflinePairingCoordinatorTest {
         assertEquals(1, pair.initiatorPort.closeCount)
     }
 
+    @Test fun `initiator rejects unauthenticated cancel until hello binds transport and application identity`() {
+        val preHello = PairHarness()
+        preHello.startOnly()
+        preHello.initiator.onTlsAuthenticated(preHello.joinerIdentity.tlsSpkiSha256)
+
+        preHello.initiator.onPeerFrame(OfflinePairingFrame.Cancel(preHello.qr.sessionId))
+
+        assertEquals(OfflinePairingError.INVALID_FRAME, preHello.initiator.status.error)
+
+        val bound = PairHarness()
+        bound.startOnly()
+        bound.initiator.onTlsAuthenticated(bound.joinerIdentity.tlsSpkiSha256)
+        bound.initiator.onPeerFrame(bound.joinerHello())
+        assertEquals(OfflinePairingState.VERIFY_CODE, bound.initiator.status.state)
+
+        bound.initiator.onPeerFrame(OfflinePairingFrame.Cancel(bound.qr.sessionId))
+
+        assertEquals(OfflinePairingError.PEER_REJECTED, bound.initiator.status.error)
+    }
+
     @Test fun `initiator deadline and joiner capped monotonic deadline expire independent of wall clock`() {
         val pair = PairHarness(lifetimeMillis = 10)
         pair.startOnly()
@@ -391,14 +412,14 @@ class OfflinePairingCoordinatorTest {
             peerDisplayName = "Peer",
             sas = "123456",
         )
-        controller.cancel(sessionId)
+        runBlocking { controller.cancel(sessionId) }
         assertEquals(1, factory.created.single().cancelCount)
         assertEquals(1, factory.created.single().closeCount)
-        assertTrue(factory.created.single().job.isCancelled)
+        assertTrue(factory.created.single().job.isCompleted)
         assertEquals(OfflinePairingApiError.CANCELLED, controller.getStatus().error)
         assertNull(controller.getStatus().peerDisplayName)
         assertNull(controller.getStatus().sas)
-        assertApiError(OfflinePairingApiError.PAIR_SESSION_NOT_FOUND) { controller.cancel(sessionId) }
+        assertApiError(OfflinePairingApiError.PAIR_SESSION_NOT_FOUND) { runBlocking { controller.cancel(sessionId) } }
     }
 
     @Test fun `native lifecycle serializes statuses and ignores a closed runtime`() {
@@ -520,7 +541,7 @@ class OfflinePairingCoordinatorTest {
         val cancelled = factory.created.single()
         cancelled.emit(OfflinePairingApiPhase.VERIFY_CODE, peerDisplayName = "Peer", sas = "654321")
 
-        controller.cancel(cancelled.sessionId)
+        runBlocking { controller.cancel(cancelled.sessionId) }
         controller.join(qrJson, "Other phone")
         val next = factory.created.last()
         cancelled.completeSilently()
@@ -559,12 +580,62 @@ class OfflinePairingCoordinatorTest {
 
         controller.destroy()
 
-        assertEquals(1, runtime.cancelCount)
+        assertEquals(0, runtime.cancelCount)
         assertEquals(1, runtime.closeCount)
         assertTrue(runtime.job.isCancelled)
         assertEquals(OfflinePairingApiPhase.IDLE, controller.getStatus().phase)
         assertNull(controller.getStatus().sas)
         assertNull(controller.getStatus().peerDisplayName)
+    }
+
+    @Test fun `native lifecycle rejects buffered terminal creation for both roles and permits retry`() {
+        val factory = FakeOfflinePairingRuntimeFactory().apply {
+            terminalBeforeReturn = OfflinePairingApiError.WIFI_PERMISSION_DENIED
+        }
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
+
+        assertApiError(OfflinePairingApiError.WIFI_PERMISSION_DENIED) { controller.start("This phone") }
+        val qrJson = factory.created.single().qrJson!!
+        assertEquals(1, factory.created.single().closeCount)
+
+        assertApiError(OfflinePairingApiError.WIFI_PERMISSION_DENIED) {
+            controller.join(qrJson, "Other phone")
+        }
+        assertEquals(1, factory.created.last().closeCount)
+
+        factory.terminalBeforeReturn = null
+        controller.start("Fresh phone")
+        assertEquals(OfflinePairingApiPhase.ADVERTISING, controller.getStatus().phase)
+    }
+
+    @Test fun `unpair quiesce awaits the active pairing runtime before wipe can proceed`() = runBlocking {
+        val factory = FakeOfflinePairingRuntimeFactory().apply { completeDuringCancel = true }
+        val events = mutableListOf<OfflinePairingPublicStatus>()
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory, events::add)
+        controller.start("This phone")
+        val active = factory.created.single()
+
+        controller.quiesceAndAwait()
+
+        assertEquals(1, active.cancelCount)
+        assertEquals(1, active.closeCount)
+        assertTrue(active.job.isCompleted)
+        assertEquals(OfflinePairingApiPhase.IDLE, controller.getStatus().phase)
+        assertFalse(events.any { it.phase == OfflinePairingApiPhase.COMPLETE })
+    }
+
+    @Test fun `native lifecycle rejects already completed jobs for both roles and cleans once`() {
+        val factory = FakeOfflinePairingRuntimeFactory().apply { completeBeforeReturn = true }
+        val controller = OfflinePairingApiController(CoroutineScope(Job()), factory) {}
+
+        assertApiError(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE) { controller.start("This phone") }
+        val qrJson = factory.created.single().qrJson!!
+        assertEquals(1, factory.created.single().closeCount)
+
+        assertApiError(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE) {
+            controller.join(qrJson, "Other phone")
+        }
+        assertEquals(1, factory.created.last().closeCount)
     }
 
     private fun assertApiError(
@@ -593,6 +664,9 @@ private class FakeOfflinePairingRuntimeFactory : OfflinePairingRuntimeFactory {
     val created = mutableListOf<FakeOfflinePairingRuntime>()
     var createCount = 0
     var throwOnCreate: Throwable? = null
+    var terminalBeforeReturn: OfflinePairingApiError? = null
+    var completeBeforeReturn = false
+    var completeDuringCancel = false
 
     override fun start(
         scope: CoroutineScope,
@@ -621,7 +695,11 @@ private class FakeOfflinePairingRuntimeFactory : OfflinePairingRuntimeFactory {
     ): FakeOfflinePairingRuntime {
         createCount++
         throwOnCreate?.let { throw it }
-        return FakeOfflinePairingRuntime(scope, role, sessionId, qrJson, statusSink).also(created::add)
+        return FakeOfflinePairingRuntime(scope, role, sessionId, qrJson, statusSink) { completeDuringCancel }.also { runtime ->
+            created += runtime
+            terminalBeforeReturn?.let { runtime.emit(OfflinePairingApiPhase.IDLE, error = it) }
+            if (completeBeforeReturn) runtime.completeSilently()
+        }
     }
 }
 
@@ -631,6 +709,7 @@ private class FakeOfflinePairingRuntime(
     override val sessionId: String,
     override val qrJson: String?,
     private val statusSink: (OfflinePairingPublicStatus) -> Unit,
+    private val completeDuringCancel: () -> Boolean,
 ) : OfflinePairingRuntime {
     override val job = Job(scope.coroutineContext[Job])
     var confirmCount = 0
@@ -642,7 +721,12 @@ private class FakeOfflinePairingRuntime(
         confirmCount++
         confirmFailure?.let { throw it }
     }
-    override fun cancel() { cancelCount++ }
+    override suspend fun cancel() {
+        cancelCount++
+        if (completeDuringCancel()) emit(OfflinePairingApiPhase.COMPLETE, completed = true)
+        else emit(OfflinePairingApiPhase.IDLE, error = OfflinePairingApiError.CANCELLED)
+        job.complete()
+    }
     override fun close() { closeCount++ }
 
     fun completeSilently() { job.complete() }

@@ -31,6 +31,7 @@ enum class PairingTransportFailure(val code: String) {
     INVALID_FRAME("invalid_frame"),
     FRAME_BUDGET_EXCEEDED("frame_budget_exceeded"),
     NSD_FAILED("nsd_failed"),
+    PERMISSION_DENIED("wifi_permission_denied"),
     CONNECT_TIMEOUT("connect_timeout"),
     ACCEPT_TIMEOUT("accept_timeout"),
     READ_TIMEOUT("read_timeout"),
@@ -39,6 +40,12 @@ enum class PairingTransportFailure(val code: String) {
 }
 
 class PairingTransportException(val failure: PairingTransportFailure) : Exception(failure.code)
+
+internal fun mapPairingNsdThrowable(error: Throwable): Throwable = when (error) {
+    is CancellationException -> error
+    is SecurityException -> PairingTransportException(PairingTransportFailure.PERMISSION_DENIED)
+    else -> PairingTransportException(PairingTransportFailure.NSD_FAILED)
+}
 
 class FrameBudget(private val maxFrames: Int, private val maxBytes: Int) {
     private var frames = 0
@@ -184,7 +191,7 @@ internal object OfflinePairingFrameCodec {
 internal interface RuntimePairingConnection : Closeable {
     val peerSpkiSha256: ByteArray?
     suspend fun read(): OfflinePairingFrame
-    fun write(frame: OfflinePairingFrame)
+    suspend fun write(frame: OfflinePairingFrame)
 }
 
 class PairingConnection internal constructor(
@@ -193,6 +200,7 @@ class PairingConnection internal constructor(
     inboundBudget: FrameBudget = FrameBudget(DEFAULT_MAX_FRAMES, DEFAULT_MAX_BYTES),
     outboundBudget: FrameBudget = FrameBudget(DEFAULT_MAX_FRAMES, DEFAULT_MAX_BYTES),
     private val readTimeoutMillis: Long = DEFAULT_READ_TIMEOUT_MILLIS,
+    private val writeTimeoutMillis: Long = DEFAULT_WRITE_TIMEOUT_MILLIS,
 ) : RuntimePairingConnection {
     private val peerPin = peerSpkiSha256?.copyOf()
     private val inbound = inboundBudget
@@ -224,7 +232,28 @@ class PairingConnection internal constructor(
         }
     }
 
-    override fun write(frame: OfflinePairingFrame) = OfflinePairingFrameCodec.write(socket.getOutputStream(), frame, outbound)
+    override suspend fun write(frame: OfflinePairingFrame) {
+        val cancellationCloser = currentCoroutineContext().closeOnCancellation(::close)
+        try {
+            withTimeout(writeTimeoutMillis) {
+                runInterruptible(Dispatchers.IO) {
+                    OfflinePairingFrameCodec.write(socket.getOutputStream(), frame, outbound)
+                }
+            }
+        } catch (error: CancellationException) {
+            close()
+            throw error
+        } catch (error: PairingTransportException) {
+            close()
+            throw error
+        } catch (_: Throwable) {
+            close()
+            currentCoroutineContext().ensureActive()
+            throw PairingTransportException(PairingTransportFailure.INVALID_FRAME)
+        } finally {
+            cancellationCloser.dispose()
+        }
+    }
 
     override fun close() = socket.close()
 
@@ -232,6 +261,7 @@ class PairingConnection internal constructor(
         const val DEFAULT_MAX_FRAMES = 16
         const val DEFAULT_MAX_BYTES = 256 * 1024
         const val DEFAULT_READ_TIMEOUT_MILLIS = 30_000L
+        const val DEFAULT_WRITE_TIMEOUT_MILLIS = 5_000L
     }
 }
 

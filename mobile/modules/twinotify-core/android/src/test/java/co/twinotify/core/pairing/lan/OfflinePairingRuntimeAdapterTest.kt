@@ -1,6 +1,9 @@
 package co.twinotify.core.pairing.lan
 
 import co.twinotify.core.OfflinePairingApiError
+import co.twinotify.core.OfflinePairingApiController
+import co.twinotify.core.OfflinePairingRuntime
+import co.twinotify.core.OfflinePairingRuntimeFactory
 import co.twinotify.core.OfflinePairingApiPhase
 import co.twinotify.core.OfflinePairingPublicStatus
 import java.security.MessageDigest
@@ -8,14 +11,19 @@ import java.util.UUID
 import kotlinx.coroutines.channels.Channel
 import co.twinotify.core.defaultOfflinePairingRuntimeFactory
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class OfflinePairingRuntimeAdapterTest {
@@ -36,6 +44,23 @@ class OfflinePairingRuntimeAdapterTest {
             OfflinePairingApiError.WIFI_UNAVAILABLE,
             PairingWifiNetworkException(PairingWifiNetworkFailure.UNAVAILABLE).toApiError(),
         )
+    }
+
+    @Test
+    fun everyNsdSecurityBoundaryMapsToWifiPermissionDenied() {
+        listOf("register", "discover", "resolve", "multicast").forEach { boundary ->
+            assertEquals(
+                "$boundary must preserve SecurityException",
+                PairingTransportFailure.PERMISSION_DENIED,
+                (mapPairingNsdThrowable(SecurityException(boundary)) as PairingTransportException).failure,
+            )
+        }
+        assertEquals(
+            PairingTransportFailure.NSD_FAILED,
+            (mapPairingNsdThrowable(IllegalStateException("unavailable")) as PairingTransportException).failure,
+        )
+        val cancellation = kotlinx.coroutines.CancellationException("cancel")
+        assertSame(cancellation, mapPairingNsdThrowable(cancellation))
     }
 
     @Test
@@ -121,6 +146,63 @@ class OfflinePairingRuntimeAdapterTest {
         assertEquals(1, harness.initiatorTransport.closeCount)
         assertTrue(harness.initiatorCommitter.commits.isEmpty())
     }
+
+    @Test
+    fun blockingWriteCannotPinCeremonyPastDeadlineAndCleanup() = runBlocking {
+        val identity = runtimeIdentity("dev-00000000-0000-0000-0000-000000000003", "Blocked", 21)
+        val qr = runtimeQr(identity, lifetimeMillis = 50)
+        val connection = BlockingWriteConnection(ByteArray(32) { 8 })
+        val transport = MemoryTransport(connection)
+        val statuses = mutableListOf<OfflinePairingPublicStatus>()
+        val runtime = OfflinePairingRuntimeAdapter(
+            CoroutineScope(Job()), OfflinePairingRole.INITIATOR, qr, identity, RecordingCommitter(), transport,
+            ByteArray(32) { 4 }, LanPairingCodec.encodeQr(qr), statuses::add, TestRuntimeCrypto,
+            monotonicMillis = { 1_000 }, actorDispatcher = Dispatchers.IO,
+        )
+
+        try {
+            withTimeout(1_000) { runtime.job.join() }
+        } finally {
+            connection.close()
+        }
+
+        assertEquals(OfflinePairingApiError.EXPIRED, statuses.last().error)
+        assertEquals(1, connection.closeCount)
+        assertEquals(1, transport.closeCount)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun controllerCancellationSerializesOneCancelBeforeClosingRealAdapter() = runTest {
+        val harness = RuntimeHarness(CoroutineScope(StandardTestDispatcher(testScheduler)))
+        runCurrent()
+        val factory = object : OfflinePairingRuntimeFactory {
+            override fun start(
+                scope: CoroutineScope,
+                displayName: String,
+                statusSink: (OfflinePairingPublicStatus) -> Unit,
+            ): OfflinePairingRuntime {
+                harness.initiatorObserver = statusSink
+                return harness.initiator
+            }
+            override fun join(
+                scope: CoroutineScope,
+                qr: LanPairingQr,
+                displayName: String,
+                statusSink: (OfflinePairingPublicStatus) -> Unit,
+            ): OfflinePairingRuntime = error("unused")
+        }
+        val controller = OfflinePairingApiController(this, factory) {}
+        controller.start("Controller")
+
+        controller.cancel(harness.initiator.sessionId)
+        runCurrent()
+
+        assertEquals(1, harness.initiatorConnection.cancelWriteCount)
+        assertEquals(OfflinePairingApiError.PEER_REJECTED, harness.joinerStatuses.last().error)
+        assertEquals(1, harness.initiatorTransport.closeCount)
+        assertEquals(1, harness.joinerTransport.closeCount)
+    }
 }
 
 private class RuntimeHarness(scope: CoroutineScope) {
@@ -129,13 +211,15 @@ private class RuntimeHarness(scope: CoroutineScope) {
     private val joinerIdentity = identity("dev-00000000-0000-0000-0000-000000000002", "Joiner", 11)
     private val aToB = Channel<OfflinePairingFrame>(16)
     private val bToA = Channel<OfflinePairingFrame>(16)
-    val initiatorTransport = MemoryTransport(MemoryConnection(bToA, aToB, joinerIdentity.tlsSpkiSha256))
+    val initiatorConnection = MemoryConnection(bToA, aToB, joinerIdentity.tlsSpkiSha256)
+    val initiatorTransport = MemoryTransport(initiatorConnection)
     val joinerTransport = MemoryTransport(MemoryConnection(aToB, bToA, initiatorIdentity.tlsSpkiSha256))
     val initiatorCommitter = RecordingCommitter()
     val joinerCommitter = RecordingCommitter()
     val initiatorStatuses = mutableListOf<OfflinePairingPublicStatus>()
     val joinerStatuses = mutableListOf<OfflinePairingPublicStatus>()
     val failures = mutableListOf<Throwable?>()
+    var initiatorObserver: ((OfflinePairingPublicStatus) -> Unit)? = null
     private val qr = LanPairingQr(
         1,
         UUID.randomUUID().toString(),
@@ -172,7 +256,10 @@ private class RuntimeHarness(scope: CoroutineScope) {
         transport,
         ByteArray(32) { if (role == OfflinePairingRole.INITIATOR) 7 else 8 },
         if (role == OfflinePairingRole.INITIATOR) LanPairingCodec.encodeQr(qr) else null,
-        statuses::add,
+        { status ->
+            statuses += status
+            if (role == OfflinePairingRole.INITIATOR) initiatorObserver?.invoke(status)
+        },
         TestRuntimeCrypto,
         monotonicMillis = { 1_000 },
         actorDispatcher = dispatcher,
@@ -213,11 +300,44 @@ private class MemoryConnection(
     private val pin = pin.copyOf()
     override val peerSpkiSha256: ByteArray get() = pin.copyOf()
     override suspend fun read(): OfflinePairingFrame = inbound.receive()
-    override fun write(frame: OfflinePairingFrame) {
+    var cancelWriteCount = 0
+    override suspend fun write(frame: OfflinePairingFrame) {
+        if (frame is OfflinePairingFrame.Cancel) cancelWriteCount++
         check(outbound.trySend(frame).isSuccess)
     }
     override fun close() = Unit
 }
+
+private class BlockingWriteConnection(pin: ByteArray) : RuntimePairingConnection {
+    private val pin = pin.copyOf()
+    private val released = java.util.concurrent.CountDownLatch(1)
+    private val closes = java.util.concurrent.atomic.AtomicInteger(0)
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+    override val peerSpkiSha256: ByteArray get() = pin.copyOf()
+    val closeCount: Int get() = closes.get()
+    override suspend fun read(): OfflinePairingFrame = kotlinx.coroutines.awaitCancellation()
+    override suspend fun write(frame: OfflinePairingFrame) { released.await() }
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            closes.incrementAndGet()
+            released.countDown()
+        }
+    }
+}
+
+private fun runtimeIdentity(deviceId: String, name: String, seed: Int) = OfflinePairingIdentity(
+    deviceId, name,
+    ByteArray(32) { (seed + it).toByte() },
+    ByteArray(32) { (seed + 1 + it).toByte() },
+    ByteArray(64) { (seed + 2 + it).toByte() },
+    ByteArray(32) { (seed + 3 + it).toByte() },
+)
+
+private fun runtimeQr(identity: OfflinePairingIdentity, lifetimeMillis: Long) = LanPairingQr(
+    1, UUID.randomUUID().toString(), 1, lifetimeMillis, identity.deviceId, identity.displayName,
+    LanPairingBytes(identity.encryptionPublicKey), LanPairingBytes(identity.signingPublicKey),
+    LanPairingBytes(identity.tlsSpkiSha256), LanPairingBytes(ByteArray(32) { 42 }),
+)
 
 private class RecordingCommitter : OfflinePairingCommitter {
     val commits = mutableListOf<OfflinePairingCommit>()

@@ -17,6 +17,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 internal class AndroidOfflinePairingRuntimeFactory(
     private val contextProvider: () -> Context,
@@ -60,17 +62,21 @@ internal class AndroidOfflinePairingRuntimeFactory(
         initialized: Initialization,
         qrJson: String?,
         statusSink: (OfflinePairingPublicStatus) -> Unit,
-    ) = OfflinePairingRuntimeAdapter(
-        scope = scope,
-        pairingRole = role,
-        qr = qr,
-        localIdentity = initialized.identity,
-        committer = AndroidOfflinePairingCommitter(initialized.context, initialized.existingPeer),
-        transport = AndroidOfflinePairingSessionTransport(initialized.context),
-        nonce = randomBytes(32),
-        qrJson = qrJson,
-        statusSink = statusSink,
-    )
+    ): OfflinePairingRuntime {
+        val commitFence = OfflinePairingCommitFence()
+        return OfflinePairingRuntimeAdapter(
+            scope = scope,
+            pairingRole = role,
+            qr = qr,
+            localIdentity = initialized.identity,
+            committer = AndroidOfflinePairingCommitter(initialized.context, initialized.existingPeer, commitFence),
+            transport = AndroidOfflinePairingSessionTransport(initialized.context),
+            nonce = randomBytes(32),
+            qrJson = qrJson,
+            statusSink = statusSink,
+            commitFence = commitFence,
+        )
+    }
 
     /** Recovery is deliberately before the peer snapshot used by the ceremony. */
     private fun initialize(displayName: String): Initialization = runBlocking(Dispatchers.IO) {
@@ -109,9 +115,22 @@ internal class AndroidOfflinePairingRuntimeFactory(
     }
 }
 
-private class AndroidOfflinePairingCommitter(
+internal class OfflinePairingCommitFence {
+    private val mutex = Mutex()
+    private var active = true
+
+    suspend fun <T> commit(block: suspend () -> T): T? = mutex.withLock {
+        if (!active) null else block()
+    }
+
+    suspend fun close() = mutex.withLock { active = false }
+}
+
+internal class AndroidOfflinePairingCommitter(
     private val context: Context,
     existingPeer: PeerRecord?,
+    private val commitFence: OfflinePairingCommitFence,
+    private val beforeStoreCommit: () -> Unit = {},
 ) : OfflinePairingCommitter {
     private val initialPeer = existingPeer?.copyRecord()
 
@@ -133,8 +152,11 @@ private class AndroidOfflinePairingCommitter(
                 value.protocolVersion,
                 System.currentTimeMillis(),
             )
-            LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding))
-            true
+            commitFence.commit {
+                beforeStoreCommit()
+                LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding))
+                true
+            } ?: false
         }
     }
 

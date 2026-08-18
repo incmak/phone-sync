@@ -8,16 +8,20 @@ import co.twinotify.core.OfflinePairingPublicStatus
 import co.twinotify.core.OfflinePairingRuntime
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 
 /** Count- and byte-bounded mailbox used by the sole pairing runtime actor. */
 internal class BoundedPairingActorMailbox<T>(
@@ -98,10 +102,13 @@ internal class OfflinePairingRuntimeAdapter(
     private val actorDispatcher: CoroutineDispatcher = Dispatchers.IO,
     eventCapacity: Int = DEFAULT_EVENT_CAPACITY,
     eventByteBudget: Int = DEFAULT_EVENT_BYTES,
+    private val commitFence: OfflinePairingCommitFence? = null,
 ) : OfflinePairingRuntime {
     private val mailbox = BoundedPairingActorMailbox<PairingActorEvent>(eventCapacity, eventByteBudget)
     private val cleaned = AtomicBoolean(false)
-    private var connection: RuntimePairingConnection? = null
+    @Volatile private var connection: RuntimePairingConnection? = null
+    private val connectionClosed = AtomicBoolean(false)
+    private val forcedTerminal = AtomicReference<OfflinePairingError?>(null)
     private var reader: Job? = null
     private var deadline: Job? = null
     private val port = object : OfflinePairingPort {
@@ -136,7 +143,13 @@ internal class OfflinePairingRuntimeAdapter(
     }
 
     override fun confirm() = enqueue(PairingActorEvent.Confirm, CONTROL_EVENT_BYTES)
-    override fun cancel() = enqueue(PairingActorEvent.Cancel, CONTROL_EVENT_BYTES)
+    override suspend fun cancel() {
+        enqueue(PairingActorEvent.Cancel, CONTROL_EVENT_BYTES)
+        if (withTimeoutOrNull(CANCEL_TIMEOUT_MILLIS) { job.join(); true } != true) {
+            forceStop(OfflinePairingError.CANCELLED)
+            withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { job.join() }
+        }
+    }
     override fun close() {
         if (!mailbox.trySend(PairingActorEvent.Close, CONTROL_EVENT_BYTES)) job.cancel()
     }
@@ -146,7 +159,7 @@ internal class OfflinePairingRuntimeAdapter(
             coordinator.start(qr, nonce.copyOf())
             deadline = CoroutineScope(kotlin.coroutines.coroutineContext).launch(actorDispatcher) {
                 delay(qr.lifetimeMillis)
-                mailbox.trySend(PairingActorEvent.Fail(OfflinePairingError.EXPIRED), CONTROL_EVENT_BYTES)
+                forceStop(OfflinePairingError.EXPIRED)
             }
             while (kotlin.coroutines.coroutineContext.isActive) {
                 when (val event = mailbox.receive()) {
@@ -176,13 +189,15 @@ internal class OfflinePairingRuntimeAdapter(
                     PairingTransportFailure.ACCEPT_TIMEOUT,
                     PairingTransportFailure.READ_TIMEOUT,
                     PairingTransportFailure.NSD_FAILED -> OfflinePairingError.WIFI_UNAVAILABLE
+                    PairingTransportFailure.PERMISSION_DENIED -> OfflinePairingError.WIFI_PERMISSION_DENIED
                     else -> OfflinePairingError.INVALID_FRAME
                 },
             )
         } catch (_: Throwable) {
             coordinator.fail(OfflinePairingError.INVALID_FRAME)
         } finally {
-            cleanup()
+            forcedTerminal.get()?.let(coordinator::fail)
+            withContext(NonCancellable) { cleanup() }
         }
     }
 
@@ -202,7 +217,7 @@ internal class OfflinePairingRuntimeAdapter(
                 while (isActive) {
                     val frame = opened.read()
                     if (!mailbox.trySend(PairingActorEvent.Received(frame), frameWeight(frame))) {
-                        opened.close()
+                        closeConnection()
                         mailbox.trySend(PairingActorEvent.Fail(OfflinePairingError.INVALID_FRAME), CONTROL_EVENT_BYTES)
                         return@launch
                     }
@@ -231,9 +246,10 @@ internal class OfflinePairingRuntimeAdapter(
 
     private suspend fun cleanup() {
         if (!cleaned.compareAndSet(false, true)) return
+        commitFence?.close()
         deadline?.cancelAndJoin()
         reader?.cancelAndJoin()
-        runCatching { connection?.close() }
+        closeConnection()
         runCatching { transport.close() }
         mailbox.close()
     }
@@ -243,6 +259,17 @@ internal class OfflinePairingRuntimeAdapter(
             if (!start) throw OfflinePairingApiException(OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
             throw IllegalStateException("pairing_actor_unavailable")
         }
+    }
+
+    private suspend fun forceStop(error: OfflinePairingError) {
+        forcedTerminal.compareAndSet(null, error)
+        commitFence?.close()
+        closeConnection()
+        job.cancel(CancellationException(error.code))
+    }
+
+    private fun closeConnection() {
+        if (connectionClosed.compareAndSet(false, true)) runCatching { connection?.close() }
     }
 
     private fun frameWeight(frame: OfflinePairingFrame): Int = when (frame) {
@@ -255,6 +282,8 @@ internal class OfflinePairingRuntimeAdapter(
         const val CONTROL_EVENT_BYTES = 32
         const val DEFAULT_EVENT_CAPACITY = 16
         const val DEFAULT_EVENT_BYTES = 16 * 1024
+        const val CANCEL_TIMEOUT_MILLIS = 2_000L
+        const val CLEANUP_TIMEOUT_MILLIS = 1_000L
     }
 }
 
