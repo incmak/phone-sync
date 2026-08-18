@@ -100,7 +100,15 @@ class OfflinePairingCoordinator(
             is OfflinePairingFrame.Signature -> receiveSignature(frame)
             is OfflinePairingFrame.Cancel -> {
                 if (peerHello == null) abort(OfflinePairingError.INVALID_FRAME)
-                else abort(OfflinePairingError.PEER_REJECTED)
+                else {
+                    val token = session.sessionToken.copy()
+                    val authenticated = try {
+                        crypto.verifyCancelAuthenticator(token, session.sessionId, frame.authenticator)
+                    } finally {
+                        token.fill(0)
+                    }
+                    abort(if (authenticated) OfflinePairingError.PEER_REJECTED else OfflinePairingError.IDENTITY_MISMATCH)
+                }
             }
         }
     }
@@ -143,7 +151,16 @@ class OfflinePairingCoordinator(
         val now = monotonicOrNull()
         if (now != null && expiredAt(now)) abort(OfflinePairingError.EXPIRED)
         else {
-            qr?.let { session -> runCatching { port.send(OfflinePairingFrame.Cancel(session.sessionId)) } }
+            qr?.let { session ->
+                val token = session.sessionToken.copy()
+                val authenticator = try {
+                    crypto.cancelAuthenticator(token, session.sessionId)
+                } finally {
+                    token.fill(0)
+                }
+                runCatching { port.send(OfflinePairingFrame.Cancel(session.sessionId, authenticator)) }
+                authenticator.fill(0)
+            }
             abort(OfflinePairingError.CANCELLED)
         }
     }

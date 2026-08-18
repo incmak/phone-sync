@@ -259,7 +259,7 @@ class OfflinePairingCoordinatorTest {
         preHello.startOnly()
         preHello.initiator.onTlsAuthenticated(preHello.joinerIdentity.tlsSpkiSha256)
 
-        preHello.initiator.onPeerFrame(OfflinePairingFrame.Cancel(preHello.qr.sessionId))
+        preHello.initiator.onPeerFrame(OfflinePairingFrame.Cancel(preHello.qr.sessionId, preHello.cancelAuthenticator()))
 
         assertEquals(OfflinePairingError.INVALID_FRAME, preHello.initiator.status.error)
 
@@ -269,9 +269,50 @@ class OfflinePairingCoordinatorTest {
         bound.initiator.onPeerFrame(bound.joinerHello())
         assertEquals(OfflinePairingState.VERIFY_CODE, bound.initiator.status.state)
 
-        bound.initiator.onPeerFrame(OfflinePairingFrame.Cancel(bound.qr.sessionId))
+        bound.initiator.onPeerFrame(OfflinePairingFrame.Cancel(bound.qr.sessionId, bound.cancelAuthenticator()))
 
         assertEquals(OfflinePairingError.PEER_REJECTED, bound.initiator.status.error)
+    }
+
+    @Test fun `fresh initiator rejects cancel from self consistent non QR peer`() {
+        val pair = PairHarness()
+        pair.startOnly()
+        val attacker = identity(77)
+        pair.initiator.onTlsAuthenticated(attacker.tlsSpkiSha256)
+        pair.initiator.onPeerFrame(
+            OfflinePairingFrame.Hello(
+                pair.qr.sessionId,
+                pair.qr.lifetimeMillis,
+                LanPairingHello(
+                    attacker.deviceId,
+                    attacker.displayName,
+                    LanPairingBytes(attacker.encryptionPublicKey),
+                    LanPairingBytes(attacker.signingPublicKey),
+                    LanPairingBytes(attacker.tlsSpkiSha256),
+                    LanPairingBytes(bytes(79)),
+                ),
+            ),
+        )
+        assertEquals(OfflinePairingState.VERIFY_CODE, pair.initiator.status.state)
+
+        pair.initiator.onPeerFrame(OfflinePairingFrame.Cancel(pair.qr.sessionId, bytes(99)))
+
+        assertEquals(OfflinePairingError.IDENTITY_MISMATCH, pair.initiator.status.error)
+        assertEquals(0, pair.initiatorStore.commits.size)
+    }
+
+    @Test fun `scanned peer cancel authenticates once and duplicate cannot alter terminal status`() {
+        val pair = PairHarness()
+        pair.startAndAuthenticate()
+
+        pair.joiner.cancel()
+        val cancel = pair.joinerPort.outbound.single { it is OfflinePairingFrame.Cancel }
+        pair.initiator.onPeerFrame(cancel)
+        assertEquals(OfflinePairingError.PEER_REJECTED, pair.initiator.status.error)
+
+        pair.initiator.onPeerFrame(cancel)
+        assertEquals(OfflinePairingError.PEER_REJECTED, pair.initiator.status.error)
+        assertEquals(0, pair.initiatorStore.commits.size)
     }
 
     @Test fun `initiator deadline and joiner capped monotonic deadline expire independent of wall clock`() {
@@ -812,6 +853,8 @@ private class PairHarness(
         return OfflinePairingFrame.Signature(qr.sessionId, using.signTranscript(transcript, joinerIdentity.signingSecretKey))
     }
 
+    fun cancelAuthenticator(): ByteArray = crypto.cancelAuthenticator(qr.sessionToken.copy(), qr.sessionId)
+
     private fun initiatorHello() = LanPairingHello(
         initiatorIdentity.deviceId, initiatorIdentity.displayName, LanPairingBytes(initiatorIdentity.encryptionPublicKey), LanPairingBytes(initiatorIdentity.signingPublicKey),
         LanPairingBytes(initiatorIdentity.tlsSpkiSha256), LanPairingBytes(bytes(10)),
@@ -875,6 +918,10 @@ private object FakeCrypto : OfflinePairingCrypto {
     override fun canonicalTranscript(value: LanPairingTranscript): ByteArray = LanPairingCodec.canonicalTranscript(value)
     override fun shortAuthenticationString(transcript: ByteArray): String = "123456"
     override fun derivePairSecret(sessionToken: ByteArray, transcript: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(sessionToken + transcript)
+    override fun cancelAuthenticator(sessionToken: ByteArray, sessionId: String): ByteArray =
+        LanPairingCrypto.cancelAuthenticator(sessionToken, sessionId)
+    override fun verifyCancelAuthenticator(sessionToken: ByteArray, sessionId: String, authenticator: ByteArray): Boolean =
+        LanPairingCrypto.verifyCancelAuthenticator(sessionToken, sessionId, authenticator)
     override fun signTranscript(transcript: ByteArray, secretKey: ByteArray): ByteArray = MessageDigest.getInstance("SHA-512").digest(transcript + secretKey)
     override fun verifyTranscript(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean =
         signature.contentEquals(MessageDigest.getInstance("SHA-512").digest(transcript + ByteArray(64) { publicKey[0] }))

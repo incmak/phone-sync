@@ -108,10 +108,13 @@ class OfflinePairingTransportTest {
 
     @Test
     fun authenticatedPairCancelRoundTripsAsBoundedPeerRejection() {
+        val source = ByteArray(32) { 7 }
+        val frame = OfflinePairingFrame.Cancel(sessionId, source)
+        source.fill(9)
         val bytes = ByteArrayOutputStream().also {
             OfflinePairingFrameCodec.write(
                 it,
-                OfflinePairingFrame.Cancel(sessionId),
+                frame,
                 FrameBudget(1, 4096),
             )
         }.toByteArray()
@@ -120,6 +123,31 @@ class OfflinePairingTransportTest {
 
         assertTrue(decoded is OfflinePairingFrame.Cancel)
         assertEquals(sessionId, decoded.sessionId)
+        decoded as OfflinePairingFrame.Cancel
+        val extracted = decoded.authenticator
+        assertArrayEquals(ByteArray(32) { 7 }, extracted)
+        extracted.fill(4)
+        assertArrayEquals(ByteArray(32) { 7 }, decoded.authenticator)
+    }
+
+    @Test
+    fun cancelCodecRejectsMissingWrongLengthAndExtraAuthenticatorFields() {
+        val authenticator = java.util.Base64.getEncoder().encodeToString(ByteArray(32))
+        val wrongLength = java.util.Base64.getEncoder().encodeToString(ByteArray(31))
+        val invalid = listOf(
+            "{\"type\":\"pair.cancel\",\"session\":\"$sessionId\"}",
+            "{\"type\":\"pair.cancel\",\"session\":\"$sessionId\",\"authenticator\":\"$wrongLength\"}",
+            "{\"type\":\"pair.cancel\",\"session\":\"$sessionId\",\"authenticator\":\"$authenticator\",\"extra\":true}",
+        )
+
+        invalid.forEach { raw ->
+            assertFailsWith<PairingTransportException> {
+                OfflinePairingFrameCodec.read(
+                    ByteArrayInputStream(prefixed(raw.encodeToByteArray())),
+                    FrameBudget(1, 4096),
+                )
+            }
+        }
     }
 
     @Test

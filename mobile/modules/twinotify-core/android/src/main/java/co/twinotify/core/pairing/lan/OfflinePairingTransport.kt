@@ -112,6 +112,7 @@ internal object OfflinePairingFrameCodec {
         is OfflinePairingFrame.Cancel -> JSONObject().apply {
             put("type", "pair.cancel")
             put("session", frame.sessionId)
+            put("authenticator", base64(frame.authenticator))
         }.toString()
     }
 
@@ -148,8 +149,11 @@ internal object OfflinePairingFrameCodec {
                 )
             }
             "pair.cancel" -> {
-                value.requireKeys(setOf("type", "session"))
-                OfflinePairingFrame.Cancel(value.requiredString("session"))
+                value.requireKeys(setOf("type", "session", "authenticator"))
+                OfflinePairingFrame.Cancel(
+                    value.requiredString("session"),
+                    value.requiredBytes("authenticator", 32),
+                )
             }
             else -> invalidFrame()
         }
@@ -193,6 +197,8 @@ internal interface RuntimePairingConnection : Closeable {
     suspend fun read(): OfflinePairingFrame
     suspend fun write(frame: OfflinePairingFrame)
 }
+
+internal const val PAIRING_WRITE_TIMEOUT_MILLIS = 5_000L
 
 class PairingConnection internal constructor(
     private val socket: Socket,
@@ -261,7 +267,7 @@ class PairingConnection internal constructor(
         const val DEFAULT_MAX_FRAMES = 16
         const val DEFAULT_MAX_BYTES = 256 * 1024
         const val DEFAULT_READ_TIMEOUT_MILLIS = 30_000L
-        const val DEFAULT_WRITE_TIMEOUT_MILLIS = 5_000L
+        const val DEFAULT_WRITE_TIMEOUT_MILLIS = PAIRING_WRITE_TIMEOUT_MILLIS
     }
 }
 

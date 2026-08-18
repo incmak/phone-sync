@@ -8,12 +8,14 @@ import co.twinotify.core.OfflinePairingApiPhase
 import co.twinotify.core.OfflinePairingPublicStatus
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import co.twinotify.core.defaultOfflinePairingRuntimeFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -203,6 +205,100 @@ class OfflinePairingRuntimeAdapterTest {
         assertEquals(1, harness.initiatorTransport.closeCount)
         assertEquals(1, harness.joinerTransport.closeCount)
     }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun controllerCancellationHasPriorityOverSaturatedRealAdapterMailbox() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val scope = CoroutineScope(dispatcher)
+        val identity = runtimeIdentity("dev-00000000-0000-0000-0000-000000000003", "Saturated", 31)
+        val qr = runtimeQr(identity, lifetimeMillis = 60_000)
+        val connection = SaturatingConnection(ByteArray(32) { 8 })
+        val transport = MemoryTransport(connection)
+        var controllerObserver: ((OfflinePairingPublicStatus) -> Unit)? = null
+        val runtime = OfflinePairingRuntimeAdapter(
+            scope, OfflinePairingRole.INITIATOR, qr, identity, RecordingCommitter(), transport,
+            ByteArray(32) { 4 }, LanPairingCodec.encodeQr(qr),
+            { controllerObserver?.invoke(it) }, TestRuntimeCrypto,
+            monotonicMillis = { 1_000 }, actorDispatcher = dispatcher, eventCapacity = 1,
+        )
+        val factory = object : OfflinePairingRuntimeFactory {
+            override fun start(
+                scope: CoroutineScope,
+                displayName: String,
+                statusSink: (OfflinePairingPublicStatus) -> Unit,
+            ): OfflinePairingRuntime {
+                controllerObserver = statusSink
+                return runtime
+            }
+            override fun join(
+                scope: CoroutineScope,
+                qr: LanPairingQr,
+                displayName: String,
+                statusSink: (OfflinePairingPublicStatus) -> Unit,
+            ): OfflinePairingRuntime = error("unused")
+        }
+        val controller = OfflinePairingApiController(this, factory) {}
+        controller.start("Controller")
+        runCurrent()
+        val remote = runtimeIdentity("dev-00000000-0000-0000-0000-000000000077", "Remote", 41)
+        connection.queueInbound(
+            OfflinePairingFrame.Hello(
+                qr.sessionId,
+                qr.lifetimeMillis,
+                LanPairingHello(
+                    remote.deviceId,
+                    remote.displayName,
+                    LanPairingBytes(remote.encryptionPublicKey),
+                    LanPairingBytes(remote.signingPublicKey),
+                    LanPairingBytes(connection.peerSpkiSha256!!),
+                    LanPairingBytes(ByteArray(32) { 9 }),
+                ),
+            ),
+        )
+        runCurrent()
+
+        val cancelling = launch { controller.cancel(runtime.sessionId) }
+        val duplicate = launch { controller.cancel(runtime.sessionId) }
+        runCurrent()
+        connection.releaseFirstWrite()
+        runCurrent()
+        cancelling.join()
+        duplicate.join()
+
+        assertEquals(1, connection.cancelWriteCount)
+        assertEquals(listOf("hello", "cancel"), connection.writeKinds)
+        val cancel = connection.writtenFrames.single { it is OfflinePairingFrame.Cancel } as OfflinePairingFrame.Cancel
+        assertTrue(TestRuntimeCrypto.verifyCancelAuthenticator(qr.sessionToken.copy(), qr.sessionId, cancel.authenticator))
+        assertEquals(1, transport.closeCount)
+        assertEquals(1, connection.closeCount)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun cancelWaitCoversBoundedActiveAndTerminalWritesBeforeCleanupFallback() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val identity = runtimeIdentity("dev-00000000-0000-0000-0000-000000000003", "Bounded", 51)
+        val qr = runtimeQr(identity, lifetimeMillis = 60_000)
+        val connection = BudgetedWriteConnection(ByteArray(32) { 8 })
+        val transport = MemoryTransport(connection)
+        val runtime = OfflinePairingRuntimeAdapter(
+            CoroutineScope(dispatcher), OfflinePairingRole.INITIATOR, qr, identity, RecordingCommitter(), transport,
+            ByteArray(32) { 4 }, LanPairingCodec.encodeQr(qr), {}, TestRuntimeCrypto,
+            monotonicMillis = { 1_000 }, actorDispatcher = dispatcher,
+        )
+        runCurrent()
+
+        val cancelling = launch { runtime.cancel() }
+        runCurrent()
+        advanceTimeBy(PAIRING_WRITE_TIMEOUT_MILLIS * 2 + 1)
+        runCurrent()
+        cancelling.join()
+
+        assertEquals(listOf("hello", "cancel"), connection.writeKinds)
+        assertEquals(1, connection.closeCount)
+        assertEquals(1, transport.closeCount)
+    }
 }
 
 private class RuntimeHarness(scope: CoroutineScope) {
@@ -325,6 +421,53 @@ private class BlockingWriteConnection(pin: ByteArray) : RuntimePairingConnection
     }
 }
 
+private class SaturatingConnection(pin: ByteArray) : RuntimePairingConnection {
+    private val pin = pin.copyOf()
+    private val firstWrite = CompletableDeferred<Unit>()
+    private val inbound = Channel<OfflinePairingFrame>(1)
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+    override val peerSpkiSha256: ByteArray get() = pin.copyOf()
+    val writeKinds = mutableListOf<String>()
+    val writtenFrames = mutableListOf<OfflinePairingFrame>()
+    var cancelWriteCount = 0
+    var closeCount = 0
+    override suspend fun read(): OfflinePairingFrame = inbound.receive()
+    override suspend fun write(frame: OfflinePairingFrame) {
+        if (writeKinds.isEmpty()) firstWrite.await()
+        writeKinds += when (frame) {
+            is OfflinePairingFrame.Hello -> "hello"
+            is OfflinePairingFrame.Signature -> "signature"
+            is OfflinePairingFrame.Cancel -> "cancel"
+        }
+        writtenFrames += frame
+        if (frame is OfflinePairingFrame.Cancel) cancelWriteCount++
+    }
+    fun queueInbound(frame: OfflinePairingFrame) { check(inbound.trySend(frame).isSuccess) }
+    fun releaseFirstWrite() { firstWrite.complete(Unit) }
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            closeCount++
+            firstWrite.complete(Unit)
+        }
+    }
+}
+
+private class BudgetedWriteConnection(pin: ByteArray) : RuntimePairingConnection {
+    private val pin = pin.copyOf()
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+    override val peerSpkiSha256: ByteArray get() = pin.copyOf()
+    val writeKinds = mutableListOf<String>()
+    var closeCount = 0
+    override suspend fun read(): OfflinePairingFrame = kotlinx.coroutines.awaitCancellation()
+    override suspend fun write(frame: OfflinePairingFrame) {
+        kotlinx.coroutines.delay(PAIRING_WRITE_TIMEOUT_MILLIS)
+        writeKinds += if (frame is OfflinePairingFrame.Cancel) "cancel" else "hello"
+    }
+    override fun close() {
+        if (closed.compareAndSet(false, true)) closeCount++
+    }
+}
+
 private fun runtimeIdentity(deviceId: String, name: String, seed: Int) = OfflinePairingIdentity(
     deviceId, name,
     ByteArray(32) { (seed + it).toByte() },
@@ -355,6 +498,10 @@ private object TestRuntimeCrypto : OfflinePairingCrypto {
             .toString().padStart(6, '0')
     override fun derivePairSecret(sessionToken: ByteArray, transcript: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(sessionToken + transcript)
+    override fun cancelAuthenticator(sessionToken: ByteArray, sessionId: String): ByteArray =
+        LanPairingCrypto.cancelAuthenticator(sessionToken, sessionId)
+    override fun verifyCancelAuthenticator(sessionToken: ByteArray, sessionId: String, authenticator: ByteArray): Boolean =
+        LanPairingCrypto.verifyCancelAuthenticator(sessionToken, sessionId, authenticator)
     override fun signTranscript(transcript: ByteArray, secretKey: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-512").digest(transcript)
     override fun verifyTranscript(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean =

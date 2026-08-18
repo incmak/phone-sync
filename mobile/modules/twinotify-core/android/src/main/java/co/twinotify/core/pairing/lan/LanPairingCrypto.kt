@@ -12,6 +12,7 @@ object LanPairingCrypto {
     private const val SAS_LIMIT = 4_294_000_000L
     private val secretInfo = "twinotify-lan-pair-secret-v1".encodeToByteArray()
     private val sasLabel = "twinotify-lan-sas-v1".encodeToByteArray()
+    private val cancelLabel = "twinotify-lan-pair-cancel-v1".encodeToByteArray()
 
     fun signTranscript(transcript: ByteArray, secretKey: ByteArray): ByteArray {
         require(secretKey.size == ED25519_SECRET_KEY_BYTES) { "invalid Ed25519 signing key" }
@@ -50,6 +51,22 @@ object LanPairingCrypto {
         val transcriptDigest = sha256(transcript)
         val prk = hmac(transcriptDigest, sessionToken)
         return hmac(prk, secretInfo + byteArrayOf(1))
+    }
+
+    fun cancelAuthenticator(sessionToken: ByteArray, sessionId: String): ByteArray {
+        require(sessionToken.size == SHA_256_BYTES) { "invalid LAN session token" }
+        validateSessionId(sessionId)
+        return hmac(sessionToken, cancelLabel + byteArrayOf(0) + sessionId.encodeToByteArray())
+    }
+
+    fun verifyCancelAuthenticator(sessionToken: ByteArray, sessionId: String, authenticator: ByteArray): Boolean {
+        if (sessionToken.size != SHA_256_BYTES || authenticator.size != SHA_256_BYTES) return false
+        val expected = cancelAuthenticator(sessionToken, sessionId)
+        return try {
+            MessageDigest.isEqual(expected, authenticator)
+        } finally {
+            expected.fill(0)
+        }
     }
 
     private fun sha256(value: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(value)

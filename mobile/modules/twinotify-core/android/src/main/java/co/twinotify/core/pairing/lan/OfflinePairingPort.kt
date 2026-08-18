@@ -40,8 +40,14 @@ sealed class OfflinePairingFrame {
 
     class Cancel(
         override val sessionId: String,
+        authenticator: ByteArray,
     ) : OfflinePairingFrame() {
-        init { validateSessionId(sessionId) }
+        private val storedAuthenticator = authenticator.copyOf()
+        init {
+            validateSessionId(sessionId)
+            require(storedAuthenticator.size == 32) { "invalid LAN pairing cancel authenticator" }
+        }
+        val authenticator: ByteArray get() = storedAuthenticator.copyOf()
     }
 }
 
@@ -157,6 +163,8 @@ interface OfflinePairingCrypto {
     fun canonicalTranscript(value: LanPairingTranscript): ByteArray
     fun shortAuthenticationString(transcript: ByteArray): String
     fun derivePairSecret(sessionToken: ByteArray, transcript: ByteArray): ByteArray
+    fun cancelAuthenticator(sessionToken: ByteArray, sessionId: String): ByteArray
+    fun verifyCancelAuthenticator(sessionToken: ByteArray, sessionId: String, authenticator: ByteArray): Boolean
     fun signTranscript(transcript: ByteArray, secretKey: ByteArray): ByteArray
     fun verifyTranscript(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean
 }
@@ -165,6 +173,10 @@ object ProductionOfflinePairingCrypto : OfflinePairingCrypto {
     override fun canonicalTranscript(value: LanPairingTranscript): ByteArray = LanPairingCodec.canonicalTranscript(value)
     override fun shortAuthenticationString(transcript: ByteArray): String = LanPairingCrypto.shortAuthenticationString(transcript)
     override fun derivePairSecret(sessionToken: ByteArray, transcript: ByteArray): ByteArray = LanPairingCrypto.derivePairSecret(sessionToken, transcript)
+    override fun cancelAuthenticator(sessionToken: ByteArray, sessionId: String): ByteArray =
+        LanPairingCrypto.cancelAuthenticator(sessionToken, sessionId)
+    override fun verifyCancelAuthenticator(sessionToken: ByteArray, sessionId: String, authenticator: ByteArray): Boolean =
+        LanPairingCrypto.verifyCancelAuthenticator(sessionToken, sessionId, authenticator)
     override fun signTranscript(transcript: ByteArray, secretKey: ByteArray): ByteArray = LanPairingCrypto.signTranscript(transcript, secretKey)
     override fun verifyTranscript(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean =
         LanPairingCrypto.verifyTranscript(transcript, signature, publicKey)

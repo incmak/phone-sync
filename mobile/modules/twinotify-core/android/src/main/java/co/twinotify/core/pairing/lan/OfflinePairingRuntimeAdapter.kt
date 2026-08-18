@@ -20,6 +20,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 
@@ -59,6 +60,20 @@ internal class BoundedPairingActorMailbox<T>(
         return entry.value
     }
 
+    suspend fun receiveUnless(priority: Channel<Unit>): T? {
+        if (priority.tryReceive().isSuccess) return null
+        return select {
+            priority.onReceive { null }
+            channel.onReceive { entry ->
+                synchronized(monitor) {
+                    queuedEvents--
+                    queuedBytes -= entry.bytes
+                }
+                entry.value
+            }
+        }
+    }
+
     override fun close() {
         synchronized(monitor) {
             if (closed) return
@@ -78,7 +93,6 @@ private sealed interface PairingActorEvent {
     data class Received(val frame: OfflinePairingFrame) : PairingActorEvent
     data class Fail(val error: OfflinePairingError) : PairingActorEvent
     data object Confirm : PairingActorEvent
-    data object Cancel : PairingActorEvent
     data object Close : PairingActorEvent
 }
 
@@ -105,19 +119,30 @@ internal class OfflinePairingRuntimeAdapter(
     private val commitFence: OfflinePairingCommitFence? = null,
 ) : OfflinePairingRuntime {
     private val mailbox = BoundedPairingActorMailbox<PairingActorEvent>(eventCapacity, eventByteBudget)
+    private val terminalCancel = Channel<Unit>(1)
+    private val cancelRequested = AtomicBoolean(false)
     private val cleaned = AtomicBoolean(false)
     @Volatile private var connection: RuntimePairingConnection? = null
     private val connectionClosed = AtomicBoolean(false)
     private val forcedTerminal = AtomicReference<OfflinePairingError?>(null)
     private var reader: Job? = null
     private var deadline: Job? = null
+    private var capturingTerminalCancel = false
+    private var terminalCancelFrame: OfflinePairingFrame.Cancel? = null
     private val port = object : OfflinePairingPort {
         override fun monotonicMillis(): Long = this@OfflinePairingRuntimeAdapter.monotonicMillis()
         override fun advertise(sessionId: String) = enqueue(PairingActorEvent.Open, CONTROL_EVENT_BYTES)
         override fun resolve(sessionId: String, expectedTlsSpkiSha256: ByteArray) =
             enqueue(PairingActorEvent.Open, CONTROL_EVENT_BYTES)
-        override fun send(frame: OfflinePairingFrame) = enqueue(PairingActorEvent.Send(frame), frameWeight(frame))
-        override fun close() = enqueue(PairingActorEvent.Close, CONTROL_EVENT_BYTES)
+        override fun send(frame: OfflinePairingFrame) {
+            if (capturingTerminalCancel && frame is OfflinePairingFrame.Cancel) {
+                check(terminalCancelFrame == null) { "duplicate_terminal_cancel" }
+                terminalCancelFrame = frame
+            } else enqueue(PairingActorEvent.Send(frame), frameWeight(frame))
+        }
+        override fun close() {
+            if (!capturingTerminalCancel) enqueue(PairingActorEvent.Close, CONTROL_EVENT_BYTES)
+        }
     }
     private val coordinator = OfflinePairingCoordinator(
         role = pairingRole,
@@ -144,7 +169,9 @@ internal class OfflinePairingRuntimeAdapter(
 
     override fun confirm() = enqueue(PairingActorEvent.Confirm, CONTROL_EVENT_BYTES)
     override suspend fun cancel() {
-        enqueue(PairingActorEvent.Cancel, CONTROL_EVENT_BYTES)
+        if (cancelRequested.compareAndSet(false, true) && terminalCancel.trySend(Unit).isFailure) {
+            forceStop(OfflinePairingError.CANCELLED)
+        }
         if (withTimeoutOrNull(CANCEL_TIMEOUT_MILLIS) { job.join(); true } != true) {
             forceStop(OfflinePairingError.CANCELLED)
             withTimeoutOrNull(CLEANUP_TIMEOUT_MILLIS) { job.join() }
@@ -162,14 +189,17 @@ internal class OfflinePairingRuntimeAdapter(
                 forceStop(OfflinePairingError.EXPIRED)
             }
             while (kotlin.coroutines.coroutineContext.isActive) {
-                when (val event = mailbox.receive()) {
+                val event = mailbox.receiveUnless(terminalCancel) ?: run {
+                    writeTerminalCancel()
+                    return
+                }
+                when (event) {
                     PairingActorEvent.Open -> if (connection == null) openConnection()
                     is PairingActorEvent.Send -> connection?.write(event.frame)
                         ?: coordinator.fail(OfflinePairingError.INVALID_FRAME)
                     is PairingActorEvent.Received -> coordinator.onPeerFrame(event.frame)
                     is PairingActorEvent.Fail -> coordinator.fail(event.error)
                     PairingActorEvent.Confirm -> coordinator.confirmLocally()
-                    PairingActorEvent.Cancel -> coordinator.cancel()
                     PairingActorEvent.Close -> return
                 }
             }
@@ -244,6 +274,17 @@ internal class OfflinePairingRuntimeAdapter(
         )
     }
 
+    private suspend fun writeTerminalCancel() {
+        capturingTerminalCancel = true
+        try {
+            coordinator.cancel()
+            terminalCancelFrame?.let { frame -> connection?.write(frame) }
+        } finally {
+            terminalCancelFrame = null
+            capturingTerminalCancel = false
+        }
+    }
+
     private suspend fun cleanup() {
         if (!cleaned.compareAndSet(false, true)) return
         commitFence?.close()
@@ -251,6 +292,7 @@ internal class OfflinePairingRuntimeAdapter(
         reader?.cancelAndJoin()
         closeConnection()
         runCatching { transport.close() }
+        terminalCancel.close()
         mailbox.close()
     }
 
@@ -282,8 +324,8 @@ internal class OfflinePairingRuntimeAdapter(
         const val CONTROL_EVENT_BYTES = 32
         const val DEFAULT_EVENT_CAPACITY = 16
         const val DEFAULT_EVENT_BYTES = 16 * 1024
-        const val CANCEL_TIMEOUT_MILLIS = 2_000L
         const val CLEANUP_TIMEOUT_MILLIS = 1_000L
+        const val CANCEL_TIMEOUT_MILLIS = PAIRING_WRITE_TIMEOUT_MILLIS * 2 + CLEANUP_TIMEOUT_MILLIS * 2
     }
 }
 

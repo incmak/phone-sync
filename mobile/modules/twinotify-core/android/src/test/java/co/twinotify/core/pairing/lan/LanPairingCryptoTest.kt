@@ -6,6 +6,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 class LanPairingCryptoTest {
     @Test
@@ -43,6 +45,31 @@ class LanPairingCryptoTest {
             "d5788b93b1cf98c45b68ce2ea6008ff6cf42d3c1a218ed7e98953f696bdd6ad6",
             first.toHex(),
         )
+    }
+
+    @Test
+    fun cancelAuthenticatorIsFixedSizeVersionDomainAndSessionBound() {
+        val token = ByteArray(32) { it.toByte() }
+        val sessionId = "00000000-0000-0000-0000-000000000099"
+        val expected = Mac.getInstance("HmacSHA256").run {
+            init(SecretKeySpec(token, "HmacSHA256"))
+            doFinal("twinotify-lan-pair-cancel-v1\u0000$sessionId".encodeToByteArray())
+        }
+
+        val authenticator = LanPairingCrypto.cancelAuthenticator(token, sessionId)
+
+        assertEquals(32, authenticator.size)
+        assertContentEquals(expected, authenticator)
+        assertTrue(LanPairingCrypto.verifyCancelAuthenticator(token, sessionId, authenticator))
+        assertFalse(
+            LanPairingCrypto.verifyCancelAuthenticator(
+                token,
+                "00000000-0000-0000-0000-000000000098",
+                authenticator,
+            ),
+        )
+        assertFalse(LanPairingCrypto.verifyCancelAuthenticator(ByteArray(32) { 9 }, sessionId, authenticator))
+        assertFalse(LanPairingCrypto.verifyCancelAuthenticator(token, sessionId, authenticator.copyOf().also { it[0]++ }))
     }
 
     @Test
