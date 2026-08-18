@@ -3,6 +3,14 @@ package co.twinotify.core.e2e
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Process
+import android.system.Os
+import android.system.OsConstants
+import co.twinotify.core.OfflinePairingApiController
+import co.twinotify.core.OfflinePairingApiException
+import co.twinotify.core.OfflinePairingApiPhase
+import co.twinotify.core.OfflinePairingPublicStatus
+import co.twinotify.core.defaultOfflinePairingRuntimeFactory
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.pairing.PairPayload
 import co.twinotify.core.pairing.PairNotifyClient
@@ -13,7 +21,12 @@ import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.PeerRecord
 import co.twinotify.core.storage.PeerStore
 import java.io.File
-import java.util.concurrent.atomic.AtomicBoolean
+import java.io.FileOutputStream
+import java.security.MessageDigest
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -51,13 +64,16 @@ data class E2eCommandResult(
     val code: String,
     val detail: String? = null,
     val payload: JSONObject? = null,
+    val secretPayload: ByteArray? = null,
 ) {
+    companion object { const val MAX_JSON_BYTES = 65_536 }
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("request_id", requestId)
         put("code", code)
         detail?.let { put("detail", it.take(MAX_DETAIL_LENGTH)) }
         payload?.let { put("payload", it) }
-    }
+    }.also { require(it.toString().encodeToByteArray().size <= MAX_JSON_BYTES) { "bounded E2E result exceeded" } }
 }
 
 /** Debug-only command bridge. Every command is authenticated by the install-scoped token. */
@@ -69,10 +85,13 @@ class E2eControlReceiver : BroadcastReceiver() {
         const val EXTRA_TOKEN = "token"
         private const val RESULT_DIR = "e2e-results"
         private const val MAX_REQUEST_ID_LENGTH = 128
+        private const val MAX_SECRET_BYTES = 4_096
+        private val SAFE_HANDLE = Regex("[A-Za-z0-9._-]{1,128}")
         private val ALLOWED_COMMANDS = setOf(
             "PAIR_INIT", "PAIR_JOIN", "AWAIT_PEER_HELLO", "SIGN_CONFIRMATION",
             "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
+            "OFFLINE_PAIR_START", "OFFLINE_PAIR_JOIN", "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL", "OFFLINE_PAIR_QUERY",
         )
 
         private fun safeRequestId(requestId: String): String = requestId
@@ -88,7 +107,29 @@ class E2eControlReceiver : BroadcastReceiver() {
         val pending = goAsync()
         val appContext = context.applicationContext
         scope.launch {
-            val result = executeForTest(appContext, E2eCommand.fromIntent(intent))
+            val parsed = E2eCommand.fromIntent(intent)
+            val authId = parsed.param("auth_input_id")
+            val auth = runCatching {
+                requireNotNull(authId)
+                consumePrivateInput(appContext, parsed.requestId, authId, "e2e-auth")
+            }.getOrNull()
+            val authToken = auth?.decodeToString()
+            val authenticated = parsed.copy(
+                token = authToken?.takeIf { E2eRequestHandle.matches(it, parsed.name, parsed.requestId, System.currentTimeMillis()) },
+                params = parsed.params - "auth_input_id",
+            )
+            auth?.fill(0)
+            var result = executeForTest(appContext, authenticated)
+            result.secretPayload?.let { secret ->
+                result = try {
+                    writeSecretResult(appContext, result.requestId, secret)
+                    result.copy(secretPayload = null)
+                } catch (_: Throwable) {
+                    result.copy(code = "error", detail = "private_result_unavailable", payload = null, secretPayload = null)
+                } finally {
+                    secret.fill(0)
+                }
+            }
             writeResult(appContext, result)
             pending.finish()
         }
@@ -103,10 +144,12 @@ class E2eControlReceiver : BroadcastReceiver() {
         if (command.name !in ALLOWED_COMMANDS) {
             return E2eCommandResult(requestId, "forbidden", "command is not allowlisted")
         }
+        validateOfflineParams(command)?.let { return E2eCommandResult(requestId, "invalid", it) }
         return try {
             runBlocking(Dispatchers.IO) { executeAuthorized(context.applicationContext, command, requestId) }
         } catch (error: Throwable) {
-            E2eCommandResult(requestId, "error", error.message ?: error::class.simpleName)
+            val detail = (error as? OfflinePairingApiException)?.error?.code ?: "operation_failed"
+            E2eCommandResult(requestId, "error", detail)
         }
     }
 
@@ -294,6 +337,59 @@ class E2eControlReceiver : BroadcastReceiver() {
                     .put("sequence", event.sequence),
             )
         }
+        "OFFLINE_PAIR_START" -> {
+            val displayName = command.param("display_name")
+                ?: return E2eCommandResult(requestId, "invalid", "display_name required")
+            val qr = E2eOfflinePairingControl.start(context, displayName).encodeToByteArray()
+            if (qr.isEmpty() || qr.size > MAX_SECRET_BYTES) {
+                qr.fill(0)
+                return E2eCommandResult(requestId, "error", "private_result_unavailable")
+            }
+            E2eCommandResult(requestId, "ok", payload = E2eStateProvider.offlinePairingEvidenceJson(context), secretPayload = qr)
+        }
+        "OFFLINE_PAIR_JOIN" -> {
+            val displayName = command.param("display_name")
+                ?: return E2eCommandResult(requestId, "invalid", "display_name required")
+            val inputId = command.param("secret_input_id")
+                ?: return E2eCommandResult(requestId, "invalid", "secret_input_id required")
+            val qr = consumePrivateInput(context, requestId, inputId, "e2e-inputs")
+            try {
+                E2eOfflinePairingControl.join(context, qr.decodeToString(), displayName)
+            } finally {
+                qr.fill(0)
+            }
+            E2eCommandResult(requestId, "ok", payload = E2eStateProvider.offlinePairingEvidenceJson(context), secretPayload = byteArrayOf('{'.code.toByte(), '}'.code.toByte()))
+        }
+        "OFFLINE_PAIR_CONFIRM" -> {
+            val inputId = command.param("secret_input_id")
+                ?: return E2eCommandResult(requestId, "invalid", "secret_input_id required")
+            val session = consumePrivateInput(context, requestId, inputId, "e2e-inputs")
+            try {
+                E2eOfflinePairingControl.confirm(context, session.decodeToString())
+            } finally {
+                session.fill(0)
+            }
+            E2eCommandResult(requestId, "ok", payload = E2eStateProvider.offlinePairingEvidenceJson(context), secretPayload = byteArrayOf('{'.code.toByte(), '}'.code.toByte()))
+        }
+        "OFFLINE_PAIR_CANCEL" -> {
+            val inputId = command.param("secret_input_id")
+                ?: return E2eCommandResult(requestId, "invalid", "secret_input_id required")
+            val session = consumePrivateInput(context, requestId, inputId, "e2e-inputs")
+            try {
+                E2eOfflinePairingControl.cancel(context, session.decodeToString())
+            } finally {
+                session.fill(0)
+            }
+            E2eCommandResult(requestId, "ok", payload = E2eStateProvider.offlinePairingEvidenceJson(context), secretPayload = byteArrayOf('{'.code.toByte(), '}'.code.toByte()))
+        }
+        "OFFLINE_PAIR_QUERY" -> {
+            val status = E2eOfflinePairingControl.status(context)
+            val privateStatus = JSONObject().apply {
+                status.sessionId?.let { put("session_id", it) }
+                status.sas?.let { put("sas", it) }
+            }.toString().encodeToByteArray()
+            E2eCommandResult(requestId, "ok", payload = E2eStateProvider.offlinePairingEvidenceJson(context), secretPayload = privateStatus)
+        }
         "CLEAR_ACTIVITY" -> {
             E2eStateProvider.clearActivity(context)
             E2eCommandResult(requestId, "ok")
@@ -306,13 +402,155 @@ class E2eControlReceiver : BroadcastReceiver() {
     private fun writeResult(context: Context, result: E2eCommandResult) {
         val directory = File(context.filesDir, RESULT_DIR).apply { mkdirs() }
         val target = File(directory, "${safeRequestId(result.requestId)}.json")
-        val temporary = File(directory, ".${target.name}.tmp-${Thread.currentThread().id}")
+        val temporary = File(directory, ".${target.name}.tmp-${System.nanoTime()}")
         temporary.writeText(result.toJson().toString())
         check(temporary.renameTo(target)) { "unable to atomically publish E2E result" }
     }
 
+    private fun validateOfflineParams(command: E2eCommand): String? {
+        val allowed = when (command.name) {
+            "OFFLINE_PAIR_START" -> setOf("display_name")
+            "OFFLINE_PAIR_JOIN" -> setOf("display_name", "secret_input_id")
+            "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL" -> setOf("secret_input_id")
+            "OFFLINE_PAIR_QUERY" -> emptySet()
+            else -> return null
+        }
+        if (command.params.keys.any { it !in allowed }) return "unexpected parameter"
+        if (command.params.values.any { it.encodeToByteArray().size > MAX_SECRET_BYTES }) return "parameter too large"
+        return null
+    }
+
+    private fun consumePrivateInput(context: Context, requestId: String, inputId: String, directoryName: String): ByteArray {
+        require(inputId == requestId && SAFE_HANDLE.matches(inputId)) { "invalid private input handle" }
+        require(directoryName == "e2e-inputs" || directoryName == "e2e-auth") { "private input unavailable" }
+        val directory = File(context.filesDir, directoryName)
+        val source = File(directory, inputId)
+        return try {
+            requirePrivateNode(directory, OsConstants.S_IFDIR, 448)
+            require(source.parentFile?.canonicalFile == directory.canonicalFile && !Files.isSymbolicLink(source.toPath())) {
+                "private input unavailable"
+            }
+            requirePrivateNode(source, OsConstants.S_IFREG, 384)
+            require(source.length() in 1..MAX_SECRET_BYTES.toLong()) { "private input unavailable" }
+            source.readBytes().also { require(it.size <= MAX_SECRET_BYTES) { "private input unavailable" } }
+        } finally {
+            val removed = runCatching { Files.deleteIfExists(source.toPath()) }.isSuccess
+            check(removed && !Files.exists(source.toPath(), LinkOption.NOFOLLOW_LINKS)) { "private input cleanup failed" }
+        }
+    }
+
+    internal fun consumePrivateInputForTest(context: Context, requestId: String, directoryName: String): ByteArray =
+        consumePrivateInput(context, requestId, requestId, directoryName)
+
+    private fun writeSecretResult(context: Context, requestId: String, value: ByteArray) {
+        require(SAFE_HANDLE.matches(requestId) && value.size in 1..MAX_SECRET_BYTES) { "invalid private result" }
+        val directory = File(context.filesDir, "e2e-secrets").apply {
+            mkdirs()
+        }
+        require(!Files.isSymbolicLink(directory.toPath())) { "private result unavailable" }
+        Os.chmod(directory.path, 448)
+        requirePrivateNode(directory, OsConstants.S_IFDIR, 448)
+        val target = File(directory, requestId)
+        require(!Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) { "stale private result handle" }
+        require(target.createNewFile()) { "private result unavailable" }
+        var complete = false
+        try {
+            Os.chmod(target.path, 384)
+            requirePrivateNode(target, OsConstants.S_IFREG, 384)
+            FileOutputStream(target).use { output -> output.write(value); output.fd.sync() }
+            complete = true
+        } finally {
+            if (!complete) runCatching { Files.deleteIfExists(target.toPath()) }
+        }
+    }
+
+    internal fun writeSecretResultForTest(context: Context, requestId: String, value: ByteArray) =
+        writeSecretResult(context, requestId, value)
+
+    private fun requirePrivateNode(file: File, type: Int, mode: Int) {
+        val stat = runCatching { Os.lstat(file.path) }
+            .getOrElse { throw IllegalArgumentException("private file unavailable", it) }
+        require((stat.st_mode and OsConstants.S_IFMT) == type && stat.st_uid == Process.myUid() && (stat.st_mode and 511) == mode) {
+            "private file ownership or mode invalid"
+        }
+    }
+
     private fun E2eCommand.timeoutMs(): Long = param("timeout_ms")?.toLongOrNull()?.coerceIn(1_000L, 300_000L)
         ?: 60_000L
+}
+
+internal object E2eOfflinePairingControl {
+    private val monitor = Any()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var controller: OfflinePairingApiController? = null
+
+    private fun controller(context: Context): OfflinePairingApiController = controller ?: synchronized(monitor) {
+        controller ?: OfflinePairingApiController(
+            scope,
+            defaultOfflinePairingRuntimeFactory { context.applicationContext },
+        ) {}.also { controller = it }
+    }
+
+    fun start(context: Context, displayName: String): String = controller(context).start(displayName)
+    fun join(context: Context, qr: String, displayName: String) = controller(context).join(qr, displayName)
+    fun confirm(context: Context, sessionId: String) = controller(context).confirm(sessionId)
+    suspend fun cancel(context: Context, sessionId: String) = controller(context).cancel(sessionId)
+    fun status(context: Context): OfflinePairingPublicStatus = controller(context).getStatus()
+
+    fun publicStatus(context: Context): JSONObject {
+        val status = status(context)
+        return JSONObject().apply {
+            put("role", status.role?.code)
+            put("phase", status.phase.code)
+            put("error_code", status.error?.code)
+            put("completed", status.completed)
+            status.sessionId?.let { put("session_id_hash", sha256Hex(it.encodeToByteArray())) }
+            status.sas?.let { put("sas_hash", sha256Hex(it.encodeToByteArray())) }
+        }
+    }
+}
+
+private fun sha256Hex(value: ByteArray): String = MessageDigest.getInstance("SHA-256")
+    .digest(value).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+internal object E2eRequestHandle {
+    private const val MAX_FUTURE_MILLIS = 5 * 60 * 1_000L
+
+    fun matches(token: String, command: String, handle: String, nowMillis: Long): Boolean {
+        return try {
+            val parts = handle.split('.')
+            if (parts.size != 5 || parts[0] != "v1") return false
+            val expires = parts[1].toLong()
+            if (expires < nowMillis || expires - nowMillis > MAX_FUTURE_MILLIS) return false
+            if (parts[2].length != 32 || hexToBytes(parts[2]).size != 16) return false
+            val commandHash = MessageDigest.getInstance("SHA-256").digest(command.encodeToByteArray()).copyOfRange(0, 8)
+            if (!MessageDigest.isEqual(commandHash, hexToBytes(parts[3]))) return false
+            val prefix = parts.take(4).joinToString(".")
+            val mac = Mac.getInstance("HmacSHA256").apply {
+                init(SecretKeySpec(token.encodeToByteArray(), "HmacSHA256"))
+            }.doFinal(prefix.encodeToByteArray()).copyOfRange(0, 16)
+            MessageDigest.isEqual(mac, hexToBytes(parts[4]))
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun forTest(token: String, command: String, expiresMillis: Long, nonce: ByteArray): String {
+        require(nonce.size == 16)
+        val commandHash = MessageDigest.getInstance("SHA-256").digest(command.encodeToByteArray()).copyOfRange(0, 8)
+        val prefix = "v1.$expiresMillis.${nonce.toHex()}.${commandHash.toHex()}"
+        val mac = Mac.getInstance("HmacSHA256").apply {
+            init(SecretKeySpec(token.encodeToByteArray(), "HmacSHA256"))
+        }.doFinal(prefix.encodeToByteArray()).copyOfRange(0, 16)
+        return "$prefix.${mac.toHex()}"
+    }
+
+    private fun hexToBytes(value: String): ByteArray {
+        require(value.length % 2 == 0 && value.all { it in '0'..'9' || it in 'a'..'f' })
+        return ByteArray(value.length / 2) { index -> value.substring(index * 2, index * 2 + 2).toInt(16).toByte() }
+    }
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }
 
 internal object E2eSessionToken {

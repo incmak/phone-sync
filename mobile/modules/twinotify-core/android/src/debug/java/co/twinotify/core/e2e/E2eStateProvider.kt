@@ -10,7 +10,10 @@ import android.os.CancellationSignal
 import androidx.core.net.toUri
 import co.twinotify.core.service.SyncServiceStatus
 import co.twinotify.core.service.toEventMap
+import co.twinotify.core.crypto.CryptoStore
+import co.twinotify.core.pairing.lan.LanIdentityStore
 import co.twinotify.core.storage.DeviceIdentity
+import co.twinotify.core.storage.LanPairStore
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.PeerStore
 import java.security.MessageDigest
@@ -27,14 +30,45 @@ class E2eStateProvider : ContentProvider() {
 
         fun stateUri(context: Context): Uri = "content://${context.packageName}.e2e/state".toUri()
 
+        fun offlinePairingEvidenceJson(context: Context): JSONObject = runBlocking(Dispatchers.IO) {
+            val peer = PeerStore.load(context)
+            val deviceId = DeviceIdentity.getOrCreate(context)
+            val keys = CryptoStore.loadOrGenerate(context)
+            val binding = peer?.takeIf { it.lanBindingId != null }?.let { LanPairStore.loadValidated(context, it) }
+            val offline = E2eOfflinePairingControl.publicStatus(context)
+            if (offline.optString("phase") == "idle" && binding != null) {
+                offline.put("phase", "complete").put("completed", true)
+            }
+            JSONObject()
+                .put("offline_pairing", offline)
+                .put("device_application_identity_hash", applicationIdentityHash(deviceId, keys.first.publicKey, keys.second.publicKey))
+                .put("peer_application_identity_hash", peer?.let { applicationIdentityHash(it.deviceId, it.encPubkey, it.signPubkey) } ?: JSONObject.NULL)
+                .put("lan_binding_present", binding != null)
+                .put("local_tls_pin_hash", binding?.let { sha256BytesHex(LanIdentityStore.loadOrCreate().spkiSha256) } ?: JSONObject.NULL)
+                .put("peer_tls_pin_hash", binding?.let { sha256BytesHex(it.peerTlsSpkiSha256) } ?: JSONObject.NULL)
+        }
+
         fun snapshotJson(context: Context): String = runBlocking(Dispatchers.IO) {
             E2eSessionToken.ensure(context)
             val db = NotificationDb.get(context)
             val database = db.openHelper.readableDatabase
             val peer = PeerStore.load(context)
+            val deviceId = DeviceIdentity.getOrCreate(context)
+            val keys = CryptoStore.loadOrGenerate(context)
+            val binding = peer?.takeIf { it.lanBindingId != null }?.let { LanPairStore.loadValidated(context, it) }
+            val offline = E2eOfflinePairingControl.publicStatus(context)
+            if (offline.optString("phase") == "idle" && binding != null) {
+                offline.put("phase", "complete").put("completed", true)
+            }
             val root = JSONObject()
-                .put("device_id", DeviceIdentity.getOrCreate(context))
+                .put("device_id", deviceId)
                 .put("paired_peer", peer?.deviceId)
+                .put("device_application_identity_hash", applicationIdentityHash(deviceId, keys.first.publicKey, keys.second.publicKey))
+                .put("peer_application_identity_hash", peer?.let { applicationIdentityHash(it.deviceId, it.encPubkey, it.signPubkey) } ?: JSONObject.NULL)
+                .put("lan_binding_present", binding != null)
+                .put("local_tls_pin_hash", binding?.let { sha256BytesHex(LanIdentityStore.loadOrCreate().spkiSha256) } ?: JSONObject.NULL)
+                .put("peer_tls_pin_hash", binding?.let { sha256BytesHex(it.peerTlsSpkiSha256) } ?: JSONObject.NULL)
+                .put("offline_pairing", offline)
                 .put("health", JSONObject(SyncServiceStatus.health.value.toEventMap()))
                 .put("active_outbox", scalar(database, "SELECT COUNT(*) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')"))
                 .put("active_inbound", scalar(database, "SELECT COUNT(*) FROM inbound_message WHERE outcome='PENDING_PLATFORM'"))
@@ -87,6 +121,19 @@ class E2eStateProvider : ContentProvider() {
         private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray())
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+        private fun applicationIdentityHash(deviceId: String, encryption: ByteArray, signing: ByteArray): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update("twinotify.application-identity.v1\u0000".encodeToByteArray())
+            digest.update(deviceId.encodeToByteArray())
+            digest.update(0.toByte())
+            digest.update(encryption)
+            digest.update(signing)
+            return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        }
+
+        private fun sha256BytesHex(value: ByteArray): String = MessageDigest.getInstance("SHA-256")
+            .digest(value).joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
     override fun onCreate(): Boolean = true

@@ -2,6 +2,7 @@ package co.twinotify.core.e2e
 
 import android.content.Context
 import android.content.Intent
+import android.system.Os
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlin.test.Test
@@ -11,6 +12,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.runner.RunWith
+import org.json.JSONObject
+import java.nio.file.Files
 
 @RunWith(AndroidJUnit4::class)
 class E2eControlSecurityTest {
@@ -58,6 +61,47 @@ class E2eControlSecurityTest {
     }
 
     @Test
+    fun offlinePairingCommandsAreAllowlistedButRejectMissingClosedWorldInputs() {
+        val token = E2eSessionToken.forTest(context, "offline-pairing-command-allowlist")
+        listOf(
+            "OFFLINE_PAIR_START",
+            "OFFLINE_PAIR_JOIN",
+            "OFFLINE_PAIR_CONFIRM",
+            "OFFLINE_PAIR_CANCEL",
+        ).forEach { command ->
+            val result = E2eControlReceiver().executeForTest(
+                context,
+                E2eCommand(requestId = command, name = command, token = token),
+            )
+            assertEquals("invalid", result.code, "$command must reject missing parameters")
+        }
+
+        val query = E2eControlReceiver().executeForTest(
+            context,
+            E2eCommand(
+                requestId = "offline-query-extra",
+                name = "OFFLINE_PAIR_QUERY",
+                token = token,
+                params = mapOf("unexpected" to "value"),
+            ),
+        )
+        assertEquals("invalid", query.code)
+    }
+
+    @Test
+    fun secretControlPayloadNeverEntersExportedResultJson() {
+        val result = E2eCommandResult(
+            requestId = "secret-result",
+            code = "ok",
+            payload = JSONObject().put("phase", "verify_code"),
+            secretPayload = "fixture-private-control-value".encodeToByteArray(),
+        ).toJson().toString()
+        assertFalse(result.contains("fixture-private-control-value"))
+        assertFalse(result.contains("secretPayload"))
+        assertTrue(result.length <= E2eCommandResult.MAX_JSON_BYTES)
+    }
+
+    @Test
     fun syntheticCallStateIsAllowlistedButRejectsMissingAndPhoneFields() {
         val token = E2eSessionToken.forTest(context, "call-state-allowlist")
         val missing = E2eControlReceiver().executeForTest(
@@ -91,6 +135,18 @@ class E2eControlSecurityTest {
             assertFalse(state.contains("ciphertext", ignoreCase = true))
             assertFalse(state.contains("nonce", ignoreCase = true))
             assertFalse(state.contains("canonical_id", ignoreCase = true))
+            assertFalse(state.contains("qr", ignoreCase = true))
+            assertFalse(state.contains("session_token", ignoreCase = true))
+            assertFalse(state.contains("transcript", ignoreCase = true))
+            assertFalse(state.contains("\"sas\"", ignoreCase = true))
+            val root = JSONObject(state)
+            val offline = root.getJSONObject("offline_pairing")
+            assertTrue(offline.keys().asSequence().all {
+                it in setOf("role", "phase", "error_code", "completed", "session_id_hash", "sas_hash")
+            })
+            assertTrue(root.has("device_application_identity_hash"))
+            assertTrue(root.has("peer_application_identity_hash"))
+            assertTrue(root.has("lan_binding_present"))
         }
     }
 
@@ -124,5 +180,82 @@ class E2eControlSecurityTest {
         val intent = Intent(E2eControlReceiver.ACTION_CONTROL)
         assertEquals(E2eControlReceiver.ACTION_CONTROL, intent.action)
         assertEquals("co.twinotify.app.e2e", E2eStateProvider.AUTHORITY)
+    }
+
+    @Test
+    fun privateRequestHandleBindsTokenCommandAndExpiry() {
+        val token = "fixture-install-token"
+        val now = 2_000_000_000_000L
+        val handle = E2eRequestHandle.forTest(token, "OFFLINE_PAIR_QUERY", now + 30_000L, ByteArray(16) { 7 })
+        assertTrue(E2eRequestHandle.matches(token, "OFFLINE_PAIR_QUERY", handle, now))
+        assertFalse(E2eRequestHandle.matches("wrong", "OFFLINE_PAIR_QUERY", handle, now))
+        assertFalse(E2eRequestHandle.matches(token, "STATUS", handle, now))
+        assertFalse(E2eRequestHandle.matches(token, "OFFLINE_PAIR_QUERY", handle, now + 31_000L))
+        assertFalse(handle.contains(token))
+    }
+
+    @Test
+    fun privateInputIsOneTimeBoundedSymlinkSafeAndCleanedOnFailure() {
+        val receiver = E2eControlReceiver()
+        val directory = context.getFileStreamPath("e2e-inputs").apply { mkdirs(); Os.chmod(path, 448) }
+        val replay = directory.resolve("replay-handle")
+        replay.writeBytes("fixture-private-value".encodeToByteArray())
+        Os.chmod(replay.path, 384)
+        val consumed = receiver.consumePrivateInputForTest(context, "replay-handle", "e2e-inputs")
+        consumed.fill(0)
+        assertFalse(replay.exists())
+        assertFailsWith<IllegalArgumentException> {
+            receiver.consumePrivateInputForTest(context, "replay-handle", "e2e-inputs")
+        }
+
+        val oversize = directory.resolve("oversize-handle")
+        oversize.writeBytes(ByteArray(4_097))
+        Os.chmod(oversize.path, 384)
+        assertFailsWith<IllegalArgumentException> {
+            receiver.consumePrivateInputForTest(context, "oversize-handle", "e2e-inputs")
+        }
+        assertFalse(oversize.exists())
+
+        val target = context.getFileStreamPath("e2e-symlink-target").apply { writeText("fixture") }
+        val link = directory.resolve("symlink-handle")
+        runCatching { Files.deleteIfExists(link.toPath()) }
+        Files.createSymbolicLink(link.toPath(), target.toPath())
+        assertFailsWith<IllegalArgumentException> {
+            receiver.consumePrivateInputForTest(context, "symlink-handle", "e2e-inputs")
+        }
+        assertFalse(link.exists())
+        target.delete()
+    }
+
+    @Test
+    fun privateResultUsesOwnerOnlyModeAndRejectsStaleOrSymlinkHandles() {
+        val receiver = E2eControlReceiver()
+        val directory = context.getFileStreamPath("e2e-secrets")
+        val fresh = directory.resolve("fresh-result")
+        Files.deleteIfExists(fresh.toPath())
+        receiver.writeSecretResultForTest(context, "fresh-result", "fixture-private-result".encodeToByteArray())
+        assertEquals(384, Os.lstat(fresh.path).st_mode and 511)
+        assertEquals(android.os.Process.myUid(), Os.lstat(fresh.path).st_uid)
+        Files.delete(fresh.toPath())
+
+        val stale = directory.resolve("stale-result")
+        stale.writeText("existing")
+        Os.chmod(stale.path, 384)
+        assertFailsWith<IllegalArgumentException> {
+            receiver.writeSecretResultForTest(context, "stale-result", "replacement".encodeToByteArray())
+        }
+        assertEquals("existing", stale.readText())
+        Files.delete(stale.toPath())
+
+        val linkTarget = context.getFileStreamPath("e2e-result-link-target").apply { writeText("safe") }
+        val link = directory.resolve("linked-result")
+        Files.deleteIfExists(link.toPath())
+        Files.createSymbolicLink(link.toPath(), linkTarget.toPath())
+        assertFailsWith<IllegalArgumentException> {
+            receiver.writeSecretResultForTest(context, "linked-result", "replacement".encodeToByteArray())
+        }
+        assertEquals("safe", linkTarget.readText())
+        Files.delete(link.toPath())
+        linkTarget.delete()
     }
 }

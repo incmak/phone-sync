@@ -2,9 +2,14 @@ package control
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -35,6 +40,16 @@ type Result struct {
 type Device interface {
 	Broadcast(context.Context, Command) error
 	ReadResult(context.Context, string) ([]byte, error)
+}
+
+type SecretDevice interface {
+	WriteSecret(context.Context, string, []byte) error
+	ReadSecretOnce(context.Context, string) ([]byte, error)
+	DeleteSecret(context.Context, string) error
+}
+
+type SecureRequestDevice interface {
+	BoundRequestID(string, string) (string, error)
 }
 
 type Client struct {
@@ -68,7 +83,15 @@ func (c *Client) Execute(ctx context.Context, command Command) (Result, error) {
 	if command.Token != "" && command.Token != c.token {
 		return Result{}, errors.New("control command token does not match client token")
 	}
-	command.Token = c.token
+	var err error
+	command, err = c.prepare(command)
+	if err != nil {
+		return Result{}, err
+	}
+	return c.executePrepared(ctx, command)
+}
+
+func (c *Client) executePrepared(ctx context.Context, command Command) (Result, error) {
 	if err := c.device.Broadcast(ctx, command); err != nil {
 		return Result{}, err
 	}
@@ -99,6 +122,108 @@ func (c *Client) Execute(ctx context.Context, command Command) (Result, error) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// ExecuteSecret transfers ceremony material through an app-private, one-time
+// channel. Only the opaque request handle enters the authenticated broadcast.
+func (c *Client) ExecuteSecret(ctx context.Context, command Command, secretInput []byte) (Result, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, nil, err
+	}
+	if command.RequestID == "" || command.Name == "" {
+		return Result{}, nil, errors.New("control request ID and command name are required")
+	}
+	device, ok := c.device.(SecretDevice)
+	if !ok {
+		return Result{}, nil, errors.New("control device does not support private ceremony channel")
+	}
+	var err error
+	command, err = c.prepare(command)
+	if err != nil {
+		return Result{}, nil, err
+	}
+	if !privateRequestID(command.RequestID) {
+		return Result{}, nil, errors.New("private control request ID is invalid")
+	}
+	if len(secretInput) > 4096 {
+		return Result{}, nil, errors.New("private control input exceeds bound")
+	}
+	if len(secretInput) > 0 {
+		if err := device.WriteSecret(ctx, command.RequestID, secretInput); err != nil {
+			return Result{}, nil, err
+		}
+		defer func() { _ = device.DeleteSecret(context.WithoutCancel(ctx), command.RequestID) }()
+		if command.Params == nil {
+			command.Params = map[string]string{}
+		}
+		command.Params["secret_input_id"] = command.RequestID
+	}
+	result, err := c.executePrepared(ctx, command)
+	if err != nil {
+		return Result{}, nil, err
+	}
+	if result.Code != "ok" {
+		return result, nil, nil
+	}
+	secret, err := device.ReadSecretOnce(ctx, command.RequestID)
+	if err != nil {
+		return Result{}, nil, err
+	}
+	if len(secret) > 4096 {
+		clear(secret)
+		return Result{}, nil, errors.New("private control result exceeds bound")
+	}
+	return result, secret, nil
+}
+
+func (c *Client) prepare(command Command) (Command, error) {
+	if c.token == "" {
+		return Command{}, errors.New("control session token is required")
+	}
+	if command.Token != "" && command.Token != c.token {
+		return Command{}, errors.New("control command token does not match client token")
+	}
+	if secure, ok := c.device.(SecureRequestDevice); ok {
+		requestID, err := secure.BoundRequestID(c.token, command.Name)
+		if err != nil {
+			return Command{}, err
+		}
+		command.RequestID = requestID
+	}
+	command.Token = c.token
+	return command, nil
+}
+
+func NewBoundRequestID(token, command string, now time.Time, randomness io.Reader) (string, error) {
+	if token == "" || command == "" {
+		return "", errors.New("token and command are required")
+	}
+	if randomness == nil {
+		randomness = rand.Reader
+	}
+	nonce := make([]byte, 16)
+	if _, err := io.ReadFull(randomness, nonce); err != nil {
+		return "", errors.New("request randomness unavailable")
+	}
+	expires := now.Add(2 * time.Minute).UnixMilli()
+	commandHash := sha256.Sum256([]byte(command))
+	prefix := fmt.Sprintf("v1.%d.%s.%s", expires, hex.EncodeToString(nonce), hex.EncodeToString(commandHash[:8]))
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write([]byte(prefix))
+	return prefix + "." + hex.EncodeToString(mac.Sum(nil)[:16]), nil
+}
+
+func privateRequestID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // PairPayload is the wire payload produced by PAIR_INIT. Keeping this as a

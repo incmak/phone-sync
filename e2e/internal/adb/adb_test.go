@@ -12,6 +12,7 @@ import (
 
 type fakeRunner struct {
 	args   [][]string
+	inputs [][]byte
 	output []byte
 	err    error
 }
@@ -19,6 +20,68 @@ type fakeRunner struct {
 func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 	f.args = append(f.args, append([]string(nil), args...))
 	return f.output, f.err
+}
+
+func (f *fakeRunner) RunWithInput(_ context.Context, input []byte, args ...string) ([]byte, error) {
+	f.args = append(f.args, append([]string(nil), args...))
+	f.inputs = append(f.inputs, append([]byte(nil), input...))
+	return f.output, f.err
+}
+
+func TestPrivateRunAsHandoffKeepsSecretOutOfArgvAndUsesBoundedOneTimeFiles(t *testing.T) {
+	runner := &fakeRunner{output: []byte("private-result")}
+	client := adb.New(runner, "physical-a")
+	sentinel := []byte("fixture-control-sentinel")
+	if err := client.WriteRunAsPrivate(context.Background(), "com.twinotify.app", "e2e-inputs", "request-1", sentinel); err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.ReadRunAsPrivateOnce(context.Background(), "com.twinotify.app", "e2e-secrets", "request-1", 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "private-result" {
+		t.Fatalf("result=%q", got)
+	}
+	for _, argv := range runner.args {
+		if strings.Contains(strings.Join(argv, " "), string(sentinel)) {
+			t.Fatalf("secret leaked to argv: %q", argv)
+		}
+	}
+	if len(runner.inputs) < 1 || string(runner.inputs[0]) != string(sentinel) {
+		t.Fatalf("stdin handoff=%q", runner.inputs)
+	}
+	if !strings.Contains(strings.Join(runner.args[0], " "), "umask 077") || !strings.Contains(strings.Join(runner.args[1], " "), "trap") {
+		t.Fatalf("private file ownership/cleanup contract missing: %q", runner.args)
+	}
+	if !strings.Contains(strings.Join(runner.args[0], " "), "test ! -L") || !strings.Contains(strings.Join(runner.args[1], " "), "test ! -L") {
+		t.Fatalf("symlink rejection contract missing: %q", runner.args)
+	}
+	writeScript := strings.Join(runner.args[0], " ")
+	readScript := strings.Join(runner.args[1], " ")
+	for _, contract := range []string{"mktemp", "ln \"$tmp\" \"$target\"", "stat -c %u", "stat -c %a"} {
+		if !strings.Contains(writeScript, contract) {
+			t.Fatalf("atomic ownership contract %q missing from write: %q", contract, runner.args[0])
+		}
+	}
+	for _, contract := range []string{"stat -c %u", "stat -c %a", "rm -f \"$target\""} {
+		if !strings.Contains(readScript, contract) {
+			t.Fatalf("ownership/one-time contract %q missing from read: %q", contract, runner.args[1])
+		}
+	}
+}
+
+func TestPrivateRunAsHandoffRejectsUnsafeHandlesAndOversizeResults(t *testing.T) {
+	runner := &fakeRunner{output: []byte(strings.Repeat("x", 17))}
+	client := adb.New(runner, "physical-a")
+	if err := client.WriteRunAsPrivate(context.Background(), "com.twinotify.app", "../escape", "request-1", []byte("x")); err == nil {
+		t.Fatal("expected bucket rejection")
+	}
+	if err := client.WriteRunAsPrivate(context.Background(), "com.twinotify.app", "e2e-inputs", "../escape", []byte("x")); err == nil {
+		t.Fatal("expected handle rejection")
+	}
+	if _, err := client.ReadRunAsPrivateOnce(context.Background(), "com.twinotify.app", "e2e-secrets", "request-1", 16); err == nil {
+		t.Fatal("expected oversize rejection")
+	}
 }
 
 func TestClientUsesSeparateArgumentsForBroadcastPayload(t *testing.T) {
@@ -133,5 +196,37 @@ func TestClientProvidesTypedNotificationAndStateCommands(t *testing.T) {
 	}
 	if len(runner.args) != 4 {
 		t.Fatalf("calls=%d want 4", len(runner.args))
+	}
+}
+
+func TestPhysicalOfflinePairingPreflightDisablesOnlyMobileDataAndHashesWiFi(t *testing.T) {
+	runner := &fakeRunner{}
+	client := adb.New(runner, "physical-a")
+	runner.output = []byte("0\n")
+	hardware, err := client.IsHardware(context.Background())
+	if err != nil || !hardware {
+		t.Fatalf("hardware=%v err=%v", hardware, err)
+	}
+	if err := client.DisableMobileData(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runner.output = []byte("Wifi is enabled\nWifiInfo SSID: local-fixture, BSSID: 00:00:00:00:00:00\n4: wlan0    inet 192.0.2.41/24 brd 192.0.2.255 scope global wlan0\n")
+	hash, err := client.WiFiNetworkHash(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hash) != 64 || strings.Contains(hash, "local-fixture") || strings.Contains(hash, "192.0.2") {
+		t.Fatalf("unsafe Wi-Fi hash=%q", hash)
+	}
+	joined := make([]string, len(runner.args))
+	for i, args := range runner.args {
+		joined[i] = strings.Join(args, " ")
+	}
+	all := strings.Join(joined, "\n")
+	if !strings.Contains(all, "svc data disable") {
+		t.Fatalf("mobile data was not disabled: %s", all)
+	}
+	if strings.Contains(all, "svc wifi disable") || strings.Contains(all, "airplane_mode") {
+		t.Fatalf("Wi-Fi/ADB destructive command used: %s", all)
 	}
 }

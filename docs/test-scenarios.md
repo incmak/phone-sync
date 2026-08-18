@@ -232,6 +232,43 @@ async function smokePhase2() {
 
 ## Physical release evidence protocol
 
+### OFFLINE-PAIR-01 - two-phone pairing with no relay or uplink
+
+This acceptance run requires two explicit, distinct, unlocked Android hardware
+serials and an operator-controlled Wi-Fi network whose local client traffic
+remains available while internet uplink is blocked. Remove both app installs,
+install the same fresh debug APK, and confirm no relay or laptop service is
+running before starting. The harness disables mobile data only. It must never
+disable Wi-Fi or airplane-mode ADB connectivity.
+
+Capture packet and DNS observations outside the harness, sanitize them without
+putting raw SSIDs or phone IP addresses in the Task 8 directory, and calculate
+their SHA-256 values. A hash is an evidence hook, not proof by itself: do not set
+the variables unless the corresponding physical observation exists. Then run:
+
+```bash
+adb devices -l
+make e2e-offline-pairing \
+  E2E_DEVICE_A=<serial-a> \
+  E2E_DEVICE_B=<serial-b> \
+  E2E_PACKET_EVIDENCE_SHA256=<sha256> \
+  E2E_DNS_EVIDENCE_SHA256=<sha256> \
+  E2E_OFFLINE_PAIRING_EVIDENCE_DIR=/private/path/offline-pairing
+```
+
+The host rejects emulators, equal serials, stale completed/provisional state,
+different Wi-Fi network hashes, absent internet-isolation evidence, mismatched
+six-digit SAS values, non-reciprocal application identity hashes, missing sealed
+LAN bindings, mismatched TLS-pin hashes, and failed process-restart recovery.
+The QR payload, session handle, transcript, SAS, install token, SSID and phone IP
+stay out of command arguments, normal control results, logs and artifacts. The
+QR and confirmation handles cross ADB only through bounded app-private one-time
+files fed over stdin. The output contains state codes and SHA-256 values only.
+
+If two unlocked phones and the controlled no-uplink topology are not available,
+record OFFLINE-PAIR-01 as pending. Unit tests and verifier self-tests do not
+constitute physical acceptance or packet evidence.
+
 These scenarios are run on two real Android 14+ phones: one Pixel and one
 Samsung. Use a fresh install for `PHY-PAIR-01`, record only scenario IDs,
 states, timestamps, measurements, and stable error codes, and keep the

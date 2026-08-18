@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify verify e2e-emulator release-audit clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify verify e2e-emulator e2e-offline-pairing release-audit clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -40,6 +40,13 @@ mobile-verify: sync-proto
 
 e2e-emulator: relay-build mobile-verify
 	./e2e/scripts/run-two-emulators.sh
+
+e2e-offline-pairing:
+	@test -n "$(E2E_DEVICE_A)" -a -n "$(E2E_DEVICE_B)" -a "$(E2E_DEVICE_A)" != "$(E2E_DEVICE_B)" || { echo "two explicit distinct E2E_DEVICE_A/E2E_DEVICE_B serials are required" >&2; exit 2; }
+	@test -n "$(E2E_PACKET_EVIDENCE_SHA256)" -a -n "$(E2E_DNS_EVIDENCE_SHA256)" || { echo "operator-captured packet and DNS evidence hashes are required" >&2; exit 2; }
+	@test -n "$(E2E_OFFLINE_PAIRING_EVIDENCE_DIR)" || { echo "E2E_OFFLINE_PAIRING_EVIDENCE_DIR is required" >&2; exit 2; }
+	cd e2e && go run ./cmd/twinotify-e2e -scenario offline-pairing -serial-a "$(E2E_DEVICE_A)" -serial-b "$(E2E_DEVICE_B)" -internet-blocked -packet-evidence-sha256 "$(E2E_PACKET_EVIDENCE_SHA256)" -dns-evidence-sha256 "$(E2E_DNS_EVIDENCE_SHA256)" -evidence-dir "$(abspath $(E2E_OFFLINE_PAIRING_EVIDENCE_DIR))"
+	./scripts/verify-offline-pairing-evidence.sh "$(E2E_OFFLINE_PAIRING_EVIDENCE_DIR)"
 
 verify: proto-test relay-verify mobile-verify
 	./scripts/verify-generated-clean.sh

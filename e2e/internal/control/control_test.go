@@ -1,6 +1,7 @@
 package control_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,87 @@ type fakeDevice struct {
 	reads   int
 	args    []control.Command
 	err     error
+}
+
+type fakeSecretDevice struct {
+	fakeDevice
+	writes       map[string][]byte
+	secret       []byte
+	deleteCalls  []string
+	broadcastErr error
+}
+
+func (f *fakeSecretDevice) Broadcast(ctx context.Context, command control.Command) error {
+	if f.broadcastErr != nil {
+		return f.broadcastErr
+	}
+	return f.fakeDevice.Broadcast(ctx, command)
+}
+
+func (f *fakeSecretDevice) WriteSecret(_ context.Context, requestID string, value []byte) error {
+	if f.writes == nil {
+		f.writes = map[string][]byte{}
+	}
+	f.writes[requestID] = append([]byte(nil), value...)
+	return nil
+}
+func (f *fakeSecretDevice) ReadSecretOnce(_ context.Context, requestID string) ([]byte, error) {
+	return append([]byte(nil), f.secret...), nil
+}
+func (f *fakeSecretDevice) DeleteSecret(_ context.Context, requestID string) error {
+	f.deleteCalls = append(f.deleteCalls, requestID)
+	return nil
+}
+
+func TestExecuteSecretUsesPrivateChannelAndNormalResultContainsNoSecret(t *testing.T) {
+	device := &fakeSecretDevice{fakeDevice: fakeDevice{results: map[string][]byte{"offline-1": []byte(`{"request_id":"offline-1","code":"ok","payload":{"phase":"advertising"}}`)}}, secret: []byte("fixture-secret-output")}
+	client := control.New(device, "physical-a", "install-token", 100*time.Millisecond)
+	result, secret, err := client.ExecuteSecret(context.Background(), control.Command{RequestID: "offline-1", Name: "OFFLINE_PAIR_START"}, []byte("fixture-secret-input"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Code != "ok" || string(secret) != "fixture-secret-output" {
+		t.Fatalf("result=%+v secret=%q", result, secret)
+	}
+	if string(device.writes["offline-1"]) != "fixture-secret-input" {
+		t.Fatalf("private write=%q", device.writes)
+	}
+	if strings.Contains(string(device.results["offline-1"]), "fixture-secret") {
+		t.Fatal("normal result leaked secret")
+	}
+	if got := device.args[0].Params["secret_input_id"]; got != "offline-1" {
+		t.Fatalf("secret handle=%q", got)
+	}
+}
+
+func TestExecuteSecretCleansPrivateInputWhenBroadcastFails(t *testing.T) {
+	device := &fakeSecretDevice{broadcastErr: errors.New("broadcast failed")}
+	client := control.New(device, "physical-a", "install-token", 100*time.Millisecond)
+	_, _, err := client.ExecuteSecret(context.Background(), control.Command{RequestID: "offline-2", Name: "OFFLINE_PAIR_JOIN"}, []byte("fixture-secret-input"))
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if len(device.deleteCalls) != 1 || device.deleteCalls[0] != "offline-2" {
+		t.Fatalf("cleanup=%v", device.deleteCalls)
+	}
+	if strings.Contains(err.Error(), "fixture-secret-input") {
+		t.Fatalf("error leaked secret: %v", err)
+	}
+}
+
+func TestBoundRequestIDIsRandomTokenCommandAndExpiryBoundWithoutLeakingToken(t *testing.T) {
+	token := "fixture-install-token"
+	first, err := control.NewBoundRequestID(token, "OFFLINE_PAIR_QUERY", time.Unix(2_000_000_000, 0), bytes.NewReader(bytes.Repeat([]byte{7}, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := control.NewBoundRequestID(token, "STATUS", time.Unix(2_000_000_000, 0), bytes.NewReader(bytes.Repeat([]byte{7}, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || strings.Contains(first, token) || strings.ContainsAny(first, "/\\") {
+		t.Fatalf("unsafe handles: %q %q", first, second)
+	}
 }
 
 type controllerDevice struct {
