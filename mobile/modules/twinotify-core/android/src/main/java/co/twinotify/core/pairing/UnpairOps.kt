@@ -33,13 +33,26 @@ object UnpairOps {
             db.outboundEventDao().clearAll()
             // The SyncService has already been cancelled and joined by UnpairWorkflow.
             // Delete LAN TLS material before rotating application identity.
-            LanIdentityStore.delete()
+            UnpairWipeOrder(
+                deleteLanIdentity = { LanIdentityStore.delete() },
+            ).beforeApplicationKeyRotation {
+                CryptoStore.rotate(ctx)
+            }
             // Rotate crypto state last (allows any in-flight decrypt to finish with old keys)
-            CryptoStore.rotate(ctx)
             NonceSource.regenerate(ctx)
             ReplayGuard.clear(ctx)
             ServiceConfigStore.clear(ctx)
             co.twinotify.core.metrics.MetricsStore.clear(ctx)
         }
+    }
+}
+
+/** Local ordering boundary used by the full wipe; it has no lifecycle responsibilities. */
+internal class UnpairWipeOrder(
+    private val deleteLanIdentity: suspend () -> Unit,
+) {
+    suspend fun beforeApplicationKeyRotation(rotateApplicationKeys: suspend () -> Unit) {
+        deleteLanIdentity()
+        rotateApplicationKeys()
     }
 }

@@ -12,6 +12,7 @@ import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
 import javax.security.auth.x500.X500Principal
+import kotlinx.coroutines.CancellationException
 
 /**
  * Installation-local TLS identity for direct LAN connections.
@@ -23,75 +24,105 @@ import javax.security.auth.x500.X500Principal
 object LanIdentityStore {
     const val ALIAS = "twinotify.lan.tls.v1"
 
+    private val operations = LanIdentityOperations(AndroidKeyStoreLanIdentityProvider)
+
+    fun loadOrCreate(): LanIdentity = operations.loadOrCreate()
+
+    /** Deletes the identity only as part of a complete unpair/reset. */
+    fun delete() = operations.delete()
+
+    internal fun keyStoreForTls(): KeyStore = operations.keyStoreForTls()
+}
+
+/**
+ * Internal, instance-local keystore boundary. Production always supplies
+ * [AndroidKeyStoreLanIdentityProvider]; callers cannot replace it through
+ * [LanIdentityStore].
+ */
+internal interface LanIdentityKeyStoreProvider {
+    fun loadIdentity(alias: String): KeyStore.PrivateKeyEntry?
+    fun generateIdentity(alias: String, spec: KeyGenParameterSpec): KeyStore.PrivateKeyEntry
+    fun deleteIdentity(alias: String)
+    fun keyStoreForTls(): KeyStore
+}
+
+private object AndroidKeyStoreLanIdentityProvider : LanIdentityKeyStoreProvider {
     private const val KEYSTORE = "AndroidKeyStore"
-    private const val CERTIFICATE_COMMON_NAME = "Twinotify LAN"
-    private const val CERTIFICATE_LIFETIME_MILLIS = 20L * 365 * 24 * 60 * 60 * 1_000
-    private const val CLOCK_SKEW_MILLIS = 24L * 60 * 60 * 1_000
+
+    override fun loadIdentity(alias: String): KeyStore.PrivateKeyEntry? {
+        val keyStore = keyStore()
+        if (!keyStore.containsAlias(alias)) return null
+        return keyStore.getEntry(alias, null) as? KeyStore.PrivateKeyEntry
+            ?: throw LanIdentityException(LanIdentityFailure.IDENTITY_INVALID)
+    }
+
+    override fun generateIdentity(alias: String, spec: KeyGenParameterSpec): KeyStore.PrivateKeyEntry {
+        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, KEYSTORE).apply {
+            initialize(spec)
+            generateKeyPair()
+        }
+        return loadIdentity(alias)
+            ?: throw LanIdentityException(LanIdentityFailure.IDENTITY_INVALID)
+    }
+
+    override fun deleteIdentity(alias: String) {
+        val keyStore = keyStore()
+        if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+    }
+
+    override fun keyStoreForTls(): KeyStore = keyStore()
+
+    private fun keyStore(): KeyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+}
+
+/**
+ * A deliberately local seam for provider failure mapping tests. This is not a
+ * trust authority: the public store always binds this operation to AndroidKeyStore.
+ */
+internal class LanIdentityOperations(
+    private val provider: LanIdentityKeyStoreProvider,
+) {
     private val lock = Any()
 
     fun loadOrCreate(): LanIdentity = synchronized(lock) {
-        try {
-            val keyStore = keyStore()
-            existingIdentity(keyStore)?.let { return@synchronized it }
-            generateIdentity(keyStore)
+        val existing = try {
+            provider.loadIdentity(LanIdentityStore.ALIAS)
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: LanIdentityException) {
             throw error
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             throw LanIdentityException(LanIdentityFailure.LOAD_FAILED)
+        }
+        if (existing != null) return@synchronized identityFrom(existing)
+
+        try {
+            identityFrom(provider.generateIdentity(LanIdentityStore.ALIAS, keyGenSpec()))
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: LanIdentityException) {
+            throw error
+        } catch (_: Exception) {
+            throw LanIdentityException(LanIdentityFailure.GENERATE_FAILED)
         }
     }
 
-    /** Deletes the identity only as part of a complete unpair/reset. */
     fun delete() = synchronized(lock) {
         try {
-            val keyStore = keyStore()
-            if (keyStore.containsAlias(ALIAS)) keyStore.deleteEntry(ALIAS)
-        } catch (_: Throwable) {
+            provider.deleteIdentity(LanIdentityStore.ALIAS)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
             throw LanIdentityException(LanIdentityFailure.DELETE_FAILED)
         }
     }
 
-    internal fun keyStoreForTls(): KeyStore = try {
-        keyStore()
-    } catch (_: Throwable) {
+    fun keyStoreForTls(): KeyStore = try {
+        provider.keyStoreForTls()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
         throw LanIdentityException(LanIdentityFailure.LOAD_FAILED)
-    }
-
-    private fun existingIdentity(keyStore: KeyStore): LanIdentity? {
-        if (!keyStore.containsAlias(ALIAS)) return null
-        val entry = keyStore.getEntry(ALIAS, null) as? KeyStore.PrivateKeyEntry
-            ?: throw LanIdentityException(LanIdentityFailure.IDENTITY_INVALID)
-        return identityFrom(entry)
-    }
-
-    private fun generateIdentity(keyStore: KeyStore): LanIdentity {
-        val now = System.currentTimeMillis()
-        val spec = KeyGenParameterSpec.Builder(
-            ALIAS,
-            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
-        )
-            .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-            .setDigests(KeyProperties.DIGEST_SHA256)
-            .setCertificateSubject(X500Principal("CN=$CERTIFICATE_COMMON_NAME"))
-            .setCertificateSerialNumber(BigInteger.ONE)
-            .setCertificateNotBefore(Date(now - CLOCK_SKEW_MILLIS))
-            .setCertificateNotAfter(Date(now + CERTIFICATE_LIFETIME_MILLIS))
-            .setUserAuthenticationRequired(false)
-            .build()
-
-        try {
-            KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, KEYSTORE).apply {
-                initialize(spec)
-                generateKeyPair()
-            }
-            val entry = keyStore.getEntry(ALIAS, null) as? KeyStore.PrivateKeyEntry
-                ?: throw LanIdentityException(LanIdentityFailure.IDENTITY_INVALID)
-            return identityFrom(entry)
-        } catch (error: LanIdentityException) {
-            throw error
-        } catch (_: Throwable) {
-            throw LanIdentityException(LanIdentityFailure.GENERATE_FAILED)
-        }
     }
 
     private fun identityFrom(entry: KeyStore.PrivateKeyEntry): LanIdentity {
@@ -105,12 +136,32 @@ object LanIdentityStore {
         return LanIdentity(entry.privateKey, chain)
     }
 
-    private fun keyStore(): KeyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+    private fun keyGenSpec(): KeyGenParameterSpec {
+        val now = System.currentTimeMillis()
+        return KeyGenParameterSpec.Builder(
+            LanIdentityStore.ALIAS,
+            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
+        )
+            .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setCertificateSubject(X500Principal("CN=Twinotify LAN"))
+            .setCertificateSerialNumber(BigInteger.ONE)
+            .setCertificateNotBefore(Date(now - CLOCK_SKEW_MILLIS))
+            .setCertificateNotAfter(Date(now + CERTIFICATE_LIFETIME_MILLIS))
+            .setUserAuthenticationRequired(false)
+            .build()
+    }
+
+    private companion object {
+        const val CERTIFICATE_LIFETIME_MILLIS = 20L * 365 * 24 * 60 * 60 * 1_000
+        const val CLOCK_SKEW_MILLIS = 24L * 60 * 60 * 1_000
+    }
 }
 
 class LanIdentity internal constructor(
     private val privateKey: PrivateKey,
     certificateChain: Array<X509Certificate>,
+    private val signatureFactory: () -> Signature = { Signature.getInstance("SHA256withECDSA") },
 ) {
     private val chain = certificateChain.copyOf()
     private val pin = MessageDigest.getInstance("SHA-256").digest(chain.first().publicKey.encoded)
@@ -122,22 +173,26 @@ class LanIdentity internal constructor(
         get() = pin.copyOf()
 
     fun sign(data: ByteArray): ByteArray = try {
-        Signature.getInstance("SHA256withECDSA").run {
+        signatureFactory().run {
             initSign(privateKey)
             update(data)
             sign()
         }
-    } catch (_: Throwable) {
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
         throw LanIdentityException(LanIdentityFailure.SIGN_FAILED)
     }
 
     fun verify(data: ByteArray, signature: ByteArray): Boolean = try {
-        Signature.getInstance("SHA256withECDSA").run {
+        signatureFactory().run {
             initVerify(chain.first().publicKey)
             update(data)
             verify(signature)
         }
-    } catch (_: Throwable) {
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
         throw LanIdentityException(LanIdentityFailure.VERIFY_FAILED)
     }
 }

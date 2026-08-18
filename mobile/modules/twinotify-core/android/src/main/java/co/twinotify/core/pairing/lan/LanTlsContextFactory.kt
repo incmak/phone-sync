@@ -7,29 +7,23 @@ import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import kotlinx.coroutines.CancellationException
 
 /** TLS contexts scoped to the LAN pairing pin trust boundary. */
 object LanTlsContextFactory {
     private const val SHA256_PIN_LENGTH = 32
+    private val serverOperations = LanTlsContextOperations(
+        identityLoader = { LanIdentityStore.loadOrCreate() },
+        keyStoreLoader = { LanIdentityStore.keyStoreForTls() },
+        keyManagerFactoryLoader = { KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()) },
+        sslContextLoader = { SSLContext.getInstance("TLS") },
+    )
 
     /**
      * Uses the installation's Android Keystore TLS identity. There is no
      * caller-supplied key material and no export of the private key.
      */
-    fun serverContext(): SSLContext {
-        LanIdentityStore.loadOrCreate()
-        return try {
-            val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-            keyManagerFactory.init(LanIdentityStore.keyStoreForTls(), null)
-            SSLContext.getInstance("TLS").apply {
-                init(keyManagerFactory.keyManagers, null, null)
-            }
-        } catch (error: LanIdentityException) {
-            throw error
-        } catch (_: Throwable) {
-            throw LanIdentityException(LanIdentityFailure.TLS_CONTEXT_FAILED)
-        }
-    }
+    fun serverContext(): SSLContext = serverOperations.serverContext()
 
     /**
      * Client-only context for a pin that was authenticated in the pairing
@@ -41,7 +35,9 @@ object LanTlsContextFactory {
         }
     } catch (error: LanIdentityException) {
         throw error
-    } catch (_: Throwable) {
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
         throw LanIdentityException(LanIdentityFailure.TLS_CONTEXT_FAILED)
     }
 
@@ -50,6 +46,35 @@ object LanTlsContextFactory {
             throw LanIdentityException(LanIdentityFailure.INVALID_PIN)
         }
         return SpkiPinningTrustManager(expectedSpkiSha256.copyOf())
+    }
+}
+
+/**
+ * Instance-local provider seam for failure mapping tests. Production constructs
+ * this once with AndroidKeyStore and the platform TLS providers; public callers
+ * cannot replace its key or trust source.
+ */
+internal class LanTlsContextOperations(
+    private val identityLoader: () -> Unit,
+    private val keyStoreLoader: () -> java.security.KeyStore,
+    private val keyManagerFactoryLoader: () -> KeyManagerFactory,
+    private val sslContextLoader: () -> SSLContext,
+) {
+    fun serverContext(): SSLContext {
+        identityLoader()
+        return try {
+            val keyManagerFactory = keyManagerFactoryLoader()
+            keyManagerFactory.init(keyStoreLoader(), null)
+            sslContextLoader().apply {
+                init(keyManagerFactory.keyManagers, null, null)
+            }
+        } catch (error: LanIdentityException) {
+            throw error
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            throw LanIdentityException(LanIdentityFailure.TLS_CONTEXT_FAILED)
+        }
     }
 }
 

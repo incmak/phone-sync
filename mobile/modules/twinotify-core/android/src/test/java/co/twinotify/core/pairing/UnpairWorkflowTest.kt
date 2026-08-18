@@ -18,4 +18,17 @@ class UnpairWorkflowTest {
 
         assertEquals(listOf("stop-and-await", "revoke", "wipe"), steps)
     }
+
+    @Test
+    fun fullWipeDeletesLanIdentityBeforeRotatingApplicationKeys() = runBlocking {
+        val steps = mutableListOf<String>()
+
+        UnpairWipeOrder(
+            deleteLanIdentity = { steps += "lan-identity-delete" },
+        ).beforeApplicationKeyRotation {
+            steps += "application-key-rotation"
+        }
+
+        assertEquals(listOf("lan-identity-delete", "application-key-rotation"), steps)
+    }
 }

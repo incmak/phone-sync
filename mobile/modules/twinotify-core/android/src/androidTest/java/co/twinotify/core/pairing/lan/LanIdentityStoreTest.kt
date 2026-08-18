@@ -4,10 +4,15 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import java.security.AlgorithmParameters
+import java.security.GeneralSecurityException
 import java.security.KeyFactory
 import java.security.KeyStore
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
+import java.security.spec.ECParameterSpec
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -45,9 +50,22 @@ class LanIdentityStoreTest {
             keyInfo.digests.contains(KeyProperties.DIGEST_SHA256),
             "TLS identity must permit SHA-256 signatures",
         )
+        assertTrue(!keyInfo.isUserAuthenticationRequired)
         assertTrue(certificate.notBefore.before(java.util.Date()))
         assertTrue(certificate.notAfter.after(java.util.Date()))
         assertEquals(certificate.subjectX500Principal, certificate.issuerX500Principal)
+        certificate.verify(certificate.publicKey)
+        val publicKey = certificate.publicKey as ECPublicKey
+        val p256 = AlgorithmParameters.getInstance("EC").run {
+            init(ECGenParameterSpec("secp256r1"))
+            getParameterSpec(ECParameterSpec::class.java)
+        }
+        assertEquals(256, publicKey.params.curve.field.fieldSize)
+        assertEquals(p256.curve, publicKey.params.curve)
+        assertEquals(p256.generator, publicKey.params.generator)
+        assertEquals(p256.order, publicKey.params.order)
+        assertEquals(p256.cofactor, publicKey.params.cofactor)
+        assertEquals("SHA256withECDSA", certificate.sigAlgName.replace("-", ""))
         assertContentEquals(certificate.publicKey.encoded, identity.certificateChain.single().publicKey.encoded)
     }
 
@@ -112,15 +130,65 @@ class LanIdentityStoreTest {
     }
 
     @Test
-    fun failuresExposeOnlyBoundedCodes() {
-        val error = assertFailsWith<LanIdentityException> {
+    fun providerAndKeystoreFailuresExposeOnlyBoundedCodes() {
+        val leakedProviderText = "provider ${LanIdentityStore.ALIAS} BEGIN CERTIFICATE"
+
+        assertBoundedFailure(LanIdentityFailure.LOAD_FAILED) {
+            LanIdentityOperations(ThrowingProvider(loadFailure = leakedProviderText)).loadOrCreate()
+        }
+        assertBoundedFailure(LanIdentityFailure.GENERATE_FAILED) {
+            LanIdentityOperations(ThrowingProvider(generateFailure = leakedProviderText)).loadOrCreate()
+        }
+        LanIdentityStore.loadOrCreate()
+        val entry = assertNotNull(
+            androidKeyStore().getEntry(LanIdentityStore.ALIAS, null) as? KeyStore.PrivateKeyEntry,
+        )
+        val signingIdentity = LanIdentity(entry.privateKey, arrayOf(entry.certificate as X509Certificate)) {
+            throw GeneralSecurityException(leakedProviderText)
+        }
+        assertBoundedFailure(LanIdentityFailure.SIGN_FAILED) {
+            signingIdentity.sign(byteArrayOf(1))
+        }
+        assertBoundedFailure(LanIdentityFailure.TLS_CONTEXT_FAILED) {
+            LanTlsContextOperations(
+                identityLoader = {},
+                keyStoreLoader = { androidKeyStore() },
+                keyManagerFactoryLoader = { throw GeneralSecurityException(leakedProviderText) },
+                sslContextLoader = { throw GeneralSecurityException(leakedProviderText) },
+            ).serverContext()
+        }
+        assertBoundedFailure(LanIdentityFailure.INVALID_PIN) {
             LanTlsContextFactory.pinningTrustManager(ByteArray(31))
         }
+    }
 
-        assertEquals(LanIdentityFailure.INVALID_PIN, error.failure)
-        assertTrue(error.message.orEmpty().matches(Regex("[a-z_]+")))
+    private fun assertBoundedFailure(
+        expectedFailure: LanIdentityFailure,
+        block: () -> Unit,
+    ) {
+        val error = assertFailsWith<LanIdentityException> { block() }
+        assertEquals(expectedFailure, error.failure)
+        assertEquals(expectedFailure.code, error.message)
         assertTrue(!error.toString().contains(LanIdentityStore.ALIAS))
         assertTrue(!error.toString().contains("BEGIN CERTIFICATE"))
+    }
+
+    private class ThrowingProvider(
+        private val loadFailure: String? = null,
+        private val generateFailure: String? = null,
+    ) : LanIdentityKeyStoreProvider {
+        override fun loadIdentity(alias: String): KeyStore.PrivateKeyEntry? {
+            loadFailure?.let { throw GeneralSecurityException(it) }
+            return null
+        }
+
+        override fun generateIdentity(alias: String, spec: android.security.keystore.KeyGenParameterSpec): KeyStore.PrivateKeyEntry {
+            throw GeneralSecurityException(requireNotNull(generateFailure))
+        }
+
+        override fun deleteIdentity(alias: String) = Unit
+
+        override fun keyStoreForTls(): KeyStore = throw GeneralSecurityException("not used")
     }
 
     private fun androidKeyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
