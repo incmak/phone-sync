@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  View, Text, TextInput, ScrollView, StyleSheet, ActivityIndicator,
+  View, Text, TextInput, ScrollView, StyleSheet,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -156,14 +156,11 @@ export default function RelayScreen() {
           <TwButton
             variant="secondary"
             size="md"
-            disabled={testState === 'testing'}
+            loading={testState === 'testing'}
+            accessibilityLabel="Test connection"
             onPress={handleTest}
           >
-            {testState === 'testing' ? (
-              <ActivityIndicator size="small" color={theme.ink} />
-            ) : (
-              'Test connection'
-            )}
+            Test connection
           </TwButton>
         </View>
 

@@ -1,11 +1,12 @@
 import React from 'react';
-import { PixelRatio, StyleSheet } from 'react-native';
+import { ScrollView, StyleSheet, Text } from 'react-native';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { ThemeProvider } from '../../../components/Theme';
 import { OnboardingState } from '../../../state/onboardingState';
 import ConnectScreen from '../../onboarding/connect';
+import RelayScreen from '../../onboarding/relay';
 import PairDetailScreen from '../../settings/pair';
 import FingerprintScreen from '../fingerprint';
 import NearbyScreen from '../nearby';
@@ -128,6 +129,23 @@ describe('offline pairing UI behavior', () => {
         .toHaveBeenCalledWith(scannedText, 'Android phone');
     });
     expect(global.__TWINOTIFY_CORE__.sendPeerHello).not.toHaveBeenCalled();
+  });
+
+  test('preserves the joined session when successful navigation unmounts the scanner', async () => {
+    global.__SET_SEARCH_PARAMS__({ mode: 'nearby' });
+    global.__TWINOTIFY_CORE__.joinOfflinePairing.mockResolvedValue(undefined);
+    global.__TWINOTIFY_CORE__.getOfflinePairingStatus.mockResolvedValue(activeStatus({ role: 'joiner' }));
+    const view = renderScreen(<ScanScreen />);
+
+    fireEvent(await screen.findByTestId('camera-view'), 'barcodeScanned', { data: 'opaque-scan-text' });
+    await waitFor(() => expect(global.__TEST_ROUTER__.replace).toHaveBeenCalledWith('/pair/nearby'));
+    await act(async () => {
+      view.unmount();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(global.__TWINOTIFY_CORE__.cancelOfflinePairing).not.toHaveBeenCalled();
   });
 
   test.each(['initiator', 'joiner'] as const)(
@@ -488,10 +506,9 @@ describe('offline pairing UI behavior', () => {
     expect(screen.getByRole('button', { name: 'Go back' })).toBeTruthy();
   });
 
-  test('renders dark theme and large-font-safe flexible content', async () => {
+  test('renders dark theme with structural constraints that avoid fixed text clipping', async () => {
     global.__SET_DARK_THEME__(true);
-    const fontScale = jest.spyOn(PixelRatio, 'getFontScale').mockReturnValue(2);
-    renderScreen(<ConnectScreen />);
+    const view = renderScreen(<ConnectScreen />);
 
     const nearby = await screen.findByRole('button', { name: 'Pair nearby without internet' });
     const style = StyleSheet.flatten(nearby.props.style);
@@ -499,7 +516,29 @@ describe('offline pairing UI behavior', () => {
     expect(style.height).toBeUndefined();
     expect(style.overflow).not.toBe('hidden');
     expect(screen.getByText(/Both options keep notification contents/)).toBeTruthy();
-    fontScale.mockRestore();
+    const scrollStyle = StyleSheet.flatten(view.UNSAFE_getByType(ScrollView).props.contentContainerStyle);
+    expect(scrollStyle.flexGrow).toBe(1);
+    for (const text of view.UNSAFE_getAllByType(Text)) {
+      const textStyle = StyleSheet.flatten(text.props.style);
+      expect(textStyle.height).toBeUndefined();
+      expect(textStyle.overflow).not.toBe('hidden');
+    }
+  });
+
+  test('keeps the relay connection test named, disabled, and busy while fetching', async () => {
+    const response = deferred<Response>();
+    const fetch = jest.spyOn(global, 'fetch').mockReturnValue(response.promise);
+    renderScreen(<RelayScreen />);
+
+    fireEvent.changeText(screen.getByLabelText('Relay URL'), 'wss://relay.invalid/ws');
+    fireEvent.press(screen.getByRole('button', { name: 'Test connection' }));
+
+    const testing = await screen.findByRole('button', { name: 'Test connection' });
+    expect(testing.props.accessibilityState).toEqual({ disabled: true, busy: true });
+
+    response.resolve(new Response(null, { status: 200 }));
+    await screen.findByText(/Reached in/);
+    fetch.mockRestore();
   });
 
   test('uses a plain relay countdown and vertically ranked fingerprint actions', async () => {

@@ -168,7 +168,7 @@ The correction was developed RED-first against `.superpowers/sdd/task-7-review.m
 | Scanner session leak and late navigation | Visible back, hardware back, and unmount set a leaving boundary, query current native status, cancel its exact session once, and recheck cleanup after a deferred join settles. Relay continuations are also suppressed after exit. | Three deferred-join tests assert exact cancellation and no late `/pair/nearby` replacement. |
 | Shared button semantics | `TwButton` now defaults to role button, infers string/number names, accepts explicit labels/hints/test IDs, publishes disabled/busy state, and uses flexible minimum heights of 48dp or more. | Focused primitive tests cover small target, inferred name, explicit loading name, disabled and busy; scanner permission controls provide representative screen coverage. |
 | Confirmation rejection | Rejections are caught, mapped to the bounded repair table, and rendered as an alert with a working return action. | Rejecting native mock produces `Pairing session changed` without an unhandled promise; exact mismatch cancellation is separately tested. |
-| Behavior breadth | Both connection choices are pressed; retry cancels then starts; stale session events are ignored; subscriptions are removed; scanner back paths, pre-join exit and transient cleanup retry, relay/nearby completion, dark theme, 2x font-scale flexible layout, and anti-slop action order are exercised. | 33-test suite in `.omo/evidence/task-7/correction-jest-full.log`. |
+| Behavior breadth | Both connection choices are pressed; retry cancels then starts; stale session events are ignored; subscriptions are removed; scanner back paths, pre-join exit and transient cleanup retry, relay/nearby completion, dark theme, flexible no-fixed-height layout constraints, and anti-slop action order are exercised. | 33-test suite in `.omo/evidence/task-7/correction-jest-full.log`. This is structural evidence, not a physical 2x-font rendering claim. |
 | Relay QR/fingerprint anti-slop | Countdown is plain type with a descriptive accessibility label; pulsing status halo is removed from the QR screen; fingerprint confirmation is the primary full-width action followed by a quiet full-width mismatch action. | Rendering test asserts uncontained countdown styling and ranked accessible action order; source audit confirms `TwStatusDot` is absent from the screen. |
 
 ### Correction verification
@@ -197,7 +197,7 @@ Read-only ADB inventory still found one phone. Its state remained font scale 1.0
 | Button composition | Pass after correction. Fingerprint actions are vertically ranked primary then quiet action, not a side-by-side filled/destructive or filled/outline preset. |
 | Real controls and semantics | Pass in source/runtime tests. Shared buttons now expose role, name, disabled/loading state and >=48dp flexible targets; every changed control retains a real handler. Physical TalkBack remains unverified. |
 | Visible-by-default content | Pass. No opacity-zero, translated-away, timed entrance, hidden section, or animation-gated content exists in the correction. |
-| Clipping, fixed heights, large text | Source/test pass. `TwButton` fixed heights were replaced by minimum height plus vertical padding; text screens remain scrollable; 2x font-scale render asserts flexible controls and no hidden overflow. Physical large-font inspection remains unverified. |
+| Clipping, fixed heights, large text | Source/test pass. `TwButton` fixed heights were replaced by minimum height plus vertical padding; text screens remain scrollable; the render test asserts flexible controls, growing scroll content, and no fixed text height or hidden overflow. React Native Testing Library does not perform native text layout, so physical large-font inspection remains unverified. |
 | Motion | Pass after correction. The repeating pairing halo is no longer used on relay QR; no entrance reveal, hover lift, underline fill, or decorative motion was added. Existing press feedback and router transitions remain functional native interaction. |
 | Color and contrast | Pass from prior token audit. The correction introduces no color. Plain timer and fingerprint actions use existing readable token pairs. |
 | Icons and decorative containers | Pass. No new icon tile, logo box, fake mark, oversized glyph container, or fabricated brand asset was introduced. |
@@ -221,9 +221,53 @@ This follow-up keeps the Task 7 UI contract but fixes the native transport-to-st
 
 The focused test uses a transport that throws `PairingTransportFailure.TLS_PIN_MISMATCH`, asserts the resulting public code and exact event-map key set, and separately asserts application identity mismatch remains unchanged. The native mappings are exhaustive `when` expressions, so future enum additions fail compilation until explicitly assigned a bounded public code.
 
-## Final workspace checks
+## Successful session handoff and relay busy-state correction
+
+This narrow correction was developed RED-first from the updated Task 7 review at base `13fbcfd`. It changes only scanner ownership behavior, the existing relay test action, and their focused tests. It does not change the native bridge or pairing protocol.
+
+### Handoff correction RED and GREEN
+
+- RED command: `cd mobile && npm test -- --runInBand app/pair/__tests__/offlinePairingFlow.test.tsx components/primitives/__tests__/TwButton.test.tsx`
+- RED observable: exit 1, 2 failed and 34 passed. A router-replacement unmount cancelled the successfully joined exact native session, and the relay loading control lost its accessible name while reporting `busy: false`.
+- RED artifact: `.omo/evidence/task-7/handoff-red.log`.
+- GREEN command: the same focused command after the production correction.
+- Focused GREEN observable: 2/2 suites and 36/36 tests passed, 0 snapshots.
+- Focused GREEN artifact: `.omo/evidence/task-7/handoff-green-focused.log`.
+- Full GREEN command: `cd mobile && npm test -- --runInBand`.
+- Full GREEN observable: 2/2 suites and 36/36 tests passed, 0 snapshots.
+- Full GREEN artifact: `.omo/evidence/task-7/handoff-jest-full.log`.
+
+### Handoff finding closure
+
+| Finding | Correction | Behavioral observable |
+|---|---|---|
+| Successful navigation unmount cancelled the newly joined nearby session | The scanner now owns a nearby join until an explicit handoff immediately before `router.replace('/pair/nearby')`. User back, failed/abandoned join, and unmount before handoff still query native status and cancel the exact current session. Unmount after handoff leaves ownership with the nearby screen. | The new test completes native join, observes the real router replacement, unmounts as navigation does, flushes cleanup, and verifies that native cancellation was not called. Existing deferred-join/back/unmount tests continue to verify exact cancellation, retry, and late-navigation suppression. |
+| Relay loading control lost its accessible name and busy semantics | The real relay call site now passes a stable `Test connection` label and uses `TwButton`'s `loading` contract instead of replacing its child with an unnamed indicator. | A deferred real fetch keeps the call-site control queryable by role and name and asserts `{ disabled: true, busy: true }`; the primitive suite separately verifies loading and disabled-not-busy semantics. |
+| Large-font test overstated layout evidence | Removed the ineffective `PixelRatio` mock. The test now checks actual rendered structural constraints: minimum target height, no fixed control/text height, no hidden overflow, and a growing scroll content container. | This is static/render-tree evidence only. Native 2x text measurement and clipping remain physically unverified. |
+
+### Handoff correction verification
+
+| Gate | Binary observable | Artifact |
+|---|---|---|
+| TypeScript | exit 0 | `.omo/evidence/task-7/handoff-typecheck.log` |
+| Focused Jest | 36/36 passed | `.omo/evidence/task-7/handoff-green-focused.log` |
+| Full Jest | 36/36 passed | `.omo/evidence/task-7/handoff-jest-full.log` |
+| Expo Doctor | 18/18 checks passed | `.omo/evidence/task-7/handoff-expo-doctor.log` |
+| Scoped lint | exit 0, zero findings | `.omo/evidence/task-7/handoff-lint-scoped.log` |
+| Full lint | exit 0; five unchanged warnings outside correction paths | `.omo/evidence/task-7/handoff-lint-full.log` |
+| Debug APK | `BUILD SUCCESSFUL`, 483 actionable tasks; APK at `mobile/android/app/build/outputs/apk/debug/app-debug.apk` | `.omo/evidence/task-7/handoff-debug-apk-build.log` |
+| Diff hygiene | `git diff --check` passed | `.omo/evidence/task-7/handoff-git-diff-check.log` |
+| Point-by-point source and anti-slop review | all correction categories pass in source/test scope; physical limits remain explicit | `.omo/evidence/task-7/handoff-self-review.txt` |
+
+### Handoff anti-slop and physical boundary
+
+The complete anti-slop law was re-read and applied point by point. This correction adds no visual system, font, color, gradient, glow, halo, pill, badge, icon tile, card, shadow, decoration, animation, entrance gating, fixed text height, clipping container, fake control, or stock filled-plus-outlined action pair. It retains the existing product tokens and real handlers. The only call-site UI change removes a hand-built loading branch in favor of the established accessible button primitive, keeping the label visible to assistive technology while work is in flight. The scanner change is state ownership only and adds no visual treatment.
+
+No physical-device result is claimed for this correction. The prior boundary remains: only one securely locked phone was available, so two-phone pairing, physical 2x-font clipping, portrait light/dark rendering, TalkBack output, and real camera-overlay behavior remain unverified. No keyguard bypass was attempted.
+
+## Initial feature workspace checks
 
 - `git diff --check`: passed; artifact `.omo/evidence/task-7/git-diff-check.log`.
-- Commit `5659a70` contains only the exact Task 7 paths listed in the brief.
+- Initial feature commit `5659a70` contains only the exact Task 7 paths listed in the brief; later sections document the bounded review corrections.
 - No generated `mobile/android/` content is staged.
 - No push is performed.

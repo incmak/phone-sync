@@ -26,6 +26,8 @@ interface RawRelayQR {
   display_name?: string;
 }
 
+type JoinOwnership = 'scanner' | 'abandoned' | 'handed_off';
+
 function parseRelayPayload(data: string): RelayQRPayload | null {
   try {
     const raw = JSON.parse(data) as RawRelayQR;
@@ -55,9 +57,13 @@ export default function PairScanScreen() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const scannedRef = useRef(false);
   const mountedRef = useRef(true);
-  const leavingRef = useRef(false);
+  const ownershipRef = useRef<JoinOwnership>('scanner');
   const cancelledSessionIdsRef = useRef(new Set<string>());
   const modeRef = useRef<PairingMode | null>(mode);
+  const scannerWasAbandoned = useCallback(
+    () => !mountedRef.current || ownershipRef.current === 'abandoned',
+    [],
+  );
 
   const cancelCurrentNearbySession = useCallback(async () => {
     let sessionId: string | null = null;
@@ -73,7 +79,7 @@ export default function PairScanScreen() {
   }, []);
 
   const leaveScanner = useCallback(async () => {
-    leavingRef.current = true;
+    ownershipRef.current = 'abandoned';
     if (mode === 'nearby') await cancelCurrentNearbySession();
     if (mountedRef.current) router.back();
   }, [cancelCurrentNearbySession, mode]);
@@ -86,8 +92,10 @@ export default function PairScanScreen() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      leavingRef.current = true;
-      if (modeRef.current === 'nearby') void cancelCurrentNearbySession();
+      if (ownershipRef.current !== 'handed_off') {
+        ownershipRef.current = 'abandoned';
+        if (modeRef.current === 'nearby') void cancelCurrentNearbySession();
+      }
     };
   }, [cancelCurrentNearbySession]);
 
@@ -115,15 +123,17 @@ export default function PairScanScreen() {
       setErrorMsg(null);
       try {
         const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
-        if (!mountedRef.current || leavingRef.current) return;
+        if (scannerWasAbandoned()) return;
         await TwinotifyCoreModule.joinOfflinePairing(data, displayName);
-        if (!mountedRef.current || leavingRef.current) {
+        if (scannerWasAbandoned()) {
           await cancelCurrentNearbySession();
           return;
         }
+        ownershipRef.current = 'handed_off';
         router.replace('/pair/nearby');
       } catch {
-        if (!mountedRef.current || leavingRef.current) {
+        if (ownershipRef.current === 'handed_off') ownershipRef.current = 'scanner';
+        if (scannerWasAbandoned()) {
           await cancelCurrentNearbySession();
           return;
         }
@@ -140,9 +150,9 @@ export default function PairScanScreen() {
     setScanned(true);
     try {
       const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
-      if (!mountedRef.current || leavingRef.current) return;
+      if (scannerWasAbandoned()) return;
       await TwinotifyCoreModule.sendPeerHello(payload.relayUrl, payload.pairToken, displayName);
-      if (!mountedRef.current || leavingRef.current) return;
+      if (scannerWasAbandoned()) return;
       router.push({
         pathname: '/pair/fingerprint',
         params: {
@@ -156,7 +166,7 @@ export default function PairScanScreen() {
         },
       });
     } catch (error: unknown) {
-      if (!mountedRef.current || leavingRef.current) return;
+      if (scannerWasAbandoned()) return;
       scannedRef.current = false;
       setScanned(false);
       setErrorMsg(error instanceof Error ? error.message : 'Could not contact the relay.');

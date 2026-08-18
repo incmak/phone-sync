@@ -28,4 +28,11 @@ describe('TwButton accessibility contract', () => {
     const button = screen.getByRole('button', { name: 'Saving pairing settings' });
     expect(button.props.accessibilityState).toEqual({ disabled: true, busy: true });
   });
+
+  test('reports disabled without reporting busy when no work is running', () => {
+    renderButton(<TwButton disabled>Continue</TwButton>);
+
+    const button = screen.getByRole('button', { name: 'Continue' });
+    expect(button.props.accessibilityState).toEqual({ disabled: true, busy: false });
+  });
 });
