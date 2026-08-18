@@ -87,6 +87,162 @@ class OfflinePairingCoordinatorTest {
         assertEquals(0, pair.initiatorStore.commits.size)
     }
 
+    @Test fun `exact duplicate signature is idempotent and conflicting duplicate aborts`() {
+        val pair = PairHarness()
+        pair.startAndAuthenticate()
+        val signature = pair.joinerSignature()
+
+        pair.initiator.onPeerFrame(signature)
+        pair.initiator.onPeerFrame(signature)
+        assertEquals(OfflinePairingState.VERIFY_CODE, pair.initiator.status.state)
+        assertEquals(64, pair.initiator.provisionalSignatureSizeForTest())
+
+        pair.initiator.onPeerFrame(OfflinePairingFrame.Signature(pair.qr.sessionId, bytes64(93)))
+        assertEquals(OfflinePairingState.IDLE, pair.initiator.status.state)
+        assertEquals(OfflinePairingError.IDENTITY_MISMATCH, pair.initiator.status.error)
+        assertEquals(0, pair.initiatorStore.commits.size)
+    }
+
+    @Test fun `reentrant authentication during initial advertise sees fully assigned ceremony`() {
+        val pair = PairHarness()
+        pair.initiatorPort.onAdvertise = {
+            pair.initiator.onTlsAuthenticated(pair.joinerIdentity.tlsSpkiSha256)
+        }
+
+        pair.initiator.start(pair.qr, bytes(10))
+
+        assertEquals(OfflinePairingState.TLS_AUTHENTICATED, pair.initiator.status.state)
+        assertTrue(pair.initiatorPort.outbound.single() is OfflinePairingFrame.Hello)
+        assertNull(pair.initiator.status.error)
+    }
+
+    @Test fun `status cancellation at mutually signed is terminal before commit`() {
+        val pair = PairHarness()
+        pair.startAndAuthenticate()
+        pair.initiator.onPeerFrame(pair.joinerSignature())
+        pair.initiatorStatusHook = { status ->
+            if (status.state == OfflinePairingState.MUTUALLY_SIGNED) pair.initiator.cancel()
+        }
+
+        pair.initiator.confirmLocally()
+
+        assertEquals(OfflinePairingError.CANCELLED, pair.initiator.status.error)
+        assertEquals(0, pair.initiatorStore.commits.size)
+        assertEquals(1, pair.initiatorPort.closeCount)
+        assertFalse(pair.initiatorStates.contains(OfflinePairingState.COMPLETE))
+    }
+
+    @Test fun `port send cancellation at mutually signed prevents commit and complete`() {
+        val pair = PairHarness()
+        pair.startAndAuthenticate()
+        pair.initiator.onPeerFrame(pair.joinerSignature())
+        pair.initiatorPort.onSend = { frame ->
+            if (frame is OfflinePairingFrame.Signature) {
+                assertEquals(OfflinePairingState.MUTUALLY_SIGNED, pair.initiator.status.state)
+                pair.initiator.cancel()
+            }
+        }
+
+        pair.initiator.confirmLocally()
+
+        assertEquals(OfflinePairingError.CANCELLED, pair.initiator.status.error)
+        assertEquals(0, pair.initiatorStore.commits.size)
+        assertEquals(1, pair.initiatorPort.closeCount)
+        assertFalse(pair.initiatorStates.contains(OfflinePairingState.COMPLETE))
+    }
+
+    @Test fun `commit callback cancellation cannot be overwritten by completion`() {
+        val pair = PairHarness()
+        pair.startAndAuthenticate()
+        pair.initiator.onPeerFrame(pair.joinerSignature())
+        pair.initiatorStore.onCommit = { pair.initiator.cancel() }
+
+        pair.initiator.confirmLocally()
+
+        assertEquals(OfflinePairingError.CANCELLED, pair.initiator.status.error)
+        assertEquals(1, pair.initiatorStore.commits.size)
+        assertEquals(1, pair.initiatorPort.closeCount)
+        assertFalse(pair.initiatorStates.contains(OfflinePairingState.COMPLETE))
+    }
+
+    @Test fun `expiry during signature send takes precedence and prevents persistence`() {
+        val pair = PairHarness(lifetimeMillis = 10)
+        pair.startAndAuthenticate()
+        pair.initiator.onPeerFrame(pair.joinerSignature())
+        pair.initiatorPort.onSend = { frame ->
+            if (frame is OfflinePairingFrame.Signature) pair.clock.now = 10
+        }
+
+        pair.initiator.confirmLocally()
+
+        assertEquals(OfflinePairingError.EXPIRED, pair.initiator.status.error)
+        assertEquals(0, pair.initiatorStore.commits.size)
+        assertEquals(1, pair.initiatorPort.closeCount)
+    }
+
+    @Test fun `expiry during commit preparation prevents persistence`() {
+        val clock = FakeClock()
+        val crypto = AdvancingCrypto(clock, advanceDuringDerive = 10)
+        val pair = PairHarness(lifetimeMillis = 10, clock = clock, crypto = crypto)
+        pair.startAndAuthenticate()
+        pair.initiator.onPeerFrame(pair.joinerSignature(crypto))
+
+        pair.initiator.confirmLocally()
+
+        assertEquals(OfflinePairingError.EXPIRED, pair.initiator.status.error)
+        assertEquals(0, pair.initiatorStore.commits.size)
+        assertEquals(1, pair.initiatorPort.closeCount)
+    }
+
+    @Test fun `expiry during signing and verification aborts before later effects`() {
+        val signClock = FakeClock()
+        val signPair = PairHarness(lifetimeMillis = 10, clock = signClock, crypto = AdvancingCrypto(signClock, advanceDuringSign = 10))
+        signPair.startAndAuthenticate()
+        signPair.initiator.confirmLocally()
+        assertEquals(OfflinePairingError.EXPIRED, signPair.initiator.status.error)
+        assertFalse(signPair.initiatorPort.outbound.any { it is OfflinePairingFrame.Signature })
+        assertEquals(0, signPair.initiatorStore.commits.size)
+
+        val verifyClock = FakeClock()
+        val verifyPair = PairHarness(lifetimeMillis = 10, clock = verifyClock, crypto = AdvancingCrypto(verifyClock, advanceDuringVerify = 10))
+        verifyPair.startAndAuthenticate()
+        verifyPair.initiator.onPeerFrame(verifyPair.joinerSignature(FakeCrypto))
+        assertEquals(OfflinePairingError.EXPIRED, verifyPair.initiator.status.error)
+        assertEquals(0, verifyPair.initiatorStore.commits.size)
+    }
+
+    @Test fun `external callbacks never execute while coordinator monitor is held`() {
+        val crypto = LockCheckingCrypto()
+        val pair = PairHarness(crypto = crypto)
+        crypto.target = pair.initiator
+        val check = { assertFalse(Thread.holdsLock(pair.initiator)) }
+        pair.initiatorPort.onAdvertise = check
+        pair.initiatorPort.onSend = { check() }
+        pair.initiatorPort.onClose = check
+        pair.initiatorStore.onExistingPeer = check
+        pair.initiatorStore.onCommit = check
+        pair.initiatorStatusHook = { check() }
+
+        pair.startAndAuthenticate()
+        pair.joiner.confirmLocally()
+        pair.pump()
+        pair.initiator.confirmLocally()
+        pair.pump()
+
+        assertEquals(OfflinePairingState.COMPLETE, pair.initiator.status.state)
+    }
+
+    @Test fun `cancel at exact deadline reports expired`() {
+        val pair = PairHarness(lifetimeMillis = 10)
+        pair.startAndAuthenticate()
+        pair.clock.now = 10
+
+        pair.initiator.cancel()
+
+        assertEquals(OfflinePairingError.EXPIRED, pair.initiator.status.error)
+        assertEquals(1, pair.initiatorPort.closeCount)
+    }
+
     @Test fun `initiator deadline and joiner capped monotonic deadline expire independent of wall clock`() {
         val pair = PairHarness(lifetimeMillis = 10)
         pair.startOnly()
@@ -194,8 +350,9 @@ class OfflinePairingCoordinatorTest {
 private class PairHarness(
     lifetimeMillis: Long = 60_000,
     existingPeer: OfflinePairingExistingPeer? = null,
+    val clock: FakeClock = FakeClock(),
+    private val crypto: OfflinePairingCrypto = FakeCrypto,
 ) {
-    val clock = FakeClock()
     val initiatorIdentity = identity(1)
     val joinerIdentity = identity(2)
     val qr = qr(initiatorIdentity, lifetimeMillis)
@@ -206,13 +363,14 @@ private class PairHarness(
     val initiatorEvents = mutableListOf<String>()
     val initiatorStates = mutableListOf<OfflinePairingState>()
     val joinerStates = mutableListOf<OfflinePairingState>()
+    var initiatorStatusHook: ((OfflinePairingStatus) -> Unit)? = null
     val initiator = newInitiator()
     val joiner = OfflinePairingCoordinator(
         role = OfflinePairingRole.JOINER,
         localIdentity = joinerIdentity,
         port = joinerPort,
         committer = joinerStore,
-        crypto = FakeCrypto,
+        crypto = crypto,
         statusSink = { status -> joinerStates += status.state },
     )
 
@@ -221,8 +379,8 @@ private class PairHarness(
         localIdentity = initiatorIdentity,
         port = initiatorPort,
         committer = initiatorStore,
-        crypto = FakeCrypto,
-        statusSink = { status -> initiatorStates += status.state; initiatorEvents += status.toString() },
+        crypto = crypto,
+        statusSink = { status -> initiatorStates += status.state; initiatorEvents += status.toString(); initiatorStatusHook?.invoke(status) },
     )
 
     fun startOnly() {
@@ -253,6 +411,18 @@ private class PairHarness(
         sessionId, qr.lifetimeMillis,
         LanPairingHello(joinerIdentity.deviceId, LanPairingBytes(encryptionKey), LanPairingBytes(joinerIdentity.signingPublicKey), LanPairingBytes(tlsPin), LanPairingBytes(nonce)),
     )
+
+    fun joinerSignature(using: OfflinePairingCrypto = crypto): OfflinePairingFrame.Signature {
+        val transcript = using.canonicalTranscript(
+            LanPairingTranscript(qr.sessionId, qr.lifetimeMillis, qr.version, joinerHello().hello, initiatorHello()),
+        )
+        return OfflinePairingFrame.Signature(qr.sessionId, using.signTranscript(transcript, joinerIdentity.signingSecretKey))
+    }
+
+    private fun initiatorHello() = LanPairingHello(
+        initiatorIdentity.deviceId, LanPairingBytes(initiatorIdentity.encryptionPublicKey), LanPairingBytes(initiatorIdentity.signingPublicKey),
+        LanPairingBytes(initiatorIdentity.tlsSpkiSha256), LanPairingBytes(bytes(10)),
+    )
 }
 
 private class FakeClock(var now: Long = 0)
@@ -261,16 +431,51 @@ private class FakePort(private val clock: FakeClock) : OfflinePairingPort {
     override fun monotonicMillis(): Long = clock.now
     val outbound = ArrayDeque<OfflinePairingFrame>()
     var closed = false
-    override fun advertise(sessionId: String) = Unit
+    var closeCount = 0
+    var onAdvertise: (() -> Unit)? = null
+    var onSend: ((OfflinePairingFrame) -> Unit)? = null
+    var onClose: (() -> Unit)? = null
+    override fun advertise(sessionId: String) { onAdvertise?.invoke() }
     override fun resolve(sessionId: String, expectedTlsSpkiSha256: ByteArray) = Unit
-    override fun send(frame: OfflinePairingFrame) { outbound += frame }
-    override fun close() { closed = true }
+    override fun send(frame: OfflinePairingFrame) { outbound += frame; onSend?.invoke(frame) }
+    override fun close() { onClose?.invoke(); closed = true; closeCount++ }
 }
 
 private class FakeCommitter(private val existing: OfflinePairingExistingPeer? = null) : OfflinePairingCommitter {
     val commits = mutableListOf<OfflinePairingCommit>()
-    override fun existingPeer(): OfflinePairingExistingPeer? = existing
-    override fun commit(value: OfflinePairingCommit): Boolean { commits += value; return true }
+    var onExistingPeer: (() -> Unit)? = null
+    var onCommit: (() -> Unit)? = null
+    override fun existingPeer(): OfflinePairingExistingPeer? { onExistingPeer?.invoke(); return existing }
+    override fun commit(value: OfflinePairingCommit): Boolean { commits += value; onCommit?.invoke(); return true }
+}
+
+private class AdvancingCrypto(
+    private val clock: FakeClock,
+    private val advanceDuringDerive: Long? = null,
+    private val advanceDuringSign: Long? = null,
+    private val advanceDuringVerify: Long? = null,
+) : OfflinePairingCrypto by FakeCrypto {
+    override fun derivePairSecret(sessionToken: ByteArray, transcript: ByteArray): ByteArray {
+        val result = FakeCrypto.derivePairSecret(sessionToken, transcript)
+        advanceDuringDerive?.let { clock.now = it }
+        return result
+    }
+
+    override fun signTranscript(transcript: ByteArray, secretKey: ByteArray): ByteArray =
+        FakeCrypto.signTranscript(transcript, secretKey).also { advanceDuringSign?.let { now -> clock.now = now } }
+
+    override fun verifyTranscript(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean =
+        FakeCrypto.verifyTranscript(transcript, signature, publicKey).also { advanceDuringVerify?.let { now -> clock.now = now } }
+}
+
+private class LockCheckingCrypto : OfflinePairingCrypto by FakeCrypto {
+    var target: OfflinePairingCoordinator? = null
+    private fun check() { target?.let { assertFalse(Thread.holdsLock(it)) } }
+    override fun canonicalTranscript(value: LanPairingTranscript): ByteArray { check(); return FakeCrypto.canonicalTranscript(value) }
+    override fun shortAuthenticationString(transcript: ByteArray): String { check(); return FakeCrypto.shortAuthenticationString(transcript) }
+    override fun derivePairSecret(sessionToken: ByteArray, transcript: ByteArray): ByteArray { check(); return FakeCrypto.derivePairSecret(sessionToken, transcript) }
+    override fun signTranscript(transcript: ByteArray, secretKey: ByteArray): ByteArray { check(); return FakeCrypto.signTranscript(transcript, secretKey) }
+    override fun verifyTranscript(transcript: ByteArray, signature: ByteArray, publicKey: ByteArray): Boolean { check(); return FakeCrypto.verifyTranscript(transcript, signature, publicKey) }
 }
 
 private object FakeCrypto : OfflinePairingCrypto {
@@ -299,3 +504,4 @@ private fun qr(identity: OfflinePairingIdentity, lifetime: Long) = LanPairingQr(
 
 private fun existingPeer(enc: ByteArray, sign: ByteArray) = OfflinePairingExistingPeer("dev-00000000-0000-0000-0000-000000000002", enc, sign)
 private fun bytes(seed: Int): ByteArray = ByteArray(32) { seed.toByte() }
+private fun bytes64(seed: Int): ByteArray = ByteArray(64) { seed.toByte() }
