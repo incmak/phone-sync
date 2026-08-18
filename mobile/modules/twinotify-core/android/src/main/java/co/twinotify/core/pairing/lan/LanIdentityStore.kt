@@ -143,7 +143,7 @@ internal class LanIdentityOperations(
             KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
         )
             .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_NONE)
             .setCertificateSubject(X500Principal("CN=Twinotify LAN"))
             .setCertificateSerialNumber(BigInteger.ONE)
             .setCertificateNotBefore(Date(now - CLOCK_SKEW_MILLIS))

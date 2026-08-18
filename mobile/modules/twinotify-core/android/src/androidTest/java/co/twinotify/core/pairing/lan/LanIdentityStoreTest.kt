@@ -46,9 +46,10 @@ class LanIdentityStoreTest {
         assertEquals("EC", entry.certificate.publicKey.algorithm)
         assertTrue(keyInfo.purposes and KeyProperties.PURPOSE_SIGN != 0)
         assertTrue(keyInfo.purposes and KeyProperties.PURPOSE_VERIFY != 0)
-        assertTrue(
-            keyInfo.digests.contains(KeyProperties.DIGEST_SHA256),
-            "TLS identity must permit SHA-256 signatures",
+        assertEquals(
+            setOf(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_NONE),
+            keyInfo.digests.toSet(),
+            "TLS identity permits SHA-256 app signatures and pre-hashed JSSE ECDSA only",
         )
         assertTrue(!keyInfo.isUserAuthenticationRequired)
         assertTrue(certificate.notBefore.before(java.util.Date()))
