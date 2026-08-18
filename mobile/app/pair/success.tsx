@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text } from 'react-native';
+import { ScrollView, View, Text } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import Svg, { Circle, Path } from 'react-native-svg';
@@ -10,25 +10,30 @@ import { OnboardingState } from '../../state/onboardingState';
 export default function PairSuccessScreen() {
   const theme = useTheme();
   const [peerName, setPeerName] = useState<string>('');
+  const [verifiedComplete, setVerifiedComplete] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
-        const relayUrl = await OnboardingState.getRelayUrl();
-        if (relayUrl) {
-          await TwinotifyCoreModule.startSyncService(relayUrl);
-        }
-        await OnboardingState.markComplete();
-      } catch {
-        // Non-fatal — sync service can be restarted from the home screen.
-      }
-      try {
+        const offline = await TwinotifyCoreModule.getOfflinePairingStatus();
         const ps = await TwinotifyCoreModule.getPairStatus();
+        const complete = offline.completed && offline.phase === 'complete';
+        if (!complete && !ps.paired) return;
+        await OnboardingState.markComplete();
+        setVerifiedComplete(true);
         if (ps.peerDisplayName?.trim()) {
           setPeerName(ps.peerDisplayName.trim());
         }
+        const relayUrl = await OnboardingState.getRelayUrl();
+        if (relayUrl) {
+          try {
+            await TwinotifyCoreModule.startSyncService(relayUrl);
+          } catch {
+            // Pairing is already committed; the home screen can retry relay sync.
+          }
+        }
       } catch {
-        // Non-fatal — fallback to generic copy.
+        setVerifiedComplete(false);
       }
     })();
   }, []);
@@ -38,8 +43,7 @@ export default function PairSuccessScreen() {
       edges={['top', 'bottom']}
       style={{ flex: 1, backgroundColor: theme.bg }}
     >
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 }}>
-        {/* Two overlapping rings + checkmark hero */}
+      <ScrollView contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', padding: 32 }}>
         <Svg width={160} height={100} viewBox="0 0 160 100">
           <Circle
             cx={60} cy={50} r={38}
@@ -63,7 +67,7 @@ export default function PairSuccessScreen() {
           marginTop: 24,
           letterSpacing: -0.4,
         }}>
-          Twinned.
+          {verifiedComplete ? 'Twinned.' : 'Finishing pairing…'}
         </Text>
         <Text style={{
           fontSize: 15,
@@ -74,17 +78,20 @@ export default function PairSuccessScreen() {
           lineHeight: 22,
           maxWidth: 280,
         }}>
-          {peerName
+          {verifiedComplete && peerName
             ? `Paired with ${peerName}. Notifications will start mirroring immediately.`
-            : 'Your phones are paired. Notifications will start mirroring immediately.'}
+            : verifiedComplete
+              ? 'Your phones are paired. Notifications will start mirroring immediately.'
+              : 'Waiting for the native pairing confirmation.'}
         </Text>
-      </View>
+      </ScrollView>
 
       <View style={{ padding: 20 }}>
         <TwButton
           variant="primary"
           size="lg"
           fullWidth
+          disabled={!verifiedComplete}
           onPress={() => router.replace('/home')}
         >
           Done

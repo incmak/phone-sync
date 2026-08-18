@@ -1,14 +1,12 @@
 import React, { useState } from 'react';
 import {
-  View, Text, TextInput, StyleSheet, ActivityIndicator,
+  View, Text, TextInput, ScrollView, StyleSheet, ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme, TwButton } from '../../components';
 import { OnboardingState } from '../../state/onboardingState';
 
-// Blank default so the user must enter their relay URL.
-// Production: 'wss://relay.twinotify.app/ws'. Local dev: 'ws://<LAN-IP>:8080/ws'.
 const DEFAULT_RELAY = '';
 const TIMEOUT_MS = 10_000;
 
@@ -28,9 +26,6 @@ export default function RelayScreen() {
     setErrorMsg('');
     setLatency(null);
 
-    // Derive the /health URL from the user-supplied relay URL.
-    // User enters ws://host:port/ws or wss://host:port/ws (the JWT-gated WebSocket).
-    // For a reachability test we use /health which is public (no auth).
     let healthUrl: string;
     try {
       const u = new URL(trimmed);
@@ -65,6 +60,7 @@ export default function RelayScreen() {
   }
 
   async function handleContinue() {
+    await OnboardingState.setPairingMode('relay');
     await OnboardingState.setRelayUrl(url.trim());
     router.push('/onboarding/perms');
   }
@@ -76,7 +72,7 @@ export default function RelayScreen() {
       edges={['top', 'bottom']}
       style={[styles.safe, { backgroundColor: theme.bg }]}
     >
-      <View style={styles.container}>
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
           <Text
             style={[
@@ -108,6 +104,7 @@ export default function RelayScreen() {
             RELAY URL
           </Text>
           <TextInput
+            accessibilityLabel="Relay URL"
             style={[
               styles.input,
               {
@@ -181,19 +178,19 @@ export default function RelayScreen() {
             Continue
           </TwButton>
         </View>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { flex: 1, paddingHorizontal: 24, paddingTop: 20, paddingBottom: 8 },
+  container: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 20, paddingBottom: 8 },
   header: { marginBottom: 32 },
   subtitle: { marginTop: 10 },
   inputSection: { marginBottom: 16 },
   label: { marginBottom: 6, letterSpacing: 0.5 },
-  input: { borderWidth: 1, paddingHorizontal: 14, paddingVertical: 12 },
+  input: { minHeight: 48, borderWidth: 1, paddingHorizontal: 14, paddingVertical: 12 },
   feedbackOk: { marginTop: 8, fontSize: 13 },
   feedbackErr: { marginTop: 8, fontSize: 13 },
   testRow: { marginBottom: 24 },

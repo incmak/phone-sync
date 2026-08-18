@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
+import { View, Text, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import Svg, { Rect, Circle, Path, Line } from 'react-native-svg';
+import Svg, { Rect, Circle, Path } from 'react-native-svg';
 import { useTheme, TwButton } from '../../components';
 import { OnboardingState, Role } from '../../state/onboardingState';
 
@@ -58,6 +58,9 @@ function RoleCard({
   return (
     <Pressable
       onPress={onPress}
+      accessibilityRole="radio"
+      accessibilityState={{ checked: selected }}
+      accessibilityLabel={`${title}. ${description}`}
       style={[
         cardStyles.card,
         {
@@ -68,7 +71,7 @@ function RoleCard({
         },
       ]}
     >
-      <View style={[cardStyles.iconWrap, { backgroundColor: selected ? `${accent}22` : border + '40' }]}>
+      <View style={cardStyles.iconWrap}>
         {icon}
       </View>
       <View style={cardStyles.text}>
@@ -92,7 +95,7 @@ function RoleCard({
 
 const cardStyles = StyleSheet.create({
   card: { flexDirection: 'row', alignItems: 'center', padding: 16, gap: 14 },
-  iconWrap: { width: 52, height: 52, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  iconWrap: { width: 40, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
   text: { flex: 1 },
   check: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
 });
@@ -104,14 +107,14 @@ export default function RoleScreen() {
   async function handleContinue() {
     if (!role) return;
     await OnboardingState.setRole(role);
-    router.push('/onboarding/relay');
+    router.push('/onboarding/connect');
   }
 
   const cardProps = {
     border: theme.border,
     fill: theme.fill,
     ink: theme.ink,
-    ink3: theme.ink3,
+    ink3: theme.ink2,
     accent: theme.accent,
     uiSemi: theme.fonts.uiSemi,
     ui: theme.fonts.ui,
@@ -123,7 +126,7 @@ export default function RoleScreen() {
       edges={['top', 'bottom']}
       style={[styles.safe, { backgroundColor: theme.bg }]}
     >
-      <View style={styles.container}>
+      <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.header}>
           <Text style={[theme.type.display, { color: theme.ink, fontFamily: theme.fonts.uiBold }]}>
             Which device{'\n'}is this?
@@ -163,14 +166,14 @@ export default function RoleScreen() {
             Continue
           </TwButton>
         </View>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { flex: 1, paddingHorizontal: 24, paddingTop: 20, paddingBottom: 8 },
+  container: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 20, paddingBottom: 8 },
   header: { marginBottom: 32 },
   subtitle: { marginTop: 10 },
   cards: { gap: 12, flex: 1 },

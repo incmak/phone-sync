@@ -14,8 +14,6 @@ import { useTheme, TwCard, TwFingerprint, TwButton, TwSpinner } from '../../comp
 import TwinotifyCoreModule, { PairStatus } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../../state/onboardingState';
 
-// ── component ─────────────────────────────────────────────────────────────────
-
 export default function PairDetailScreen() {
   const theme = useTheme();
 
@@ -34,9 +32,7 @@ export default function PairDetailScreen() {
               ps.peerSignPubkey,
             );
             setFingerprint(fp);
-          } catch {
-            // fingerprint unavailable — show blank grid
-          }
+          } catch {}
         }
       })
       .catch(() => {});
@@ -68,14 +64,24 @@ export default function PairDetailScreen() {
     );
   }, []);
 
+  const handleEnableNearby = useCallback(() => {
+    void OnboardingState.setPairingMode('nearby');
+    router.push('/pair/nearby');
+  }, []);
+
   const peerIdFull = pairStatus?.peerDeviceId ?? '';
   const peerDisplayName = pairStatus?.peerDisplayName?.trim() || '';
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>
-      {/* Header */}
       <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <Pressable onPress={() => router.back()} hitSlop={12} style={styles.backBtn}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Back to settings"
+          onPress={() => router.back()}
+          hitSlop={8}
+          style={styles.backBtn}
+        >
           <Text style={[styles.backLabel, { color: theme.accent, fontFamily: theme.fonts.ui }]}>‹ Settings</Text>
         </Pressable>
         <Text style={[styles.headerTitle, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
@@ -86,21 +92,15 @@ export default function PairDetailScreen() {
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
-        {/* Device hero */}
         <View style={styles.hero}>
-          <View style={[styles.deviceIcon, { backgroundColor: theme.accentLo }]}>
-            {/* Phone silhouette */}
-            <Text style={[styles.phoneMoji, { color: theme.accent }]}>📱</Text>
-          </View>
           <Text style={[styles.peerId, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
             {pairStatus === null ? '…' : (peerDisplayName || 'Paired device')}
           </Text>
           <Text style={[styles.peerFull, { color: theme.ink3, fontFamily: theme.fonts.mono }]}>
-            {peerIdFull || '—'}
+            {peerIdFull || 'Unavailable'}
           </Text>
         </View>
 
-        {/* Fingerprint section */}
         <Text style={[styles.sectionHeader, { color: theme.ink4, fontFamily: theme.fonts.uiSemi }]}>
           PEER FINGERPRINT
         </Text>
@@ -125,10 +125,27 @@ export default function PairDetailScreen() {
           If you ever reinstall, check that these 64 characters are unchanged.
         </Text>
 
-        {/* Spacer */}
+        {pairStatus?.paired && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Enable nearby sync"
+            onPress={handleEnableNearby}
+            style={({ pressed }) => [
+              styles.nearbyAction,
+              { backgroundColor: pressed ? theme.hover : theme.fill },
+            ]}
+          >
+            <Text style={[styles.nearbyTitle, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
+              Enable nearby sync
+            </Text>
+            <Text style={[styles.nearbyBody, { color: theme.ink2, fontFamily: theme.fonts.ui }]}>
+              Add a direct Wi-Fi path without replacing this relay pair.
+            </Text>
+          </Pressable>
+        )}
+
         <View style={styles.spacer} />
 
-        {/* Unpair button */}
         <TwButton
           variant="destructive"
           size="md"
@@ -154,7 +171,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  backBtn: { minWidth: 80 },
+  backBtn: { minWidth: 80, minHeight: 48, justifyContent: 'center' },
   backLabel: { fontSize: 16 },
   headerTitle: { fontSize: 17 },
   scroll: {
@@ -163,21 +180,10 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
     flexGrow: 1,
   },
-  // Hero
   hero: { alignItems: 'center', paddingBottom: 32 },
-  deviceIcon: {
-    width: 88,
-    height: 88,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 16,
-  },
-  phoneMoji: { fontSize: 40 },
   peerId: { fontSize: 22, fontWeight: '600', letterSpacing: -0.2, marginBottom: 6 },
   peerFull: { fontSize: 11, letterSpacing: 0.5, marginBottom: 4 },
   peerMeta: { fontSize: 13 },
-  // Section
   sectionHeader: {
     fontSize: 11,
     letterSpacing: 0.6,
@@ -187,5 +193,8 @@ const styles = StyleSheet.create({
   fpPlaceholder: { alignItems: 'center', justifyContent: 'center', minHeight: 100 },
   fpEmpty: { fontSize: 14 },
   fpHint: { fontSize: 12, marginTop: 10, paddingHorizontal: 4, lineHeight: 18 },
+  nearbyAction: { minHeight: 72, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14, marginTop: 24, justifyContent: 'center' },
+  nearbyTitle: { fontSize: 15, lineHeight: 21 },
+  nearbyBody: { fontSize: 13, lineHeight: 19, marginTop: 3 },
   spacer: { flex: 1, minHeight: 32 },
 });

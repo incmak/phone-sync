@@ -12,6 +12,7 @@ import {
 import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import type { PeerHelloPayload } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../../state/onboardingState';
+import type { PairingMode } from '../../state/onboardingState';
 
 type ScreenStatus = 'starting' | 'waiting' | 'connected' | 'error';
 
@@ -21,8 +22,18 @@ export default function PairQRScreen() {
   const [status, setStatus] = useState<ScreenStatus>('starting');
   const [seconds, setSeconds] = useState(300);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pairingMode, setPairingMode] = useState<PairingMode | null>(null);
 
   useEffect(() => {
+    void OnboardingState.getPairingMode().then((mode) => {
+      const resolved = mode ?? 'relay';
+      setPairingMode(resolved);
+      if (resolved === 'nearby') router.replace('/pair/nearby');
+    });
+  }, []);
+
+  useEffect(() => {
+    if (pairingMode !== 'relay') return;
     let cancelled = false;
 
     (async () => {
@@ -34,14 +45,12 @@ export default function PairQRScreen() {
           return;
         }
 
-        // Get device display name then register with relay
         const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
         const payloadStr = await TwinotifyCoreModule.startPairInitiator(relayUrl, displayName);
         if (cancelled) return;
         setPayload(payloadStr);
         setStatus('waiting');
 
-        // Native payload uses snake_case keys (see PairPayload.toJson).
         let parsed: { pair_token: string };
         try {
           parsed = JSON.parse(payloadStr) as { pair_token: string };
@@ -53,7 +62,6 @@ export default function PairQRScreen() {
         }
         const pairToken = parsed.pair_token;
 
-        // Wait for B's peer.hello frame — relay pushes it once B scans and calls /pair/hello
         let helloFrame: PeerHelloPayload;
         try {
           const rawFrame = await TwinotifyCoreModule.awaitPeerHello(relayUrl, pairToken);
@@ -88,9 +96,8 @@ export default function PairQRScreen() {
     })();
 
     return () => { cancelled = true; };
-  }, []);
+  }, [pairingMode]);
 
-  // Countdown timer — only ticks while waiting
   useEffect(() => {
     if (status !== 'waiting' || seconds <= 0) return;
     const id = setTimeout(() => setSeconds((s) => s - 1), 1000);
@@ -106,7 +113,6 @@ export default function PairQRScreen() {
       style={{ flex: 1, backgroundColor: theme.bg }}
     >
       <View style={{ flex: 1, padding: 20 }}>
-        {/* Header row */}
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
           <TwWordmark size={16} />
           <View style={{
@@ -120,7 +126,6 @@ export default function PairQRScreen() {
           </View>
         </View>
 
-        {/* Title */}
         <Text style={{
           fontSize: 20,
           fontFamily: theme.fonts.uiSemi,
@@ -131,7 +136,6 @@ export default function PairQRScreen() {
           Scan this from your other phone
         </Text>
 
-        {/* QR code */}
         <View style={{ alignItems: 'center', marginBottom: 28 }}>
           {payload ? (
             <TwQR size={240} value={payload} />
@@ -150,13 +154,12 @@ export default function PairQRScreen() {
           )}
         </View>
 
-        {/* Status row */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
           {status === 'waiting' && <TwStatusDot state="pairing" size={8} />}
           <Text style={{ fontSize: 14, color: theme.ink3, fontFamily: theme.fonts.ui }}>
             {status === 'starting' && 'Starting pairing…'}
             {status === 'waiting' && 'Waiting for Phone B…'}
-            {status === 'connected' && 'Connected — navigating…'}
+            {status === 'connected' && 'Connected, opening verification…'}
             {status === 'error' && (errorMsg ?? 'Pairing failed.')}
           </Text>
         </View>

@@ -1,12 +1,14 @@
-import React, { useRef, useState } from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { router } from 'expo-router';
-import { useTheme, TwButton } from '../../components';
-import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
+import { router, useLocalSearchParams } from 'expo-router';
 
-interface QRPayload {
+import { TwButton, useTheme } from '../../components';
+import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
+import { OnboardingState, type PairingMode } from '../../state/onboardingState';
+
+interface RelayQRPayload {
   relayUrl: string;
   deviceId: string;
   encPubkey: string;
@@ -15,8 +17,7 @@ interface QRPayload {
   displayName?: string;
 }
 
-// Wire format (from PairPayload.toJson on the Kotlin side) uses snake_case keys.
-interface RawQR {
+interface RawRelayQR {
   relay_url?: string;
   device_id?: string;
   enc_pubkey?: string;
@@ -25,13 +26,11 @@ interface RawQR {
   display_name?: string;
 }
 
-function parsePayload(data: string): QRPayload | null {
+function parseRelayPayload(data: string): RelayQRPayload | null {
   try {
-    const raw = JSON.parse(data) as RawQR;
+    const raw = JSON.parse(data) as RawRelayQR;
     if (!raw || typeof raw !== 'object') return null;
-    if (!raw.pair_token || !raw.enc_pubkey || !raw.sign_pubkey || !raw.relay_url || !raw.device_id) {
-      return null;
-    }
+    if (!raw.pair_token || !raw.enc_pubkey || !raw.sign_pubkey || !raw.relay_url || !raw.device_id) return null;
     return {
       relayUrl: raw.relay_url,
       deviceId: raw.device_id,
@@ -47,23 +46,46 @@ function parsePayload(data: string): QRPayload | null {
 
 export default function PairScanScreen() {
   const theme = useTheme();
+  const params = useLocalSearchParams<{ mode?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
+  const [mode, setMode] = useState<PairingMode | null>(
+    params.mode === 'nearby' || params.mode === 'relay' ? params.mode : null,
+  );
   const [scanned, setScanned] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const scannedRef = useRef(false);
 
+  useEffect(() => {
+    if (mode) return;
+    void OnboardingState.getPairingMode().then((stored) => setMode(stored ?? 'relay'));
+  }, [mode]);
+
   async function onBarcode({ data }: { data: string }) {
-    if (scannedRef.current) return;
-    const payload = parsePayload(data);
-    if (!payload) return; // not our QR — keep scanning
+    if (scannedRef.current || !mode) return;
+
+    if (mode === 'nearby') {
+      scannedRef.current = true;
+      setScanned(true);
+      setErrorMsg(null);
+      try {
+        const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
+        await TwinotifyCoreModule.joinOfflinePairing(data, displayName);
+        router.replace('/pair/nearby');
+      } catch {
+        scannedRef.current = false;
+        setScanned(false);
+        setErrorMsg('This is not a valid nearby pairing code. Create a new code on the other phone and scan again.');
+      }
+      return;
+    }
+
+    const payload = parseRelayPayload(data);
+    if (!payload) return;
     scannedRef.current = true;
     setScanned(true);
-
     try {
-      // Get B's display name and announce B's pubkeys to the relay
       const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
       await TwinotifyCoreModule.sendPeerHello(payload.relayUrl, payload.pairToken, displayName);
-
       router.push({
         pathname: '/pair/fingerprint',
         params: {
@@ -76,103 +98,67 @@ export default function PairScanScreen() {
           peerDisplayName: payload.displayName ?? '',
         },
       });
-    } catch (err: unknown) {
-      // Allow retry on error
+    } catch (error: unknown) {
       scannedRef.current = false;
       setScanned(false);
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to announce to relay.');
+      setErrorMsg(error instanceof Error ? error.message : 'Could not contact the relay.');
     }
   }
 
-  if (!permission) return null;
+  if (!mode || !permission) {
+    return (
+      <SafeAreaView edges={['top', 'bottom']} style={[styles.preparing, { backgroundColor: theme.bg }]}>
+        <Text accessibilityLiveRegion="polite" style={[styles.body, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
+          Preparing the scanner…
+        </Text>
+      </SafeAreaView>
+    );
+  }
 
   if (!permission.granted) {
     return (
-      <SafeAreaView
-        edges={['top', 'bottom']}
-        style={{ flex: 1, backgroundColor: theme.bg, padding: 20 }}
-      >
-        <Text style={{
-          fontSize: 20,
-          fontFamily: theme.fonts.uiSemi,
-          color: theme.ink,
-          marginBottom: 12,
-        }}>
-          Camera access needed
+      <SafeAreaView edges={['top', 'bottom']} style={[styles.permission, { backgroundColor: theme.bg }]}>
+        <Text style={[styles.title, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>Camera permission is off</Text>
+        <Text style={[styles.body, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
+          Allow camera access so Twinotify can scan the pairing code. The image is not saved.
         </Text>
-        <Text style={{
-          fontSize: 15,
-          color: theme.ink3,
-          fontFamily: theme.fonts.ui,
-          lineHeight: 22,
-          marginBottom: 28,
-        }}>
-          We need camera access to scan the QR code from your other phone.
-        </Text>
-        <TwButton variant="primary" fullWidth onPress={() => { void requestPermission(); }}>
-          Grant access
-        </TwButton>
-        <View style={{ marginTop: 12 }}>
-          <TwButton variant="secondary" fullWidth onPress={() => router.back()}>
-            Go back
-          </TwButton>
+        <View style={styles.permissionActions}>
+          <TwButton variant="primary" fullWidth onPress={() => { void requestPermission(); }}>Allow camera</TwButton>
+          <TwButton variant="ghost" fullWidth onPress={() => router.back()}>Go back</TwButton>
         </View>
       </SafeAreaView>
     );
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#000' }}>
+    <View style={styles.cameraPage}>
       <CameraView
         style={StyleSheet.absoluteFill}
         facing="back"
         barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
         onBarcodeScanned={scanned ? undefined : onBarcode}
       />
-      <SafeAreaView style={{ flex: 1 }} edges={['top', 'bottom']}>
-        {/* Back button */}
-        <View style={{ padding: 16 }}>
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.backRow}>
           <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
             onPress={() => router.back()}
-            style={{
-              width: 40, height: 40,
-              borderRadius: 20,
-              backgroundColor: 'rgba(255,255,255,0.18)',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
+            style={({ pressed }) => [styles.backButton, { opacity: pressed ? 0.72 : 1 }]}
           >
-            <Text style={{ color: '#fff', fontSize: 20, lineHeight: 24 }}>‹</Text>
+            <Text style={styles.backGlyph}>‹</Text>
           </Pressable>
         </View>
 
-        {/* Viewfinder */}
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-          <View style={{
-            width: 240, height: 240,
-            borderRadius: 14,
-            borderWidth: 2.5,
-            borderColor: theme.accent,
-          }} />
-          <Text style={{
-            color: '#fff',
-            marginTop: 28,
-            fontSize: 15,
-            fontFamily: theme.fonts.ui,
-            textAlign: 'center',
-            paddingHorizontal: 32,
-          }}>
-            Point at the QR code shown on your other phone
+        <View style={styles.viewfinderArea}>
+          <View style={[styles.viewfinder, { borderColor: theme.accent }]} accessible={false} />
+          <Text style={[styles.cameraCopy, { fontFamily: theme.fonts.ui }]}>
+            {mode === 'nearby'
+              ? 'Scan the nearby pairing code on your other phone'
+              : 'Scan the relay pairing code on your other phone'}
           </Text>
           {errorMsg !== null && (
-            <Text style={{
-              color: '#ff6b6b',
-              marginTop: 12,
-              fontSize: 13,
-              fontFamily: theme.fonts.ui,
-              textAlign: 'center',
-              paddingHorizontal: 32,
-            }}>
+            <Text accessibilityRole="alert" style={[styles.error, { fontFamily: theme.fonts.ui }]}>
               {errorMsg}
             </Text>
           )}
@@ -181,3 +167,20 @@ export default function PairScanScreen() {
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  safe: { flex: 1 },
+  preparing: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  permission: { flex: 1, paddingHorizontal: 24, paddingTop: 20, paddingBottom: 24 },
+  title: { fontSize: 22, lineHeight: 28, marginBottom: 10 },
+  body: { fontSize: 15, lineHeight: 22 },
+  permissionActions: { gap: 8, marginTop: 28 },
+  cameraPage: { flex: 1, backgroundColor: '#000000' },
+  backRow: { padding: 16 },
+  backButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: 'rgba(0,0,0,0.58)', alignItems: 'center', justifyContent: 'center' },
+  backGlyph: { color: '#ffffff', fontSize: 28, lineHeight: 32 },
+  viewfinderArea: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, paddingBottom: 48 },
+  viewfinder: { width: 232, height: 232, borderRadius: 14, borderWidth: 3 },
+  cameraCopy: { color: '#ffffff', marginTop: 24, fontSize: 15, lineHeight: 22, textAlign: 'center', maxWidth: 320 },
+  error: { color: '#ffffff', backgroundColor: 'rgba(94, 16, 16, 0.92)', marginTop: 14, padding: 12, borderRadius: 10, fontSize: 13, lineHeight: 19, textAlign: 'center', maxWidth: 340 },
+});

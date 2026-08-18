@@ -52,7 +52,6 @@ export default function FingerprintScreen() {
     })();
   }, [peerEncB64, peerSignB64]);
 
-  // ---- Role A: sign + push sig via relay, then store and finish ----
   async function handleAConfirmMatch() {
     try {
       setWorking(true);
@@ -69,7 +68,6 @@ export default function FingerprintScreen() {
     }
   }
 
-  // ---- Role B: wait for relay-pushed sig, complete pair, store, finish ----
   async function handleBConfirmMatch() {
     try {
       setWorking(true);
@@ -109,7 +107,6 @@ export default function FingerprintScreen() {
           <View style={{ marginBottom: 20 }} />
         )}
 
-        {/* Peer fingerprint */}
         <Text style={{
           fontSize: 11, fontFamily: theme.fonts.uiSemi, color: theme.ink3,
           marginBottom: 6, letterSpacing: 0.4, textTransform: 'uppercase',
@@ -120,7 +117,6 @@ export default function FingerprintScreen() {
           ? <TwFingerprint hex={peerFp} columns={4} />
           : <Text style={{ color: theme.ink4, fontFamily: theme.fonts.ui }}>Loading…</Text>}
 
-        {/* Own fingerprint */}
         <Text style={{
           fontSize: 11, fontFamily: theme.fonts.uiSemi, color: theme.ink3,
           marginTop: 16, marginBottom: 6, letterSpacing: 0.4, textTransform: 'uppercase',
@@ -140,7 +136,6 @@ export default function FingerprintScreen() {
           </Text>
         )}
 
-        {/* Error message */}
         {errorMsg !== null && (
           <Text style={{
             color: theme.sem.danger,
@@ -155,7 +150,6 @@ export default function FingerprintScreen() {
 
         <View style={{ flex: 1, minHeight: 24 }} />
 
-        {/* Action buttons */}
         {working ? (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12 }}>
             <TwSpinner size={16} />
@@ -168,7 +162,7 @@ export default function FingerprintScreen() {
               style={{ flex: 1 }}
               onPress={() => router.replace('/pair/fail')}
             >
-              Don't match
+              {"Don't match"}
             </TwButton>
 
             {role === 'A' && (
