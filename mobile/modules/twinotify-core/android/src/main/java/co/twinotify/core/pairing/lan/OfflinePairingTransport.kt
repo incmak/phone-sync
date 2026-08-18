@@ -15,8 +15,11 @@ import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -30,6 +33,7 @@ enum class PairingTransportFailure(val code: String) {
     NSD_FAILED("nsd_failed"),
     CONNECT_TIMEOUT("connect_timeout"),
     ACCEPT_TIMEOUT("accept_timeout"),
+    READ_TIMEOUT("read_timeout"),
     TLS_PIN_MISMATCH("tls_pin_mismatch"),
     TLS_FAILED("tls_failed"),
 }
@@ -172,6 +176,7 @@ class PairingConnection internal constructor(
     peerSpkiSha256: ByteArray?,
     inboundBudget: FrameBudget = FrameBudget(DEFAULT_MAX_FRAMES, DEFAULT_MAX_BYTES),
     outboundBudget: FrameBudget = FrameBudget(DEFAULT_MAX_FRAMES, DEFAULT_MAX_BYTES),
+    private val readTimeoutMillis: Long = DEFAULT_READ_TIMEOUT_MILLIS,
 ) : Closeable {
     private val peerPin = peerSpkiSha256?.copyOf()
     private val inbound = inboundBudget
@@ -179,7 +184,29 @@ class PairingConnection internal constructor(
 
     val peerSpkiSha256: ByteArray? get() = peerPin?.copyOf()
 
-    fun read(): OfflinePairingFrame = OfflinePairingFrameCodec.read(socket.getInputStream(), inbound)
+    suspend fun read(): OfflinePairingFrame {
+        val cancellationCloser = currentCoroutineContext().closeOnCancellation(::close)
+        try {
+            socket.soTimeout = readTimeoutMillis.toSocketTimeout()
+            return runInterruptible(Dispatchers.IO) {
+                OfflinePairingFrameCodec.read(socket.getInputStream(), inbound)
+            }
+        } catch (_: SocketTimeoutException) {
+            close()
+            throw PairingTransportException(PairingTransportFailure.READ_TIMEOUT)
+        } catch (error: PairingTransportException) {
+            throw error
+        } catch (error: CancellationException) {
+            close()
+            throw error
+        } catch (_: Throwable) {
+            close()
+            currentCoroutineContext().ensureActive()
+            throw PairingTransportException(PairingTransportFailure.INVALID_FRAME)
+        } finally {
+            cancellationCloser.dispose()
+        }
+    }
 
     fun write(frame: OfflinePairingFrame) = OfflinePairingFrameCodec.write(socket.getOutputStream(), frame, outbound)
 
@@ -188,8 +215,11 @@ class PairingConnection internal constructor(
     private companion object {
         const val DEFAULT_MAX_FRAMES = 16
         const val DEFAULT_MAX_BYTES = 256 * 1024
+        const val DEFAULT_READ_TIMEOUT_MILLIS = 30_000L
     }
 }
+
+private fun Long.toSocketTimeout(): Int = coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
 
 internal fun interface PairingTlsClient {
     suspend fun handshake(rawSocket: Socket, host: String, port: Int, expectedPin: ByteArray): PairingConnection
@@ -201,6 +231,7 @@ internal interface PairingTlsServer : Closeable {
 }
 
 internal class JssePairingTlsClient(
+    private val operationTimeoutMillis: Long = DEFAULT_TLS_TIMEOUT_MILLIS,
     private val contextFactory: (ByteArray) -> SSLContext = LanTlsContextFactory::clientContext,
 ) : PairingTlsClient {
     override suspend fun handshake(rawSocket: Socket, host: String, port: Int, expectedPin: ByteArray): PairingConnection {
@@ -213,6 +244,7 @@ internal class JssePairingTlsClient(
         }
         try {
             sslSocket.useClientMode = true
+            sslSocket.soTimeout = operationTimeoutMillis.toSocketTimeout()
             runInterruptible(Dispatchers.IO) { sslSocket.startHandshake() }
             val certificate = sslSocket.session.peerCertificates.firstOrNull() as? X509Certificate
                 ?: throw PairingTransportException(PairingTransportFailure.TLS_FAILED)
@@ -227,29 +259,52 @@ internal class JssePairingTlsClient(
         } catch (error: CancellationException) {
             sslSocket.close()
             throw error
+        } catch (_: SocketTimeoutException) {
+            sslSocket.close()
+            throw PairingTransportException(PairingTransportFailure.CONNECT_TIMEOUT)
         } catch (_: Throwable) {
             sslSocket.close()
+            currentCoroutineContext().ensureActive()
             throw PairingTransportException(PairingTransportFailure.TLS_PIN_MISMATCH)
         }
+    }
+
+    private companion object {
+        const val DEFAULT_TLS_TIMEOUT_MILLIS = 30_000L
     }
 }
 
 internal class JssePairingTlsServer private constructor(
     private val socket: SSLServerSocket,
+    private val operationTimeoutMillis: Long,
 ) : PairingTlsServer {
     override val localPort: Int get() = socket.localPort
 
     override suspend fun accept(): PairingConnection {
-        val accepted = runInterruptible(Dispatchers.IO) { socket.accept() as SSLSocket }
+        val accepted = try {
+            runInterruptible(Dispatchers.IO) { socket.accept() as SSLSocket }
+        } catch (_: SocketTimeoutException) {
+            throw PairingTransportException(PairingTransportFailure.ACCEPT_TIMEOUT)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            currentCoroutineContext().ensureActive()
+            throw PairingTransportException(PairingTransportFailure.TLS_FAILED)
+        }
         try {
             accepted.useClientMode = false
+            accepted.soTimeout = operationTimeoutMillis.toSocketTimeout()
             runInterruptible(Dispatchers.IO) { accepted.startHandshake() }
             return PairingConnection(accepted, null)
         } catch (error: CancellationException) {
             accepted.close()
             throw error
+        } catch (_: SocketTimeoutException) {
+            accepted.close()
+            throw PairingTransportException(PairingTransportFailure.ACCEPT_TIMEOUT)
         } catch (_: Throwable) {
             accepted.close()
+            currentCoroutineContext().ensureActive()
             throw PairingTransportException(PairingTransportFailure.TLS_FAILED)
         }
     }
@@ -257,18 +312,24 @@ internal class JssePairingTlsServer private constructor(
     override fun close() = socket.close()
 
     companion object {
-        fun open(context: SSLContext = LanTlsContextFactory.serverContext()): JssePairingTlsServer {
+        fun open(
+            context: SSLContext = LanTlsContextFactory.serverContext(),
+            operationTimeoutMillis: Long = DEFAULT_TLS_TIMEOUT_MILLIS,
+        ): JssePairingTlsServer {
             val socket = context.serverSocketFactory.createServerSocket(0) as SSLServerSocket
             socket.useClientMode = false
             socket.needClientAuth = false
-            return JssePairingTlsServer(socket)
+            socket.soTimeout = operationTimeoutMillis.toSocketTimeout()
+            return JssePairingTlsServer(socket, operationTimeoutMillis)
         }
+
+        private const val DEFAULT_TLS_TIMEOUT_MILLIS = 30_000L
     }
 }
 
 class OfflinePairingTransport internal constructor(
     private val nsd: PairingNsdAdapter,
-    private val tlsClient: PairingTlsClient = JssePairingTlsClient(),
+    private val tlsClient: PairingTlsClient? = null,
     private val tlsServer: PairingTlsServer? = null,
     private val acceptTimeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
     private val connectTimeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
@@ -289,12 +350,19 @@ class OfflinePairingTransport internal constructor(
                         connectTimeoutMillis.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
                     )
                 }
-                tlsClient.handshake(
+                val cancellationCloser = currentCoroutineContext().closeOnCancellation {
+                    rawSocket?.close()
+                }
+                try {
+                    (tlsClient ?: JssePairingTlsClient(connectTimeoutMillis)).handshake(
                     rawSocket = rawSocket ?: throw PairingTransportException(PairingTransportFailure.TLS_FAILED),
                     host = endpoint.address.hostAddress ?: throw PairingTransportException(PairingTransportFailure.NSD_FAILED),
                     port = endpoint.port,
                     expectedPin = expectedPin.copyOf(),
-                )
+                    )
+                } finally {
+                    cancellationCloser.dispose()
+                }
             }
         } catch (_: TimeoutCancellationException) {
             rawSocket?.close()
@@ -318,11 +386,18 @@ class OfflinePairingTransport internal constructor(
 
     suspend fun accept(sessionId: String): PairingConnection {
         validateSessionId(sessionId)
-        val server = tlsServer ?: JssePairingTlsServer.open()
+        val server = tlsServer ?: JssePairingTlsServer.open(operationTimeoutMillis = acceptTimeoutMillis)
         var advertisement: PairingAdvertisement? = null
         try {
             advertisement = nsd.register(sessionId, server.localPort)
-            return withTimeout(acceptTimeoutMillis) { server.accept() }
+            return withTimeout(acceptTimeoutMillis) {
+                val cancellationCloser = currentCoroutineContext().closeOnCancellation(server::close)
+                try {
+                    server.accept()
+                } finally {
+                    cancellationCloser.dispose()
+                }
+            }
         } catch (_: TimeoutCancellationException) {
             throw PairingTransportException(PairingTransportFailure.ACCEPT_TIMEOUT)
         } catch (error: PairingTransportException) {
@@ -348,3 +423,14 @@ class OfflinePairingTransport internal constructor(
         const val DEFAULT_CLEANUP_TIMEOUT_MILLIS = 1_000L
     }
 }
+
+@OptIn(InternalCoroutinesApi::class)
+private fun kotlin.coroutines.CoroutineContext.closeOnCancellation(
+    close: () -> Unit,
+): kotlinx.coroutines.DisposableHandle =
+    requireNotNull(this[kotlinx.coroutines.Job]) { "missing_job" }.invokeOnCompletion(
+        onCancelling = true,
+        invokeImmediately = true,
+    ) { cause ->
+        if (cause is CancellationException) runCatching(close)
+    }

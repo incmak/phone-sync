@@ -39,6 +39,7 @@ class AndroidPairingNsdAdapter(
             serviceName = "twinotify-pair-${UUID.randomUUID()}"
             serviceType = PairingNsdContract.SERVICE_TYPE
             this.port = port
+            this.network = this@AndroidPairingNsdAdapter.network
             PairingNsdContract.txt(sessionId).forEach { (key, value) ->
                 setAttribute(key, value.decodeToString())
             }
@@ -83,13 +84,12 @@ class AndroidPairingNsdAdapter(
                     override fun onDiscoveryStarted(serviceType: String) = Unit
 
                     override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                        if (finished.get() || serviceInfo.serviceType != PairingNsdContract.SERVICE_TYPE ||
-                            !PairingNsdContract.matchesSession(serviceInfo.attributes, sessionId)
-                        ) return
-                        val resolver = object : NsdManager.ResolveListener {
+                        if (finished.get() || serviceInfo.serviceType != PairingNsdContract.SERVICE_TYPE) return
+                        lateinit var resolver: NsdManager.ResolveListener
+                        resolver = object : NsdManager.ResolveListener {
                             override fun onServiceResolved(resolved: NsdServiceInfo) {
+                                activeResolution.compareAndSet(resolver, null)
                                 if (!PairingNsdContract.matchesSession(resolved.attributes, sessionId)) {
-                                    fail()
                                     return
                                 }
                                 val address = resolved.hostAddresses.firstOrNull() ?: resolved.host
@@ -108,7 +108,9 @@ class AndroidPairingNsdAdapter(
                                 stopListeners()
                             }
 
-                            override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = fail()
+                            override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                                activeResolution.compareAndSet(resolver, null)
+                            }
                         }
                         if (!activeResolution.compareAndSet(null, resolver)) return
                         try {

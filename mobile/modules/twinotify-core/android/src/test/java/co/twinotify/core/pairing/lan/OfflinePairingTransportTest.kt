@@ -4,11 +4,16 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketAddress
 import java.nio.ByteBuffer
 import java.util.UUID
+import javax.net.ssl.SSLContext
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -215,6 +220,150 @@ class OfflinePairingTransportTest {
         assertTrue(adapter.registeredHandle === adapter.unregisteredHandle)
     }
 
+    @Test
+    fun realSslServerAcceptTimeoutClosesListenerWithinTerminalBound() = runBlocking {
+        val adapter = FakeNsdAdapter(null)
+        val context = SSLContext.getInstance("TLS").apply { init(null, null, null) }
+        val server = JssePairingTlsServer.open(context)
+        val safetyRelease = Thread {
+            Thread.sleep(1_000)
+            server.close()
+        }.apply { start() }
+        val transport = OfflinePairingTransport(
+            adapter,
+            tlsServer = server,
+            acceptTimeoutMillis = 50,
+            cleanupTimeoutMillis = 50,
+        )
+
+        val startedAt = System.nanoTime()
+        assertFailsWith<PairingTransportException> { transport.accept(sessionId) }
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+
+        safetyRelease.join()
+        assertTrue("elapsed=${elapsedMillis}ms", elapsedMillis < 500)
+        assertEquals(1, adapter.unregisterCalls)
+        assertTrue(adapter.registeredHandle === adapter.unregisteredHandle)
+    }
+
+    @Test
+    fun cancellingRealSslServerAcceptClosesListenerAndUnregistersWithinTerminalBound() = runBlocking {
+        val adapter = FakeNsdAdapter(null)
+        val context = SSLContext.getInstance("TLS").apply { init(null, null, null) }
+        val server = JssePairingTlsServer.open(context, operationTimeoutMillis = 10_000)
+        val transport = OfflinePairingTransport(
+            adapter,
+            tlsServer = server,
+            acceptTimeoutMillis = 10_000,
+            cleanupTimeoutMillis = 50,
+        )
+        val accepting = async { transport.accept(sessionId) }
+        while (adapter.registeredHandle == null) delay(5)
+
+        val startedAt = System.nanoTime()
+        accepting.cancelAndJoin()
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+
+        assertTrue("elapsed=${elapsedMillis}ms", elapsedMillis < 500)
+        assertEquals(1, adapter.unregisterCalls)
+        assertTrue(adapter.registeredHandle === adapter.unregisteredHandle)
+    }
+
+    @Test
+    fun silentTlsPeerHandshakeTimeoutClosesSocketWithinTerminalBound() = runBlocking {
+        val listener = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
+        val accepted = CompletableDeferred<Socket>()
+        val peer = Thread {
+            val socket = listener.accept()
+            accepted.complete(socket)
+            Thread.sleep(1_000)
+            socket.close()
+        }.apply { start() }
+        val endpoint = PairingNsdEndpoint(
+            InetAddress.getLoopbackAddress(),
+            listener.localPort,
+            PairingNetwork { Socket() },
+        )
+        val adapter = FakeNsdAdapter(endpoint)
+        val trustContext = SSLContext.getInstance("TLS").apply { init(null, arrayOf(TrustAllManager), null) }
+        val transport = OfflinePairingTransport(
+            adapter,
+            tlsClient = JssePairingTlsClient { trustContext },
+            connectTimeoutMillis = 50,
+        )
+
+        val startedAt = System.nanoTime()
+        val failure = assertFailsWith<PairingTransportException> {
+            transport.connect(sessionId, ByteArray(32))
+        }
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+
+        accepted.await()
+        peer.join()
+        listener.close()
+        assertEquals(PairingTransportFailure.CONNECT_TIMEOUT, failure.failure)
+        assertTrue("elapsed=${elapsedMillis}ms", elapsedMillis < 500)
+        assertEquals(1, adapter.stopCalls)
+    }
+
+    @Test
+    fun partialHeaderAndBodyReadsTimeOutAndCloseRealSockets() = runBlocking {
+        listOf(
+            byteArrayOf(0, 0),
+            ByteBuffer.allocate(4).putInt(8).array() + byteArrayOf(1, 2),
+        ).forEach { partialFrame ->
+            val listener = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
+            val writer = Thread {
+                listener.accept().use { socket ->
+                    socket.getOutputStream().write(partialFrame)
+                    socket.getOutputStream().flush()
+                    Thread.sleep(1_000)
+                }
+            }.apply { start() }
+            val socket = Socket(InetAddress.getLoopbackAddress(), listener.localPort)
+            val connection = PairingConnection(
+                socket,
+                null,
+                readTimeoutMillis = 50,
+            )
+
+            val startedAt = System.nanoTime()
+            val failure = assertFailsWith<PairingTransportException> { connection.read() }
+            val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+
+            writer.join()
+            listener.close()
+            assertEquals(PairingTransportFailure.READ_TIMEOUT, failure.failure)
+            assertTrue("elapsed=${elapsedMillis}ms", elapsedMillis < 500)
+            assertTrue(socket.isClosed)
+        }
+    }
+
+    @Test
+    fun cancellingPartialFrameReadClosesRealSocketWithinTerminalBound() = runBlocking {
+        val listener = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
+        val writer = Thread {
+            listener.accept().use { socket ->
+                socket.getOutputStream().write(byteArrayOf(0, 0))
+                socket.getOutputStream().flush()
+                Thread.sleep(1_000)
+            }
+        }.apply { start() }
+        val socket = Socket(InetAddress.getLoopbackAddress(), listener.localPort)
+        val connection = PairingConnection(socket, null, readTimeoutMillis = 10_000)
+        val reading = async { connection.read() }
+        delay(25)
+
+        val startedAt = System.nanoTime()
+        reading.cancelAndJoin()
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+
+        writer.join()
+        listener.close()
+        assertTrue("elapsed=${elapsedMillis}ms", elapsedMillis < 500)
+        assertTrue(socket.isClosed)
+    }
+
     private fun prefixed(payload: ByteArray): ByteArray =
         ByteBuffer.allocate(4 + payload.size).putInt(payload.size).put(payload).array()
 
@@ -293,5 +442,11 @@ class OfflinePairingTransportTest {
         override val localPort: Int = 0
         override suspend fun accept(): PairingConnection = CompletableDeferred<PairingConnection>().await()
         override fun close() { closed = true }
+    }
+
+    private object TrustAllManager : javax.net.ssl.X509TrustManager {
+        override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) = Unit
+        override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) = Unit
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
     }
 }
