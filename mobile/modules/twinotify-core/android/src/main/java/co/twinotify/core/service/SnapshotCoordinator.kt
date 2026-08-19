@@ -12,6 +12,7 @@ import co.twinotify.core.storage.SnapshotBeginResult
 import co.twinotify.core.storage.SnapshotCommitResult
 import co.twinotify.core.storage.SnapshotStage
 import co.twinotify.core.storage.SnapshotStageResult
+import co.twinotify.core.storage.isNotificationSnapshotCanonical
 import java.security.MessageDigest
 import java.util.UUID
 import org.json.JSONObject
@@ -201,7 +202,9 @@ class SnapshotCoordinator(
 
     suspend fun localDigest(originDevice: String): StateDigest {
         require(originDevice.isNotEmpty()) { "snapshot origin must not be empty" }
-        val states = store.activeOriginStates(originDevice).filter { it.state == "ACTIVE" }
+        val states = store.activeOriginStates(originDevice).filter {
+            it.state == "ACTIVE" && isNotificationSnapshotCanonical(it.canonId)
+        }
         return StateDigest(
             originDevice = originDevice,
             count = states.size,
@@ -243,7 +246,9 @@ class SnapshotCoordinator(
             return SnapshotConvergence.Rejected("active notification count exceeds snapshot bound")
         }
         val snapshotId = UUID.randomUUID().toString()
-        val states = store.activeOriginStates(localOrigin).associateBy { it.canonId }
+        val states = store.activeOriginStates(localOrigin)
+            .filter { isNotificationSnapshotCanonical(it.canonId) }
+            .associateBy { it.canonId }
         val items = snapshots.mapNotNull { snapshot ->
             val canonId = CanonIdBuilder.build(localOrigin, snapshot.packageName, snapshot.id, snapshot.tag)
             val payload = snapshotSource.payloadJson(localOrigin, snapshot)
@@ -315,6 +320,7 @@ class SnapshotCoordinator(
             is SnapshotCommitResult.Committed -> SnapshotConvergence.Committed(result.upserted, result.cancelled)
             is SnapshotCommitResult.Incomplete -> SnapshotConvergence.Incomplete(result.expected, result.staged)
             is SnapshotCommitResult.DigestMismatch -> SnapshotConvergence.DigestMismatch(result.expected, result.actual)
+            is SnapshotCommitResult.InvalidItem -> SnapshotConvergence.Rejected("snapshot item is outside notification scope")
             is SnapshotCommitResult.Expired -> SnapshotConvergence.Rejected("snapshot expired before end (${result.snapshotAgeMs}ms)")
             SnapshotCommitResult.MissingBegin -> SnapshotConvergence.Rejected("snapshot end arrived before begin")
         }
@@ -391,6 +397,9 @@ class SnapshotCoordinator(
         require(item.snapshotId.isNotEmpty()) { "snapshot ID must not be empty" }
         require(item.originDevice.isNotEmpty()) { "snapshot origin must not be empty" }
         require(item.canonId.isNotEmpty()) { "snapshot canon ID must not be empty" }
+        require(isNotificationSnapshotCanonical(item.canonId)) {
+            "snapshot item canonical ID must be notification scoped"
+        }
         require(item.sequence > 0) { "snapshot sequence must be positive" }
         require(item.payloadJson.toByteArray(Charsets.UTF_8).size <= MAX_ITEM_PAYLOAD_BYTES) {
             "snapshot item exceeds bounded payload size"

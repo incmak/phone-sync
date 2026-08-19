@@ -55,6 +55,80 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun snapshotBeginBaselineExcludesActiveCallState() = runBlocking {
+        dao.putCanonical(canonical(sequence = 4, state = "ACTIVE", payload = "notification"))
+        dao.putCanonical(callCanonical(sequence = 9))
+
+        val begin = dao.beginSnapshot(
+            snapshotId = "mixed-baseline",
+            originDevice = ORIGIN,
+            expectedItemCount = 0,
+            receivedAt = 1_500,
+        )
+
+        assertEquals(SnapshotBeginResult.Started(baselineCount = 1), begin)
+    }
+
+    @Test
+    fun emptyNotificationSnapshotPreservesActiveCallState() = runBlocking {
+        val call = callCanonical(sequence = 9)
+        dao.putCanonical(call)
+        dao.beginSnapshot("call-only-snapshot", ORIGIN, expectedItemCount = 0, receivedAt = 1_500)
+
+        val result = dao.commitSnapshot("call-only-snapshot", committedAt = 2_000)
+
+        assertEquals(SnapshotCommitResult.Committed(upserted = 0, cancelled = 0), result)
+        assertEquals(call, dao.canonical(CALL_CANON_ID))
+    }
+
+    @Test
+    fun notificationSnapshotCancelsMissingNotificationButPreservesActiveCall() = runBlocking {
+        dao.putCanonical(canonical(sequence = 4, state = "ACTIVE", payload = "notification"))
+        val call = callCanonical(sequence = 9)
+        dao.putCanonical(call)
+        dao.beginSnapshot("mixed-empty-snapshot", ORIGIN, expectedItemCount = 0, receivedAt = 1_500)
+
+        val result = dao.commitSnapshot("mixed-empty-snapshot", committedAt = 2_000)
+
+        assertEquals(SnapshotCommitResult.Committed(upserted = 0, cancelled = 1), result)
+        assertEquals("CANCELLED", dao.canonical(CANON_ID)?.state)
+        assertEquals(call, dao.canonical(CALL_CANON_ID))
+    }
+
+    @Test
+    fun snapshotStageRejectsCallNamespaceItem() = runBlocking {
+        dao.beginSnapshot("call-stage", ORIGIN, expectedItemCount = 1, receivedAt = 1_500)
+
+        assertFailsWith<IllegalArgumentException> {
+            dao.stageSnapshotItem(
+                SnapshotStage(
+                    snapshotId = "call-stage",
+                    canonId = CALL_CANON_ID,
+                    sequence = 10,
+                    payloadJson = snapshotPayload(CALL_CANON_ID),
+                    receivedAt = 1_600,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun commitRejectsPreexistingCallStageWithoutMutatingCallState() = runBlocking {
+        val call = callCanonical(sequence = 9)
+        dao.putCanonical(call)
+        dao.beginSnapshot("legacy-call-stage", ORIGIN, expectedItemCount = 1, receivedAt = 1_500)
+        db.openHelper.writableDatabase.execSQL(
+            "INSERT INTO snapshot_stage(snapshotId,canonId,sequence,payloadJson,receivedAt) VALUES(?,?,?,?,?)",
+            arrayOf<Any?>("legacy-call-stage", CALL_CANON_ID, 10, snapshotPayload(CALL_CANON_ID), 1_600),
+        )
+
+        val result = dao.commitSnapshot("legacy-call-stage", committedAt = 2_000)
+
+        assertEquals(SnapshotCommitResult.InvalidItem(CALL_CANON_ID), result)
+        assertEquals(call, dao.canonical(CALL_CANON_ID))
+    }
+
+    @Test
     fun v2MirrorCancelEchoResolvesAndConsumesPersistedCanonicalTombstone() = runBlocking {
         dao.putCanonical(
             canonical(sequence = 3, state = "CANCELLED", payload = null).copy(
@@ -368,6 +442,20 @@ class ReliableDeliveryTransactionTest {
             updatedAt = updatedAt,
         )
 
+    private fun callCanonical(sequence: Long) = CanonicalNotificationState(
+        canonId = CALL_CANON_ID,
+        originDevice = ORIGIN,
+        latestSequence = sequence,
+        state = "ACTIVE",
+        desiredPayloadJson = """{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming"}""",
+        materializedSequence = sequence,
+        sourceNotificationKey = null,
+        mirrorLocalId = 99,
+        mirrorLocalTag = "call-mirror",
+        peerCancelPending = false,
+        updatedAt = 1_000,
+    )
+
     private fun outbound(msgId: String, sequence: Long?, eventType: String) = OutboundMessage(
         msgId = msgId,
         canonId = CANON_ID,
@@ -411,6 +499,7 @@ class ReliableDeliveryTransactionTest {
 
     private companion object {
         const val CANON_ID = "canon-a"
+        const val CALL_CANON_ID = "call:11111111-1111-4111-8111-111111111111"
         const val ORIGIN = "dev-a"
     }
 }

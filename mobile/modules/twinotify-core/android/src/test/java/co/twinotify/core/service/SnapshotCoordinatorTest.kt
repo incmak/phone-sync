@@ -1,5 +1,7 @@
 package co.twinotify.core.service
 
+import co.twinotify.core.listener.CanonIdBuilder
+import co.twinotify.core.listener.SourceNotificationSnapshot
 import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.SnapshotBeginResult
 import co.twinotify.core.storage.SnapshotCommitResult
@@ -7,11 +9,91 @@ import co.twinotify.core.storage.SnapshotStage
 import co.twinotify.core.storage.SnapshotStageResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
 
 class SnapshotCoordinatorTest {
+    @Test
+    fun localDigestExcludesActiveCallStateFromNotificationSummary() = runTest {
+        val notificationCanon = notificationCanon()
+        val store = FakeSnapshotStore(
+            states = mutableListOf(
+                state(notificationCanon, 4),
+                callState(sequence = 8),
+            ),
+        )
+
+        val digest = SnapshotCoordinator(store).localDigest(ORIGIN)
+
+        assertEquals(1, digest.count)
+        assertEquals(digestOf(notificationCanon, 4), digest.digest)
+    }
+
+    @Test
+    fun repairEnumerationIgnoresActiveCallState() = runTest {
+        val snapshot = sourceSnapshot()
+        val notificationCanon = notificationCanon(snapshot)
+        val store = FakeSnapshotStore(
+            states = mutableListOf(
+                state(notificationCanon, 4),
+                callState(sequence = 8),
+            ),
+        )
+        val emitted = mutableListOf<Any>()
+        val source = object : SnapshotSource {
+            override fun active(originDevice: String): List<SourceNotificationSnapshot> = listOf(snapshot)
+
+            override fun payloadJson(originDevice: String, snapshot: SourceNotificationSnapshot): String =
+                payload(notificationCanon)
+        }
+        val coordinator = SnapshotCoordinator(
+            store = store,
+            emitter = SnapshotEmitter { emitted += it },
+            clock = { 10_000L },
+            source = source,
+            localOriginDevice = ORIGIN,
+        )
+
+        val result = coordinator.onDigest(
+            StateDigest(ORIGIN, count = 0, digest = emptyDigest()),
+            force = true,
+        )
+
+        val started = assertIs<SnapshotConvergence.RepairStarted>(result)
+        assertEquals(1, started.itemCount)
+        assertEquals(listOf(notificationCanon), emitted.filterIsInstance<SnapshotItemEvent>().map { it.canonId })
+    }
+
+    @Test
+    fun callOnlyOriginHasEmptyNotificationDigest() = runTest {
+        val store = FakeSnapshotStore(states = mutableListOf(callState(sequence = 3)))
+
+        val digest = SnapshotCoordinator(store).localDigest(ORIGIN)
+
+        assertEquals(0, digest.count)
+        assertEquals(emptyDigest(), digest.digest)
+    }
+
+    @Test
+    fun callNamespaceSnapshotItemIsRejected() = runTest {
+        val coordinator = SnapshotCoordinator(FakeSnapshotStore())
+        coordinator.onBegin(SnapshotBeginEvent("call-item", ORIGIN, 1))
+
+        assertFailsWith<IllegalArgumentException> {
+            coordinator.onItem(
+                SnapshotItemEvent(
+                    snapshotId = "call-item",
+                    originDevice = ORIGIN,
+                    canonId = CALL_CANON_ID,
+                    sequence = 2,
+                    payloadJson = payload(CALL_CANON_ID),
+                ),
+            )
+        }
+    }
+
     @Test
     fun incompleteSnapshotNeverMutatesExistingState() = runTest {
         val store = FakeSnapshotStore(
@@ -144,6 +226,35 @@ class SnapshotCoordinatorTest {
         updatedAt = sequence,
     )
 
+    private fun callState(sequence: Long) = state(CALL_CANON_ID, sequence).copy(
+        desiredPayloadJson = """{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming"}""",
+        sourceNotificationKey = null,
+    )
+
+    private fun sourceSnapshot() = SourceNotificationSnapshot(
+        sourceKey = "source-key",
+        packageName = "example.notifications",
+        id = 7,
+        tag = "thread",
+        postTime = 1_000,
+        flags = 0,
+        category = null,
+        visibility = 1,
+        isGroupSummary = false,
+        isOngoing = false,
+        isClearable = true,
+        appName = "Example",
+        title = "Title",
+        text = "Body",
+        subText = null,
+        bigText = null,
+        smallIcon = null,
+        largeIcon = null,
+    )
+
+    private fun notificationCanon(snapshot: SourceNotificationSnapshot = sourceSnapshot()): String =
+        CanonIdBuilder.build(ORIGIN, snapshot.packageName, snapshot.id, snapshot.tag)
+
     private fun payload(canonId: String) = """{"type":"notif.post","canon_id":"$canonId","package_name":"pkg","id":1,"visibility":"private"}"""
 
     private fun digestOf(canonId: String, sequence: Long): String {
@@ -152,7 +263,12 @@ class SnapshotCoordinatorTest {
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
+    private fun emptyDigest(): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(ByteArray(0))
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
     companion object {
         private const val ORIGIN = "origin-device"
+        private const val CALL_CANON_ID = "call:11111111-1111-4111-8111-111111111111"
     }
 }

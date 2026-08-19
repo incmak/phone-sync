@@ -6,6 +6,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 
+internal fun isNotificationSnapshotCanonical(canonId: String): Boolean = !canonId.startsWith("call:")
+
 sealed interface SequenceReservationResult {
     data class Reserved(val sequence: Long) : SequenceReservationResult
 }
@@ -50,6 +52,7 @@ sealed interface SnapshotCommitResult {
     data class Committed(val upserted: Int, val cancelled: Int) : SnapshotCommitResult
     data class Incomplete(val expected: Int, val staged: Int) : SnapshotCommitResult
     data class DigestMismatch(val expected: String, val actual: String) : SnapshotCommitResult
+    data class InvalidItem(val canonId: String) : SnapshotCommitResult
     data class Expired(val snapshotAgeMs: Long) : SnapshotCommitResult
     data object MissingBegin : SnapshotCommitResult
 }
@@ -753,7 +756,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         } else {
             deleteSnapshot(snapshotId)
         }
-        val baseline = canonicalsForOrigin(originDevice).filter { it.state != "CANCELLED" }
+        val baseline = canonicalsForOrigin(originDevice).filter {
+            it.state != "CANCELLED" && isNotificationSnapshotCanonical(it.canonId)
+        }
         putSnapshotStages(
             buildList {
                 add(
@@ -792,6 +797,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         expectedOriginDevice: String?,
     ): SnapshotStageResult {
         require(!row.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX))
+        require(isNotificationSnapshotCanonical(row.canonId)) {
+            "snapshot item canonical ID must be notification scoped"
+        }
         require(row.sequence > 0) { "snapshot sequence must be positive" }
         require(row.payloadJson.toByteArray(Charsets.UTF_8).size <= MAX_SNAPSHOT_ITEM_BYTES) {
             "snapshot item payload exceeds bounded size"
@@ -855,6 +863,11 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
             .filter { it.canonId.startsWith(SNAPSHOT_BASELINE_MARKER_PREFIX) }
             .associate { it.payloadJson to it.sequence }
         val staged = rows.filter { !it.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX) }
+        val invalidItem = staged.firstOrNull { !isNotificationSnapshotCanonical(it.canonId) }
+        if (invalidItem != null) {
+            deleteSnapshot(snapshotId)
+            return SnapshotCommitResult.InvalidItem(invalidItem.canonId)
+        }
         if (staged.size != expectedItemCount) {
             return SnapshotCommitResult.Incomplete(expectedItemCount, staged.size)
         }
@@ -894,7 +907,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
         val stagedIds = staged.mapTo(hashSetOf()) { it.canonId }
         var cancelled = 0
-        for (current in canonicalsForOrigin(originDevice)) {
+        for (current in canonicalsForOrigin(originDevice).filter {
+            isNotificationSnapshotCanonical(it.canonId)
+        }) {
             val beginSequence = baselineByCanonId[current.canonId]
             if (
                 current.canonId !in stagedIds &&

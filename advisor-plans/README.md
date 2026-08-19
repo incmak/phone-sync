@@ -29,7 +29,7 @@ are the authoritative implementation path for the user's no-internet sync goal.
 | 004 | Produce a protected standalone Android release artifact | P1 | M | 002, 003 | BLOCKED: producer and fail-closed gates are complete; EAS project linkage plus protected signing, fingerprint, token, and attestation inputs are unavailable for the first approved build |
 | 005 | Preserve retryable legacy v1 deliveries | P1 | M | none | DONE |
 | 006 | Compile Android instrumentation sources in every native gate | P1 | S | 003 | DONE |
-| 007 | Isolate call state from notification anti-entropy | P0 | S | 006 | TODO |
+| 007 | Isolate call state from notification anti-entropy | P0 | S | 006 | DONE |
 | 008 | Seal call sessions when terminal idle is observed | P0 | S | 007 | TODO |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
