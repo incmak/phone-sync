@@ -93,6 +93,22 @@ sed -i.bak "s#\.github/workflows/android-release\.yml#.github/workflows/not-andr
 expect_rejection 'E2E host paths omit protected Android release workflow changes'
 
 copy_workflows
+awk '/^  pull_request:$/ { print; print "    paths:"; print "      - mobile/eas.json"; next } { print }' "$tmp/.github/workflows/e2e-host.yml" > "$tmp/e2e-host.yml"
+mv "$tmp/e2e-host.yml" "$tmp/.github/workflows/e2e-host.yml"
+expect_rejection 'pull request guard must be unconditional'
+
+copy_workflows
+awk '/^  pull_request:$/ { print; print "    paths-ignore:"; print "      - docs/**"; next } { print }' "$tmp/.github/workflows/e2e-host.yml" > "$tmp/e2e-host.yml"
+mv "$tmp/e2e-host.yml" "$tmp/.github/workflows/e2e-host.yml"
+expect_rejection 'pull request guard must reject paths-ignore'
+
+for release_input in mobile/eas.json mobile/package.json mobile/package-lock.json; do
+  copy_workflows
+  sed -i.bak "\\#$release_input#d" "$tmp/.github/workflows/e2e-host.yml"
+  expect_rejection "E2E host push paths omit $release_input"
+done
+
+copy_workflows
 sed -i.bak 's/contents: read/contents: write/' "$tmp/.github/workflows/e2e-host.yml"
 expect_rejection 'write permission'
 

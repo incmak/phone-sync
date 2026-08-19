@@ -6,6 +6,9 @@ on:
       - 'e2e/**'
       - 'proto/**'
       - 'Makefile'
+      - 'mobile/eas.json'
+      - 'mobile/package.json'
+      - 'mobile/package-lock.json'
       - 'scripts/verify-offline-pairing-evidence.sh'
       - 'scripts/verify-release-evidence.sh'
       - 'scripts/verify-standalone-android.sh'
@@ -18,21 +21,6 @@ on:
       - '.github/workflows/mobile.yml'
       - '.github/workflows/android-release.yml'
   pull_request:
-    paths:
-      - 'e2e/**'
-      - 'proto/**'
-      - 'Makefile'
-      - 'scripts/verify-offline-pairing-evidence.sh'
-      - 'scripts/verify-release-evidence.sh'
-      - 'scripts/verify-standalone-android.sh'
-      - 'scripts/verify-android-release-workflow.sh'
-      - 'scripts/verify-android-release_test.sh'
-      - 'scripts/verify-host-workflows.sh'
-      - 'scripts/verify-host-workflows_test.sh'
-      - '.github/workflows/e2e-host.yml'
-      - '.github/workflows/e2e-android.yml'
-      - '.github/workflows/mobile.yml'
-      - '.github/workflows/android-release.yml'
 
 permissions:
   contents: read

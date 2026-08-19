@@ -69,12 +69,113 @@ verify_read_only_permissions() {
   ' "$WORKFLOW" || die "workflow permissions must contain exactly one top-level contents: read entry"
 }
 
+verify_release_triggers() {
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (trim(code) == "") next
+      indent = indentation(code)
+      entry = trim(code)
+
+      if (entry == "on:") {
+        if (indent != 0 || on_blocks != 0) invalid = 1
+        on_blocks++
+        in_on = 1
+        active_event = ""
+        next
+      }
+      if (!in_on) next
+      if (indent == 0) {
+        in_on = 0
+        active_event = ""
+        next
+      }
+      if (indent == 2) {
+        if (entry == "workflow_dispatch:") {
+          workflow_dispatch++
+          active_event = "workflow_dispatch"
+        } else if (entry == "push:") {
+          push++
+          active_event = "push"
+        } else {
+          invalid = 1
+          active_event = "invalid"
+        }
+        next
+      }
+      if (indent == 4 && active_event == "push" && entry == "tags: ['\''android-v*'\'']") {
+        push_tags++
+        next
+      }
+      invalid = 1
+    }
+    END {
+      if (on_blocks != 1 || workflow_dispatch != 1 || push != 1 || push_tags != 1) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$WORKFLOW" || die "release triggers must be exactly workflow_dispatch and push.tags android-v*"
+}
+
+verify_secret_scopes() {
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (trim(code) == "") next
+      indent = indentation(code)
+      entry = trim(code)
+      if (indent == 6 && entry ~ /^- name: /) {
+        step = entry
+        sub(/^- name: /, "", step)
+      }
+      if (entry !~ /secrets\./) next
+      if (indent != 10) invalid = 1
+      if (entry == "EAS_TOKEN: ${{ secrets.EAS_TOKEN }}" &&
+          (step == "Build installable release APK at exact commit" || step == "Build Play AAB at exact commit")) {
+        eas_token++
+      } else if (entry == "EXPECTED_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}" &&
+                 (step == "Require protected certificate input" || step == "Verify standalone APK")) {
+        certificate++
+      } else if (entry == "RELEASE_ATTESTATION_PRIVATE_KEY: ${{ secrets.RELEASE_ATTESTATION_PRIVATE_KEY }}" &&
+                 step == "Sign release attestation") {
+        attestation_key++
+      } else {
+        invalid = 1
+      }
+    }
+    END {
+      if (eas_token != 2 || certificate != 2 || attestation_key != 1) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$WORKFLOW" || die "protected secrets must be scoped only to their exact consuming steps"
+}
+
 verify_workflow() {
   [[ -f "$WORKFLOW" ]] || die "protected Android release workflow is missing"
-  grep -Eq '^[[:space:]]*workflow_dispatch:' "$WORKFLOW" || die "workflow_dispatch trigger is required"
-  grep -Eq "^[[:space:]]*tags:[[:space:]]*\['android-v\*'\]" "$WORKFLOW" || die "protected android-v* tag trigger is required"
-  ! grep -Eq '^[[:space:]]*pull_request:' "$WORKFLOW" || die "release workflow must not run for pull requests"
+  verify_release_triggers
   verify_read_only_permissions
+  verify_secret_scopes
   grep -Eq '^[[:space:]]*environment:[[:space:]]*android-release[[:space:]]*$' "$WORKFLOW" || die "android-release protected environment is required"
 
   local action_count pinned_count
@@ -94,9 +195,6 @@ verify_workflow() {
   grep -Fq 'actions/upload-artifact@' "$WORKFLOW" || die "release artifact upload is missing"
   grep -Fq 'retention-days:' "$WORKFLOW" || die "explicit artifact retention is missing"
 
-  grep -Fq 'secrets.EAS_TOKEN' "$WORKFLOW" || die "EAS token must come from the protected environment"
-  grep -Fq 'secrets.ANDROID_RELEASE_CERT_SHA256' "$WORKFLOW" || die "expected certificate fingerprint must come from the protected environment"
-  grep -Fq 'secrets.RELEASE_ATTESTATION_PRIVATE_KEY' "$WORKFLOW" || die "attestation key must come from the protected environment"
   ! grep -Eqi 'eas[[:space:]]+submit|--auto-submit|withoutCredentials|set[[:space:]]+-x|printenv|env[[:space:]]*\|' "$WORKFLOW" || die "auto-submit, credential bypass, or secret-dumping commands are forbidden"
 }
 
@@ -129,8 +227,45 @@ self_test() {
   sed -i.bak 's/android-v\*/release-v*/' "$tmp/.github/workflows/android-release.yml"
   expect_rejection unprotected-tag
   copy_fixture
-  printf '\n  pull_request:\n' >> "$tmp/.github/workflows/android-release.yml"
+  awk '/^on:$/ { print; print "  pull_request:"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection pull-request-trigger
+  copy_fixture
+  awk '/^on:$/ { print; print "  pull_request_target:"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection pull-request-target-trigger
+  copy_fixture
+  awk '/^on:$/ { print; print "  schedule:"; print "    - cron: \"0 0 * * *\""; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection schedule-trigger
+  copy_fixture
+  awk '/^on:$/ { print; print "  workflow_run:"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection workflow-run-trigger
+  copy_fixture
+  awk '/^on:$/ { print; print "  repository_dispatch:"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection repository-dispatch-trigger
+  copy_fixture
+  awk '/^on:$/ { print; print "  workflow_call:"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection workflow-call-trigger
+  copy_fixture
+  awk '/^on:$/ { print; print "  merge_group:"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection extra-event-trigger
+  copy_fixture
+  awk '/^  push:$/ { print; print "    branches: [main]"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection push-branches-filter
+  copy_fixture
+  awk '/^  push:$/ { print; print "    paths: [mobile/**]"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection push-paths-filter
+  copy_fixture
+  awk '/timeout-minutes: 120/ { print; print "    env:"; print "      EAS_TOKEN: ${{ secrets.EAS_TOKEN }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection job-level-secret
   copy_fixture
   sed -i.bak 's/environment: android-release/environment: unprotected/' "$tmp/.github/workflows/android-release.yml"
   expect_rejection missing-environment

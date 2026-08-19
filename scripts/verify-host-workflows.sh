@@ -129,6 +129,108 @@ require_read_only_permissions() {
   }
 }
 
+require_unconditional_pull_request() {
+  local workflow=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (trim(code) == "") next
+      indent = indentation(code)
+      entry = trim(code)
+      if (entry == "on:" && indent == 0) {
+        in_on = 1
+        next
+      }
+      if (in_on && indent == 0) in_on = 0
+      if (!in_on) next
+      if (entry == "pull_request:" && indent == 2) {
+        pull_requests++
+        in_pull_request = 1
+        next
+      }
+      if (in_pull_request) {
+        if (indent > 2) invalid = 1
+        else in_pull_request = 0
+      }
+    }
+    END {
+      if (pull_requests != 1) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$workflow" || {
+    echo "E2E host pull_request trigger must be unconditional with no paths or paths-ignore" >&2
+    exit 1
+  }
+}
+
+require_push_path() {
+  local workflow=$1 expected=$2
+  awk -v expected="$expected" '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (trim(code) == "") next
+      indent = indentation(code)
+      entry = trim(code)
+      if (entry == "on:" && indent == 0) {
+        in_on = 1
+        next
+      }
+      if (in_on && indent == 0) in_on = 0
+      if (!in_on) next
+      if (entry == "push:" && indent == 2) {
+        in_push = 1
+        in_paths = 0
+        next
+      }
+      if (in_push && indent == 2) {
+        in_push = 0
+        in_paths = 0
+      }
+      if (in_push && entry == "paths:" && indent == 4) {
+        in_paths = 1
+        next
+      }
+      if (in_paths && indent == 6 && entry ~ /^- /) {
+        value = entry
+        sub(/^- /, "", value)
+        if (value ~ /^'\''.*'\''$/) {
+          sub(/^'\''/, "", value)
+          sub(/'\''$/, "", value)
+        }
+        if (value == expected) found++
+        next
+      }
+      if (in_paths && indent <= 4) in_paths = 0
+    }
+    END { exit found == 1 ? 0 : 1 }
+  ' "$workflow" || {
+    echo "E2E host push paths must contain exactly once: $expected" >&2
+    exit 1
+  }
+}
+
 require_approved_run_commands() {
   local workflow=$1
   awk '
@@ -303,12 +405,21 @@ require_occurrences "$MOBILE_WORKFLOW" "'scripts/verify-release-evidence.sh'" 2 
 require_occurrences "$MOBILE_WORKFLOW" "'.github/workflows/e2e-host.yml'" 2 'mobile push and PR workflows must cover E2E host workflow changes'
 
 require_literal "$E2E_WORKFLOW" 'push:' 'E2E host workflow must trigger on push'
-require_literal "$E2E_WORKFLOW" 'pull_request:' 'E2E host workflow must trigger on pull requests'
-require_occurrences "$E2E_WORKFLOW" "'.github/workflows/mobile.yml'" 2 'E2E host push and PR workflows must cover mobile workflow changes'
-require_occurrences "$E2E_WORKFLOW" "'.github/workflows/android-release.yml'" 2 'E2E host push and PR workflows must cover Android release workflow changes'
-require_occurrences "$E2E_WORKFLOW" "'scripts/verify-standalone-android.sh'" 2 'E2E host push and PR workflows must cover standalone Android verifier changes'
-require_occurrences "$E2E_WORKFLOW" "'scripts/verify-android-release-workflow.sh'" 2 'E2E host push and PR workflows must cover Android release workflow verifier changes'
-require_occurrences "$E2E_WORKFLOW" "'scripts/verify-android-release_test.sh'" 2 'E2E host push and PR workflows must cover Android release verifier tests'
+require_unconditional_pull_request "$E2E_WORKFLOW"
+for release_path in \
+  'mobile/eas.json' \
+  'mobile/package.json' \
+  'mobile/package-lock.json' \
+  'scripts/verify-standalone-android.sh' \
+  'scripts/verify-android-release-workflow.sh' \
+  'scripts/verify-android-release_test.sh' \
+  'scripts/verify-host-workflows.sh' \
+  'scripts/verify-host-workflows_test.sh' \
+  '.github/workflows/e2e-host.yml' \
+  '.github/workflows/mobile.yml' \
+  '.github/workflows/android-release.yml'; do
+  require_push_path "$E2E_WORKFLOW" "$release_path"
+done
 require_read_only_permissions "$E2E_WORKFLOW"
 require_pinned_actions "$E2E_WORKFLOW"
 for command in \

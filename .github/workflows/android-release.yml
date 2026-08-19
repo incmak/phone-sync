@@ -18,10 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: android-release
     timeout-minutes: 120
-    env:
-      EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
-      EXPECTED_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
-      RELEASE_ATTESTATION_PRIVATE_KEY: ${{ secrets.RELEASE_ATTESTATION_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -46,21 +42,27 @@ jobs:
           git diff --exit-code
           git diff --cached --exit-code
           printf 'RELEASE_COMMIT=%s\n' "$RELEASE_COMMIT" >> "$GITHUB_ENV"
-      - name: Require protected inputs
+      - name: Require protected certificate input
+        env:
+          EXPECTED_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$EXPECTED_RELEASE_CERT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]
+      - name: Build installable release APK at exact commit
+        env:
+          EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
+        working-directory: mobile
         run: |
           set -Eeuo pipefail
           [[ -n "$EAS_TOKEN" ]]
-          [[ "$EXPECTED_RELEASE_CERT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]
-          [[ -n "$RELEASE_ATTESTATION_PRIVATE_KEY" ]]
-      - name: Build installable release APK at exact commit
-        working-directory: mobile
-        run: |
-          set -Eeuo pipefail
           npm exec eas -- build --platform android --profile release-apk --non-interactive --wait --json > "$RUNNER_TEMP/release-apk-build.json"
       - name: Build Play AAB at exact commit
+        env:
+          EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
         working-directory: mobile
         run: |
           set -Eeuo pipefail
+          [[ -n "$EAS_TOKEN" ]]
           npm exec eas -- build --platform android --profile production --non-interactive --wait --json > "$RUNNER_TEMP/production-build.json"
       - name: Download exact EAS artifacts
         run: |
@@ -102,6 +104,8 @@ jobs:
             '{git_commit:$commit,app_sha256:$app,aab_sha256:$aab,release_apk_build_id:$apk_build_id,production_build_id:$aab_build_id,release_apk_profile:"release-apk",production_profile:"production"}' \
             > "$RELEASE_DIR/app-provenance.json"
       - name: Verify standalone APK
+        env:
+          EXPECTED_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
         run: |
           set -Eeuo pipefail
           RELEASE_DIR="$RUNNER_TEMP/twinotify-release"
@@ -111,8 +115,11 @@ jobs:
             --expected-cert-sha256 "$EXPECTED_RELEASE_CERT_SHA256" \
             --expected-commit "$RELEASE_COMMIT"
       - name: Sign release attestation
+        env:
+          RELEASE_ATTESTATION_PRIVATE_KEY: ${{ secrets.RELEASE_ATTESTATION_PRIVATE_KEY }}
         run: |
           set -Eeuo pipefail
+          [[ -n "$RELEASE_ATTESTATION_PRIVATE_KEY" ]]
           RELEASE_DIR="$RUNNER_TEMP/twinotify-release"
           PRIVATE_KEY="$RUNNER_TEMP/release-attestation-private.pem"
           DERIVED_PUBLIC_KEY="$RUNNER_TEMP/release-attestation-public.pem"
