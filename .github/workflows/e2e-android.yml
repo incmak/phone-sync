@@ -6,7 +6,7 @@ on:
       scenario:
         description: Scenario ID to execute
         required: true
-        default: all-correctness
+        default: core-correctness
         type: string
   schedule:
     - cron: '17 3 * * *'

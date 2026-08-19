@@ -4,7 +4,7 @@ workflow=${1:-.github/workflows/e2e-android.yml}
 [[ -f "$workflow" ]] || { echo "workflow missing: $workflow" >&2; exit 1; }
 grep -Fq 'workflow_dispatch:' "$workflow" || { echo "workflow_dispatch trigger missing" >&2; exit 1; }
 grep -Fq 'scenario:' "$workflow" || { echo "scenario input missing" >&2; exit 1; }
-grep -Fq "default: all-correctness" "$workflow" || { echo "manual scenario default missing" >&2; exit 1; }
+grep -Fq "default: core-correctness" "$workflow" || { echo "manual scenario default must be executable core-correctness" >&2; exit 1; }
 grep -Fq "|| 'post'" "$workflow" || { echo "scheduled scenario must default to executable post" >&2; exit 1; }
 grep -Fq 'timeout-minutes: 60' "$workflow" || { echo "60 minute timeout missing" >&2; exit 1; }
 grep -Fq 'if: always()' "$workflow" || { echo "always artifact upload missing" >&2; exit 1; }

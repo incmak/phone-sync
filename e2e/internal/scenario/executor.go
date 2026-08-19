@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/twinotify/phone-sync/e2e/internal/adb"
@@ -12,6 +11,136 @@ import (
 )
 
 var ErrUnsupportedEnvironment = errors.New("scenario requires a connected two-device environment")
+
+type actionKind uint8
+
+const (
+	actionPost actionKind = iota + 1
+	actionCancel
+	actionNetwork
+	actionForceStop
+	actionReconcile
+	actionUnsupported
+)
+
+type action struct {
+	kind     actionKind
+	device   string
+	tag      string
+	text     string
+	enabled  bool
+	original string
+}
+
+func (a action) eventID() string {
+	switch a.kind {
+	case actionPost:
+		return "post:" + a.device + ":" + a.tag
+	case actionCancel:
+		return "cancel:" + a.device + ":" + a.tag
+	case actionNetwork:
+		state := "off"
+		if a.enabled {
+			state = "on"
+		}
+		return "network:" + a.device + ":" + state
+	case actionForceStop:
+		return "force-stop:" + a.device
+	case actionReconcile:
+		return "reconcile:" + a.device
+	default:
+		return "unsupported"
+	}
+}
+
+func parseAction(raw string) (action, error) {
+	switch raw {
+	case "B.network.off":
+		return action{kind: actionNetwork, device: "B", enabled: false, original: raw}, nil
+	case "B.network.on":
+		return action{kind: actionNetwork, device: "B", enabled: true, original: raw}, nil
+	case "A.network.off":
+		return action{kind: actionNetwork, device: "A", enabled: false, original: raw}, nil
+	case "A.network.on":
+		return action{kind: actionNetwork, device: "A", enabled: true, original: raw}, nil
+	case "A.force-stop", "A.kill":
+		return action{kind: actionForceStop, device: "A", original: raw}, nil
+	case "B.force-stop", "B.kill":
+		return action{kind: actionForceStop, device: "B", original: raw}, nil
+	case "A.reconcile":
+		return action{kind: actionReconcile, device: "A", original: raw}, nil
+	case "B.reconcile":
+		return action{kind: actionReconcile, device: "B", original: raw}, nil
+	case "A.restart", "B.restart", "B.reboot", "relay.sigterm", "relay.restart.same-db", "B.ui.xml.find-mirror:n1", "B.ui.swipe-dismiss:n1", "relay.drop.receipt:n1", "relay.accepted:n1", "relay.expire.mailbox", "relay.snapshot", "B.listener.rebind":
+		return action{kind: actionUnsupported, original: raw}, nil
+	}
+	parts := splitAction(raw)
+	if len(parts) >= 2 && (parts[0] == "A.shell.post" || parts[0] == "A.shell.cancel") {
+		device := string(parts[0][0])
+		operation := parts[0]
+		tag := parts[1]
+		if tag == "" {
+			return action{}, fmt.Errorf("invalid scenario action %q", raw)
+		}
+		if operation == "A.shell.post" {
+			if len(parts) == 2 {
+				return action{kind: actionPost, device: device, tag: tag, text: tag, original: raw}, nil
+			}
+			if len(parts) == 3 {
+				return action{kind: actionPost, device: device, tag: tag, text: parts[2], original: raw}, nil
+			}
+		}
+		if operation == "A.shell.cancel" && len(parts) == 2 {
+			return action{kind: actionCancel, device: device, tag: tag, original: raw}, nil
+		}
+		return action{}, fmt.Errorf("invalid scenario action %q", raw)
+	}
+	return action{}, fmt.Errorf("unknown scenario action %q", raw)
+}
+
+func splitAction(raw string) []string {
+	var result []string
+	start := 0
+	for i := 0; i <= len(raw); i++ {
+		if i == len(raw) || raw[i] == ':' {
+			result = append(result, raw[start:i])
+			start = i + 1
+		}
+	}
+	return result
+}
+
+func knownPredicate(predicate string) bool {
+	switch predicate {
+	case "terminal.converged", "A.outbox.zero", "A.outbox.nonzero", "B.mirror.active:n1", "B.mirror.absent:n1", "B.mirror.sequence:3", "B.no-resurrection:n1", "B.health.connected", "B.health.offline", "A.source.absent:n1", "B.user-dismiss.reason":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateExecutablePlan performs all plan parsing before a bridge is created or
+// contacted. It is intentionally shared by the CLI and Executor.
+func ValidateExecutablePlan(plan ScenarioPlan) error {
+	for _, step := range plan.Steps {
+		if step.Action != "" {
+			a, err := parseAction(step.Action)
+			if err != nil {
+				return err
+			}
+			if a.kind == actionUnsupported {
+				return fmt.Errorf("%w: %s", ErrUnsupportedEnvironment, step.Action)
+			}
+		}
+		if step.Predicate != "" && !knownPredicate(step.Predicate) {
+			return fmt.Errorf("unknown scenario predicate %q", step.Predicate)
+		}
+		if step.Action == "" && step.Predicate == "" {
+			return errors.New("scenario step is empty")
+		}
+	}
+	return nil
+}
 
 // Bridge is the real host/device seam. Implementations must use the typed
 // control and ADB clients; tests provide a deterministic fake at this seam.
@@ -39,68 +168,83 @@ func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
 }
 
 func (e *Executor) Run(ctx context.Context, name string) error {
+	_, err := e.RunResult(ctx, name)
+	return err
+}
+
+// RunResult records only action identifiers and provider snapshots. Notification
+// text is intentionally absent from the result so it can be retained as evidence.
+func (e *Executor) RunResult(ctx context.Context, name string) (result ScenarioResult, runErr error) {
+	result = ScenarioResult{Scenario: name, Status: "failed", Before: map[string]Observation{}, After: map[string]Observation{}}
 	plan, err := Plan(name)
 	if err != nil {
-		return err
+		result.ErrorCode = errorCode(err)
+		return result, err
 	}
+	if err := ValidateExecutablePlan(plan); err != nil {
+		result.ErrorCode = errorCode(err)
+		return result, err
+	}
+	defer func() {
+		for _, device := range []string{"A", "B"} {
+			state, err := e.bridge.Snapshot(context.WithoutCancel(ctx), device)
+			if err == nil {
+				result.After[device] = state
+			}
+		}
+		if runErr != nil {
+			result.ErrorCode = errorCode(runErr)
+		} else {
+			result.Status = "passed"
+		}
+	}()
 	for _, device := range []string{"A", "B"} {
 		state, snapshotErr := e.bridge.Snapshot(ctx, device)
 		if snapshotErr != nil {
-			return fmt.Errorf("scenario baseline %s: %w", device, snapshotErr)
+			return result, fmt.Errorf("scenario baseline %s: %w", device, snapshotErr)
 		}
 		e.baseline[device] = state.Canonical
+		result.Before[device] = state
 	}
 	for _, step := range plan.Steps {
-		if err := e.action(ctx, step.Action); err != nil {
-			return fmt.Errorf("%s action %s: %w", name, step.Action, err)
+		if step.Action != "" {
+			a, err := parseAction(step.Action)
+			if err != nil {
+				return result, err
+			}
+			result.Events = append(result.Events, a.eventID())
+			if err := e.action(ctx, step.Action); err != nil {
+				return result, fmt.Errorf("%s action %s: %w", name, step.Action, err)
+			}
 		}
 		if step.Predicate != "" {
+			result.Events = append(result.Events, "predicate:"+step.Predicate)
 			if err := e.waitPredicate(ctx, name, step.Predicate); err != nil {
-				return err
+				return result, err
 			}
 		}
 	}
-	return nil
+	return result, nil
 }
 
 func (e *Executor) action(ctx context.Context, action string) error {
-	parts := strings.SplitN(action, ":", 2)
-	base, value := parts[0], ""
-	if len(parts) == 2 {
-		value = parts[1]
-	}
-	switch {
-	case base == "A.shell.post":
-		return e.bridge.Post(ctx, "A", value, value)
-	case base == "A.shell.cancel":
-		return e.bridge.Cancel(ctx, "A", value)
-	case base == "B.network.off":
-		return e.bridge.SetNetwork(ctx, "B", false)
-	case base == "B.network.on":
-		return e.bridge.SetNetwork(ctx, "B", true)
-	case base == "A.network.off":
-		return e.bridge.SetNetwork(ctx, "A", false)
-	case base == "A.network.on":
-		return e.bridge.SetNetwork(ctx, "A", true)
-	case base == "A.force-stop", base == "A.kill":
-		return e.bridge.ForceStop(ctx, "A")
-	case base == "B.force-stop", base == "B.kill":
-		return e.bridge.ForceStop(ctx, "B")
-	case base == "A.reconcile":
-		return e.bridge.Reconcile(ctx, "A")
-	case base == "B.reconcile":
-		return e.bridge.Reconcile(ctx, "B")
-	case base == "A.restart", base == "B.restart", base == "B.reboot":
-		return ErrUnsupportedEnvironment
-	case base == "relay.sigterm", base == "relay.restart.same-db", base == "B.ui.xml.find-mirror", base == "B.ui.swipe-dismiss":
-		return ErrUnsupportedEnvironment
-	case strings.HasPrefix(base, "relay."):
-		return ErrUnsupportedEnvironment
-	case strings.Contains(base, "outbox."), strings.Contains(base, "health."), strings.Contains(base, "mirror."), strings.Contains(base, "receipt."), strings.Contains(base, "source."), strings.Contains(base, "listener."), strings.Contains(base, "user-dismiss."), strings.Contains(base, "no-resurrection"):
-		return nil
-	case strings.HasPrefix(base, "B.") || strings.HasPrefix(base, "A."):
-		_, err := e.bridge.Control(ctx, strings.TrimPrefix(strings.TrimPrefix(base, "A."), "B."), "STATUS", nil)
+	a, err := parseAction(action)
+	if err != nil {
 		return err
+	}
+	switch a.kind {
+	case actionPost:
+		return e.bridge.Post(ctx, a.device, a.tag, a.text)
+	case actionCancel:
+		return e.bridge.Cancel(ctx, a.device, a.tag)
+	case actionNetwork:
+		return e.bridge.SetNetwork(ctx, a.device, a.enabled)
+	case actionForceStop:
+		return e.bridge.ForceStop(ctx, a.device)
+	case actionReconcile:
+		return e.bridge.Reconcile(ctx, a.device)
+	case actionUnsupported:
+		return fmt.Errorf("%w: %s", ErrUnsupportedEnvironment, action)
 	default:
 		return fmt.Errorf("unknown scenario action %q", action)
 	}

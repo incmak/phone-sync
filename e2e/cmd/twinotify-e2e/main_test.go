@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/twinotify/phone-sync/e2e/internal/adb"
 	"github.com/twinotify/phone-sync/e2e/internal/control"
+	"github.com/twinotify/phone-sync/e2e/internal/scenario"
 )
 
 type privateRunner struct {
@@ -91,6 +93,13 @@ func TestADBDeviceCleanupAPIsAddressDistinctPrivateBuckets(t *testing.T) {
 func TestCLIRejectsInvalidPackageBeforeADB(t *testing.T) {
 	err := runWithOptions(context.Background(), options{scenario: "status", serialA: "phone-a", serialB: "phone-b", packageName: "com.twinotify.app;id", timeout: time.Second})
 	if err == nil || !strings.Contains(err.Error(), "invalid Android package") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCLIRejectsUnsupportedScenarioBeforeADB(t *testing.T) {
+	err := validateScenarioBeforeADB("all-correctness")
+	if !errors.Is(err, scenario.ErrUnsupportedEnvironment) {
 		t.Fatalf("error=%v", err)
 	}
 }

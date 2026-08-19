@@ -17,7 +17,7 @@ ADB_BIN=${E2E_ADB_BIN:-}
 NC_BIN=${E2E_NC_BIN:-}
 CURL_BIN=${E2E_CURL_BIN:-}
 PREPARE_SCRIPT=${E2E_PREPARE_SCRIPT:-$ROOT_DIR/e2e/scripts/prepare-avds.sh}
-SCENARIO=${E2E_SCENARIO:-smoke}
+SCENARIO=${E2E_SCENARIO:-post}
 KEEP_RUN_DIR=${E2E_KEEP_RUN_DIR:-0}
 RUN_DIR_FILE=${E2E_RUN_DIR_FILE:-}
 [[ -n "$RUN_DIR_FILE" ]] && printf '%s\n' "$RUN_DIR" > "$RUN_DIR_FILE"
@@ -83,14 +83,6 @@ owned_pid() {
 cleanup() {
   (( CLEANED )) && return
   CLEANED=1; set +e
-  if [[ "$KEEP_RUN_DIR" == "1" ]]; then
-    mkdir -p "$RUN_DIR/sanitized"
-    [[ -f "$RUN_DIR/sanitized/state.json" ]] || printf '{"status":"failed"}\n' > "$RUN_DIR/sanitized/state.json"
-    [[ -f "$RUN_DIR/sanitized/timeline.json" ]] || printf '[]\n' > "$RUN_DIR/sanitized/timeline.json"
-    [[ -f "$RUN_DIR/sanitized/metrics.json" ]] || printf '{"status":"failed"}\n' > "$RUN_DIR/sanitized/metrics.json"
-    [[ -f "$RUN_DIR/sanitized/health-a.json" ]] || printf '{"status":"unavailable"}\n' > "$RUN_DIR/sanitized/health-a.json"
-    [[ -f "$RUN_DIR/sanitized/health-b.json" ]] || printf '{"status":"unavailable"}\n' > "$RUN_DIR/sanitized/health-b.json"
-  fi
   owned_pid "$EMU_PID_A" "$EMULATOR_BIN" && kill "$EMU_PID_A" 2>/dev/null
   owned_pid "$EMU_PID_B" "$EMULATOR_BIN" && kill "$EMU_PID_B" 2>/dev/null
   owned_pid "$RELAY_PID" "$RELAY_BIN" && kill "$RELAY_PID" 2>/dev/null
@@ -153,8 +145,9 @@ done
 
 RELAY_URL="http://10.0.2.2:$RELAY_PORT"
 (cd "$ROOT_DIR/e2e" && go run ./cmd/twinotify-e2e -scenario pair -serial-a "$EMU_A" -serial-b "$EMU_B" -package "$PACKAGE_NAME" -relay-url "$RELAY_URL" -timeout "${E2E_TIMEOUT:-60s}")
-if [[ "$SCENARIO" != "smoke" && "$SCENARIO" != "pair" ]]; then
-  (cd "$ROOT_DIR/e2e" && go run ./cmd/twinotify-e2e -scenario "$SCENARIO" -serial-a "$EMU_A" -serial-b "$EMU_B" -package "$PACKAGE_NAME" -relay-url "$RELAY_URL" -timeout "${E2E_TIMEOUT:-60s}")
+mkdir -p "$RUN_DIR/sanitized"
+if [[ "$SCENARIO" != "pair" ]]; then
+  (cd "$ROOT_DIR/e2e" && go run ./cmd/twinotify-e2e -scenario "$SCENARIO" -serial-a "$EMU_A" -serial-b "$EMU_B" -package "$PACKAGE_NAME" -relay-url "$RELAY_URL" -timeout "${E2E_TIMEOUT:-60s}" -scenario-evidence-dir "$RUN_DIR/sanitized")
 fi
 
 for serial in "$EMU_A" "$EMU_B"; do
@@ -166,11 +159,7 @@ for serial in "$EMU_A" "$EMU_B"; do
   "$ADB_BIN" -s "$serial" shell cmd notification post -t "$tag" "$tag" "smoke stimulus"
   "$ADB_BIN" -s "$serial" shell dumpsys notification --noredact | grep -Fq "$tag" || fail 24 "$serial did not show posted smoke notification"
 done
-mkdir -p "$RUN_DIR/sanitized"
 status_output=$(cd "$ROOT_DIR/e2e" && go run ./cmd/twinotify-e2e -scenario status -serial-a "$EMU_A" -serial-b "$EMU_B" -package "$PACKAGE_NAME" -timeout "${E2E_TIMEOUT:-60s}")
 printf '%s\n' "$status_output" | sed -n 's/^A //p' > "$RUN_DIR/sanitized/health-a.json"
 printf '%s\n' "$status_output" | sed -n 's/^B //p' > "$RUN_DIR/sanitized/health-b.json"
-printf '{"scenario":"%s","status":"pass"}\n' "$SCENARIO" > "$RUN_DIR/sanitized/state.json"
-printf '[{"scenario":"%s","status":"pass"}]\n' "$SCENARIO" > "$RUN_DIR/sanitized/timeline.json"
-printf '{"scenario":"%s","status":"pass"}\n' "$SCENARIO" > "$RUN_DIR/sanitized/metrics.json"
-echo "e2e-emulator: provisioned pair and completed shell notification post smoke"
+echo "e2e-emulator: provisioned pair, executed $SCENARIO, and captured state-derived evidence"

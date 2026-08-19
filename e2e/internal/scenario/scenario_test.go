@@ -14,24 +14,39 @@ import (
 )
 
 type fakeBridge struct {
-	events []string
-	states map[string]scenario.Observation
+	events        []string
+	states        map[string]scenario.Observation
+	calls         int
+	pendingOutbox bool
+	postCount     int
 }
 
 func (f *fakeBridge) Control(_ context.Context, device, name string, _ map[string]string) (control.Result, error) {
+	f.calls++
 	f.events = append(f.events, device+"."+name)
 	return control.Result{}, nil
 }
-func (f *fakeBridge) Post(_ context.Context, device, tag, _ string) error {
-	f.events = append(f.events, device+".shell.post:"+tag)
+func (f *fakeBridge) Post(_ context.Context, device, tag, text string) error {
+	f.calls++
+	f.events = append(f.events, device+".shell.post:"+tag+":"+text)
+	f.pendingOutbox = true
+	f.postCount++
 	f.states[device] = scenario.Observation{Outbox: 1, Canonical: map[string]string{"new-hash": "ACTIVE"}}
+	if device == "A" {
+		health := f.states["B"].Health
+		f.states["B"] = scenario.Observation{Health: health, Canonical: map[string]string{"new-hash": "ACTIVE"}, Mirror: true, Sequence: f.postCount}
+	}
 	return nil
 }
 func (f *fakeBridge) Cancel(_ context.Context, device, tag string) error {
+	f.calls++
 	f.events = append(f.events, device+".shell.cancel:"+tag)
+	f.pendingOutbox = true
+	f.states["B"] = scenario.Observation{Health: f.states["B"].Health, Canonical: map[string]string{}}
 	return nil
 }
 func (f *fakeBridge) SetNetwork(_ context.Context, device string, enabled bool) error {
+	f.calls++
 	f.events = append(f.events, device+".network")
 	f.states[device] = scenario.Observation{Health: map[bool]string{true: "connected", false: "offline"}[enabled]}
 	if device == "B" && enabled {
@@ -40,21 +55,29 @@ func (f *fakeBridge) SetNetwork(_ context.Context, device string, enabled bool) 
 	return nil
 }
 func (f *fakeBridge) ForceStop(_ context.Context, device string) error {
+	f.calls++
 	f.events = append(f.events, device+".force-stop")
 	return nil
 }
 func (f *fakeBridge) Reconcile(_ context.Context, device string) error {
+	f.calls++
 	f.events = append(f.events, device+".reconcile")
 	return nil
 }
 func (f *fakeBridge) Snapshot(_ context.Context, device string) (scenario.Observation, error) {
+	f.calls++
 	state := f.states[device]
 	state.Terminal = true
 	if device == "B" {
 		state.Mirror = len(state.Canonical) > 0
 	}
 	if device == "A" {
-		state.Outbox = 0
+		if f.pendingOutbox {
+			state.Outbox = 1
+			f.pendingOutbox = false
+		} else {
+			state.Outbox = 0
+		}
 	}
 	return state, nil
 }
@@ -76,6 +99,111 @@ func TestExecutorRejectsUnavailableUIAutomation(t *testing.T) {
 	if !errors.Is(err, scenario.ErrUnsupportedEnvironment) {
 		t.Fatalf("error=%v", err)
 	}
+	if bridge.calls != 0 {
+		t.Fatalf("unsupported scenario touched bridge %d times", bridge.calls)
+	}
+}
+
+func TestUpdatePlanPostsThreePayloadsToTheSameTag(t *testing.T) {
+	plan, err := scenario.Plan("update")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"A.shell.post:n1:v1", "A.shell.post:n1:v2", "A.shell.post:n1:v3"}
+	if got := plan.Actions()[:3]; !equal(got, want) {
+		t.Fatalf("actions=%v want=%v", got, want)
+	}
+	bridge := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
+	if err := scenario.NewExecutor(bridge, 50*time.Millisecond).Run(context.Background(), "update"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := bridge.events[:3], []string{"A.shell.post:n1:v1", "A.shell.post:n1:v2", "A.shell.post:n1:v3"}; !equal(got, want) {
+		t.Fatalf("bridge posts=%v want=%v", got, want)
+	}
+}
+
+func TestExecutablePlanRejectsAssertionLikeAction(t *testing.T) {
+	err := scenario.ValidateExecutablePlan(scenario.ScenarioPlan{
+		Name:  "invented",
+		Steps: []scenario.Step{{Action: "A.outbox.nonzero"}},
+	})
+	if err == nil {
+		t.Fatal("assertion-like action was accepted")
+	}
+}
+
+func TestCoreCorrectnessContainsOnlyExecutableActions(t *testing.T) {
+	plan, err := scenario.Plan("core-correctness")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scenario.ValidateExecutablePlan(plan); err != nil {
+		t.Fatalf("core-correctness should be executable: %v", err)
+	}
+	all, err := scenario.Plan("all-correctness")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scenario.ValidateExecutablePlan(all); !errors.Is(err, scenario.ErrUnsupportedEnvironment) {
+		t.Fatalf("all-correctness error=%v", err)
+	}
+}
+
+func TestResultEvidenceIsDerivedFromObservedSnapshots(t *testing.T) {
+	bridge := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
+	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "offline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "passed" || result.After["B"].Health != "connected" || len(result.Events) == 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	dir := t.TempDir()
+	if err := scenario.WriteEvidenceArtifacts(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.After["B"] = scenario.Observation{Health: "offline", Outbox: 9}
+	if err := scenario.WriteEvidenceArtifacts(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) == string(after) || !strings.Contains(string(after), `"offline"`) || !strings.Contains(string(after), `"outbox":9`) {
+		t.Fatalf("state evidence did not reflect observation: %s", after)
+	}
+}
+
+func TestUnsupportedScenarioWritesFailedEvidenceOnly(t *testing.T) {
+	bridge := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
+	result, err := scenario.NewExecutor(bridge, time.Second).RunResult(context.Background(), "dismiss-peer")
+	if !errors.Is(err, scenario.ErrUnsupportedEnvironment) || result.Status != "failed" || result.ErrorCode != "unsupported_environment" || len(result.Events) != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	dir := t.TempDir()
+	if err := scenario.WriteEvidenceArtifacts(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	state, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(state), `"passed"`) || !strings.Contains(string(state), `"failed"`) {
+		t.Fatalf("unsupported scenario evidence=%s", state)
+	}
+}
+
+func TestUnknownScenarioReturnsBoundedInvalidScenarioCode(t *testing.T) {
+	bridge := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
+	result, err := scenario.NewExecutor(bridge, time.Second).RunResult(context.Background(), "not-real")
+	if err == nil || result.ErrorCode != "invalid_scenario" || bridge.calls != 0 {
+		t.Fatalf("result=%+v err=%v calls=%d", result, err, bridge.calls)
+	}
 }
 
 func TestOfflinePlanOrdersFaultStimulusAndConvergence(t *testing.T) {
@@ -84,11 +212,19 @@ func TestOfflinePlanOrdersFaultStimulusAndConvergence(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"B.network.off", "B.health.offline", "A.shell.post:n1", "A.outbox.nonzero",
-		"B.network.on", "B.health.connected", "B.mirror.active:n1", "A.outbox.zero",
+		"B.network.off", "A.shell.post:n1", "B.network.on",
 	}
 	if got := plan.Actions(); !equal(got, want) {
 		t.Fatalf("actions=%v want=%v", got, want)
+	}
+	for _, predicate := range []string{"B.health.offline", "A.outbox.nonzero", "B.health.connected", "B.mirror.active:n1", "A.outbox.zero", "terminal.converged"} {
+		found := false
+		for _, step := range plan.Steps {
+			found = found || step.Predicate == predicate
+		}
+		if !found {
+			t.Fatalf("missing observable predicate %q", predicate)
+		}
 	}
 }
 

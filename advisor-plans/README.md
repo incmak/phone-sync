@@ -24,7 +24,7 @@ are the authoritative implementation path for the user's no-internet sync goal.
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---:|---:|---|---|
 | 001 | Let offline-only pairs unpair safely | P1 | S | none | DONE |
-| 002 | Make Android E2E scenarios executable and evidence truthful | P1 | M | none | TODO |
+| 002 | Make Android E2E scenarios executable and evidence truthful | P1 | M | none | DONE |
 | 003 | Enforce complete host verification in Make and PR CI | P1 | S | 002 | TODO |
 | 004 | Produce a protected standalone Android release artifact | P1 | M | 002, 003 | TODO |
 

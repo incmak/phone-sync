@@ -29,6 +29,7 @@ func main() {
 	relayPort := flag.Int("relay-port", 0, "host relay port used with the emulator loopback address")
 	timeout := flag.Duration("timeout", 30*time.Second, "bounded wait for each control phase")
 	evidenceDir := flag.String("evidence-dir", "", "private directory for offline pairing evidence")
+	scenarioEvidenceDir := flag.String("scenario-evidence-dir", "", "directory for sanitized scenario result artifacts")
 	packetEvidenceHash := flag.String("packet-evidence-sha256", "", "SHA-256 of operator-captured internet-block packet evidence")
 	dnsEvidenceHash := flag.String("dns-evidence-sha256", "", "SHA-256 of operator-captured DNS evidence")
 	internetBlocked := flag.Bool("internet-blocked", false, "assert operator-controlled internet isolation is active")
@@ -41,6 +42,7 @@ func main() {
 		packageName: *packageName,
 		relayURL:    *relayURL, relayPort: *relayPort, timeout: *timeout}
 	options.evidenceDir = *evidenceDir
+	options.scenarioEvidenceDir = *scenarioEvidenceDir
 	options.packetEvidenceHash = *packetEvidenceHash
 	options.dnsEvidenceHash = *dnsEvidenceHash
 	options.internetBlocked = *internetBlocked
@@ -51,11 +53,11 @@ func main() {
 }
 
 type options struct {
-	scenario, serialA, serialB, packageName, relayURL string
-	evidenceDir, packetEvidenceHash, dnsEvidenceHash  string
-	internetBlocked                                   bool
-	relayPort                                         int
-	timeout                                           time.Duration
+	scenario, serialA, serialB, packageName, relayURL                     string
+	evidenceDir, scenarioEvidenceDir, packetEvidenceHash, dnsEvidenceHash string
+	internetBlocked                                                       bool
+	relayPort                                                             int
+	timeout                                                               time.Duration
 }
 
 // run is kept small for callers that only need CLI argument validation.
@@ -67,13 +69,8 @@ func runWithOptions(ctx context.Context, cfg options) error {
 	if err := adb.ValidateComponentName(cfg.packageName); err != nil {
 		return fmt.Errorf("invalid Android package: %w", err)
 	}
-	if cfg.scenario != "status" && cfg.scenario != "pair" && cfg.scenario != "offline-pairing" {
-		if err := metrics.ValidateScenarioID(cfg.scenario); err == nil {
-			return scenario.ErrUnsupportedEnvironment
-		}
-		if _, err := scenario.Plan(cfg.scenario); err != nil {
-			return err
-		}
+	if err := validateScenarioBeforeADB(cfg.scenario); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.serialA) == "" || strings.TrimSpace(cfg.serialB) == "" || cfg.serialA == cfg.serialB {
 		return errors.New("two distinct ADB serials are required")
@@ -127,7 +124,13 @@ func runWithOptions(ctx context.Context, cfg options) error {
 			_, err := scenario.RunSyntheticCallState(ctx, bridge, cfg.timeout)
 			return err
 		}
-		return scenario.NewExecutor(bridge, cfg.timeout).Run(ctx, cfg.scenario)
+		result, runErr := scenario.NewExecutor(bridge, cfg.timeout).RunResult(ctx, cfg.scenario)
+		if cfg.scenarioEvidenceDir != "" {
+			if evidenceErr := scenario.WriteEvidenceArtifacts(cfg.scenarioEvidenceDir, result); evidenceErr != nil {
+				return fmt.Errorf("write scenario evidence: %w", evidenceErr)
+			}
+		}
+		return runErr
 	}
 	for _, device := range []struct {
 		label  string
@@ -141,6 +144,20 @@ func runWithOptions(ctx context.Context, cfg options) error {
 		fmt.Printf("%s %s\n", label, result.Payload)
 	}
 	return nil
+}
+
+func validateScenarioBeforeADB(name string) error {
+	if name == "status" || name == "pair" || name == "offline-pairing" || name == "call-state" {
+		return nil
+	}
+	if err := metrics.ValidateScenarioID(name); err == nil {
+		return scenario.ErrUnsupportedEnvironment
+	}
+	plan, err := scenario.Plan(name)
+	if err != nil {
+		return err
+	}
+	return scenario.ValidateExecutablePlan(plan)
 }
 
 type adbDevice struct {

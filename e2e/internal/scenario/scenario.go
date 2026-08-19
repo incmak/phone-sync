@@ -25,7 +25,9 @@ type ScenarioPlan struct {
 func (p ScenarioPlan) Actions() []string {
 	result := make([]string, 0, len(p.Steps))
 	for _, step := range p.Steps {
-		result = append(result, step.Action)
+		if step.Action != "" {
+			result = append(result, step.Action)
+		}
 	}
 	return result
 }
@@ -33,56 +35,56 @@ func (p ScenarioPlan) Actions() []string {
 var plans = map[string][]Step{
 	"post": {
 		{Action: "A.shell.post:n1", Predicate: "A.outbox.nonzero"},
-		{Action: "B.health.connected", Predicate: "B.mirror.active:n1"},
-		{Action: "A.receipt.accepted:n1", Predicate: "A.outbox.zero"},
+		{Predicate: "B.mirror.active:n1"},
+		{Predicate: "A.outbox.zero"},
 	},
 	"update": {
 		{Action: "A.shell.post:n1:v1"}, {Action: "A.shell.post:n1:v2"}, {Action: "A.shell.post:n1:v3"},
-		{Action: "B.mirror.active:n1", Predicate: "B.mirror.sequence:3"},
-		{Action: "A.receipt.accepted:n1", Predicate: "A.outbox.zero"},
+		{Predicate: "B.mirror.sequence:3"},
+		{Predicate: "A.outbox.zero"},
 	},
 	"dismiss-origin": {
-		{Action: "A.shell.post:n1"}, {Action: "B.mirror.active:n1"},
+		{Action: "A.shell.post:n1"}, {Predicate: "B.mirror.active:n1"},
 		{Action: "A.shell.cancel:n1", Predicate: "A.outbox.nonzero"},
-		{Action: "B.mirror.dismissed:n1", Predicate: "B.mirror.absent:n1"},
-		{Action: "A.receipt.accepted:n1", Predicate: "A.outbox.zero"},
+		{Predicate: "B.mirror.absent:n1"},
+		{Predicate: "A.outbox.zero"},
 	},
 	"dismiss-peer": {
-		{Action: "A.shell.post:n1"}, {Action: "B.mirror.active:n1"},
+		{Action: "A.shell.post:n1"}, {Predicate: "B.mirror.active:n1"},
 		{Action: "B.ui.xml.find-mirror:n1"}, {Action: "B.ui.swipe-dismiss:n1", Predicate: "B.user-dismiss.reason"},
-		{Action: "A.source.dismissed:n1", Predicate: "A.source.absent:n1"},
-		{Action: "B.mirror.absent:n1", Predicate: "A.outbox.zero"},
+		{Predicate: "A.source.absent:n1"},
+		{Predicate: "B.mirror.absent:n1"}, {Predicate: "A.outbox.zero"},
 	},
 	"rapid-post-update-cancel": {
 		{Action: "A.shell.post:n1:v1"}, {Action: "A.shell.post:n1:v2"}, {Action: "A.shell.cancel:n1"},
-		{Action: "B.mirror.absent:n1", Predicate: "B.no-resurrection:n1"},
-		{Action: "A.receipt.accepted:n1", Predicate: "A.outbox.zero"},
+		{Predicate: "B.no-resurrection:n1"},
+		{Predicate: "A.outbox.zero"},
 	},
 	"offline": {
-		{Action: "B.network.off"}, {Action: "B.health.offline"},
-		{Action: "A.shell.post:n1"}, {Action: "A.outbox.nonzero"},
-		{Action: "B.network.on"}, {Action: "B.health.connected"},
-		{Action: "B.mirror.active:n1"}, {Action: "A.outbox.zero", Predicate: "terminal.converged"},
+		{Action: "B.network.off", Predicate: "B.health.offline"},
+		{Action: "A.shell.post:n1", Predicate: "A.outbox.nonzero"},
+		{Action: "B.network.on", Predicate: "B.health.connected"},
+		{Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"}, {Predicate: "terminal.converged"},
 	},
 	"relay-restart": {
 		{Action: "A.shell.post:n1"}, {Action: "relay.sigterm"}, {Action: "relay.restart.same-db"},
-		{Action: "B.mirror.active:n1"}, {Action: "A.outbox.zero", Predicate: "terminal.converged"},
+		{Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"}, {Predicate: "terminal.converged"},
 	},
 	"sender-kill": {
 		{Action: "A.shell.post:n1"}, {Action: "A.force-stop"}, {Action: "A.restart"},
-		{Action: "B.mirror.active:n1"}, {Action: "A.outbox.zero", Predicate: "terminal.converged"},
+		{Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"}, {Predicate: "terminal.converged"},
 	},
 	"receiver-kill": {
 		{Action: "A.shell.post:n1"}, {Action: "B.force-stop"}, {Action: "B.restart"},
-		{Action: "B.mirror.active:n1"}, {Action: "A.outbox.zero", Predicate: "terminal.converged"},
+		{Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"}, {Predicate: "terminal.converged"},
 	},
 	"reboot": {
 		{Action: "A.shell.post:n1"}, {Action: "B.reboot"}, {Action: "B.listener.rebind"},
-		{Action: "B.mirror.active:n1"}, {Action: "A.outbox.zero", Predicate: "terminal.converged"},
+		{Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"}, {Predicate: "terminal.converged"},
 	},
 	"ack-loss": {
-		{Action: "A.shell.post:n1"}, {Action: "relay.drop.receipt:n1"}, {Action: "B.mirror.active:n1"},
-		{Action: "A.reconcile", Predicate: "A.outbox.zero"}, {Action: "B.mirror.active:n1", Predicate: "terminal.converged"},
+		{Action: "A.shell.post:n1"}, {Action: "relay.drop.receipt:n1"}, {Predicate: "B.mirror.active:n1"},
+		{Action: "A.reconcile", Predicate: "A.outbox.zero"}, {Predicate: "B.mirror.active:n1"}, {Predicate: "terminal.converged"},
 	},
 	"sender-offline-after-acceptance": {
 		{Action: "A.shell.post:n1"}, {Action: "relay.accepted:n1"}, {Action: "A.network.off"},
@@ -90,7 +92,7 @@ var plans = map[string][]Step{
 	},
 	"expiry-snapshot": {
 		{Action: "A.shell.post:n1"}, {Action: "relay.expire.mailbox"}, {Action: "relay.snapshot"},
-		{Action: "B.mirror.active:n1", Predicate: "terminal.converged"},
+		{Predicate: "B.mirror.active:n1"}, {Predicate: "terminal.converged"},
 	},
 }
 
@@ -103,6 +105,13 @@ func Plan(name string) (ScenarioPlan, error) {
 	if name == "all-correctness" {
 		var steps []Step
 		for _, child := range []string{"post", "update", "dismiss-origin", "offline", "ack-loss", "sender-offline-after-acceptance", "relay-restart", "sender-kill", "receiver-kill", "reboot", "expiry-snapshot"} {
+			steps = append(steps, plans[child]...)
+		}
+		return ScenarioPlan{Name: name, Steps: steps}, nil
+	}
+	if name == "core-correctness" {
+		var steps []Step
+		for _, child := range []string{"post", "update", "dismiss-origin", "rapid-post-update-cancel", "offline"} {
 			steps = append(steps, plans[child]...)
 		}
 		return ScenarioPlan{Name: name, Steps: steps}, nil
