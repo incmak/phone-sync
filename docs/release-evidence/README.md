@@ -70,6 +70,15 @@ Host-only release contract checks are safe to run without credentials:
 ./scripts/verify-release-evidence.sh --self-test
 ```
 
+When an authorized operator resolves the release profiles, use the pinned
+ephemeral CLI rather than adding EAS CLI to this project:
+
+```bash
+cd mobile
+npx --yes eas-cli@22.0.0 config --platform android --profile release-apk --non-interactive
+npx --yes eas-cli@22.0.0 config --platform android --profile production --non-interactive
+```
+
 Resolving EAS configuration itself requires an Expo account. In CI, the
 protected environment supplies that authority. The current checkout is not yet
 linked to an EAS project, so an authorized owner must establish and commit that

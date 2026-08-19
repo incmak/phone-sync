@@ -55,7 +55,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ -n "$EAS_TOKEN" ]]
-          npm exec eas -- build --platform android --profile release-apk --non-interactive --wait --json > "$RUNNER_TEMP/release-apk-build.json"
+          npx --yes eas-cli@22.0.0 build --platform android --profile release-apk --non-interactive --wait --json > "$RUNNER_TEMP/release-apk-build.json"
       - name: Build Play AAB at exact commit
         env:
           EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
@@ -63,7 +63,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           [[ -n "$EAS_TOKEN" ]]
-          npm exec eas -- build --platform android --profile production --non-interactive --wait --json > "$RUNNER_TEMP/production-build.json"
+          npx --yes eas-cli@22.0.0 build --platform android --profile production --non-interactive --wait --json > "$RUNNER_TEMP/production-build.json"
       - name: Download exact EAS artifacts
         run: |
           set -Eeuo pipefail

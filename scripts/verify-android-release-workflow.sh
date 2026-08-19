@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR=${TWINOTIFY_ANDROID_RELEASE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 WORKFLOW="$ROOT_DIR/.github/workflows/android-release.yml"
 EAS_CONFIG="$ROOT_DIR/mobile/eas.json"
+PACKAGE_JSON="$ROOT_DIR/mobile/package.json"
 
 die() {
   echo "android-release-workflow: $*" >&2
@@ -13,7 +14,9 @@ die() {
 verify_config() {
   command -v jq >/dev/null 2>&1 || die "jq is required"
   [[ -f "$EAS_CONFIG" ]] || die "mobile/eas.json is missing"
+  [[ -f "$PACKAGE_JSON" ]] || die "mobile/package.json is missing"
   jq -e '
+    .cli.version == "22.0.0" and
     .cli.appVersionSource == "local" and
     .build["release-apk"].developmentClient == false and
     .build["release-apk"].distribution == "internal" and
@@ -26,6 +29,43 @@ verify_config() {
     .build.production.android.buildType == "app-bundle" and
     (.build.production.android.withoutCredentials == null)
   ' "$EAS_CONFIG" >/dev/null || die "EAS release profiles are not fail-closed APK/AAB production profiles"
+  jq -e '
+    ((.dependencies // {})["eas-cli"] == null) and
+    ((.devDependencies // {})["eas-cli"] == null) and
+    .scripts["build:dev"] == "npx --yes eas-cli@22.0.0 build --profile development --platform android --local"
+  ' "$PACKAGE_JSON" >/dev/null || die "project-local eas-cli dependency is forbidden; use the pinned ephemeral CLI"
+}
+
+verify_eas_cli_invocations() {
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      entry = trim(code)
+      if (entry == "") next
+      normalized = tolower(entry)
+      invokes_eas = normalized ~ /(^|[^[:alnum:]_-])eas-cli([^[:alnum:]_-]|$)/ ||
+                    normalized ~ /(^|[^[:alnum:]_])npm[ \t]+exec[ \t]+eas([^[:alnum:]_]|$)/ ||
+                    normalized ~ /(^|[^[:alnum:]_])eas[ \t]+build([^[:alnum:]_]|$)/
+      if (!invokes_eas) next
+      if (entry == "npx --yes eas-cli@22.0.0 build --platform android --profile release-apk --non-interactive --wait --json > \"$RUNNER_TEMP/release-apk-build.json\"") {
+        apk++
+      } else if (entry == "npx --yes eas-cli@22.0.0 build --platform android --profile production --non-interactive --wait --json > \"$RUNNER_TEMP/production-build.json\"") {
+        production++
+      } else {
+        invalid = 1
+      }
+    }
+    END {
+      if (apk != 1 || production != 1) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$WORKFLOW" || die "EAS builds must use exactly the two pinned ephemeral CLI commands"
 }
 
 verify_read_only_permissions() {
@@ -177,6 +217,7 @@ verify_workflow() {
   verify_release_triggers
   verify_read_only_permissions
   verify_secret_scopes
+  verify_eas_cli_invocations
   grep -Eq '^[[:space:]]*environment:[[:space:]]*android-release[[:space:]]*$' "$WORKFLOW" || die "android-release protected environment is required"
 
   local action_count pinned_count
@@ -185,8 +226,6 @@ verify_workflow() {
   [[ "$action_count" -gt 0 && "$action_count" -eq "$pinned_count" ]] || die "all actions must be pinned to full commit SHAs"
 
   grep -Fq 'run: make host-verify' "$WORKFLOW" || die "mandatory host verification is missing"
-  grep -Fq 'npm exec eas -- build --platform android --profile release-apk --non-interactive --wait --json' "$WORKFLOW" || die "release-apk EAS build is missing"
-  grep -Fq 'npm exec eas -- build --platform android --profile production --non-interactive --wait --json' "$WORKFLOW" || die "production AAB EAS build is missing"
   grep -Fq 'git rev-parse HEAD' "$WORKFLOW" || die "exact checkout commit capture is missing"
   grep -Fq 'gitCommitHash' "$WORKFLOW" || die "EAS result commit assertion is missing"
   grep -Fq './scripts/verify-standalone-android.sh' "$WORKFLOW" || die "standalone APK verifier is missing"
@@ -216,6 +255,7 @@ self_test() {
     mkdir -p "$tmp/.github/workflows" "$tmp/mobile"
     cp "$WORKFLOW" "$tmp/.github/workflows/android-release.yml"
     cp "$EAS_CONFIG" "$tmp/mobile/eas.json"
+    cp "$PACKAGE_JSON" "$tmp/mobile/package.json"
   }
   expect_rejection() {
     local label=$1
@@ -323,6 +363,23 @@ self_test() {
   copy_fixture
   sed -i.bak 's/--profile production/--profile preview/' "$tmp/.github/workflows/android-release.yml"
   expect_rejection wrong-aab-profile
+  copy_fixture
+  sed -i.bak 's/eas-cli@22\.0\.0/eas-cli/' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection unpinned-eas-cli
+  copy_fixture
+  sed -i.bak 's/release-apk-build\.json"/release-apk-build.json" --local/' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection noncanonical-pinned-eas-command
+  copy_fixture
+  sed -i.bak 's/npx --yes eas-cli@22\.0\.0/npm exec eas --/' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection project-local-eas-cli-invocation
+  copy_fixture
+  jq '.devDependencies["eas-cli"] = "22.0.0"' "$tmp/mobile/package.json" > "$tmp/mobile/package.tmp"
+  mv "$tmp/mobile/package.tmp" "$tmp/mobile/package.json"
+  expect_rejection project-local-eas-cli-dependency
+  copy_fixture
+  jq '.scripts["build:dev"] = "eas build --profile development --platform android --local"' "$tmp/mobile/package.json" > "$tmp/mobile/package.tmp"
+  mv "$tmp/mobile/package.tmp" "$tmp/mobile/package.json"
+  expect_rejection unpinned-development-build-script
   copy_fixture
   sed -i.bak 's/contents: read/contents: write/' "$tmp/.github/workflows/android-release.yml"
   expect_rejection write-permission

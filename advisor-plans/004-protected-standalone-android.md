@@ -51,7 +51,7 @@ root.
 
 | Purpose | Command | Expected on success |
 |---|---|---|
-| Config validation | `cd mobile && npx eas-cli config --platform android --profile release-apk --non-interactive` | exit 0 and resolved profile is release APK |
+| Config validation | `cd mobile && npx --yes eas-cli@22.0.0 config --platform android --profile release-apk --non-interactive` | exit 0 and resolved profile is release APK |
 | Type/UI host | `cd mobile && npm run typecheck && npm test -- --runInBand` | exit 0 |
 | Verifier fixtures | `./scripts/verify-release-evidence.sh --self-test` | prints passed |
 | Standalone verifier fixtures | `./scripts/verify-standalone-android.sh --self-test` | all negative and positive fixtures pass |
@@ -65,7 +65,8 @@ attestation credentials. Never run it with secrets echoed or shell tracing.
 **In scope**:
 
 - `mobile/eas.json`
-- `mobile/package.json` and lockfile only if pinning `eas-cli` locally is needed
+- `mobile/package.json` and lockfile only to ensure `eas-cli` is not installed
+  locally; protected commands use the pinned ephemeral CLI
 - create `scripts/verify-standalone-android.sh`
 - create `.github/workflows/android-release.yml` or an equivalent protected EAS
   workflow
