@@ -115,7 +115,7 @@ class CallStateCoordinator(
             }
             lastFrameworkState = frameworkState
             sequence += 1L
-            CallStateEvent(
+            val event = CallStateEvent(
                 callSessionId = requireNotNull(sessionId),
                 state = when (frameworkState) {
                     CallFrameworkState.RINGING -> "ringing"
@@ -125,14 +125,19 @@ class CallStateCoordinator(
                 direction = direction,
                 sequence = sequence,
             )
+            if (frameworkState == CallFrameworkState.IDLE) {
+                sessionId = null
+                lastFrameworkState = null
+                direction = CallDirection.UNKNOWN
+                sequence = 0L
+            }
+            event
         }
         val queued = synchronized(lock) { pendingEmits.isNotEmpty() }
         if (queued) {
             enqueuePending(event)
         } else if (!deliver(event)) {
             enqueuePending(event)
-        } else {
-            finalizeEvent(event)
         }
         return event
     }
@@ -158,17 +163,16 @@ class CallStateCoordinator(
                 scheduleRetry()
                 return false
             }
-            finalizeEvent(next)
         }
     }
 
     private fun enqueuePending(event: CallStateEvent) {
         synchronized(lock) {
             if (pendingEmits.size >= MAX_PENDING_EVENTS) {
-                // Keep the queue bounded under a broken sink. Preserve the terminal idle event and
-                // retain the newest state; intermediate callbacks are explicitly latest-state
-                // coalesced only after the safety bound is reached.
-                val retainedIdle = pendingEmits.lastOrNull { it.state == "idle" }
+                // Keep the queue bounded under a broken sink. Preserve the oldest terminal idle
+                // barrier before retaining the newest state; intermediate callbacks are explicitly
+                // latest-state coalesced only after the safety bound is reached.
+                val retainedIdle = pendingEmits.firstOrNull { it.state == "idle" }
                 pendingEmits.clear()
                 if (retainedIdle != null) pendingEmits.addLast(retainedIdle)
             }
@@ -195,16 +199,6 @@ class CallStateCoordinator(
                         scheduleRetry()
                     }
                 }
-            }
-        }
-    }
-
-    private fun finalizeEvent(event: CallStateEvent) {
-        if (event.state == "idle") {
-            synchronized(lock) {
-                sessionId = null
-                lastFrameworkState = CallFrameworkState.IDLE
-                direction = CallDirection.UNKNOWN
             }
         }
     }
