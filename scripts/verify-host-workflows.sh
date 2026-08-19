@@ -23,6 +23,54 @@ require_occurrences() {
   }
 }
 
+require_mobile_typecheck_runs() {
+  local workflow=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    BEGIN {
+      expected[1] = "npm ci"
+      expected[2] = "npx tsc --noEmit"
+      expected[3] = "npm test -- --runInBand"
+      expected[4] = "npx expo-doctor"
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (trim(code) == "") next
+
+      if (code ~ /^  typecheck:[ \t]*$/) {
+        typecheck_jobs++
+        in_typecheck = 1
+        next
+      }
+      if (in_typecheck && code ~ /^  [^ \t#][^:]*:/) {
+        in_typecheck = 0
+        next
+      }
+      if (in_typecheck) {
+        entry = trim(code)
+        if (entry ~ /^- run:[ \t]*/) {
+          command = entry
+          sub(/^- run:[ \t]*/, "", command)
+          observed++
+          if (observed > 4 || command != expected[observed]) invalid = 1
+        }
+      }
+    }
+    END {
+      if (typecheck_jobs != 1 || observed != 4) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$workflow" || {
+    echo "mobile typecheck job must run npm ci, typecheck, Jest, and Expo Doctor exactly once and in order" >&2
+    exit 1
+  }
+}
+
 require_pinned_actions() {
   local workflow=$1
   local action_count pinned_count
@@ -246,7 +294,7 @@ require_mobile_verify_recipe() {
 [[ -f "$E2E_WORKFLOW" ]] || { echo "E2E host workflow missing: $E2E_WORKFLOW" >&2; exit 1; }
 [[ -f "$MAKEFILE" ]] || { echo "Makefile missing: $MAKEFILE" >&2; exit 1; }
 
-require_literal "$MOBILE_WORKFLOW" 'npm test -- --runInBand' 'mobile PR workflow must run all Jest tests'
+require_mobile_typecheck_runs "$MOBILE_WORKFLOW"
 require_occurrences "$MOBILE_WORKFLOW" "'e2e/**'" 2 'mobile push and PR workflows must cover E2E changes'
 require_occurrences "$MOBILE_WORKFLOW" "'scripts/verify-offline-pairing-evidence.sh'" 2 'mobile push and PR workflows must cover offline evidence verifier changes'
 require_occurrences "$MOBILE_WORKFLOW" "'scripts/verify-release-evidence.sh'" 2 'mobile push and PR workflows must cover release evidence verifier changes'

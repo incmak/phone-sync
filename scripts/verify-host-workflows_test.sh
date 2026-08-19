@@ -36,6 +36,35 @@ sed -i.bak '/npm test -- --runInBand/d' "$tmp/.github/workflows/mobile.yml"
 expect_rejection 'missing mobile Jest'
 
 copy_workflows
+awk '/^[[:space:]]*- run: npm test -- --runInBand$/ { print "      # - run: npm test -- --runInBand"; next } { print }' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'commented mobile Jest cannot satisfy typecheck job'
+
+copy_workflows
+awk '
+  /^[[:space:]]*- run: npm test -- --runInBand$/ { print "      # - run: npm test -- --runInBand"; next }
+  $0 == "  native-android:" { in_native = 1 }
+  in_native && $0 == "      - run: npm ci" { print; print "      - run: npm test -- --runInBand"; in_native = 0; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'Jest in another job cannot satisfy typecheck job'
+
+copy_workflows
+awk '
+  $0 == "      - run: npx tsc --noEmit" { typecheck = $0; next }
+  $0 == "      - run: npm test -- --runInBand" { print; print typecheck; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'typecheck must precede Jest in mobile typecheck job'
+
+copy_workflows
+awk '/^[[:space:]]*- run: npm test -- --runInBand$/ { print; print; next } { print }' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'mobile typecheck job must not duplicate Jest'
+
+copy_workflows
 sed -i.bak 's/e2e\/\*\*/not-e2e\/\*\*/g' "$tmp/.github/workflows/mobile.yml"
 expect_rejection 'mobile paths omit E2E changes'
 
