@@ -8,11 +8,15 @@ on:
       - 'Makefile'
       - 'scripts/verify-offline-pairing-evidence.sh'
       - 'scripts/verify-release-evidence.sh'
+      - 'scripts/verify-standalone-android.sh'
+      - 'scripts/verify-android-release-workflow.sh'
+      - 'scripts/verify-android-release_test.sh'
       - 'scripts/verify-host-workflows.sh'
       - 'scripts/verify-host-workflows_test.sh'
       - '.github/workflows/e2e-host.yml'
       - '.github/workflows/e2e-android.yml'
       - '.github/workflows/mobile.yml'
+      - '.github/workflows/android-release.yml'
   pull_request:
     paths:
       - 'e2e/**'
@@ -20,11 +24,15 @@ on:
       - 'Makefile'
       - 'scripts/verify-offline-pairing-evidence.sh'
       - 'scripts/verify-release-evidence.sh'
+      - 'scripts/verify-standalone-android.sh'
+      - 'scripts/verify-android-release-workflow.sh'
+      - 'scripts/verify-android-release_test.sh'
       - 'scripts/verify-host-workflows.sh'
       - 'scripts/verify-host-workflows_test.sh'
       - '.github/workflows/e2e-host.yml'
       - '.github/workflows/e2e-android.yml'
       - '.github/workflows/mobile.yml'
+      - '.github/workflows/android-release.yml'
 
 permissions:
   contents: read
@@ -49,6 +57,8 @@ jobs:
         run: ./scripts/verify-offline-pairing-evidence.sh --self-test
       - name: Verify release evidence verifier
         run: ./scripts/verify-release-evidence.sh --self-test
+      - name: Verify protected Android release contracts
+        run: ./scripts/verify-android-release_test.sh
       - name: Verify host workflow contracts
         run: ./scripts/verify-host-workflows.sh
       - name: Run host workflow verifier self-test

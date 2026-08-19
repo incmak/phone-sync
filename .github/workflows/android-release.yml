@@ -1,0 +1,148 @@
+name: protected-android-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['android-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-android-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build signed APK and AAB
+    runs-on: ubuntu-latest
+    environment: android-release
+    timeout-minutes: 120
+    env:
+      EAS_TOKEN: ${{ secrets.EAS_TOKEN }}
+      EXPECTED_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
+      RELEASE_ATTESTATION_PRIVATE_KEY: ${{ secrets.RELEASE_ATTESTATION_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+        working-directory: mobile
+      - name: Verify exact source and host contract
+        run: make host-verify
+      - name: Verify protected release workflow contract
+        run: ./scripts/verify-android-release-workflow.sh
+      - name: Capture exact release commit
+        run: |
+          set -Eeuo pipefail
+          RELEASE_COMMIT=$(git rev-parse HEAD)
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          git diff --exit-code
+          git diff --cached --exit-code
+          printf 'RELEASE_COMMIT=%s\n' "$RELEASE_COMMIT" >> "$GITHUB_ENV"
+      - name: Require protected inputs
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$EAS_TOKEN" ]]
+          [[ "$EXPECTED_RELEASE_CERT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]
+          [[ -n "$RELEASE_ATTESTATION_PRIVATE_KEY" ]]
+      - name: Build installable release APK at exact commit
+        working-directory: mobile
+        run: |
+          set -Eeuo pipefail
+          npm exec eas -- build --platform android --profile release-apk --non-interactive --wait --json > "$RUNNER_TEMP/release-apk-build.json"
+      - name: Build Play AAB at exact commit
+        working-directory: mobile
+        run: |
+          set -Eeuo pipefail
+          npm exec eas -- build --platform android --profile production --non-interactive --wait --json > "$RUNNER_TEMP/production-build.json"
+      - name: Download exact EAS artifacts
+        run: |
+          set -Eeuo pipefail
+          RELEASE_DIR="$RUNNER_TEMP/twinotify-release"
+          mkdir -p "$RELEASE_DIR"
+          extract_build() {
+            local source=$1 expected_profile=$2
+            jq -er --arg commit "$RELEASE_COMMIT" --arg profile "$expected_profile" '
+              (if type == "array" then .[0] else . end) |
+              select(.status == "FINISHED") |
+              select(.gitCommitHash == $commit) |
+              select(.buildProfile == $profile)
+            ' "$source"
+          }
+          extract_build "$RUNNER_TEMP/release-apk-build.json" release-apk > "$RUNNER_TEMP/release-apk-verified.json"
+          extract_build "$RUNNER_TEMP/production-build.json" production > "$RUNNER_TEMP/production-verified.json"
+          APK_URL=$(jq -er '.artifacts.buildUrl // .artifacts.applicationArchiveUrl' "$RUNNER_TEMP/release-apk-verified.json")
+          AAB_URL=$(jq -er '.artifacts.buildUrl // .artifacts.applicationArchiveUrl' "$RUNNER_TEMP/production-verified.json")
+          [[ "$APK_URL" == https://* && "$AAB_URL" == https://* ]]
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output "$RELEASE_DIR/app-release.apk" "$APK_URL"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --output "$RELEASE_DIR/app-release.aab" "$AAB_URL"
+          unzip -tq "$RELEASE_DIR/app-release.apk" >/dev/null
+          unzip -tq "$RELEASE_DIR/app-release.aab" >/dev/null
+      - name: Create provenance from artifact bytes
+        run: |
+          set -Eeuo pipefail
+          RELEASE_DIR="$RUNNER_TEMP/twinotify-release"
+          APK_SHA=$(sha256sum "$RELEASE_DIR/app-release.apk" | awk '{print $1}')
+          AAB_SHA=$(sha256sum "$RELEASE_DIR/app-release.aab" | awk '{print $1}')
+          APK_BUILD_ID=$(jq -er '.id' "$RUNNER_TEMP/release-apk-verified.json")
+          AAB_BUILD_ID=$(jq -er '.id' "$RUNNER_TEMP/production-verified.json")
+          jq -n \
+            --arg commit "$RELEASE_COMMIT" \
+            --arg app "$APK_SHA" \
+            --arg aab "$AAB_SHA" \
+            --arg apk_build_id "$APK_BUILD_ID" \
+            --arg aab_build_id "$AAB_BUILD_ID" \
+            '{git_commit:$commit,app_sha256:$app,aab_sha256:$aab,release_apk_build_id:$apk_build_id,production_build_id:$aab_build_id,release_apk_profile:"release-apk",production_profile:"production"}' \
+            > "$RELEASE_DIR/app-provenance.json"
+      - name: Verify standalone APK
+        run: |
+          set -Eeuo pipefail
+          RELEASE_DIR="$RUNNER_TEMP/twinotify-release"
+          ./scripts/verify-standalone-android.sh \
+            --apk "$RELEASE_DIR/app-release.apk" \
+            --provenance "$RELEASE_DIR/app-provenance.json" \
+            --expected-cert-sha256 "$EXPECTED_RELEASE_CERT_SHA256" \
+            --expected-commit "$RELEASE_COMMIT"
+      - name: Sign release attestation
+        run: |
+          set -Eeuo pipefail
+          RELEASE_DIR="$RUNNER_TEMP/twinotify-release"
+          PRIVATE_KEY="$RUNNER_TEMP/release-attestation-private.pem"
+          DERIVED_PUBLIC_KEY="$RUNNER_TEMP/release-attestation-public.pem"
+          printf '%s' "$RELEASE_ATTESTATION_PRIVATE_KEY" > "$PRIVATE_KEY"
+          chmod 600 "$PRIVATE_KEY"
+          openssl pkey -in "$PRIVATE_KEY" -pubout -out "$DERIVED_PUBLIC_KEY" >/dev/null
+          DERIVED_SHA=$(openssl pkey -pubin -in "$DERIVED_PUBLIC_KEY" -outform DER | sha256sum | awk '{print $1}')
+          PINNED_SHA=$(openssl pkey -pubin -in docs/release-evidence/attestation-public.pem -outform DER | sha256sum | awk '{print $1}')
+          [[ "$DERIVED_SHA" == "$PINNED_SHA" ]]
+          APK_SHA=$(jq -er '.app_sha256' "$RELEASE_DIR/app-provenance.json")
+          AAB_SHA=$(jq -er '.aab_sha256' "$RELEASE_DIR/app-provenance.json")
+          jq -n \
+            --arg app "$APK_SHA" \
+            --arg aab "$AAB_SHA" \
+            --arg commit "$RELEASE_COMMIT" \
+            --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{app_sha256:$app,aab_sha256:$aab,app_git_commit:$commit,relay_git_commit:$commit,e2e_git_commit:$commit,generated_at:$generated_at}' \
+            > "$RELEASE_DIR/app-attestation.json"
+          openssl dgst -sha256 -sign "$PRIVATE_KEY" -out "$RELEASE_DIR/app-attestation.sig" "$RELEASE_DIR/app-attestation.json"
+          openssl dgst -sha256 -verify docs/release-evidence/attestation-public.pem -signature "$RELEASE_DIR/app-attestation.sig" "$RELEASE_DIR/app-attestation.json" >/dev/null
+          rm -f "$PRIVATE_KEY" "$DERIVED_PUBLIC_KEY"
+      - name: Upload protected Android release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: twinotify-android-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/twinotify-release/app-release.apk
+            ${{ runner.temp }}/twinotify-release/app-release.aab
+            ${{ runner.temp }}/twinotify-release/app-provenance.json
+            ${{ runner.temp }}/twinotify-release/app-attestation.json
+            ${{ runner.temp }}/twinotify-release/app-attestation.sig
+          if-no-files-found: error
+          retention-days: 14

@@ -1,5 +1,8 @@
 {
-  "cli": { "version": ">= 10.0.0" },
+  "cli": {
+    "version": "22.0.0",
+    "appVersionSource": "local"
+  },
   "build": {
     "development": {
       "developmentClient": true,
@@ -10,6 +13,17 @@
       "distribution": "internal",
       "android": { "buildType": "apk" }
     },
-    "production": {}
+    "release-apk": {
+      "developmentClient": false,
+      "distribution": "internal",
+      "environment": "production",
+      "android": { "buildType": "apk" }
+    },
+    "production": {
+      "developmentClient": false,
+      "distribution": "store",
+      "environment": "production",
+      "android": { "buildType": "app-bundle" }
+    }
   }
 }

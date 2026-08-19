@@ -5,6 +5,77 @@ directory outside the repository, or in an ignored location, and do not paste
 device identifiers, notification text, keys, tokens, contacts, or raw logcat
 into a report or issue.
 
+## Protected Android candidate
+
+The `protected-android-release` workflow is the only repository workflow that
+produces a release candidate. It runs only from an `android-v*` tag or a manual
+dispatch and requires approval for the `android-release` environment. Configure
+that environment with these protected values:
+
+- `EAS_TOKEN`: an Expo token authorized to build this project;
+- `ANDROID_RELEASE_CERT_SHA256`: the expected certificate fingerprint for the
+  stable `com.twinotify.app` signing identity, as 64 hex characters;
+- `RELEASE_ATTESTATION_PRIVATE_KEY`: the PEM private key matching the committed
+  `attestation-public.pem` trust root.
+
+The workflow builds `release-apk` and `production` from the same checkout. The
+first is an internally distributed, non-development APK with its JavaScript
+bundle embedded, so it starts without Metro. The second is the store AAB. Both
+profiles use the EAS `production` environment and local app-version source.
+EAS-managed or protected external Android credentials must preserve the
+existing signing identity. The workflow never submits either artifact.
+
+Before approving a run, confirm that the tag points to the intended full commit
+and that the repository host gates pass. The committed Expo config must already
+be linked to the intended EAS project, and the local version in `app.json` must
+be advanced deliberately before a new store release. Do not let a protected run
+create or relink the project because that would change the build input outside
+the attested commit. After the run:
+
+1. Download the `twinotify-android-<commit>` artifact into a fresh private
+   directory. Keep `app-release.apk`, `app-release.aab`,
+   `app-provenance.json`, `app-attestation.json`, and
+   `app-attestation.sig` together.
+2. Verify the APK again using the protected certificate value and exact commit:
+
+   ```bash
+   ./scripts/verify-standalone-android.sh \
+     --apk /private/candidate/app-release.apk \
+     --provenance /private/candidate/app-provenance.json \
+     --expected-cert-sha256 "$ANDROID_RELEASE_CERT_SHA256" \
+     --expected-commit "$(git rev-parse HEAD)"
+   ```
+
+3. Install that APK on both approved release devices with Metro stopped. Do not
+   use the AAB for direct device installation.
+4. Collect the private physical scenarios described below. Copy only the
+   allowlisted sanitized artifacts into a new evidence directory. Place the
+   protected candidate files at the manifest paths, including
+   `artifacts/app-release.apk`, `artifacts/app-provenance.json`,
+   `artifacts/app-attestation.json`, and `artifacts/app-attestation.sig`.
+5. From the exact candidate commit, run:
+
+   ```bash
+   make release-audit RELEASE_EVIDENCE_DIR=/private/path/to/evidence
+   ```
+
+The protected build creates a candidate, not a physical test result. The audit
+still rejects absent `all-correctness`, stress, capacity, battery, OEM, network,
+or other physical evidence.
+
+Host-only release contract checks are safe to run without credentials:
+
+```bash
+./scripts/verify-android-release_test.sh
+./scripts/verify-release-evidence.sh --self-test
+```
+
+Resolving EAS configuration itself requires an Expo account. In CI, the
+protected environment supplies that authority. The current checkout is not yet
+linked to an EAS project, so an authorized owner must establish and commit that
+link before the first approved build. Never add a credential bypass, commit a
+keystore, or copy a protected fingerprint from the artifact being verified.
+
 ## Gate
 
 Run the verifier against one candidate directory:

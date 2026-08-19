@@ -85,6 +85,14 @@ sed -i.bak 's/verify-release-evidence\.sh --self-test/verify-release-evidence.sh
 expect_rejection 'missing release evidence self-test'
 
 copy_workflows
+sed -i.bak '/verify-android-release_test\.sh/d' "$tmp/.github/workflows/e2e-host.yml"
+expect_rejection 'missing protected Android release contract test'
+
+copy_workflows
+sed -i.bak "s#\.github/workflows/android-release\.yml#.github/workflows/not-android-release.yml#g" "$tmp/.github/workflows/e2e-host.yml"
+expect_rejection 'E2E host paths omit protected Android release workflow changes'
+
+copy_workflows
 sed -i.bak 's/contents: read/contents: write/' "$tmp/.github/workflows/e2e-host.yml"
 expect_rejection 'write permission'
 

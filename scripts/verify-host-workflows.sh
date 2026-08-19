@@ -149,6 +149,7 @@ require_approved_run_commands() {
       approved["./e2e/scripts/preflight_test.sh"] = 1
       approved["./scripts/verify-offline-pairing-evidence.sh --self-test"] = 1
       approved["./scripts/verify-release-evidence.sh --self-test"] = 1
+      approved["./scripts/verify-android-release_test.sh"] = 1
       approved["./scripts/verify-host-workflows.sh"] = 1
       approved["./scripts/verify-host-workflows_test.sh"] = 1
     }
@@ -216,9 +217,10 @@ require_host_verify_recipe() {
       expected[7] = "./e2e/scripts/preflight_test.sh"
       expected[8] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
       expected[9] = "./scripts/verify-release-evidence.sh --self-test"
-      expected[10] = "./scripts/verify-host-workflows.sh"
-      expected[11] = "./scripts/verify-host-workflows_test.sh"
-      expected[12] = "./scripts/verify-generated-clean.sh"
+      expected[10] = "./scripts/verify-android-release_test.sh"
+      expected[11] = "./scripts/verify-host-workflows.sh"
+      expected[12] = "./scripts/verify-host-workflows_test.sh"
+      expected[13] = "./scripts/verify-generated-clean.sh"
     }
     $0 ~ /^host-verify:[ \t]*proto-test[ \t]*$/ {
       target_count++
@@ -234,11 +236,11 @@ require_host_verify_recipe() {
         recipe = trim($0)
         if (recipe == "" || recipe ~ /^#/) next
         observed++
-        if (observed > 12 || recipe != expected[observed]) invalid = 1
+        if (observed > 13 || recipe != expected[observed]) invalid = 1
       }
     }
     END {
-      if (target_count != 1 || observed != 12) invalid = 1
+      if (target_count != 1 || observed != 13) invalid = 1
       exit invalid ? 1 : 0
     }
   ' "$makefile" || {
@@ -303,6 +305,10 @@ require_occurrences "$MOBILE_WORKFLOW" "'.github/workflows/e2e-host.yml'" 2 'mob
 require_literal "$E2E_WORKFLOW" 'push:' 'E2E host workflow must trigger on push'
 require_literal "$E2E_WORKFLOW" 'pull_request:' 'E2E host workflow must trigger on pull requests'
 require_occurrences "$E2E_WORKFLOW" "'.github/workflows/mobile.yml'" 2 'E2E host push and PR workflows must cover mobile workflow changes'
+require_occurrences "$E2E_WORKFLOW" "'.github/workflows/android-release.yml'" 2 'E2E host push and PR workflows must cover Android release workflow changes'
+require_occurrences "$E2E_WORKFLOW" "'scripts/verify-standalone-android.sh'" 2 'E2E host push and PR workflows must cover standalone Android verifier changes'
+require_occurrences "$E2E_WORKFLOW" "'scripts/verify-android-release-workflow.sh'" 2 'E2E host push and PR workflows must cover Android release workflow verifier changes'
+require_occurrences "$E2E_WORKFLOW" "'scripts/verify-android-release_test.sh'" 2 'E2E host push and PR workflows must cover Android release verifier tests'
 require_read_only_permissions "$E2E_WORKFLOW"
 require_pinned_actions "$E2E_WORKFLOW"
 for command in \
@@ -312,6 +318,7 @@ for command in \
   './e2e/scripts/preflight_test.sh' \
   './scripts/verify-offline-pairing-evidence.sh --self-test' \
   './scripts/verify-release-evidence.sh --self-test' \
+  './scripts/verify-android-release_test.sh' \
   './scripts/verify-host-workflows_test.sh'; do
   require_literal "$E2E_WORKFLOW" "$command" "E2E host workflow is missing required command: $command"
 done
