@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/twinotify/phone-sync/e2e/internal/adb"
@@ -111,6 +112,11 @@ func splitAction(raw string) []string {
 }
 
 func knownPredicate(predicate string) bool {
+	for _, prefix := range []string{"B.mirror.active:", "B.mirror.absent:", "B.no-resurrection:", "A.source.absent:"} {
+		if strings.HasPrefix(predicate, prefix) {
+			return strings.TrimPrefix(predicate, prefix) != ""
+		}
+	}
 	switch predicate {
 	case "terminal.converged", "A.outbox.zero", "A.outbox.nonzero", "B.mirror.active:n1", "B.mirror.absent:n1", "B.mirror.sequence:3", "B.no-resurrection:n1", "B.health.connected", "B.health.offline", "A.source.absent:n1", "B.user-dismiss.reason":
 		return true
@@ -122,6 +128,17 @@ func knownPredicate(predicate string) bool {
 // ValidateExecutablePlan performs all plan parsing before a bridge is created or
 // contacted. It is intentionally shared by the CLI and Executor.
 func ValidateExecutablePlan(plan ScenarioPlan) error {
+	if len(plan.Children) != 0 {
+		if len(plan.Steps) != 0 {
+			return errors.New("aggregate scenario cannot contain direct steps")
+		}
+		for _, child := range plan.Children {
+			if err := ValidateExecutablePlan(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for _, step := range plan.Steps {
 		if step.Action != "" {
 			a, err := parseAction(step.Action)
@@ -175,22 +192,39 @@ func (e *Executor) Run(ctx context.Context, name string) error {
 // RunResult records only action identifiers and provider snapshots. Notification
 // text is intentionally absent from the result so it can be retained as evidence.
 func (e *Executor) RunResult(ctx context.Context, name string) (result ScenarioResult, runErr error) {
-	result = ScenarioResult{Scenario: name, Status: "failed", Before: map[string]Observation{}, After: map[string]Observation{}}
 	plan, err := Plan(name)
 	if err != nil {
-		result.ErrorCode = errorCode(err)
+		result = failedResult(name, err)
 		return result, err
 	}
+	return e.runPlan(ctx, plan)
+}
+
+func failedResult(name string, err error) ScenarioResult {
+	return ScenarioResult{Scenario: name, Status: "failed", Before: map[string]Observation{}, After: map[string]Observation{}, ErrorCode: errorCode(err)}
+}
+
+func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result ScenarioResult, runErr error) {
+	result = ScenarioResult{Scenario: plan.Name, Status: "failed", Before: map[string]Observation{}, After: map[string]Observation{}}
 	if err := ValidateExecutablePlan(plan); err != nil {
 		result.ErrorCode = errorCode(err)
 		return result, err
 	}
+	if len(plan.Children) != 0 {
+		return e.runAggregate(ctx, plan)
+	}
 	defer func() {
+		var finalSnapshotErr error
 		for _, device := range []string{"A", "B"} {
 			state, err := e.bridge.Snapshot(context.WithoutCancel(ctx), device)
 			if err == nil {
 				result.After[device] = state
+			} else if finalSnapshotErr == nil {
+				finalSnapshotErr = fmt.Errorf("scenario terminal snapshot %s: %w", device, err)
 			}
+		}
+		if runErr == nil && finalSnapshotErr != nil {
+			runErr = finalSnapshotErr
 		}
 		if runErr != nil {
 			result.ErrorCode = errorCode(runErr)
@@ -203,7 +237,7 @@ func (e *Executor) RunResult(ctx context.Context, name string) (result ScenarioR
 		if snapshotErr != nil {
 			return result, fmt.Errorf("scenario baseline %s: %w", device, snapshotErr)
 		}
-		e.baseline[device] = state.Canonical
+		e.baseline[device] = cloneCanonical(state.Canonical)
 		result.Before[device] = state
 	}
 	for _, step := range plan.Steps {
@@ -214,16 +248,43 @@ func (e *Executor) RunResult(ctx context.Context, name string) (result ScenarioR
 			}
 			result.Events = append(result.Events, a.eventID())
 			if err := e.action(ctx, step.Action); err != nil {
-				return result, fmt.Errorf("%s action %s: %w", name, step.Action, err)
+				return result, fmt.Errorf("%s action %s: %w", plan.Name, step.Action, err)
 			}
 		}
 		if step.Predicate != "" {
 			result.Events = append(result.Events, "predicate:"+step.Predicate)
-			if err := e.waitPredicate(ctx, name, step.Predicate); err != nil {
+			if err := e.waitPredicate(ctx, plan.Name, step.Predicate); err != nil {
 				return result, err
 			}
 		}
 	}
+	return result, nil
+}
+
+func cloneCanonical(value map[string]string) map[string]string {
+	clone := make(map[string]string, len(value))
+	for key, state := range value {
+		clone[key] = state
+	}
+	return clone
+}
+
+func (e *Executor) runAggregate(ctx context.Context, plan ScenarioPlan) (ScenarioResult, error) {
+	result := ScenarioResult{Scenario: plan.Name, Status: "failed", Before: map[string]Observation{}, After: map[string]Observation{}}
+	for index, child := range plan.Children {
+		childResult, err := NewExecutor(e.bridge, e.stepTimeout).runPlan(ctx, child)
+		if index == 0 {
+			result.Before = childResult.Before
+		}
+		result.After = childResult.After
+		result.Events = append(result.Events, "scenario:"+child.Name)
+		result.Events = append(result.Events, childResult.Events...)
+		if err != nil {
+			result.ErrorCode = childResult.ErrorCode
+			return result, err
+		}
+	}
+	result.Status = "passed"
 	return result, nil
 }
 
@@ -265,10 +326,10 @@ func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) er
 }
 
 func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) bool {
-	if predicate == "B.mirror.active:n1" {
+	if strings.HasPrefix(predicate, "B.mirror.active:") {
 		return hasNewActive(e.baseline["B"], b.Canonical)
 	}
-	if predicate == "B.mirror.absent:n1" || predicate == "B.no-resurrection:n1" {
+	if strings.HasPrefix(predicate, "B.mirror.absent:") || strings.HasPrefix(predicate, "B.no-resurrection:") {
 		return !hasNewActive(e.baseline["B"], b.Canonical)
 	}
 	return predicateSatisfied(name, predicate, a, b)

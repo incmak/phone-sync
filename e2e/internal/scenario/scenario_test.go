@@ -18,7 +18,20 @@ type fakeBridge struct {
 	states        map[string]scenario.Observation
 	calls         int
 	pendingOutbox bool
-	postCount     int
+	sequences     map[string]int
+}
+
+type terminalSnapshotFailureBridge struct {
+	*fakeBridge
+	snapshots int
+}
+
+func (f *terminalSnapshotFailureBridge) Snapshot(ctx context.Context, device string) (scenario.Observation, error) {
+	f.snapshots++
+	if f.snapshots >= 10 && device == "B" {
+		return scenario.Observation{}, errors.New("terminal snapshot unavailable")
+	}
+	return f.fakeBridge.Snapshot(ctx, device)
 }
 
 func (f *fakeBridge) Control(_ context.Context, device, name string, _ map[string]string) (control.Result, error) {
@@ -30,11 +43,26 @@ func (f *fakeBridge) Post(_ context.Context, device, tag, text string) error {
 	f.calls++
 	f.events = append(f.events, device+".shell.post:"+tag+":"+text)
 	f.pendingOutbox = true
-	f.postCount++
-	f.states[device] = scenario.Observation{Outbox: 1, Canonical: map[string]string{"new-hash": "ACTIVE"}}
+	if f.sequences == nil {
+		f.sequences = map[string]int{}
+	}
+	f.sequences[tag]++
+	stateA := f.states[device]
+	if stateA.Canonical == nil {
+		stateA.Canonical = map[string]string{}
+	}
+	stateA.Outbox = 1
+	stateA.Canonical[tag] = "ACTIVE"
+	f.states[device] = stateA
 	if device == "A" {
-		health := f.states["B"].Health
-		f.states["B"] = scenario.Observation{Health: health, Canonical: map[string]string{"new-hash": "ACTIVE"}, Mirror: true, Sequence: f.postCount}
+		stateB := f.states["B"]
+		if stateB.Canonical == nil {
+			stateB.Canonical = map[string]string{}
+		}
+		stateB.Canonical[tag] = "ACTIVE"
+		stateB.Mirror = true
+		stateB.Sequence = highestSequence(f.sequences)
+		f.states["B"] = stateB
 	}
 	return nil
 }
@@ -42,17 +70,35 @@ func (f *fakeBridge) Cancel(_ context.Context, device, tag string) error {
 	f.calls++
 	f.events = append(f.events, device+".shell.cancel:"+tag)
 	f.pendingOutbox = true
-	f.states["B"] = scenario.Observation{Health: f.states["B"].Health, Canonical: map[string]string{}}
+	stateB := f.states["B"]
+	delete(stateB.Canonical, tag)
+	stateB.Mirror = len(stateB.Canonical) != 0
+	f.states["B"] = stateB
 	return nil
 }
 func (f *fakeBridge) SetNetwork(_ context.Context, device string, enabled bool) error {
 	f.calls++
 	f.events = append(f.events, device+".network")
-	f.states[device] = scenario.Observation{Health: map[bool]string{true: "connected", false: "offline"}[enabled]}
+	state := f.states[device]
+	state.Health = map[bool]string{true: "connected", false: "offline"}[enabled]
+	f.states[device] = state
 	if device == "B" && enabled {
-		f.states[device] = scenario.Observation{Health: "connected", Canonical: map[string]string{"new-hash": "ACTIVE"}, Mirror: true}
+		state = f.states[device]
+		state.Mirror = len(state.Canonical) != 0
+		state.Sequence = highestSequence(f.sequences)
+		f.states[device] = state
 	}
 	return nil
+}
+
+func highestSequence(values map[string]int) int {
+	result := 0
+	for _, value := range values {
+		if value > result {
+			result = value
+		}
+	}
+	return result
 }
 func (f *fakeBridge) ForceStop(_ context.Context, device string) error {
 	f.calls++
@@ -149,6 +195,17 @@ func TestCoreCorrectnessContainsOnlyExecutableActions(t *testing.T) {
 	}
 }
 
+func TestCoreCorrectnessRunsIndependentTaggedScenarios(t *testing.T) {
+	bridge := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
+	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "core-correctness")
+	if err != nil || result.Status != "passed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if !contains(bridge.events, "A.shell.post:n-core-update:v1") {
+		t.Fatalf("core scenario did not isolate update tag: %v", bridge.events)
+	}
+}
+
 func TestResultEvidenceIsDerivedFromObservedSnapshots(t *testing.T) {
 	bridge := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
 	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "offline")
@@ -195,6 +252,25 @@ func TestUnsupportedScenarioWritesFailedEvidenceOnly(t *testing.T) {
 	}
 	if strings.Contains(string(state), `"passed"`) || !strings.Contains(string(state), `"failed"`) {
 		t.Fatalf("unsupported scenario evidence=%s", state)
+	}
+}
+
+func TestTerminalSnapshotFailureNeverProducesPassedEvidence(t *testing.T) {
+	bridge := &terminalSnapshotFailureBridge{fakeBridge: &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}}
+	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "post")
+	if err == nil || result.Status != "failed" || result.ErrorCode != "execution_failed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	dir := t.TempDir()
+	if err := scenario.WriteEvidenceArtifacts(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	state, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(state), `"passed"`) || !strings.Contains(string(state), `"execution_failed"`) {
+		t.Fatalf("terminal snapshot failure evidence=%s", state)
 	}
 }
 
@@ -301,4 +377,13 @@ func equal(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

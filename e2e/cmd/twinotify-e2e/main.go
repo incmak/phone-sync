@@ -70,6 +70,12 @@ func runWithOptions(ctx context.Context, cfg options) error {
 		return fmt.Errorf("invalid Android package: %w", err)
 	}
 	if err := validateScenarioBeforeADB(cfg.scenario); err != nil {
+		if cfg.scenarioEvidenceDir != "" {
+			result := scenario.ScenarioResult{Scenario: cfg.scenario, Status: "failed", Before: map[string]scenario.Observation{}, After: map[string]scenario.Observation{}, ErrorCode: scenario.ErrorCode(err)}
+			if evidenceErr := scenario.WriteEvidenceArtifacts(cfg.scenarioEvidenceDir, result); evidenceErr != nil {
+				return fmt.Errorf("%w; write scenario evidence: %v", err, evidenceErr)
+			}
+		}
 		return err
 	}
 	if strings.TrimSpace(cfg.serialA) == "" || strings.TrimSpace(cfg.serialB) == "" || cfg.serialA == cfg.serialB {

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -101,6 +103,34 @@ func TestCLIRejectsUnsupportedScenarioBeforeADB(t *testing.T) {
 	err := validateScenarioBeforeADB("all-correctness")
 	if !errors.Is(err, scenario.ErrUnsupportedEnvironment) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCLIPreflightFailuresWriteFailedEvidenceBeforeADB(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code string
+	}{
+		{name: "all-correctness", code: "unsupported_environment"},
+		{name: "not-real", code: "invalid_scenario"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			err := runWithOptions(context.Background(), options{
+				scenario: tc.name, serialA: "phone-a", serialB: "phone-b", packageName: "com.twinotify.app",
+				timeout: time.Second, scenarioEvidenceDir: dir,
+			})
+			if err == nil {
+				t.Fatal("expected preflight failure")
+			}
+			state, readErr := os.ReadFile(filepath.Join(dir, "state.json"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !strings.Contains(string(state), `"failed"`) || !strings.Contains(string(state), `"`+tc.code+`"`) {
+				t.Fatalf("state=%s", state)
+			}
+		})
 	}
 }
 

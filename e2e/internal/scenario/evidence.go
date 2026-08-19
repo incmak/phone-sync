@@ -19,7 +19,7 @@ type ScenarioResult struct {
 	ErrorCode string                 `json:"error_code,omitempty"`
 }
 
-func errorCode(err error) string {
+func ErrorCode(err error) string {
 	if err == nil {
 		return ""
 	}
@@ -32,6 +32,8 @@ func errorCode(err error) string {
 	}
 	return "execution_failed"
 }
+
+func errorCode(err error) string { return ErrorCode(err) }
 
 // WriteEvidenceArtifacts atomically replaces every derived artifact only after
 // successful JSON serialization. Callers can upload these files without

@@ -18,12 +18,16 @@ type Step struct {
 }
 
 type ScenarioPlan struct {
-	Name  string
-	Steps []Step
+	Name     string
+	Steps    []Step
+	Children []ScenarioPlan
 }
 
 func (p ScenarioPlan) Actions() []string {
 	result := make([]string, 0, len(p.Steps))
+	for _, child := range p.Children {
+		result = append(result, child.Actions()...)
+	}
 	for _, step := range p.Steps {
 		if step.Action != "" {
 			result = append(result, step.Action)
@@ -110,11 +114,11 @@ func Plan(name string) (ScenarioPlan, error) {
 		return ScenarioPlan{Name: name, Steps: steps}, nil
 	}
 	if name == "core-correctness" {
-		var steps []Step
+		children := make([]ScenarioPlan, 0, 5)
 		for _, child := range []string{"post", "update", "dismiss-origin", "rapid-post-update-cancel", "offline"} {
-			steps = append(steps, plans[child]...)
+			children = append(children, ScenarioPlan{Name: child, Steps: stepsWithTag(plans[child], "n-core-"+child)})
 		}
-		return ScenarioPlan{Name: name, Steps: steps}, nil
+		return ScenarioPlan{Name: name, Children: children}, nil
 	}
 	steps, ok := plans[name]
 	if !ok {
@@ -122,6 +126,17 @@ func Plan(name string) (ScenarioPlan, error) {
 	}
 	copySteps := append([]Step(nil), steps...)
 	return ScenarioPlan{Name: name, Steps: copySteps}, nil
+}
+
+func stepsWithTag(steps []Step, tag string) []Step {
+	result := make([]Step, len(steps))
+	for index, step := range steps {
+		result[index] = Step{
+			Action:    strings.ReplaceAll(step.Action, "n1", tag),
+			Predicate: strings.ReplaceAll(step.Predicate, "n1", tag),
+		}
+	}
+	return result
 }
 
 type Observation struct {
