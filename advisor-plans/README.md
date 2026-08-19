@@ -31,6 +31,7 @@ are the authoritative implementation path for the user's no-internet sync goal.
 | 006 | Compile Android instrumentation sources in every native gate | P1 | S | 003 | DONE |
 | 007 | Isolate call state from notification anti-entropy | P0 | S | 006 | DONE |
 | 008 | Seal call sessions when terminal idle is observed | P0 | S | 007 | DONE |
+| 009 | Recover orphaned call sessions before capture starts | P0 | M | 008 | TODO |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.
@@ -113,3 +114,9 @@ REJECTED with a one-line rationale.
 - **Evidence**: `CallStateCoordinator` clears its session UUID only in `finalizeEvent()` after idle persistence succeeds. A failed idle followed by a new ringing/off-hook callback therefore reuses the completed UUID at a higher sequence.
 - **Impact**: The receiver can accept the higher sequence and resurrect a terminal call under the old canonical ID.
 - **Effort**: S. **Risk**: MED because queued terminal delivery must not clear a newer session. **Confidence**: HIGH.
+
+### [BUG-05] Recover active call mirrors after process death
+
+- **Evidence**: call UUID/sequence are in-memory, while a locally owned `call:*` canonical row remains ACTIVE until idle and its outbox row commit atomically. `SyncService` currently registers telephony capture without reconciling those durable ACTIVE rows.
+- **Impact**: process death during ringing/active can strand the peer's ongoing call mirror indefinitely, and a restarted physical call can begin without closing the old logical session.
+- **Effort**: M. **Risk**: HIGH because recovery must precede new capture and remain idempotent under stale concurrent commits. **Confidence**: HIGH.
