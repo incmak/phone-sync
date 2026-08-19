@@ -71,6 +71,167 @@ require_mobile_typecheck_runs() {
   }
 }
 
+require_mobile_native_android_runs() {
+  local workflow=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    function normalized_key(value, colon, key, first, last, single_quote) {
+      sub(/^-[ \t]+/, "", value)
+      colon = index(value, ":")
+      if (colon == 0) return ""
+      key = trim(substr(value, 1, colon - 1))
+      first = substr(key, 1, 1)
+      last = substr(key, length(key), 1)
+      single_quote = sprintf("%c", 39)
+      if (length(key) >= 2 && ((first == "\"" && last == "\"") ||
+          (first == single_quote && last == single_quote))) {
+        key = substr(key, 2, length(key) - 2)
+      }
+      return key
+    }
+    function mapping_value(value, colon) {
+      colon = index(value, ":")
+      if (colon == 0) return ""
+      return trim(substr(value, colon + 1))
+    }
+    function supported_step_key(key) {
+      return key == "uses" || key == "run" || key == "name" ||
+             key == "if" || key == "continue-on-error" ||
+             key == "shell" || key == "working-directory"
+    }
+    function unsupported_yaml_syntax(value) {
+      return value ~ /[{}]/ || value ~ /(^|[ \t])[&*!][^ \t]+/ ||
+             value ~ /^(-[ \t]+)?\?[ \t]+/
+    }
+    function finish_step(expected_directory) {
+      if (!step_active) return
+      if (step_required_index > 0) {
+        if (step_shell_count != 0) invalid = 1
+        expected_directory = ""
+        if (step_required_index == 2) expected_directory = "."
+        if (step_required_index == 4) expected_directory = "mobile/android"
+        if (expected_directory == "") {
+          if (step_working_directory_count != 0) invalid = 1
+        } else if (step_working_directory_count != 1 ||
+                   step_working_directory != expected_directory) {
+          invalid = 1
+        }
+      }
+      step_active = 0
+      step_required_index = 0
+      step_shell_count = 0
+      step_working_directory_count = 0
+      step_working_directory = ""
+    }
+    BEGIN {
+      expected[1] = "npm ci"
+      expected[2] = "make sync-proto"
+      expected[3] = "npx expo prebuild --platform android --clean --no-install"
+      expected[4] = "./gradlew --no-daemon lintDebug testDebugUnitTest compileDebugAndroidTestKotlin assembleDebug"
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (trim(code) == "") next
+      indent = indentation(code)
+
+      if (code ~ /^  native-android:[ \t]*$/) {
+        native_jobs++
+        in_native = 1
+        next
+      }
+      if (in_native && code ~ /^  [^ \t#][^:]*:/) {
+        finish_step()
+        in_native = 0
+        next
+      }
+      if (in_native) {
+        entry = trim(code)
+        if (unsupported_yaml_syntax(entry)) invalid = 1
+        entry_key = normalized_key(entry)
+        entry_value = mapping_value(entry)
+
+        if (indent == 4) {
+          in_defaults = (entry_key == "defaults")
+          in_defaults_run = 0
+          if (in_defaults) defaults_count++
+        } else if (in_defaults && indent == 6 && entry !~ /^-[ \t]+/) {
+          if (entry_key == "run") {
+            defaults_run_count++
+            in_defaults_run = 1
+          } else {
+            invalid = 1
+            in_defaults_run = 0
+          }
+        } else if (in_defaults_run && indent == 8) {
+          if (entry_key == "working-directory") {
+            defaults_working_directory_count++
+            defaults_working_directory = entry_value
+          } else {
+            invalid = 1
+          }
+        }
+
+        if (indent == 4 && entry_key == "if") invalid = 1
+        if (indent == 4 && entry_key == "continue-on-error") invalid = 1
+        if (indent == 6 && entry ~ /^-[ \t]+/) {
+          finish_step()
+          step_active = 1
+          step_conditional = 0
+          step_continue = 0
+          if (!supported_step_key(entry_key)) invalid = 1
+          if (entry_key == "if") step_conditional = 1
+          if (entry_key == "continue-on-error") step_continue = 1
+        }
+        if (indent == 8 && entry_key == "if") {
+          step_conditional = 1
+          if (step_required_index > 0) invalid = 1
+        }
+        if (indent == 8 && entry_key == "continue-on-error") {
+          step_continue = 1
+          if (step_required_index > 0) invalid = 1
+        }
+        if (step_active && (indent == 6 || indent == 8) && entry_key == "shell") {
+          step_shell_count++
+        }
+        if (step_active && (indent == 6 || indent == 8) &&
+            entry_key == "working-directory") {
+          step_working_directory_count++
+          step_working_directory = entry_value
+        }
+        if (entry_key == "run" &&
+            ((indent == 6 && entry ~ /^-[ \t]+/) || indent == 8)) {
+          command = entry_value
+          observed++
+          if (observed > 4 || command != expected[observed]) invalid = 1
+          step_required_index = observed
+          if (step_conditional || step_continue) invalid = 1
+        }
+      }
+    }
+    END {
+      finish_step()
+      if (defaults_count != 1 || defaults_run_count != 1 ||
+          defaults_working_directory_count != 1 ||
+          defaults_working_directory != "mobile") invalid = 1
+      if (native_jobs != 1 || observed != 4) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$workflow" || {
+    echo "mobile native-android job must run npm ci, proto sync, prebuild, and the canonical instrumentation-compiling Gradle command exactly once and in order" >&2
+    exit 1
+  }
+}
+
 require_pinned_actions() {
   local workflow=$1
   local action_count pinned_count
@@ -365,7 +526,7 @@ require_mobile_verify_recipe() {
       expected[3] = "cd mobile && npm test -- --runInBand"
       expected[4] = "cd mobile && npx expo-doctor"
       expected[5] = "cd mobile && npx expo prebuild --platform android --clean --no-install"
-      expected[6] = "cd mobile/android && ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug"
+      expected[6] = "cd mobile/android && ./gradlew --no-daemon lintDebug testDebugUnitTest compileDebugAndroidTestKotlin assembleDebug"
     }
     $0 ~ /^mobile-verify:[ \t]*sync-proto[ \t]*$/ {
       target_count++
@@ -399,6 +560,7 @@ require_mobile_verify_recipe() {
 [[ -f "$MAKEFILE" ]] || { echo "Makefile missing: $MAKEFILE" >&2; exit 1; }
 
 require_mobile_typecheck_runs "$MOBILE_WORKFLOW"
+require_mobile_native_android_runs "$MOBILE_WORKFLOW"
 require_occurrences "$MOBILE_WORKFLOW" "'e2e/**'" 2 'mobile push and PR workflows must cover E2E changes'
 require_occurrences "$MOBILE_WORKFLOW" "'scripts/verify-offline-pairing-evidence.sh'" 2 'mobile push and PR workflows must cover offline evidence verifier changes'
 require_occurrences "$MOBILE_WORKFLOW" "'scripts/verify-release-evidence.sh'" 2 'mobile push and PR workflows must cover release evidence verifier changes'

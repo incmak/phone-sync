@@ -37,7 +37,7 @@ mobile-verify: sync-proto
 	cd mobile && npm test -- --runInBand
 	cd mobile && npx expo-doctor
 	cd mobile && npx expo prebuild --platform android --clean --no-install
-	cd mobile/android && ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
+	cd mobile/android && ./gradlew --no-daemon lintDebug testDebugUnitTest compileDebugAndroidTestKotlin assembleDebug
 
 host-verify: proto-test
 	cd mobile && npm ci

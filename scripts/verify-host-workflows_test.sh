@@ -209,6 +209,359 @@ awk '
 mv "$tmp/Makefile.mutated" "$tmp/Makefile"
 expect_rejection 'mobile-verify must run Jest after typecheck'
 
+copy_workflows
+sed -i.bak 's/ compileDebugAndroidTestKotlin//' "$tmp/Makefile"
+expect_rejection 'mobile-verify must compile Android instrumentation sources'
+
+copy_workflows
+sed -i.bak 's/compileDebugAndroidTestKotlin assembleDebug/assembleDebug compileDebugAndroidTestKotlin/' "$tmp/Makefile"
+expect_rejection 'mobile-verify instrumentation compilation must precede APK assembly'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    sub(/ compileDebugAndroidTestKotlin assembleDebug$/, " assembleDebug")
+    print
+    print "\tcd mobile/android && ./gradlew --no-daemon compileDebugAndroidTestKotlin"
+    next
+  }
+  { print }
+' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'mobile-verify must use one canonical native Gradle command'
+
+copy_workflows
+sed -i.bak 's/ compileDebugAndroidTestKotlin//' "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android CI must compile instrumentation sources'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    sub(/ compileDebugAndroidTestKotlin/, "")
+    print
+    print "      # compileDebugAndroidTestKotlin"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'commented instrumentation task cannot satisfy native Android CI'
+
+copy_workflows
+sed -i.bak 's/ compileDebugAndroidTestKotlin//' "$tmp/.github/workflows/mobile.yml"
+cat >> "$tmp/.github/workflows/mobile.yml" <<'EOF'
+
+  instrumentation-decoy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./gradlew --no-daemon lintDebug testDebugUnitTest compileDebugAndroidTestKotlin assembleDebug
+EOF
+expect_rejection 'instrumentation compilation in another job cannot satisfy native Android CI'
+
+copy_workflows
+awk '/^[[:space:]]*- run: .*gradlew --no-daemon lintDebug testDebugUnitTest/ { print; print; next } { print }' \
+  "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android CI must not duplicate the canonical Gradle command'
+
+copy_workflows
+awk '
+  $0 == "  native-android:" { print; print "    if: false"; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'conditional native Android job cannot satisfy the compile gate'
+
+copy_workflows
+awk '
+  $0 == "  native-android:" { print; print "    continue-on-error: true"; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'skippable native Android job cannot satisfy the compile gate'
+
+copy_workflows
+awk '
+  $0 == "  native-android:" { print; print "    \"if\" : false"; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'quoted conditional native Android job cannot satisfy the compile gate'
+
+copy_workflows
+awk '
+  $0 == "  native-android:" { print; print "    \047continue-on-error\047 : true"; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'quoted skippable native Android job cannot satisfy the compile gate'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ { print; print "        continue-on-error: true"; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'skippable native Android Gradle step cannot satisfy the compile gate'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    command = $0
+    sub(/^[[:space:]]*- run:[[:space:]]*/, "", command)
+    print "      - if: false"
+    print "        run: " command
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'leading conditional key cannot make the native Gradle step optional'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    command = $0
+    sub(/^[[:space:]]*- run:[[:space:]]*/, "", command)
+    print "      - continue-on-error: true"
+    print "        run: " command
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'leading continue-on-error key cannot make the native Gradle step optional'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    command = $0
+    sub(/^[[:space:]]*- run:[[:space:]]*/, "", command)
+    print "      - \"if\" : false"
+    print "        run: " command
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'quoted leading conditional key cannot make the native Gradle step optional'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    command = $0
+    sub(/^[[:space:]]*- run:[[:space:]]*/, "", command)
+    print "      - \047continue-on-error\047 : true"
+    print "        run: " command
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'quoted leading continue-on-error key cannot make the native Gradle step optional'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ { print; print "        \"if\" : false"; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'quoted subsequent conditional key cannot make the native Gradle step optional'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ { print; print "        \047continue-on-error\047 : true"; next }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'quoted subsequent continue-on-error key cannot make the native Gradle step optional'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    print
+    print "      - run: |"
+    print "          printf extra-command"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'extra multiline native Android run command must be rejected'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    print
+    print "      - \"run\" : printf hidden-extra-command"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'quoted scalar run key cannot hide an extra native Android command'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    print
+    print "      - run : printf hidden-extra-command"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'spaced scalar run key cannot hide an extra native Android command'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    print
+    print "      - \"run\" : |"
+    print "          printf hidden-extra-command"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'quoted block run key cannot hide an extra native Android command'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    print
+    print "      - run : |"
+    print "          printf hidden-extra-command"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'spaced block run key cannot hide an extra native Android command'
+
+copy_workflows
+awk '
+  $0 == "        working-directory: mobile" {
+    print
+    print "        \"shell\" : bash {0}"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android defaults must not override the shell'
+
+copy_workflows
+awk '
+  /compileDebugAndroidTestKotlin assembleDebug$/ {
+    print
+    print "        \047shell\047 : bash {0}"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'required native Android steps must not override the shell'
+
+copy_workflows
+sed -i.bak 's/working-directory: mobile$/working-directory: fake-mobile/' "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android default working directory must be mobile'
+
+copy_workflows
+awk '
+  $0 == "        working-directory: mobile" {
+    print
+    print "        \"working-directory\" : fake-mobile"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android default working directory must not be duplicated'
+
+copy_workflows
+sed -i.bak '/^[[:space:]]*working-directory: \.$/d' "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android proto sync must run from the repository root'
+
+copy_workflows
+sed -i.bak 's/working-directory: \.$/"working-directory" : fake-root/' "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android proto sync must reject a conflicting working directory'
+
+copy_workflows
+sed -i.bak 's/working-directory: mobile\/android$/working-directory : fake-android/' "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android Gradle gate must run from mobile/android'
+
+copy_workflows
+awk '
+  $0 == "        working-directory: mobile/android" {
+    print
+    print "        \047working-directory\047 : fake-android"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android Gradle working directory must not be duplicated'
+
+copy_workflows
+awk '
+  $0 == "        working-directory: mobile/android" {
+    print
+    print "      - { run: printf hidden-extra-command }"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'flow-style native Android steps must not bypass the run inventory'
+
+copy_workflows
+awk '
+  $0 == "        working-directory: mobile/android" {
+    print
+    print "      - &hidden run: printf hidden-extra-command"
+    next
+  }
+  { print }
+' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'anchored native Android steps must not bypass the run inventory'
+
+expect_native_continuation_rejection() {
+  local mutation=$1
+  local label=$2
+  copy_workflows
+  awk -v mutation="$mutation" '
+    $0 == "        working-directory: mobile/android" {
+      print
+      print mutation
+      next
+    }
+    { print }
+  ' "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
+  mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
+  expect_rejection "$label"
+}
+
+expect_native_continuation_rejection \
+  '        &skip_native if: false' \
+  'anchored continuation if cannot make the native Gradle step conditional'
+expect_native_continuation_rejection \
+  '        &skip_native continue-on-error: true' \
+  'anchored continuation continue-on-error cannot make the native Gradle step skippable'
+expect_native_continuation_rejection \
+  '        &hidden shell: bash {0}' \
+  'anchored continuation shell cannot mask native Gradle failure'
+expect_native_continuation_rejection \
+  '        &hidden working-directory: fake-android' \
+  'anchored continuation working-directory cannot redirect native Gradle'
+expect_native_continuation_rejection \
+  '        &hidden run: printf hidden-extra-command' \
+  'anchored continuation run cannot bypass the exact command inventory'
+expect_native_continuation_rejection \
+  '        !unsafe if: false' \
+  'tagged continuation keys are outside the supported native-job YAML subset'
+
 [[ "$missing_rejections" -eq 0 ]] || exit 1
 
 echo "host workflow verifier self-test passed"
