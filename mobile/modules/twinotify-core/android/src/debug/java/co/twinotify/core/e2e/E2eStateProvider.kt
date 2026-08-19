@@ -136,7 +136,10 @@ class E2eStateProvider : ContentProvider() {
             .digest(value).joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
-    override fun onCreate(): Boolean = true
+    override fun onCreate(): Boolean {
+        E2eSessionToken.ensure(requireNotNull(context))
+        return true
+    }
 
     override fun query(
         uri: Uri,

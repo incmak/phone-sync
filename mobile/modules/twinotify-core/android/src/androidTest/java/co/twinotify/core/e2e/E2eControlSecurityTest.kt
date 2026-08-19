@@ -2,6 +2,7 @@ package co.twinotify.core.e2e
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ProviderInfo
 import android.system.Os
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -174,6 +175,20 @@ class E2eControlSecurityTest {
         val tokenFile = context.getFileStreamPath("e2e-token")
         assertTrue(tokenFile.exists())
         assertEquals(first, tokenFile.readText())
+    }
+
+    @Test
+    fun providerStartupPublishesTokenForHostBootstrap() {
+        val tokenFile = context.getFileStreamPath("e2e-token")
+        assertTrue(tokenFile.delete() || !tokenFile.exists())
+
+        E2eStateProvider().attachInfo(
+            context,
+            ProviderInfo().apply { authority = "${context.packageName}.e2e.bootstrap" },
+        )
+
+        assertTrue(tokenFile.isFile)
+        assertTrue(tokenFile.readText().isNotBlank())
     }
 
     @Test
