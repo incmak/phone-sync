@@ -52,6 +52,11 @@ type OfflineTopologyEvidence struct {
 	DNSEvidenceSHA256    string `json:"dns_evidence_sha256"`
 }
 
+type OfflineCeremonyRoles struct {
+	DeviceA string `json:"device_a"`
+	DeviceB string `json:"device_b"`
+}
+
 type OfflinePairingOptions struct {
 	SerialA, SerialB string
 	DisplayNameA     string
@@ -65,6 +70,7 @@ type OfflinePairingResult struct {
 	SerialAHash             string                  `json:"serial_a_hash"`
 	SerialBHash             string                  `json:"serial_b_hash"`
 	WiFiNetworkHash         string                  `json:"wifi_network_hash"`
+	CeremonyRoles           OfflineCeremonyRoles    `json:"ceremony_roles"`
 	DeviceA                 OfflinePairingSnapshot  `json:"device_a"`
 	DeviceB                 OfflinePairingSnapshot  `json:"device_b"`
 	Topology                OfflineTopologyEvidence `json:"topology"`
@@ -216,6 +222,10 @@ func RunOfflinePairing(ctx context.Context, host OfflinePairingHost, options Off
 	if err := validateReciprocalBindings(completeA, completeB); err != nil {
 		return OfflinePairingResult{}, fail("binding", err)
 	}
+	ceremonyRoles, err := validateCeremonyRoles(completeA, completeB)
+	if err != nil {
+		return OfflinePairingResult{}, fail("roles", err)
+	}
 	if err := host.RestartProcess(ctx, options.SerialA); err != nil {
 		return OfflinePairingResult{}, fail("restart_a", err)
 	}
@@ -249,10 +259,17 @@ func RunOfflinePairing(ctx context.Context, host OfflinePairingHost, options Off
 
 	return OfflinePairingResult{
 		Result: "pass", SerialAHash: sha256Text(options.SerialA), SerialBHash: sha256Text(options.SerialB),
-		WiFiNetworkHash: wifiA, DeviceA: restartedA, DeviceB: restartedB, Topology: options.Topology,
+		WiFiNetworkHash: wifiA, CeremonyRoles: ceremonyRoles, DeviceA: restartedA, DeviceB: restartedB, Topology: options.Topology,
 		MobileDataDisabled: true, ProcessRestartPersisted: true,
 		RelayRequired: false, LaptopServiceRequired: false,
 	}, nil
+}
+
+func validateCeremonyRoles(a, b OfflinePairingSnapshot) (OfflineCeremonyRoles, error) {
+	if a.Role != "initiator" || b.Role != "joiner" {
+		return OfflineCeremonyRoles{}, errors.New("offline ceremony roles do not match device positions")
+	}
+	return OfflineCeremonyRoles{DeviceA: a.Role, DeviceB: b.Role}, nil
 }
 
 func cancelOfflinePairingSessions(parent context.Context, host OfflinePairingHost, options OfflinePairingOptions, sessionA, sessionB string) {

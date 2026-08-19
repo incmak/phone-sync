@@ -84,7 +84,7 @@ Focused correction GREEN: `.omo/evidence/task-8/review-green-fresh-start-cleanup
 The second independent review found three Important and two Minor issues. All five code findings are corrected:
 
 - Private input, authentication, and output cleanup are separate APIs and target `e2e-inputs`, `e2e-auth`, and `e2e-secrets` respectively. Every prepared private request runs each cleanup under a two-second `context.WithoutCancel` deadline on success, ordinary result error, timeout, caller cancellation, malformed ordinary response, and private-read failure. Cleanup is idempotent when a directory or file is already absent. The test device produces an output before each forced failure and proves no input or output residue remains.
-- The evidence verifier now requires the exact top-level inventory and JSON types, complete final phases, reciprocal initiator/joiner roles, no final error, lowercase 64-character hashes, reciprocal application identities and TLS bindings, directory mode 0700, and file mode 0600. It rejects extra files, directories, symlinks, missing fields, unexpected fields, invalid values, wrong types, public modes, and reciprocal mismatches. The reviewer's previously accepted combined mutation is covered by the phase, role, error, hash, and mode negative cases.
+- The evidence verifier now requires the exact top-level inventory and JSON types, complete durable final phases, separately recorded initiator/joiner ceremony roles, roleless post-restart snapshots, no final error, lowercase 64-character hashes, reciprocal application identities and TLS bindings, directory mode 0700, and file mode 0600. It rejects extra files, directories, symlinks, missing fields, unexpected fields, invalid values, wrong types, public modes, and reciprocal mismatches. The reviewer's previously accepted combined mutation is covered by the phase, role, error, hash, and mode negative cases.
 - Fresh preflight is exact idle state with no role, error, session hash, SAS hash, peer application identity, completion, or LAN binding. Fixtures shaped like production cancelled and failed terminal-idle state are rejected before mobile data changes.
 - The Android security suite now sends real explicit exported broadcasts through `onReceive`, waits for ordinary and private file publication, and covers wrong-command, expiry, replay, malformed Intent, bounded errors, and auth/input/output removal. `PendingResult.finish()` is in a `finally` block.
 - Package and component grammar is enforced at CLI parsing and every package-bearing shell helper, including `ReadRunAs` and `ForceStop`. Metacharacter and whitespace cases prove zero ADB invocation.
@@ -106,4 +106,19 @@ Correction evidence:
 
 Physical acceptance remains pending. Only one M2012K11AI was visible, so no two-phone pairing, radio change, internet-isolation claim, packet/DNS claim, or destructive scenario was attempted.
 
-Focused re-review verdict: **CLEAR / APPROVE for the implementation**, with no remaining Critical or Important code finding. The reviewer inspected both corrections plus their RED/GREEN and full Go race/vet artifacts. Overall plan-completion approval remains unavailable because review cannot convert the absent second phone/topology into physical acceptance; that is an explicit release concern rather than a fabricated pass.
+Corrected re-review verdict at `70f74a8`: **BLOCK**. One Important integration mismatch remained because native process restart drops the transient role while the verifier required role inside durable snapshots. The evidence index was also stale. No approval is claimed before a fresh review of the correction below.
+
+## Final restart evidence alignment
+
+The host now records the pre-restart ceremony assertion in a bounded `ceremony_roles` object with exact `device_a=initiator` and `device_b=joiner` values. The final `device_a` and `device_b` objects remain the native post-restart durable snapshots and are required to omit transient role. This preserves the real process-lifetime boundary while retaining explicit evidence that both sides occupied the intended ceremony positions before restart.
+
+The integration regression runs `RunOfflinePairing` with production-shaped snapshots, writes the real result through `WriteOfflinePairingEvidence`, then invokes `scripts/verify-offline-pairing-evidence.sh`. This makes the operator verifier the authoritative contract for the Go scenario result instead of maintaining a second unchecked fixture literal.
+
+| Scenario | Invocation | Binary observable | Artifact |
+|---|---|---|---|
+| Production-shaped role contract RED | focused scenario integration test | real post-restart result rejected by verifier | `.omo/evidence/task-8/role-contract-red.log` |
+| Production-shaped role contract GREEN | focused scenario integration test with race detector | real result accepted by authoritative verifier | `.omo/evidence/task-8/role-contract-green.log` |
+| Verifier role contract | `scripts/verify-offline-pairing-evidence.sh --self-test` | exact ceremony roles accepted; missing/invalid ceremony roles and durable roles rejected | `.omo/evidence/task-8/role-verifier-green.log` |
+| Unchanged Android seam compile | `:twinotify-core:compileDebugKotlin` | `BUILD SUCCESSFUL` | `.omo/evidence/task-8/fix-final-role-android-compile.log` |
+
+Physical acceptance remains pending and no fresh reviewer approval is claimed here.

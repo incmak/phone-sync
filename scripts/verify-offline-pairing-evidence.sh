@@ -21,15 +21,17 @@ verify() {
 
   jq -e '
     type == "object" and
-    (keys == (["result","serial_a_hash","serial_b_hash","wifi_network_hash","device_a","device_b","topology","mobile_data_disabled","process_restart_persisted","relay_required","laptop_service_required"] | sort)) and
+    (keys == (["result","serial_a_hash","serial_b_hash","wifi_network_hash","ceremony_roles","device_a","device_b","topology","mobile_data_disabled","process_restart_persisted","relay_required","laptop_service_required"] | sort)) and
+    (.ceremony_roles | type == "object" and keys == (["device_a","device_b"] | sort) and
+      (.device_a | type == "string" and . == "initiator") and
+      (.device_b | type == "string" and . == "joiner")) and
     (.topology | type == "object" and keys == (["internet_blocked","packet_evidence_sha256","dns_evidence_sha256"] | sort)) and
     ([.device_a,.device_b] | all(
       type == "object" and
-      (keys - ["role","phase","error_code","completed","session_id_hash","sas_hash","device_application_identity_hash","peer_application_identity_hash","lan_binding_present","local_tls_pin_hash","peer_tls_pin_hash"] | length) == 0 and
-      has("role") and has("phase") and has("completed") and has("lan_binding_present") and
+      (keys - ["phase","error_code","completed","session_id_hash","sas_hash","device_application_identity_hash","peer_application_identity_hash","lan_binding_present","local_tls_pin_hash","peer_tls_pin_hash"] | length) == 0 and
+      has("phase") and has("completed") and has("lan_binding_present") and
       has("device_application_identity_hash") and has("peer_application_identity_hash") and
       has("local_tls_pin_hash") and has("peer_tls_pin_hash") and
-      (.role | type == "string" and (. == "initiator" or . == "joiner")) and
       (.phase | type == "string" and . == "complete") and
       (.completed | type == "boolean") and (.lan_binding_present | type == "boolean") and
       (.device_application_identity_hash | type == "string") and (.peer_application_identity_hash | type == "string") and
@@ -57,7 +59,6 @@ verify() {
     .laptop_service_required == false and
     .topology.internet_blocked == true and
     .device_a.completed == true and .device_b.completed == true and
-    .device_a.role == "initiator" and .device_b.role == "joiner" and
     .device_a.lan_binding_present == true and .device_b.lan_binding_present == true and
     .device_a.device_application_identity_hash == .device_b.peer_application_identity_hash and
     .device_b.device_application_identity_hash == .device_a.peer_application_identity_hash and
@@ -79,7 +80,7 @@ self_test() {
   trap 'rm -rf "$tmp"' EXIT
   base="$tmp/evidence"
   mkdir -m 700 "$base"
-  valid='{"result":"pass","serial_a_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","serial_b_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","wifi_network_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","device_a":{"role":"initiator","phase":"complete","completed":true,"device_application_identity_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peer_application_identity_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","lan_binding_present":true,"local_tls_pin_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","peer_tls_pin_hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"device_b":{"role":"joiner","phase":"complete","completed":true,"device_application_identity_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","peer_application_identity_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","lan_binding_present":true,"local_tls_pin_hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","peer_tls_pin_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"topology":{"internet_blocked":true,"packet_evidence_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","dns_evidence_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"mobile_data_disabled":true,"process_restart_persisted":true,"relay_required":false,"laptop_service_required":false}'
+  valid='{"result":"pass","serial_a_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","serial_b_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","wifi_network_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","ceremony_roles":{"device_a":"initiator","device_b":"joiner"},"device_a":{"phase":"complete","completed":true,"device_application_identity_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peer_application_identity_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","lan_binding_present":true,"local_tls_pin_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","peer_tls_pin_hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"device_b":{"phase":"complete","completed":true,"device_application_identity_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","peer_application_identity_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","lan_binding_present":true,"local_tls_pin_hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","peer_tls_pin_hash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"topology":{"internet_blocked":true,"packet_evidence_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","dns_evidence_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"mobile_data_disabled":true,"process_restart_persisted":true,"relay_required":false,"laptop_service_required":false}'
 
   if "$0" "$base" 2>"$tmp/missing.err"; then die "self-test expected missing-file failure"; fi
   printf '%s\n' "$valid" > "$base/offline-pairing.json"
@@ -99,7 +100,9 @@ self_test() {
     if "$0" "$base" 2>"$tmp/$name.err"; then die "self-test expected $name failure"; fi
   done <<'EOF'
 phase|.device_a.phase="made_up"
-role|.device_a.role="attacker_value"
+role|.ceremony_roles.device_a="attacker_value"
+durable-role|.device_a.role="initiator"
+missing-ceremony-role|del(.ceremony_roles.device_b)
 error|.device_a.error_code="unbounded_value"
 hash|.device_a.session_id_hash="not-a-hash"
 uppercase-hash|.device_a.sas_hash="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"

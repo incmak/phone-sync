@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,6 +29,7 @@ type fakeOfflinePairingHost struct {
 	startSideEffectError bool
 	started              bool
 	cancelled            map[string]bool
+	restarted            map[string]bool
 }
 
 func (f *fakeOfflinePairingHost) Hardware(_ context.Context, serial string) (bool, error) {
@@ -101,13 +103,24 @@ func (f *fakeOfflinePairingHost) Cancel(_ context.Context, serial, sessionID str
 }
 func (f *fakeOfflinePairingHost) RestartProcess(_ context.Context, serial string) error {
 	f.events = append(f.events, "restart:"+serial)
+	if f.restarted == nil {
+		f.restarted = map[string]bool{}
+	}
+	f.restarted[serial] = true
 	return nil
 }
 func (f *fakeOfflinePairingHost) completed(serial string) OfflinePairingSnapshot {
-	if serial == "phone-a" {
-		return OfflinePairingSnapshot{Phase: "complete", Completed: true, DeviceApplicationIdentityHash: hashA, PeerApplicationIdentityHash: hashB, LanBindingPresent: true, LocalTLSPinHash: hashC, PeerTLSPinHash: hashD}
+	role := "initiator"
+	if serial == "phone-b" {
+		role = "joiner"
 	}
-	return OfflinePairingSnapshot{Phase: "complete", Completed: true, DeviceApplicationIdentityHash: hashB, PeerApplicationIdentityHash: hashA, LanBindingPresent: true, LocalTLSPinHash: hashD, PeerTLSPinHash: hashC}
+	if f.restarted[serial] {
+		role = ""
+	}
+	if serial == "phone-a" {
+		return OfflinePairingSnapshot{Role: role, Phase: "complete", Completed: true, DeviceApplicationIdentityHash: hashA, PeerApplicationIdentityHash: hashB, LanBindingPresent: true, LocalTLSPinHash: hashC, PeerTLSPinHash: hashD}
+	}
+	return OfflinePairingSnapshot{Role: role, Phase: "complete", Completed: true, DeviceApplicationIdentityHash: hashB, PeerApplicationIdentityHash: hashA, LanBindingPresent: true, LocalTLSPinHash: hashD, PeerTLSPinHash: hashC}
 }
 
 func TestRunOfflinePairingUsesTwoHardwarePhonesAndNeverNeedsRelay(t *testing.T) {
@@ -228,7 +241,8 @@ func TestRunOfflinePairingRejectsMismatchedSASWithBoundedSecretFreeSnapshot(t *t
 
 func TestWriteOfflinePairingEvidenceUsesPrivateBoundedSecretFreeArtifact(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "evidence")
-	result := OfflinePairingResult{Result: "pass", SerialAHash: hashA, SerialBHash: hashB, WiFiNetworkHash: hashC, DeviceA: (*fakeOfflinePairingHost).completed(&fakeOfflinePairingHost{}, "phone-a"), DeviceB: (*fakeOfflinePairingHost).completed(&fakeOfflinePairingHost{}, "phone-b"), Topology: OfflineTopologyEvidence{InternetBlocked: true, PacketEvidenceSHA256: hashA, DNSEvidenceSHA256: hashB}, MobileDataDisabled: true, ProcessRestartPersisted: true}
+	restarted := &fakeOfflinePairingHost{restarted: map[string]bool{"phone-a": true, "phone-b": true}}
+	result := OfflinePairingResult{Result: "pass", SerialAHash: hashA, SerialBHash: hashB, WiFiNetworkHash: hashC, CeremonyRoles: OfflineCeremonyRoles{DeviceA: "initiator", DeviceB: "joiner"}, DeviceA: restarted.completed("phone-a"), DeviceB: restarted.completed("phone-b"), Topology: OfflineTopologyEvidence{InternetBlocked: true, PacketEvidenceSHA256: hashA, DNSEvidenceSHA256: hashB}, MobileDataDisabled: true, ProcessRestartPersisted: true}
 	path, err := WriteOfflinePairingEvidence(root, result)
 	if err != nil {
 		t.Fatal(err)
@@ -269,5 +283,30 @@ func TestWriteOfflinePairingEvidenceUsesPrivateBoundedSecretFreeArtifact(t *test
 	}
 	if _, err := WriteOfflinePairingEvidence(linkedRoot, result); err == nil {
 		t.Fatal("expected symlink evidence directory rejection")
+	}
+}
+
+func TestRunOfflinePairingEvidenceMatchesAuthoritativeVerifier(t *testing.T) {
+	host := &fakeOfflinePairingHost{statusCalls: map[string]int{}}
+	result, err := RunOfflinePairing(context.Background(), host, OfflinePairingOptions{
+		SerialA: "phone-a", SerialB: "phone-b", Timeout: time.Second,
+		Topology: OfflineTopologyEvidence{InternetBlocked: true, PacketEvidenceSHA256: hashA, DNSEvidenceSHA256: hashB},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeviceA.Role != "" || result.DeviceB.Role != "" {
+		t.Fatalf("post-restart snapshots retained transient roles: %+v %+v", result.DeviceA, result.DeviceB)
+	}
+	root := filepath.Join(t.TempDir(), "evidence")
+	if _, err := WriteOfflinePairingEvidence(root, result); err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := filepath.Abs(filepath.Join("..", "..", "..", "scripts", "verify-offline-pairing-evidence.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(verifier, root).CombinedOutput(); err != nil {
+		t.Fatalf("authoritative verifier rejected RunOfflinePairing output: %v: %s", err, output)
 	}
 }
