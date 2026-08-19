@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify verify e2e-emulator e2e-offline-pairing release-audit clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify e2e-emulator e2e-offline-pairing release-audit clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -34,9 +34,23 @@ deployment-test:
 mobile-verify: sync-proto
 	cd mobile && npm ci
 	cd mobile && npm run typecheck
+	cd mobile && npm test -- --runInBand
 	cd mobile && npx expo-doctor
 	cd mobile && npx expo prebuild --platform android --clean --no-install
 	cd mobile/android && ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug
+
+host-verify: proto-test
+	cd mobile && npm ci
+	cd mobile && npm run typecheck
+	cd mobile && npm test -- --runInBand
+	cd e2e && go test ./... -race -count=1
+	cd e2e && go vet ./...
+	./e2e/scripts/validate-workflow.sh
+	./e2e/scripts/preflight_test.sh
+	./scripts/verify-offline-pairing-evidence.sh --self-test
+	./scripts/verify-release-evidence.sh --self-test
+	./scripts/verify-host-workflows.sh
+	./scripts/verify-generated-clean.sh
 
 e2e-emulator: relay-build mobile-verify
 	./e2e/scripts/run-two-emulators.sh

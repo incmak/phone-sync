@@ -1,9 +1,9 @@
 name: mobile
 on:
   push:
-    paths: ['mobile/**', 'proto/**', 'Makefile', 'scripts/verify-generated-clean.sh', 'docs/superpowers/specs/**', 'docs/superpowers/plans/**', '.github/workflows/mobile.yml']
+    paths: ['mobile/**', 'e2e/**', 'proto/**', 'Makefile', 'scripts/verify-generated-clean.sh', 'scripts/verify-offline-pairing-evidence.sh', 'scripts/verify-release-evidence.sh', 'scripts/verify-host-workflows.sh', 'scripts/verify-host-workflows_test.sh', 'docs/superpowers/specs/**', 'docs/superpowers/plans/**', '.github/workflows/mobile.yml', '.github/workflows/e2e-host.yml']
   pull_request:
-    paths: ['mobile/**', 'proto/**', 'Makefile', 'scripts/verify-generated-clean.sh', 'docs/superpowers/specs/**', 'docs/superpowers/plans/**', '.github/workflows/mobile.yml']
+    paths: ['mobile/**', 'e2e/**', 'proto/**', 'Makefile', 'scripts/verify-generated-clean.sh', 'scripts/verify-offline-pairing-evidence.sh', 'scripts/verify-release-evidence.sh', 'scripts/verify-host-workflows.sh', 'scripts/verify-host-workflows_test.sh', 'docs/superpowers/specs/**', 'docs/superpowers/plans/**', '.github/workflows/mobile.yml', '.github/workflows/e2e-host.yml']
 
 permissions:
   contents: read
@@ -23,6 +23,7 @@ jobs:
           cache-dependency-path: mobile/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      - run: npm test -- --runInBand
       - run: npx expo-doctor
 
   native-android:

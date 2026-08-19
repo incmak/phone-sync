@@ -1,0 +1,51 @@
+name: e2e-host
+
+on:
+  push:
+    paths:
+      - 'e2e/**'
+      - 'proto/**'
+      - 'Makefile'
+      - 'scripts/verify-offline-pairing-evidence.sh'
+      - 'scripts/verify-release-evidence.sh'
+      - 'scripts/verify-host-workflows.sh'
+      - 'scripts/verify-host-workflows_test.sh'
+      - '.github/workflows/e2e-host.yml'
+      - '.github/workflows/e2e-android.yml'
+  pull_request:
+    paths:
+      - 'e2e/**'
+      - 'proto/**'
+      - 'Makefile'
+      - 'scripts/verify-offline-pairing-evidence.sh'
+      - 'scripts/verify-release-evidence.sh'
+      - 'scripts/verify-host-workflows.sh'
+      - 'scripts/verify-host-workflows_test.sh'
+      - '.github/workflows/e2e-host.yml'
+      - '.github/workflows/e2e-android.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  host-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version: '1.23.x'
+      - name: Run E2E Go race tests
+        run: cd e2e && go test ./... -race -count=1
+      - name: Vet E2E Go code
+        run: cd e2e && go vet ./...
+      - name: Validate emulator workflow contract
+        run: ./e2e/scripts/validate-workflow.sh
+      - name: Run emulator preflight self-test
+        run: ./e2e/scripts/preflight_test.sh
+      - name: Verify offline-pairing evidence verifier
+        run: ./scripts/verify-offline-pairing-evidence.sh --self-test
+      - name: Verify release evidence verifier
+        run: ./scripts/verify-release-evidence.sh --self-test
+      - name: Verify host workflow contracts
+        run: ./scripts/verify-host-workflows.sh
