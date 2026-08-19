@@ -107,31 +107,38 @@ class E2eControlReceiver : BroadcastReceiver() {
         val pending = goAsync()
         val appContext = context.applicationContext
         scope.launch {
-            val parsed = E2eCommand.fromIntent(intent)
-            val authId = parsed.param("auth_input_id")
-            val auth = runCatching {
-                requireNotNull(authId)
-                consumePrivateInput(appContext, parsed.requestId, authId, "e2e-auth")
-            }.getOrNull()
-            val authToken = auth?.decodeToString()
-            val authenticated = parsed.copy(
-                token = authToken?.takeIf { E2eRequestHandle.matches(it, parsed.name, parsed.requestId, System.currentTimeMillis()) },
-                params = parsed.params - "auth_input_id",
-            )
-            auth?.fill(0)
-            var result = executeForTest(appContext, authenticated)
-            result.secretPayload?.let { secret ->
-                result = try {
-                    writeSecretResult(appContext, result.requestId, secret)
-                    result.copy(secretPayload = null)
-                } catch (_: Throwable) {
-                    result.copy(code = "error", detail = "private_result_unavailable", payload = null, secretPayload = null)
-                } finally {
-                    secret.fill(0)
+            var requestId = "missing-request"
+            try {
+                val parsed = E2eCommand.fromIntent(intent)
+                requestId = safeRequestId(parsed.requestId)
+                val authId = parsed.param("auth_input_id")
+                val auth = runCatching {
+                    requireNotNull(authId)
+                    consumePrivateInput(appContext, parsed.requestId, authId, "e2e-auth")
+                }.getOrNull()
+                val authToken = auth?.decodeToString()
+                val authenticated = parsed.copy(
+                    token = authToken?.takeIf { E2eRequestHandle.matches(it, parsed.name, parsed.requestId, System.currentTimeMillis()) },
+                    params = parsed.params - "auth_input_id",
+                )
+                auth?.fill(0)
+                var result = executeForTest(appContext, authenticated)
+                result.secretPayload?.let { secret ->
+                    result = try {
+                        writeSecretResult(appContext, result.requestId, secret)
+                        result.copy(secretPayload = null)
+                    } catch (_: Throwable) {
+                        result.copy(code = "error", detail = "private_result_unavailable", payload = null, secretPayload = null)
+                    } finally {
+                        secret.fill(0)
+                    }
                 }
+                writeResult(appContext, result)
+            } catch (_: Throwable) {
+                runCatching { writeResult(appContext, E2eCommandResult(requestId, "error", "operation_failed")) }
+            } finally {
+                pending.finish()
             }
-            writeResult(appContext, result)
-            pending.finish()
         }
     }
 

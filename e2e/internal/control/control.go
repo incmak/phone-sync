@@ -45,7 +45,12 @@ type Device interface {
 type SecretDevice interface {
 	WriteSecret(context.Context, string, []byte) error
 	ReadSecretOnce(context.Context, string) ([]byte, error)
-	DeleteSecret(context.Context, string) error
+	CleanupPrivateInput(context.Context, string) error
+	CleanupPrivateOutput(context.Context, string) error
+}
+
+type PrivateAuthDevice interface {
+	CleanupPrivateAuth(context.Context, string) error
 }
 
 type SecureRequestDevice interface {
@@ -88,6 +93,7 @@ func (c *Client) Execute(ctx context.Context, command Command) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	defer c.cleanupAuth(ctx, command.RequestID)
 	return c.executePrepared(ctx, command)
 }
 
@@ -145,6 +151,9 @@ func (c *Client) ExecuteSecret(ctx context.Context, command Command, secretInput
 	if !privateRequestID(command.RequestID) {
 		return Result{}, nil, errors.New("private control request ID is invalid")
 	}
+	defer c.cleanupAuth(ctx, command.RequestID)
+	defer boundedCleanup(ctx, func(cleanup context.Context) { _ = device.CleanupPrivateInput(cleanup, command.RequestID) })
+	defer boundedCleanup(ctx, func(cleanup context.Context) { _ = device.CleanupPrivateOutput(cleanup, command.RequestID) })
 	if len(secretInput) > 4096 {
 		return Result{}, nil, errors.New("private control input exceeds bound")
 	}
@@ -152,7 +161,6 @@ func (c *Client) ExecuteSecret(ctx context.Context, command Command, secretInput
 		if err := device.WriteSecret(ctx, command.RequestID, secretInput); err != nil {
 			return Result{}, nil, err
 		}
-		defer func() { _ = device.DeleteSecret(context.WithoutCancel(ctx), command.RequestID) }()
 		if command.Params == nil {
 			command.Params = map[string]string{}
 		}
@@ -174,6 +182,22 @@ func (c *Client) ExecuteSecret(ctx context.Context, command Command, secretInput
 		return Result{}, nil, errors.New("private control result exceeds bound")
 	}
 	return result, secret, nil
+}
+
+const privateCleanupTimeout = 2 * time.Second
+
+func boundedCleanup(parent context.Context, cleanup func(context.Context)) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), privateCleanupTimeout)
+	defer cancel()
+	cleanup(ctx)
+}
+
+func (c *Client) cleanupAuth(parent context.Context, requestID string) {
+	device, ok := c.device.(PrivateAuthDevice)
+	if !ok {
+		return
+	}
+	boundedCleanup(parent, func(ctx context.Context) { _ = device.CleanupPrivateAuth(ctx, requestID) })
 }
 
 func (c *Client) prepare(command Command) (Command, error) {

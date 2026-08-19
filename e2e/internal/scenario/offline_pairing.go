@@ -292,7 +292,9 @@ func validateOfflinePairingOptions(options OfflinePairingOptions) error {
 }
 
 func freshOfflinePairingState(value OfflinePairingSnapshot) bool {
-	return !value.Completed && !value.LanBindingPresent && value.PeerApplicationIdentityHash == "" && (value.Phase == "" || value.Phase == "idle")
+	return value.Phase == "idle" && value.Role == "" && value.ErrorCode == "" &&
+		value.SessionIDHash == "" && value.SASHash == "" && !value.Completed &&
+		!value.LanBindingPresent && value.PeerApplicationIdentityHash == ""
 }
 
 func waitOfflinePairingStatus(ctx context.Context, host OfflinePairingHost, options OfflinePairingOptions, phase string) (OfflinePairingSnapshot, OfflinePairingSecret, OfflinePairingSnapshot, OfflinePairingSecret, error) {
@@ -376,16 +378,50 @@ func WriteOfflinePairingEvidence(root string, result OfflinePairingResult) (stri
 		return "", err
 	}
 	path := filepath.Join(root, "offline-pairing.json")
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	temporary := filepath.Join(root, ".offline-pairing.json.tmp")
+	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	complete := false
+	defer func() {
+		_ = file.Close()
+		if !complete {
+			_ = os.Remove(temporary)
+		}
+	}()
 	if _, err := file.Write(encoded); err != nil {
 		return "", err
 	}
 	if err := file.Sync(); err != nil {
 		return "", err
 	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	// Linking publishes the fully synced inode atomically and refuses to replace
+	// an existing artifact. Removing the temporary name leaves one exact file.
+	if err := os.Link(temporary, path); err != nil {
+		return "", err
+	}
+	if err := os.Remove(temporary); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	directory, err := os.Open(root)
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := directory.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	complete = true
 	return path, nil
 }

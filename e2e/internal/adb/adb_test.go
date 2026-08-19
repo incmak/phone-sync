@@ -153,6 +153,30 @@ func TestClientRejectsShellMetacharactersInBroadcastComponent(t *testing.T) {
 	}
 }
 
+func TestEveryPackageShellBoundaryRejectsMetacharactersWithoutInvokingADB(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(*adb.Client) error
+	}{
+		{"read-run-as", func(c *adb.Client) error {
+			_, err := c.ReadRunAs(context.Background(), "com.twinotify.app;id", "files/e2e-token")
+			return err
+		}},
+		{"force-stop", func(c *adb.Client) error { return c.ForceStop(context.Background(), "com.twinotify.app$(id)") }},
+		{"whitespace", func(c *adb.Client) error { return c.ForceStop(context.Background(), " com.twinotify.app") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeRunner{}
+			if err := tc.call(adb.New(runner, "physical-a")); err == nil {
+				t.Fatal("expected component rejection")
+			}
+			if len(runner.args) != 0 {
+				t.Fatalf("adb invoked: %q", runner.args)
+			}
+		})
+	}
+}
+
 func TestClientWrapsNonzeroADBExit(t *testing.T) {
 	runner := &fakeRunner{output: []byte("device offline"), err: errors.New("exit status 1")}
 	client := adb.New(runner, "emulator-5554")

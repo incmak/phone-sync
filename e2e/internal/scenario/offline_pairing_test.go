@@ -23,6 +23,7 @@ type fakeOfflinePairingHost struct {
 	statusCalls          map[string]int
 	stale                bool
 	existingPeer         bool
+	terminalIdle         string
 	mismatchSAS          bool
 	startSideEffectError bool
 	started              bool
@@ -49,6 +50,9 @@ func (f *fakeOfflinePairingHost) Query(_ context.Context, serial string) (Offlin
 	}
 	if f.existingPeer && call == 1 {
 		return OfflinePairingSnapshot{Phase: "idle", PeerApplicationIdentityHash: hashB}, OfflinePairingSecret{}, nil
+	}
+	if f.terminalIdle != "" && call == 1 {
+		return OfflinePairingSnapshot{Phase: "idle", Role: "initiator", ErrorCode: f.terminalIdle, SessionIDHash: hashD, SASHash: hashA}, OfflinePairingSecret{}, nil
 	}
 	if call == 1 {
 		return OfflinePairingSnapshot{Phase: "idle"}, OfflinePairingSecret{}, nil
@@ -171,6 +175,21 @@ func TestRunOfflinePairingRejectsExistingRelayPeerAsNotFresh(t *testing.T) {
 	}
 }
 
+func TestRunOfflinePairingRejectsProductionTerminalIdleCancelledAndFailedStates(t *testing.T) {
+	for _, code := range []string{"cancelled", "transport_unavailable"} {
+		t.Run(code, func(t *testing.T) {
+			host := &fakeOfflinePairingHost{statusCalls: map[string]int{}, terminalIdle: code}
+			_, err := RunOfflinePairing(context.Background(), host, OfflinePairingOptions{SerialA: "phone-a", SerialB: "phone-b", Timeout: time.Second, Topology: OfflineTopologyEvidence{InternetBlocked: true, PacketEvidenceSHA256: hashA, DNSEvidenceSHA256: hashB}})
+			if err == nil || !strings.Contains(err.Error(), "fresh unpaired state") {
+				t.Fatalf("error=%v", err)
+			}
+			if strings.Contains(strings.Join(host.events, ","), "mobile-data-off") {
+				t.Fatalf("radio changed before rejection: %v", host.events)
+			}
+		})
+	}
+}
+
 func TestRunOfflinePairingCancelsStartSideEffectWhenStartResponseFails(t *testing.T) {
 	host := &fakeOfflinePairingHost{statusCalls: map[string]int{}, startSideEffectError: true, cancelled: map[string]bool{}}
 	_, err := RunOfflinePairing(context.Background(), host, OfflinePairingOptions{SerialA: "phone-a", SerialB: "phone-b", Timeout: time.Second, Topology: OfflineTopologyEvidence{InternetBlocked: true, PacketEvidenceSHA256: hashA, DNSEvidenceSHA256: hashB}})
@@ -220,6 +239,13 @@ func TestWriteOfflinePairingEvidenceUsesPrivateBoundedSecretFreeArtifact(t *test
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%o", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "offline-pairing.json" {
+		t.Fatalf("atomic evidence inventory=%v err=%v", entries, err)
+	}
+	if _, err := WriteOfflinePairingEvidence(root, result); err == nil {
+		t.Fatal("expected immutable exclusive evidence publication")
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {

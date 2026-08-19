@@ -113,7 +113,7 @@ func (c *Client) Grant(ctx context.Context, permission string) error {
 
 // GrantPackage grants an Android permission without invoking a shell.
 func (c *Client) GrantPackage(ctx context.Context, packageName, permission string) error {
-	if strings.TrimSpace(packageName) == "" || strings.TrimSpace(permission) == "" {
+	if !validComponentName(packageName) || strings.TrimSpace(permission) == "" {
 		return errors.New("package and permission are required")
 	}
 	_, err := c.run(ctx, "shell", "pm", "grant", packageName, permission)
@@ -139,8 +139,7 @@ func (c *Client) BroadcastReceiver(ctx context.Context, packageName, receiver, a
 }
 
 func validComponentName(value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" {
+	if value == "" || value != strings.TrimSpace(value) {
 		return false
 	}
 	for _, part := range strings.Split(value, ".") {
@@ -155,6 +154,15 @@ func validComponentName(value string) bool {
 		}
 	}
 	return true
+}
+
+// ValidateComponentName applies the grammar used at every Android package and
+// component boundary before any value can reach adb shell.
+func ValidateComponentName(value string) error {
+	if !validComponentName(value) {
+		return errors.New("invalid Android component name")
+	}
+	return nil
 }
 
 func (c *Client) broadcastArgs(ctx context.Context, args []string, extras map[string]string) error {
@@ -178,6 +186,9 @@ func shellQuote(value string) string {
 }
 
 func (c *Client) ReadRunAs(ctx context.Context, packageName, path string) ([]byte, error) {
+	if err := ValidateComponentName(packageName); err != nil {
+		return nil, err
+	}
 	return c.run(ctx, "shell", "run-as", packageName, "cat", path)
 }
 
@@ -237,12 +248,15 @@ func (c *Client) DeleteRunAsPrivate(ctx context.Context, packageName, bucket, re
 	if err != nil {
 		return err
 	}
-	const script = `set -eu; dir="$1"; test ! -L "$dir"; test -d "$dir"; test "$(stat -c %u "$dir")" = "$(id -u)"; rm -f "$dir/$2" "$dir/.$2.tmp" "$dir/.$2.tmp."*`
+	const script = `set -eu; dir="$1"; test ! -L "$dir"; if test ! -e "$dir"; then exit 0; fi; test -d "$dir"; test "$(stat -c %u "$dir")" = "$(id -u)"; rm -f "$dir/$2" "$dir/.$2.tmp" "$dir/.$2.tmp."*`
 	_, err = c.runWithInput(ctx, nil, "exec-out", "run-as", packageName, "sh", "-c", script, "sh", directory, requestID)
 	return err
 }
 
 func (c *Client) ForceStop(ctx context.Context, packageName string) error {
+	if err := ValidateComponentName(packageName); err != nil {
+		return err
+	}
 	_, err := c.run(ctx, "shell", "am", "force-stop", packageName)
 	return err
 }

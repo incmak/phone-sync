@@ -14,6 +14,7 @@ import kotlin.test.assertTrue
 import org.junit.runner.RunWith
 import org.json.JSONObject
 import java.nio.file.Files
+import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class E2eControlSecurityTest {
@@ -257,5 +258,75 @@ class E2eControlSecurityTest {
         assertEquals("safe", linkTarget.readText())
         Files.delete(link.toPath())
         linkTarget.delete()
+    }
+
+    @Test
+    fun exportedBroadcastAuthenticatesPublishesAndCleansPrivateFiles() {
+        val token = E2eSessionToken.forTest(context, "exported-broadcast-boundary")
+        fun send(name: String, handle: String, extras: Map<String, String> = emptyMap()): JSONObject {
+            val resultFile = File(context.filesDir, "e2e-results/$handle.json")
+            Files.deleteIfExists(resultFile.toPath())
+            val intent = Intent(E2eControlReceiver.ACTION_CONTROL).setClass(context, E2eControlReceiver::class.java)
+                .putExtra(E2eControlReceiver.EXTRA_REQUEST_ID, handle)
+                .putExtra(E2eControlReceiver.EXTRA_COMMAND, name)
+                .putExtra("auth_input_id", handle)
+            extras.forEach { (key, value) -> intent.putExtra(key, value) }
+            context.sendBroadcast(intent)
+            val deadline = System.currentTimeMillis() + 5_000
+            while (!resultFile.exists() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+            assertTrue(resultFile.exists(), "exported receiver did not finish and publish")
+            return JSONObject(resultFile.readText()).also { Files.deleteIfExists(resultFile.toPath()) }
+        }
+        fun privateFile(bucket: String, handle: String, value: ByteArray) {
+            val directory = File(context.filesDir, bucket).apply { mkdirs(); Os.chmod(path, 448) }
+            val file = File(directory, handle)
+            Files.deleteIfExists(file.toPath())
+            file.writeBytes(value); Os.chmod(file.path, 384)
+        }
+        fun handle(command: String, expiry: Long = System.currentTimeMillis() + 30_000) =
+            E2eRequestHandle.forTest(token, command, expiry, ByteArray(16) { (it + command.length).toByte() })
+
+        val wrong = handle("SHELL")
+        privateFile("e2e-auth", wrong, token.encodeToByteArray())
+        assertEquals("forbidden", send("SHELL", wrong).getString("code"))
+        assertFalse(File(context.filesDir, "e2e-auth/$wrong").exists())
+
+        val expired = handle("SHELL", System.currentTimeMillis() - 1)
+        privateFile("e2e-auth", expired, token.encodeToByteArray())
+        assertEquals("unauthorized", send("SHELL", expired).getString("code"))
+        assertFalse(File(context.filesDir, "e2e-auth/$expired").exists())
+
+        val replay = handle("SHELL")
+        privateFile("e2e-auth", replay, token.encodeToByteArray())
+        assertEquals("forbidden", send("SHELL", replay).getString("code"))
+        assertEquals("unauthorized", send("SHELL", replay).getString("code"))
+
+        val confirm = handle("OFFLINE_PAIR_CONFIRM")
+        privateFile("e2e-auth", confirm, token.encodeToByteArray())
+        privateFile("e2e-inputs", confirm, "fixture-session-value".encodeToByteArray())
+        val failed = send("OFFLINE_PAIR_CONFIRM", confirm, mapOf("secret_input_id" to confirm))
+        assertEquals("error", failed.getString("code"))
+        assertTrue(failed.optString("detail").length <= 256)
+        assertFalse(File(context.filesDir, "e2e-auth/$confirm").exists())
+        assertFalse(File(context.filesDir, "e2e-inputs/$confirm").exists())
+
+        val query = handle("OFFLINE_PAIR_QUERY")
+        privateFile("e2e-auth", query, token.encodeToByteArray())
+        assertEquals("ok", send("OFFLINE_PAIR_QUERY", query).getString("code"))
+        val output = File(context.filesDir, "e2e-secrets/$query")
+        assertTrue(output.exists())
+        Files.deleteIfExists(output.toPath())
+        assertFalse(output.exists())
+
+        val malformed = File(context.filesDir, "e2e-results/missing-request.json")
+        Files.deleteIfExists(malformed.toPath())
+        context.sendBroadcast(Intent(E2eControlReceiver.ACTION_CONTROL).setClass(context, E2eControlReceiver::class.java))
+        val deadline = System.currentTimeMillis() + 5_000
+        while (!malformed.exists() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertTrue(malformed.exists(), "malformed exported intent did not finish")
+        val malformedJson = JSONObject(malformed.readText())
+        assertEquals("unauthorized", malformedJson.getString("code"))
+        assertTrue(malformed.readText().length <= E2eCommandResult.MAX_JSON_BYTES)
+        Files.deleteIfExists(malformed.toPath())
     }
 }

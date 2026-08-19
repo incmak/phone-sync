@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/twinotify/phone-sync/e2e/internal/adb"
 	"github.com/twinotify/phone-sync/e2e/internal/control"
@@ -61,6 +62,36 @@ func TestADBDeviceBroadcastSendsInstallTokenThroughPrivateAuthFile(t *testing.T)
 	}
 	if len(runner.inputs) == 0 || string(runner.inputs[0]) != token {
 		t.Fatalf("token was not sent over private stdin: %q", runner.inputs)
+	}
+}
+
+func TestADBDeviceCleanupAPIsAddressDistinctPrivateBuckets(t *testing.T) {
+	runner := &privateRunner{}
+	device := adbDevice{client: adb.New(runner, "physical-a"), packageName: "com.twinotify.app"}
+	if err := device.CleanupPrivateInput(context.Background(), "request-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.CleanupPrivateAuth(context.Background(), "request-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.CleanupPrivateOutput(context.Background(), "request-1"); err != nil {
+		t.Fatal(err)
+	}
+	joined := make([]string, 0, len(runner.args))
+	for _, args := range runner.args {
+		joined = append(joined, strings.Join(args, " "))
+	}
+	for _, bucket := range []string{"files/e2e-inputs", "files/e2e-auth", "files/e2e-secrets"} {
+		if !strings.Contains(strings.Join(joined, "\n"), bucket) {
+			t.Fatalf("missing cleanup bucket %s: %q", bucket, runner.args)
+		}
+	}
+}
+
+func TestCLIRejectsInvalidPackageBeforeADB(t *testing.T) {
+	err := runWithOptions(context.Background(), options{scenario: "status", serialA: "phone-a", serialB: "phone-b", packageName: "com.twinotify.app;id", timeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "invalid Android package") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

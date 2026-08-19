@@ -64,6 +64,9 @@ func run(ctx context.Context, scenario string) error {
 }
 
 func runWithOptions(ctx context.Context, cfg options) error {
+	if err := adb.ValidateComponentName(cfg.packageName); err != nil {
+		return fmt.Errorf("invalid Android package: %w", err)
+	}
 	if cfg.scenario != "status" && cfg.scenario != "pair" && cfg.scenario != "offline-pairing" {
 		if err := metrics.ValidateScenarioID(cfg.scenario); err == nil {
 			return scenario.ErrUnsupportedEnvironment
@@ -154,7 +157,9 @@ func (d adbDevice) Broadcast(ctx context.Context, command control.Command) error
 		extras[key] = value
 	}
 	if err := d.client.BroadcastReceiver(ctx, d.packageName, "co.twinotify.core.e2e.E2eControlReceiver", "co.twinotify.e2e.CONTROL", extras); err != nil {
-		_ = d.client.DeleteRunAsPrivate(context.WithoutCancel(ctx), d.packageName, "e2e-auth", command.RequestID)
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		_ = d.client.DeleteRunAsPrivate(cleanup, d.packageName, "e2e-auth", command.RequestID)
+		cancel()
 		if errors.Is(err, adb.ErrDeviceOffline) {
 			return fmt.Errorf("%w: %v", control.ErrDeviceOffline, err)
 		}
@@ -189,8 +194,16 @@ func (d adbDevice) ReadSecretOnce(ctx context.Context, requestID string) ([]byte
 	return d.client.ReadRunAsPrivateOnce(ctx, d.packageName, "e2e-secrets", requestID, 4096)
 }
 
-func (d adbDevice) DeleteSecret(ctx context.Context, requestID string) error {
+func (d adbDevice) CleanupPrivateInput(ctx context.Context, requestID string) error {
 	return d.client.DeleteRunAsPrivate(ctx, d.packageName, "e2e-inputs", requestID)
+}
+
+func (d adbDevice) CleanupPrivateAuth(ctx context.Context, requestID string) error {
+	return d.client.DeleteRunAsPrivate(ctx, d.packageName, "e2e-auth", requestID)
+}
+
+func (d adbDevice) CleanupPrivateOutput(ctx context.Context, requestID string) error {
+	return d.client.DeleteRunAsPrivate(ctx, d.packageName, "e2e-secrets", requestID)
 }
 
 func readToken(ctx context.Context, client *adb.Client, packageName string) (string, error) {

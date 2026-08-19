@@ -21,13 +21,19 @@ type fakeDevice struct {
 
 type fakeSecretDevice struct {
 	fakeDevice
-	writes       map[string][]byte
-	secret       []byte
-	deleteCalls  []string
-	broadcastErr error
+	writes        map[string][]byte
+	lastWrite     []byte
+	secret        []byte
+	cleanupCalls  []string
+	readSecretErr error
+	produceOutput bool
+	broadcastErr  error
 }
 
 func (f *fakeSecretDevice) Broadcast(ctx context.Context, command control.Command) error {
+	if f.produceOutput {
+		f.secret = []byte("fixture-secret-output")
+	}
 	if f.broadcastErr != nil {
 		return f.broadcastErr
 	}
@@ -39,14 +45,37 @@ func (f *fakeSecretDevice) WriteSecret(_ context.Context, requestID string, valu
 		f.writes = map[string][]byte{}
 	}
 	f.writes[requestID] = append([]byte(nil), value...)
+	f.lastWrite = append([]byte(nil), value...)
 	return nil
 }
 func (f *fakeSecretDevice) ReadSecretOnce(_ context.Context, requestID string) ([]byte, error) {
+	if f.readSecretErr != nil {
+		return nil, f.readSecretErr
+	}
 	return append([]byte(nil), f.secret...), nil
 }
-func (f *fakeSecretDevice) DeleteSecret(_ context.Context, requestID string) error {
-	f.deleteCalls = append(f.deleteCalls, requestID)
+func (f *fakeSecretDevice) CleanupPrivateInput(ctx context.Context, requestID string) error {
+	f.recordCleanup(ctx, "input:"+requestID)
+	delete(f.writes, requestID)
 	return nil
+}
+func (f *fakeSecretDevice) CleanupPrivateAuth(ctx context.Context, requestID string) error {
+	f.recordCleanup(ctx, "auth:"+requestID)
+	return nil
+}
+func (f *fakeSecretDevice) CleanupPrivateOutput(ctx context.Context, requestID string) error {
+	f.recordCleanup(ctx, "output:"+requestID)
+	f.secret = nil
+	return nil
+}
+func (f *fakeSecretDevice) recordCleanup(ctx context.Context, value string) {
+	if ctx.Err() != nil {
+		panic("cleanup context inherited cancellation")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		panic("cleanup context is unbounded")
+	}
+	f.cleanupCalls = append(f.cleanupCalls, value)
 }
 
 func TestExecuteSecretUsesPrivateChannelAndNormalResultContainsNoSecret(t *testing.T) {
@@ -59,8 +88,8 @@ func TestExecuteSecretUsesPrivateChannelAndNormalResultContainsNoSecret(t *testi
 	if result.Code != "ok" || string(secret) != "fixture-secret-output" {
 		t.Fatalf("result=%+v secret=%q", result, secret)
 	}
-	if string(device.writes["offline-1"]) != "fixture-secret-input" {
-		t.Fatalf("private write=%q", device.writes)
+	if string(device.lastWrite) != "fixture-secret-input" {
+		t.Fatalf("private write=%q", device.lastWrite)
 	}
 	if strings.Contains(string(device.results["offline-1"]), "fixture-secret") {
 		t.Fatal("normal result leaked secret")
@@ -77,11 +106,63 @@ func TestExecuteSecretCleansPrivateInputWhenBroadcastFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected failure")
 	}
-	if len(device.deleteCalls) != 1 || device.deleteCalls[0] != "offline-2" {
-		t.Fatalf("cleanup=%v", device.deleteCalls)
+	for _, want := range []string{"input:offline-2", "auth:offline-2", "output:offline-2"} {
+		if !contains(device.cleanupCalls, want) {
+			t.Fatalf("cleanup=%v missing %s", device.cleanupCalls, want)
+		}
 	}
 	if strings.Contains(err.Error(), "fixture-secret-input") {
 		t.Fatalf("error leaked secret: %v", err)
+	}
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestExecuteSecretCleansAllPrivateBucketsOnEveryExit(t *testing.T) {
+	cases := []struct {
+		name    string
+		result  []byte
+		readErr error
+		cancel  bool
+	}{
+		{"success", []byte(`{"request_id":"offline-3","code":"ok"}`), nil, false},
+		{"normal result failure", []byte(`{"request_id":"offline-3","code":"error"}`), nil, false},
+		{"malformed response", []byte(`{`), nil, false},
+		{"private read failure", []byte(`{"request_id":"offline-3","code":"ok"}`), errors.New("private read failed"), false},
+		{"timeout", nil, nil, false},
+		{"cancelled context", nil, nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			device := &fakeSecretDevice{fakeDevice: fakeDevice{results: map[string][]byte{}}, produceOutput: true, readSecretErr: tc.readErr}
+			if tc.result != nil {
+				device.results["offline-3"] = tc.result
+			}
+			client := control.New(device, "physical-a", "install-token", 20*time.Millisecond)
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				go func() { time.Sleep(time.Millisecond); cancel() }()
+			} else {
+				defer cancel()
+			}
+			_, secret, _ := client.ExecuteSecret(ctx, control.Command{RequestID: "offline-3", Name: "OFFLINE_PAIR_JOIN"}, []byte("fixture-secret-input"))
+			clear(secret)
+			for _, want := range []string{"input:offline-3", "auth:offline-3", "output:offline-3"} {
+				if !contains(device.cleanupCalls, want) {
+					t.Fatalf("cleanup=%v missing %s", device.cleanupCalls, want)
+				}
+			}
+			if len(device.writes) != 0 || len(device.secret) != 0 {
+				t.Fatalf("private residue input=%d output=%d", len(device.writes), len(device.secret))
+			}
+		})
 	}
 }
 
