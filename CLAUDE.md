@@ -53,10 +53,10 @@ npm run lint
 npx expo-doctor        # also gated in CI
 npm run prebuild       # expo prebuild --clean; generates mobile/android + mobile/ios (both gitignored)
 npm run android        # expo run:android — needs a dev build + device/emulator
-npm run build:dev      # eas build --profile development --platform android --local → APK
+npm run build:dev      # pinned ephemeral EAS CLI, development profile, local APK
 ```
 
-`mobile/android/` and `mobile/ios/` do not exist in a fresh clone; they are prebuild output. Kotlin JVM tests (`modules/twinotify-core/android/src/test/`) and instrumented tests (`.../androidTest/`) only run after a prebuild produces a Gradle project, and instrumented tests need an emulator. CI does **not** currently compile Kotlin — treat any Kotlin change as unverified until built on a real device.
+`mobile/android/` and `mobile/ios/` do not exist in a fresh clone; they are prebuild output. Kotlin JVM tests (`modules/twinotify-core/android/src/test/`) and instrumented tests (`.../androidTest/`) only run after a prebuild produces a Gradle project. The mobile CI prebuilds Android, then runs Kotlin lint, JVM tests, and `assembleDebug`; instrumented tests still require an API-compatible emulator or physical device.
 
 ### Relay in Docker
 
@@ -73,7 +73,7 @@ Docker build context is the **repo root** with `dockerfile: relay/Dockerfile` (t
 
 `proto/` holds both generations. **v1** (`packet.schema.json`, `envelope-encrypted.schema.json` with `v:1`) is online-only passthrough: the relay forwards to a live peer or fails. **v2** (`inner-event-v2.schema.json`, `peer-receipt.schema.json`, `relay-control.schema.json`) adds an authenticated inner packet (`msg_id`, `canon_id`, `sequence`, `expires_at` inside the ciphertext), a durable relay mailbox, and end-to-end peer receipts.
 
-Current state: **the relay implements v1 + v2; Android still speaks v1 only** (no `relay.put`/`relay.hello` in Kotlin, Room at version 2 with the legacy `OutboundEvent` queue). The Android v2 lane is planned but not started.
+Current state: **the relay and Android both implement v1 + v2**. Android advertises `[2,1]` with `relay.hello`, sends durable v2 envelopes with `relay.put`, authenticates inner events, stores inbound/outbound state in Room version 4, materializes desired notification/call state, and emits peer receipts. The deprecated DataStore replay guard and legacy outbound queue remain only for v1 compatibility/migration; do not route new reliable-delivery work through them.
 
 Frames (`relay/internal/server/relay_frame.go`): in — `relay.hello`, `relay.put`, `relay.ack`; out — `relay.accepted`, `relay.deliver`, `relay.rejected`, `relay.expired`, `relay.capabilities`, `relay.legacy_forwarded`. Once both devices advertise `[2,1]` the relay records a protocol floor of 2 per pair and refuses v1 frames for it, so a downgrade cannot be forced.
 
