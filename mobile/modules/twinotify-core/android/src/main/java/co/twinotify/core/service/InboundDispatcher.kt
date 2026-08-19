@@ -43,37 +43,42 @@ class InboundDispatcher(
     /** Legacy v1 compatibility path. New relay deliveries use [dispatchV2]. */
     private suspend fun dispatchV1(raw: String) {
         val env = try { EncryptedEnvelope.fromJson(raw) } catch (e: Throwable) {
-            android.util.Log.w("Twinotify", "bad inbound envelope: ${e.message}")
+            android.util.Log.w("Twinotify", "bad legacy inbound envelope")
             return
         }
         if (env.type != "enc") return
-        // Replay check BEFORE decrypt — cheap rejection path
-        if (ReplayGuard.seenOrMark(ctx, env.msgId)) return
-        val peer = PeerStore.load(ctx) ?: run {
-            android.util.Log.w("Twinotify", "no peer paired; dropping inbound")
-            return
-        }
-        val (box, _) = CryptoStore.loadOrGenerate(ctx)
-        val plaintext: ByteArray = try {
-            Encrypter.decrypt(
-                Base64.decode(env.ciphertextB64, Base64.DEFAULT),
-                Base64.decode(env.nonceB64, Base64.DEFAULT),
-                peer.encPubkey,
-                box.secretKey,
-            )
-        } catch (e: Throwable) {
-            android.util.Log.w("Twinotify", "decrypt failed: ${e.message}")
-            return
-        }
-        val inner = try { JSONObject(plaintext.toString(Charsets.UTF_8)) }
-            catch (e: Throwable) { return }
+        LegacyInboundProcessor(
+            loadPeer = {
+                PeerStore.load(ctx) ?: run {
+                    android.util.Log.w("Twinotify", "no peer paired; dropping legacy inbound")
+                    null
+                }
+            },
+            decrypt = { envelope, peer ->
+                val (box, _) = CryptoStore.loadOrGenerate(ctx)
+                Encrypter.decrypt(
+                    Base64.decode(envelope.ciphertextB64, Base64.DEFAULT),
+                    Base64.decode(envelope.nonceB64, Base64.DEFAULT),
+                    peer.encPubkey,
+                    box.secretKey,
+                )
+            },
+            parseInner = { plaintext ->
+                JSONObject(plaintext.toString(Charsets.UTF_8))
+            },
+            seenOrMark = { msgId -> ReplayGuard.seenOrMark(ctx, msgId) },
+            dispatchInner = { inner -> dispatchLegacyInner(inner) },
+        ).process(env)
+    }
+
+    private suspend fun dispatchLegacyInner(inner: JSONObject) {
         val innerType = inner.optString("type")
         when (innerType) {
             "notif.post", "notif.update" -> handlePost(inner)
             "notif.cancel" -> handleCancel(inner)
             "unpair" -> handleUnpair()
             "ack" -> { /* Phase 3: drop */ }
-            else -> android.util.Log.i("Twinotify", "unknown inner type: $innerType")
+            else -> android.util.Log.i("Twinotify", "unknown legacy inner type")
         }
     }
 

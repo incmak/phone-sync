@@ -27,6 +27,7 @@ are the authoritative implementation path for the user's no-internet sync goal.
 | 002 | Make Android E2E scenarios executable and evidence truthful | P1 | M | none | DONE |
 | 003 | Enforce complete host verification in Make and PR CI | P1 | S | 002 | DONE |
 | 004 | Produce a protected standalone Android release artifact | P1 | M | 002, 003 | BLOCKED: producer and fail-closed gates are complete; EAS project linkage plus protected signing, fingerprint, token, and attestation inputs are unavailable for the first approved build |
+| 005 | Preserve retryable legacy v1 deliveries | P1 | M | none | DONE |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.
@@ -85,3 +86,9 @@ REJECTED with a one-line rationale.
 - **Physical no-uplink acceptance**: pending by design until the operator returns
   with two available phones and a safe network-isolation path. It is evidence
   work, not a source-code finding to fake around.
+
+### [BUG-02] Preserve retryable legacy v1 deliveries
+
+- **Evidence**: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/InboundDispatcher.kt:50-69` records `msgId` before peer lookup, local key access, decryption, or plaintext JSON parsing.
+- **Impact**: A temporary missing peer or keystore/decryption failure makes relay redelivery look like a replay for 48 hours, silently losing the notification.
+- **Effort**: M. **Risk**: MED because the marker must remain before destructive inner side effects. **Confidence**: HIGH.
