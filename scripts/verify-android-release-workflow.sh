@@ -149,7 +149,8 @@ verify_secret_scopes() {
         step = entry
         sub(/^- name: /, "", step)
       }
-      if (index(entry, "secrets.") == 0 && index(entry, "secrets[") == 0) next
+      normalized = tolower(entry)
+      if (normalized !~ /(^|[^[:alnum:]_])secrets([^[:alnum:]_]|$)/) next
       if (indent != 10) invalid = 1
       if (entry == "EAS_TOKEN: ${{ secrets.EAS_TOKEN }}" &&
           (step == "Build installable release APK at exact commit" || step == "Build Play AAB at exact commit")) {
@@ -290,6 +291,26 @@ self_test() {
   awk '/^[[:space:]]*run: npm ci$/ { print "        run: printf \"%s\" \"${{ secrets.EAS_TOKEN }}\""; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection early-step-run-secret
+  copy_fixture
+  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets [\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection whitespace-before-bracket-secret
+  copy_fixture
+  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets  . EAS_TOKEN }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection whitespace-around-dot-secret
+  copy_fixture
+  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets\t[\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection tab-before-bracket-secret
+  copy_fixture
+  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: >-"; print "            ${{"; print "              secrets"; print "              [\047EAS_TOKEN\047]"; print "            }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection multiline-secret-context
+  copy_fixture
+  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ SeCrEtS [\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection mixed-case-secret-context
   copy_fixture
   sed -i.bak 's/environment: android-release/environment: unprotected/' "$tmp/.github/workflows/android-release.yml"
   expect_rejection missing-environment
