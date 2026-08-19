@@ -11,6 +11,7 @@ import co.twinotify.core.protocol.EncryptedEnvelope
 import co.twinotify.core.protocol.InnerEventV2
 import co.twinotify.core.protocol.ProtocolJson
 import co.twinotify.core.storage.CanonicalNotificationState
+import co.twinotify.core.storage.CallRecoveryCommitResult
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.OutboundMessage
@@ -127,7 +128,19 @@ class DurableCapturePersister(context: Context) : CapturePersister {
     }
 
     /** Authenticated v2 durable boundary for privacy-bounded cellular call state. */
-    suspend fun persistCallState(event: CallStateEvent): CallStatePersistResult {
+    suspend fun persistCallState(event: CallStateEvent): CallStatePersistResult =
+        persistCallState(event, expectedLocalOrigin = null)
+
+    /** Recovery-only boundary that atomically refuses to terminate a call no longer owned locally. */
+    internal suspend fun persistRecoveredCallState(
+        event: CallStateEvent,
+        expectedLocalOrigin: String,
+    ): CallStatePersistResult = persistCallState(event, expectedLocalOrigin)
+
+    private suspend fun persistCallState(
+        event: CallStateEvent,
+        expectedLocalOrigin: String?,
+    ): CallStatePersistResult {
         val peer = PeerStore.load(appContext)
             ?: throw CaptureNotPairedException("call capture deferred until a peer is paired")
         val originDevice = DeviceIdentity.getOrCreate(appContext)
@@ -195,7 +208,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         )
         val desired = CanonicalNotificationState(
             canonId = canonId,
-            originDevice = current?.originDevice ?: originDevice,
+            originDevice = expectedLocalOrigin ?: current?.originDevice ?: originDevice,
             latestSequence = event.sequence,
             state = if (event.state == "idle") "CANCELLED" else "ACTIVE",
             desiredPayloadJson = if (event.state == "idle") null else payloadJson,
@@ -206,10 +219,18 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             peerCancelPending = current?.peerCancelPending ?: false,
             updatedAt = now,
         )
-        return when (val result = dao.commitCapturedState(desired, row)) {
-            is OutboundStateCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, msgId)
-            is OutboundStateCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
-            OutboundStateCommitResult.NotStateEvent -> error("call capture produced unsupported event type")
+        if (expectedLocalOrigin == null) {
+            return when (val result = dao.commitCapturedState(desired, row)) {
+                is OutboundStateCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, msgId)
+                is OutboundStateCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
+                OutboundStateCommitResult.NotStateEvent -> error("call capture produced unsupported event type")
+            }
+        }
+        return when (val result = dao.commitRecoveredCallState(desired, row, expectedLocalOrigin)) {
+            is CallRecoveryCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, msgId)
+            is CallRecoveryCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
+            CallRecoveryCommitResult.OwnershipLost -> CallStatePersistResult.OwnershipLost
+            CallRecoveryCommitResult.NotStateEvent -> error("call recovery produced unsupported event type")
         }
     }
 

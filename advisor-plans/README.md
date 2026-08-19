@@ -31,7 +31,7 @@ are the authoritative implementation path for the user's no-internet sync goal.
 | 006 | Compile Android instrumentation sources in every native gate | P1 | S | 003 | DONE |
 | 007 | Isolate call state from notification anti-entropy | P0 | S | 006 | DONE |
 | 008 | Seal call sessions when terminal idle is observed | P0 | S | 007 | DONE |
-| 009 | Recover orphaned call sessions before capture starts | P0 | M | 008 | TODO |
+| 009 | Recover orphaned call sessions before capture starts | P0 | M | 008 | DONE |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.

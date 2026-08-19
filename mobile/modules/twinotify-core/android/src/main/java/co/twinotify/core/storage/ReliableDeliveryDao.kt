@@ -48,6 +48,13 @@ sealed interface OutboundStateCommitResult {
     data object NotStateEvent : OutboundStateCommitResult
 }
 
+sealed interface CallRecoveryCommitResult {
+    data class Committed(val compacted: Int) : CallRecoveryCommitResult
+    data class Stale(val latestSequence: Long) : CallRecoveryCommitResult
+    data object OwnershipLost : CallRecoveryCommitResult
+    data object NotStateEvent : CallRecoveryCommitResult
+}
+
 sealed interface SnapshotCommitResult {
     data class Committed(val upserted: Int, val cancelled: Int) : SnapshotCommitResult
     data class Incomplete(val expected: Int, val staged: Int) : SnapshotCommitResult
@@ -111,7 +118,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Query(
         "SELECT * FROM outbound_message WHERE state IN ('NEW','ACCEPTED') " +
-            "AND nextAttemptAt <= :now ORDER BY createdAt LIMIT :limit",
+            "AND nextAttemptAt <= :now ORDER BY createdAt, rowid LIMIT :limit",
     )
     abstract suspend fun sendable(now: Long, limit: Int): List<OutboundMessage>
 
@@ -300,6 +307,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Query("SELECT * FROM canonical_notification_state WHERE originDevice=:originDevice AND state='ACTIVE'")
     abstract suspend fun activeOriginStates(originDevice: String): List<CanonicalNotificationState>
+
+    @Query(
+        "SELECT * FROM canonical_notification_state " +
+            "WHERE originDevice=:originDevice AND state='ACTIVE' " +
+            "AND substr(canonId, 1, 5)='call:' ORDER BY updatedAt, canonId",
+    )
+    abstract suspend fun activeLocalCallStates(
+        originDevice: String,
+    ): List<CanonicalNotificationState>
 
     @Query(
         "SELECT COALESCE(MAX(mirrorLocalId), 0) + 1 FROM canonical_notification_state " +
@@ -723,6 +739,35 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         if (sequence != nextSequence) return OutboundStateCommitResult.Stale(nextSequence - 1L)
         putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
         return commitOutboundState(desired, incoming)
+    }
+
+    /** Recovery commit fenced to the local call ownership selected before capture starts. */
+    @Transaction
+    open suspend fun commitRecoveredCallState(
+        desired: CanonicalNotificationState,
+        incoming: OutboundMessage,
+        expectedLocalOrigin: String,
+    ): CallRecoveryCommitResult {
+        val sequence = requireNotNull(incoming.sequence)
+        val canonId = incoming.canonId ?: return CallRecoveryCommitResult.NotStateEvent
+        val current = canonical(canonId)
+        if (
+            current == null ||
+            current.state != "ACTIVE" ||
+            current.originDevice != expectedLocalOrigin ||
+            desired.originDevice != expectedLocalOrigin
+        ) {
+            return CallRecoveryCommitResult.OwnershipLost
+        }
+        val nextSequence = originSequence(canonId)?.nextSequence
+            ?: current.latestSequence.plus(1L)
+        if (sequence != nextSequence) return CallRecoveryCommitResult.Stale(nextSequence - 1L)
+        putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
+        return when (val result = commitOutboundState(desired, incoming)) {
+            is OutboundStateCommitResult.Committed -> CallRecoveryCommitResult.Committed(result.compacted)
+            is OutboundStateCommitResult.Stale -> CallRecoveryCommitResult.Stale(result.latestSequence)
+            OutboundStateCommitResult.NotStateEvent -> CallRecoveryCommitResult.NotStateEvent
+        }
     }
 
     @Transaction

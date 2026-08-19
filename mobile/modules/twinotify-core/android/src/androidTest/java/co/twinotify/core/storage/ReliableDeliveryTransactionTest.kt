@@ -3,6 +3,14 @@ package co.twinotify.core.storage
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import co.twinotify.core.call.ActiveCallRecoveryException
+import co.twinotify.core.call.ActiveCallRecoverySummary
+import co.twinotify.core.call.ActiveCallTerminalizer
+import co.twinotify.core.call.CallDirection
+import co.twinotify.core.call.CallStateEvent
+import co.twinotify.core.call.CallStatePersistResult
+import co.twinotify.core.call.CallStatePersister
+import co.twinotify.core.call.DaoActiveCallRecoveryStore
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -365,6 +373,214 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun activeLocalCallSelectionIsLocalActiveCallsInStableOrderOnly() = runBlocking {
+        val first = callCanonical(
+            canonId = "call:11111111-1111-4111-8111-111111111111",
+            sequence = 2,
+            updatedAt = 100,
+        )
+        val second = callCanonical(
+            canonId = "call:22222222-2222-4222-8222-222222222222",
+            sequence = 3,
+            updatedAt = 100,
+        )
+        dao.putCanonical(second)
+        dao.putCanonical(first)
+        dao.putCanonical(canonical(sequence = 9, state = "ACTIVE", payload = "notification", updatedAt = 1))
+        dao.putCanonical(
+            callCanonical(
+                canonId = "call:33333333-3333-4333-8333-333333333333",
+                origin = "remote-device",
+                sequence = 4,
+                updatedAt = 1,
+            ),
+        )
+        dao.putCanonical(
+            callCanonical(
+                canonId = "call:44444444-4444-4444-8444-444444444444",
+                sequence = 5,
+                state = "CANCELLED",
+                updatedAt = 1,
+            ),
+        )
+
+        assertEquals(
+            listOf(first.canonId, second.canonId),
+            dao.activeLocalCallStates(ORIGIN).map { it.canonId },
+        )
+    }
+
+    @Test
+    fun terminalizerAtomicallyCancelsLocalCallAndQueuesOneIdleWithoutTouchingOtherRows() = runBlocking {
+        val local = callCanonical(sequence = 8)
+        val remote = callCanonical(
+            canonId = "call:22222222-2222-4222-8222-222222222222",
+            origin = "remote-device",
+            sequence = 4,
+        )
+        val notification = canonical(sequence = 7, state = "ACTIVE", payload = "notification")
+        dao.putCanonical(local)
+        dao.putCanonical(remote)
+        dao.putCanonical(notification)
+        val sink = DaoCallRecoverySink(dao)
+        val terminalizer = ActiveCallTerminalizer(DaoActiveCallRecoveryStore(dao), CallStatePersister(sink))
+
+        assertEquals(ActiveCallRecoverySummary(terminated = 1), terminalizer.recover(ORIGIN))
+        assertEquals("CANCELLED", dao.canonical(local.canonId)?.state)
+        assertEquals(9, dao.canonical(local.canonId)?.latestSequence)
+        assertEquals(listOf(CallStateEvent(sessionId(local), "idle", CallDirection.INCOMING, 9)), sink.events)
+        assertEquals(
+            listOf("recovery-9"),
+            dao.sendable(now = 1_000, limit = 10).map { it.msgId },
+        )
+        assertEquals("NEW", dao.outboundMessage("recovery-9")?.state)
+        assertEquals("call.state", dao.outboundMessage("recovery-9")?.eventType)
+        assertEquals(remote, dao.canonical(remote.canonId))
+        assertEquals(notification, dao.canonical(notification.canonId))
+
+        assertEquals(ActiveCallRecoverySummary(terminated = 0), terminalizer.recover(ORIGIN))
+        assertEquals(listOf("recovery-9"), dao.sendable(now = 1_000, limit = 10).map { it.msgId })
+    }
+
+    @Test
+    fun terminalizerTreatsStaleResultWithCancelledDaoRereadAsSuccess() = runBlocking {
+        val local = callCanonical(sequence = 8)
+        dao.putCanonical(local)
+        val sink = DaoCallRecoverySink(dao, staleMode = StaleMode.CANCELLED)
+        val terminalizer = ActiveCallTerminalizer(DaoActiveCallRecoveryStore(dao), CallStatePersister(sink))
+
+        assertEquals(ActiveCallRecoverySummary(terminated = 1), terminalizer.recover(ORIGIN))
+        assertEquals("CANCELLED", dao.canonical(local.canonId)?.state)
+        assertEquals(9, dao.canonical(local.canonId)?.latestSequence)
+        assertEquals(listOf(CallStateEvent(sessionId(local), "idle", CallDirection.INCOMING, 9)), sink.events)
+        assertEquals(listOf("concurrent-cancel-9"), dao.sendable(now = 1_000, limit = 10).map { it.msgId })
+    }
+
+    @Test
+    fun terminalizerRecomputesOnceAgainstActiveDaoRereadBeforeCancelling() = runBlocking {
+        val local = callCanonical(sequence = 8)
+        dao.putCanonical(local)
+        val sink = DaoCallRecoverySink(dao, staleMode = StaleMode.ACTIVE)
+        val terminalizer = ActiveCallTerminalizer(DaoActiveCallRecoveryStore(dao), CallStatePersister(sink))
+
+        assertEquals(ActiveCallRecoverySummary(terminated = 1), terminalizer.recover(ORIGIN))
+        assertEquals("CANCELLED", dao.canonical(local.canonId)?.state)
+        assertEquals(10, dao.canonical(local.canonId)?.latestSequence)
+        assertEquals(
+            listOf(
+                CallStateEvent(sessionId(local), "idle", CallDirection.INCOMING, 9),
+                CallStateEvent(sessionId(local), "idle", CallDirection.INCOMING, 10),
+            ),
+            sink.events,
+        )
+        assertEquals(
+            listOf("concurrent-active-9", "recovery-10"),
+            dao.sendable(now = 1_000, limit = 10).map { it.msgId },
+        )
+    }
+
+    @Test
+    fun terminalizerRollbackOnOutboxConflictLeavesCallAndSequenceReservationUntouched() = runBlocking {
+        val local = callCanonical(sequence = 8)
+        val conflict = outbound("recovery-9", sequence = null, eventType = "unpair")
+        dao.putCanonical(local)
+        dao.insertOutbound(conflict)
+        val sink = DaoCallRecoverySink(dao)
+        val terminalizer = ActiveCallTerminalizer(DaoActiveCallRecoveryStore(dao), CallStatePersister(sink))
+
+        val error = assertFailsWith<ActiveCallRecoveryException> {
+            terminalizer.recover(ORIGIN)
+        }
+
+        assertEquals("call_recovery_failed", error.code)
+        assertEquals(local, dao.canonical(local.canonId))
+        assertNull(dao.nextCaptureSequence(local.canonId))
+        assertEquals(conflict, dao.outboundMessage(conflict.msgId))
+        assertEquals(listOf(conflict.msgId), activeMessageIds())
+        assertEquals(listOf(CallStateEvent(sessionId(local), "idle", CallDirection.INCOMING, 9)), sink.events)
+    }
+
+    @Test
+    fun recoveryOwnershipCheckAtomicallyPreservesConcurrentRemoteCallAndOutboxState() = runBlocking {
+        val staleLocal = callCanonical(sequence = 8)
+        val remote = staleLocal.copy(originDevice = "remote-device", updatedAt = 1_001)
+        dao.putCanonical(staleLocal)
+        val store = object : co.twinotify.core.call.ActiveCallRecoveryStore {
+            override suspend fun activeLocalCalls(originDevice: String) = listOf(staleLocal)
+
+            override suspend fun canonical(canonId: String) = dao.canonical(canonId)
+
+            override suspend fun nextSequence(canonId: String): Long {
+                dao.putCanonical(remote)
+                return 9L
+            }
+        }
+        val sink = DaoCallRecoverySink(dao)
+        val terminalizer = ActiveCallTerminalizer(store, CallStatePersister(sink, sink))
+
+        assertEquals(ActiveCallRecoverySummary(terminated = 1), terminalizer.recover(ORIGIN))
+        assertEquals(remote, dao.canonical(staleLocal.canonId))
+        assertNull(dao.nextCaptureSequence(staleLocal.canonId))
+        assertTrue(activeMessageIds().isEmpty())
+        assertEquals(
+            listOf(CallStateEvent(sessionId(staleLocal), "idle", CallDirection.INCOMING, 9)),
+            sink.events,
+        )
+        assertEquals(listOf(ORIGIN), sink.expectedLocalOrigins)
+    }
+
+    @Test
+    fun recoveryOwnershipCheckRejectsDesiredOwnerMutationBeforeAnyWrite() = runBlocking {
+        val local = callCanonical(sequence = 8)
+        val incoming = callRecoveryOutbound("wrong-owner-recovery", local.canonId, 9)
+        dao.putCanonical(local)
+
+        assertEquals(
+            CallRecoveryCommitResult.OwnershipLost,
+            dao.commitRecoveredCallState(
+                local.copy(
+                    originDevice = "remote-device",
+                    latestSequence = 9,
+                    state = "CANCELLED",
+                    desiredPayloadJson = null,
+                ),
+                incoming,
+                ORIGIN,
+            ),
+        )
+        assertEquals(local, dao.canonical(local.canonId))
+        assertNull(dao.nextCaptureSequence(local.canonId))
+        assertNull(dao.outboundMessage(incoming.msgId))
+    }
+
+    @Test
+    fun sendableKeepsRecoveryIdleAheadOfFreshRingingDespiteCompetingTimestampIndex() = runBlocking {
+        val createdAt = 500L
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE INDEX competing_sendable_tiebreak ON outbound_message(createdAt, msgId DESC)",
+        )
+        dao.insertOutbound(
+            outbound("a-recovery-idle", sequence = 9, eventType = "call.state").copy(
+                canonId = CALL_CANON_ID,
+                createdAt = createdAt,
+                nextAttemptAt = createdAt,
+            ),
+        )
+        dao.insertOutbound(
+            outbound("z-fresh-ringing", sequence = 10, eventType = "call.state").copy(
+                canonId = CALL_CANON_ID,
+                createdAt = createdAt,
+                nextAttemptAt = createdAt,
+            ),
+        )
+
+        assertEquals(
+            listOf("a-recovery-idle", "z-fresh-ringing"),
+            dao.sendable(now = createdAt, limit = 10).map { it.msgId },
+        )
+    }
+
+    @Test
     fun inboundJournalAtomicallyDistinguishesSameDigestDuplicateFromIdConflict() = runBlocking {
         val first = inbound(msgId = "inbound-1", digest = "digest-a")
 
@@ -442,19 +658,130 @@ class ReliableDeliveryTransactionTest {
             updatedAt = updatedAt,
         )
 
-    private fun callCanonical(sequence: Long) = CanonicalNotificationState(
-        canonId = CALL_CANON_ID,
-        originDevice = ORIGIN,
+    private fun callCanonical(
+        canonId: String = CALL_CANON_ID,
+        origin: String = ORIGIN,
+        sequence: Long,
+        state: String = "ACTIVE",
+        updatedAt: Long = 1_000,
+    ) = CanonicalNotificationState(
+        canonId = canonId,
+        originDevice = origin,
         latestSequence = sequence,
-        state = "ACTIVE",
-        desiredPayloadJson = """{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming"}""",
+        state = state,
+        desiredPayloadJson = if (state == "ACTIVE") {
+            """{"call_session_id":"${canonId.removePrefix("call:")}","state":"ringing","direction":"incoming"}"""
+        } else {
+            null
+        },
         materializedSequence = sequence,
         sourceNotificationKey = null,
-        mirrorLocalId = 99,
-        mirrorLocalTag = "call-mirror",
+        mirrorLocalId = null,
+        mirrorLocalTag = null,
         peerCancelPending = false,
-        updatedAt = 1_000,
+        updatedAt = updatedAt,
     )
+
+    private fun sessionId(state: CanonicalNotificationState): String = state.canonId.removePrefix("call:")
+
+    private fun callRecoveryOutbound(msgId: String, canonId: String, sequence: Long) = OutboundMessage(
+        msgId = msgId,
+        canonId = canonId,
+        sequence = sequence,
+        eventType = "call.state",
+        protocolVersion = 2,
+        envelopeJson = "{}",
+        envelopeSha256 = "sha-$msgId",
+        byteSize = 2,
+        createdAt = sequence,
+        expiresAt = 100_000,
+        relayAcceptedAt = null,
+        attempts = 0,
+        nextAttemptAt = sequence,
+        state = "NEW",
+        lastError = null,
+        requiresPeerReceipt = true,
+    )
+
+    private enum class StaleMode { ACTIVE, CANCELLED }
+
+    private class DaoCallRecoverySink(
+        private val dao: ReliableDeliveryDao,
+        private val staleMode: StaleMode? = null,
+    ) : co.twinotify.core.call.CallStateSink, co.twinotify.core.call.CallRecoveryStateSink {
+        val events = mutableListOf<CallStateEvent>()
+        val expectedLocalOrigins = mutableListOf<String>()
+        private var staleInjected = false
+
+        override suspend fun persist(event: CallStateEvent): CallStatePersistResult {
+            return persistForRecovery(event, ORIGIN)
+        }
+
+        override suspend fun persistForRecovery(
+            event: CallStateEvent,
+            expectedLocalOrigin: String,
+        ): CallStatePersistResult {
+            events += event
+            expectedLocalOrigins += expectedLocalOrigin
+            val canonId = "call:${event.callSessionId}"
+            val current = requireNotNull(dao.canonical(canonId))
+            if (!staleInjected && staleMode != null) {
+                staleInjected = true
+                val concurrentState = if (staleMode == StaleMode.ACTIVE) "ACTIVE" else "CANCELLED"
+                val concurrentId = if (staleMode == StaleMode.ACTIVE) {
+                    "concurrent-active-${event.sequence}"
+                } else {
+                    "concurrent-cancel-${event.sequence}"
+                }
+                assertEquals(
+                    OutboundStateCommitResult.Committed(compacted = 0),
+                    dao.commitCapturedState(
+                        current.copy(
+                            latestSequence = event.sequence,
+                            state = concurrentState,
+                            desiredPayloadJson = if (concurrentState == "ACTIVE") current.desiredPayloadJson else null,
+                        ),
+                        recoveryOutbound(concurrentId, canonId, event.sequence),
+                    ),
+                )
+            }
+            val desired = current.copy(
+                latestSequence = event.sequence,
+                state = "CANCELLED",
+                desiredPayloadJson = null,
+            )
+            return when (val result = dao.commitRecoveredCallState(
+                desired,
+                recoveryOutbound("recovery-${event.sequence}", canonId, event.sequence),
+                expectedLocalOrigin,
+            )) {
+                is CallRecoveryCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, "recovery-${event.sequence}")
+                is CallRecoveryCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
+                CallRecoveryCommitResult.OwnershipLost -> CallStatePersistResult.OwnershipLost
+                CallRecoveryCommitResult.NotStateEvent -> error("call recovery only writes call.state")
+            }
+        }
+
+        private fun recoveryOutbound(msgId: String, canonId: String, sequence: Long) = OutboundMessage(
+            msgId = msgId,
+            canonId = canonId,
+            sequence = sequence,
+            eventType = "call.state",
+            protocolVersion = 2,
+            envelopeJson = "{}",
+            envelopeSha256 = "sha-$msgId",
+            byteSize = 2,
+            createdAt = sequence,
+            expiresAt = 100_000,
+            relayAcceptedAt = null,
+            attempts = 0,
+            nextAttemptAt = sequence,
+            state = "NEW",
+            lastError = null,
+            requiresPeerReceipt = true,
+        )
+
+    }
 
     private fun outbound(msgId: String, sequence: Long?, eventType: String) = OutboundMessage(
         msgId = msgId,

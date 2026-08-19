@@ -15,10 +15,15 @@ import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.call.CallStateCoordinator
 import co.twinotify.core.call.CallStateEvent
 import co.twinotify.core.call.CallFrameworkState
+import co.twinotify.core.call.ActiveCallTerminalizer
+import co.twinotify.core.call.CallCaptureStartupGate
+import co.twinotify.core.call.startNormalCallCapture
 import co.twinotify.core.call.CallCaptureDecision
 import co.twinotify.core.call.CallCapturePolicy
+import co.twinotify.core.call.CallCaptureStatus
 import co.twinotify.core.call.CallStatePersister
 import co.twinotify.core.call.CallStateMaterializer
+import co.twinotify.core.call.DaoActiveCallRecoveryStore
 import co.twinotify.core.call.TelephonyCallStateSource
 import co.twinotify.core.call.code
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +42,39 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.collectLatest
+
+/** Avoids crash recovery while a live source can still be producing legitimate ACTIVE rows. */
+internal fun startCallCaptureRecoveryForServiceStart(
+    captureStatus: CallCaptureStatus?,
+    startRecovery: () -> Job,
+): Job? = if (captureStatus?.enabled == true) null else startRecovery()
+
+/** Serializes coordinator registration and teardown across service lifecycle threads. */
+internal class CallCaptureLifecycleFence {
+    private val monitor = Any()
+    private var coordinator: CallStateCoordinator? = null
+    private var terminal = false
+
+    fun current(): CallStateCoordinator? = synchronized(monitor) { coordinator }
+
+    fun status(): CallCaptureStatus? = synchronized(monitor) { coordinator?.status }
+
+    fun start(startup: (install: (CallStateCoordinator?) -> Unit) -> Unit): Boolean =
+        synchronized(monitor) {
+            if (terminal) return false
+            if (coordinator != null) return true
+            startup { coordinator = it }
+            true
+        }
+
+    fun stop(terminal: Boolean) {
+        synchronized(monitor) {
+            if (terminal) this.terminal = true
+            coordinator?.close()
+            coordinator = null
+        }
+    }
+}
 
 /** Lifecycle shell around the lifecycle-independent durable relay transport. */
 class SyncService : Service() {
@@ -71,7 +109,7 @@ class SyncService : Service() {
         fun startDebugCallCapture(): Boolean {
             val service = activeInstance ?: return false
             service.configureCallCapture(enabled = true, debugSynthetic = true)
-            return service.callStateCoordinator?.status?.enabled == true
+            return service.callCaptureLifecycle.status()?.enabled == true
         }
 
         suspend fun injectDebugCallState(state: String): CallStateEvent? {
@@ -81,7 +119,7 @@ class SyncService : Service() {
                 "idle" -> CallFrameworkState.IDLE
                 else -> return null
             }
-            return activeInstance?.callStateCoordinator?.injectDebugState(frameworkState)
+            return activeInstance?.callCaptureLifecycle?.current()?.injectDebugState(frameworkState)
         }
     }
 
@@ -90,7 +128,8 @@ class SyncService : Service() {
     private var retentionJob: Job? = null
     private var healthJob: Job? = null
     private var materializerJob: Job? = null
-    private var callStateCoordinator: CallStateCoordinator? = null
+    private val callCaptureLifecycle = CallCaptureLifecycleFence()
+    private val callCaptureStartupGate = CallCaptureStartupGate()
     private var foregroundStarted = false
     private var shuttingDown = false
     private val shutdownCompleted = CompletableDeferred<Unit>()
@@ -159,7 +198,7 @@ class SyncService : Service() {
             runBlocking(Dispatchers.IO) {
                 ServiceConfigStore.setEnabled(applicationContext, enabled = false)
             }
-            stopCallCapture()
+            stopCallCapture(terminal = true)
             SyncServiceStatus.setState(SyncState.DISCONNECTED)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -188,7 +227,7 @@ class SyncService : Service() {
             is ServiceStartDecision.Start -> {
                 startForegroundCompat()
                 foregroundStarted = true
-                configureCallCapture(config.callCaptureEnabled)
+                recoverCallsBeforeNormalCapture()
                 scope.launch { runRetentionSweep() }
                 startRelay(decision.relayUrl)
             }
@@ -203,7 +242,7 @@ class SyncService : Service() {
         relayJob?.cancel()
         retentionJob?.cancel()
         healthJob?.cancel()
-        stopCallCapture()
+        stopCallCapture(terminal = true)
         scope.cancel()
         activeInstance = null
         shutdownCompleted.complete(Unit)
@@ -238,6 +277,7 @@ class SyncService : Service() {
         if (shuttingDown) return
         shuttingDown = true
         foregroundStarted = false
+        stopCallCapture(terminal = true)
         val activeRelay = relayJob
         activeRelay?.cancel()
         // Peer-initiated unpair runs inside the relay job itself. Joining that job from its own
@@ -361,51 +401,83 @@ class SyncService : Service() {
         }
     }
 
+    private fun recoverCallsBeforeNormalCapture() {
+        startCallCaptureRecoveryForServiceStart(callCaptureLifecycle.status()) {
+            callCaptureStartupGate.start(
+                scope = scope,
+                recover = {
+                    val localDevice = DeviceIdentity.getOrCreate(applicationContext)
+                    ActiveCallTerminalizer(
+                        store = DaoActiveCallRecoveryStore(reliableDao),
+                        persister = CallStatePersister(applicationContext),
+                    ).recover(localDevice)
+                },
+                startCapture = {
+                    // Read only after recovery. If this read fails, the helper
+                    // reports a bounded failure and retries the full recovery.
+                    configureCallCapture(ServiceConfigStore.read(applicationContext).callCaptureEnabled)
+                },
+                reportFailure = { code ->
+                    SyncServiceStatus.setCallCapture(false, code)
+                },
+            )
+        }
+    }
+
     private fun configureCallCapture(enabled: Boolean, debugSynthetic: Boolean = false) {
         if (!enabled) {
             stopCallCapture()
             SyncServiceStatus.setCallCapture(false, "call_capture_disabled")
             return
         }
-        if (callStateCoordinator != null) return
-        val source = TelephonyCallStateSource(applicationContext)
-        when (val decision = CallCapturePolicy.decide(enabled, source.capabilities())) {
-            is CallCaptureDecision.Disabled -> {
-                if (debugSynthetic) {
-                    // The synthetic host scenario must not depend on a real cellular modem or
-                    // READ_PHONE_STATE. It still uses the production persister and coordinator.
-                } else {
-                    SyncServiceStatus.setCallCapture(false, decision.code)
-                    return
+        callCaptureLifecycle.start { install ->
+            val source = TelephonyCallStateSource(applicationContext)
+            when (val decision = CallCapturePolicy.decide(enabled, source.capabilities())) {
+                is CallCaptureDecision.Disabled -> {
+                    if (debugSynthetic) {
+                        // The synthetic host scenario must not depend on a real cellular modem or
+                        // READ_PHONE_STATE. It still uses the production persister and coordinator.
+                    } else {
+                        SyncServiceStatus.setCallCapture(false, decision.code)
+                        return@start
+                    }
                 }
+                CallCaptureDecision.Start -> Unit
             }
-            CallCaptureDecision.Start -> Unit
+            val coordinator = CallStateCoordinator(
+                source = source,
+                emit = { event ->
+                    try {
+                        CallStatePersister(applicationContext).persist(event)
+                        SyncServiceStatus.setLastCallEventAt(System.currentTimeMillis())
+                        SyncServiceStatus.setCallCapture(true, CallStateMaterializer.mode.capabilityCode)
+                    } catch (error: Throwable) {
+                        // Expose only a bounded health code; the coordinator still serializes and
+                        // suppresses callbacks while the service remains opted in.
+                        SyncServiceStatus.setCallCapture(true, "call_event_persist_failed")
+                        throw error
+                    }
+                },
+                dispatcher = Dispatchers.IO,
+            )
+            val status = if (debugSynthetic) {
+                install(coordinator)
+                coordinator.startForDebug()
+            } else {
+                startNormalCallCapture(
+                    coordinator = coordinator,
+                    install = install,
+                    reportRegistrationFailure = { code -> SyncServiceStatus.setCallCapture(false, code) },
+                )
+            }
+            val capability = if (status.enabled) CallStateMaterializer.mode.capabilityCode else null
+            SyncServiceStatus.setCallCapture(status.enabled, status.lastErrorCode ?: status.reason?.code ?: capability)
         }
-        val coordinator = CallStateCoordinator(
-            source = source,
-            emit = { event ->
-                try {
-                    CallStatePersister(applicationContext).persist(event)
-                    SyncServiceStatus.setLastCallEventAt(System.currentTimeMillis())
-                    SyncServiceStatus.setCallCapture(true, CallStateMaterializer.mode.capabilityCode)
-                } catch (error: Throwable) {
-                    // Expose only a bounded health code; the coordinator still serializes and
-                    // suppresses callbacks while the service remains opted in.
-                    SyncServiceStatus.setCallCapture(true, "call_event_persist_failed")
-                    throw error
-                }
-            },
-            dispatcher = Dispatchers.IO,
-        )
-        callStateCoordinator = coordinator
-        val status = if (debugSynthetic) coordinator.startForDebug() else coordinator.start()
-        val capability = if (status.enabled) CallStateMaterializer.mode.capabilityCode else null
-        SyncServiceStatus.setCallCapture(status.enabled, status.lastErrorCode ?: status.reason?.code ?: capability)
     }
 
-    private fun stopCallCapture() {
-        callStateCoordinator?.close()
-        callStateCoordinator = null
+    private fun stopCallCapture(terminal: Boolean = false) {
+        if (terminal) shuttingDown = true
+        callCaptureLifecycle.stop(terminal)
         SyncServiceStatus.setCallCapture(false, "call_capture_disabled")
     }
 
