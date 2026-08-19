@@ -29,6 +29,8 @@ are the authoritative implementation path for the user's no-internet sync goal.
 | 004 | Produce a protected standalone Android release artifact | P1 | M | 002, 003 | BLOCKED: producer and fail-closed gates are complete; EAS project linkage plus protected signing, fingerprint, token, and attestation inputs are unavailable for the first approved build |
 | 005 | Preserve retryable legacy v1 deliveries | P1 | M | none | DONE |
 | 006 | Compile Android instrumentation sources in every native gate | P1 | S | 003 | DONE |
+| 007 | Isolate call state from notification anti-entropy | P0 | S | 006 | TODO |
+| 008 | Seal call sessions when terminal idle is observed | P0 | S | 007 | TODO |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.
@@ -99,3 +101,15 @@ REJECTED with a one-line rationale.
 - **Evidence**: `Makefile` and `.github/workflows/mobile.yml` run `lintDebug testDebugUnitTest assembleDebug` but omit `compileDebugAndroidTestKotlin`, while Keystore, Room, offline-pairing, debug-security, and call-notification tests live under `src/androidTest`.
 - **Impact**: Instrumentation source/API regressions can merge even though the native PR gate is green.
 - **Effort**: S. **Risk**: LOW. **Confidence**: HIGH.
+
+### [BUG-03] Keep call rows outside notification snapshots
+
+- **Evidence**: `SnapshotCoordinator.localDigest` includes every active canonical row while emitted snapshot items come only from the notification listener; `ReliableDeliveryDao.beginSnapshot` and `commitSnapshot` likewise baseline and cancel every active canonical row, including `call:*`.
+- **Impact**: An active call can invalidate notification repair or be cancelled as missing by a notification-only snapshot.
+- **Effort**: S. **Risk**: MED because digest and reconciliation scope must change together. **Confidence**: HIGH.
+
+### [BUG-04] Seal terminal call identity before persistence succeeds
+
+- **Evidence**: `CallStateCoordinator` clears its session UUID only in `finalizeEvent()` after idle persistence succeeds. A failed idle followed by a new ringing/off-hook callback therefore reuses the completed UUID at a higher sequence.
+- **Impact**: The receiver can accept the higher sequence and resurrect a terminal call under the old canonical ID.
+- **Effort**: S. **Risk**: MED because queued terminal delivery must not clear a newer session. **Confidence**: HIGH.
