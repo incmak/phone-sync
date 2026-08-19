@@ -94,6 +94,14 @@ copy_workflows
 printf '\n      - run: |\n          printf "$(adb)"\n' >> "$tmp/.github/workflows/e2e-host.yml"
 expect_rejection 'subshell device command'
 
+copy_workflows
+printf "\n      - run: |\n          \$('a'db) devices\n" >> "$tmp/.github/workflows/e2e-host.yml"
+expect_rejection 'quoted-shell device command'
+
+copy_workflows
+printf '\n      - run: printf safe\n' >> "$tmp/.github/workflows/e2e-host.yml"
+expect_rejection 'additional benign-looking run command'
+
 expect_acceptance() {
   local label=$1
   if ! TWINOTIFY_HOST_WORKFLOW_ROOT="$tmp" "$VERIFY" >/dev/null 2>"$tmp/error"; then
@@ -104,7 +112,8 @@ expect_acceptance() {
 }
 
 copy_workflows
-printf '\n      # adb devices is intentionally mentioned in a comment\n      - name: ADB wording is not a command\n        run: printf safe\n' >> "$tmp/.github/workflows/e2e-host.yml"
+sed -i.bak 's/Run E2E Go race tests/ADB wording is not a command/' "$tmp/.github/workflows/e2e-host.yml"
+printf '\n      # adb devices is intentionally mentioned in a comment\n' >> "$tmp/.github/workflows/e2e-host.yml"
 expect_acceptance 'comments and labels may mention prohibited tools'
 
 copy_workflows

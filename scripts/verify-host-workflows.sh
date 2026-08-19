@@ -81,7 +81,7 @@ require_read_only_permissions() {
   }
 }
 
-require_safe_host_commands() {
+require_approved_run_commands() {
   local workflow=$1
   awk '
     function trim(value) {
@@ -94,8 +94,15 @@ require_safe_host_commands() {
       sub(/[^ \t].*$/, "", prefix)
       return length(prefix)
     }
-    function inspect(command) {
-      if (command ~ /(^|[^[:alnum:]_])(adb|emulator|sdkmanager|docker)([^[:alnum:]_]|$)/) invalid = 1
+    BEGIN {
+      approved["cd e2e && go test ./... -race -count=1"] = 1
+      approved["cd e2e && go vet ./..."] = 1
+      approved["./e2e/scripts/validate-workflow.sh"] = 1
+      approved["./e2e/scripts/preflight_test.sh"] = 1
+      approved["./scripts/verify-offline-pairing-evidence.sh --self-test"] = 1
+      approved["./scripts/verify-release-evidence.sh --self-test"] = 1
+      approved["./scripts/verify-host-workflows.sh"] = 1
+      approved["./scripts/verify-host-workflows_test.sh"] = 1
     }
     {
       code = $0
@@ -105,10 +112,7 @@ require_safe_host_commands() {
       entry = trim(code)
 
       if (in_run_block) {
-        if (indent > run_indent) {
-          inspect(entry)
-          next
-        }
+        if (indent > run_indent) invalid = 1
         in_run_block = 0
       }
 
@@ -118,12 +122,16 @@ require_safe_host_commands() {
         if (command ~ /^[>|][+-]?$/) {
           in_run_block = 1
           run_indent = indent
-        } else inspect(command)
+        } else if (!(command in approved)) invalid = 1
+        else observed[command]++
       }
     }
-    END { exit invalid ? 1 : 0 }
+    END {
+      for (command in approved) if (observed[command] != 1) invalid = 1
+      exit invalid ? 1 : 0
+    }
   ' "$workflow" || {
-    echo "E2E host workflow must not run ADB, emulator, SDK manager, or Docker commands" >&2
+    echo "E2E host workflow must contain only the approved host verification run commands, exactly once each" >&2
     exit 1
   }
 }
@@ -182,7 +190,7 @@ for command in \
 done
 require_literal "$E2E_WORKFLOW" 'run: ./scripts/verify-host-workflows_test.sh' 'E2E host workflow must run the workflow verifier self-test'
 require_make_target_command "$MAKEFILE" 'host-verify' './scripts/verify-host-workflows_test.sh'
-require_safe_host_commands "$E2E_WORKFLOW"
+require_approved_run_commands "$E2E_WORKFLOW"
 require_no_secrets "$E2E_WORKFLOW"
 
 echo 'host workflow validation passed'
