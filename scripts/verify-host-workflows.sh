@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR=${TWINOTIFY_HOST_WORKFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 MOBILE_WORKFLOW="$ROOT_DIR/.github/workflows/mobile.yml"
 E2E_WORKFLOW="$ROOT_DIR/.github/workflows/e2e-host.yml"
+MAKEFILE="$ROOT_DIR/Makefile"
 
 require_literal() {
   local file=$1 text=$2 message=$3
@@ -35,16 +36,128 @@ require_pinned_actions() {
 
 require_read_only_permissions() {
   local workflow=$1
-  require_literal "$workflow" 'permissions:' "workflow permissions missing: $workflow"
-  require_literal "$workflow" 'contents: read' "workflow must use read-only contents permission: $workflow"
-  if grep -Eq 'contents:[[:space:]]*write|write-all' "$workflow"; then
-    echo "workflow must not request write permissions: $workflow" >&2
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (trim(code) == "") next
+      indent = indentation(code)
+      entry = trim(code)
+
+      if (entry == "permissions:") {
+        if (indent != 0 || permission_blocks != 0) invalid = 1
+        permission_blocks++
+        in_permissions = 1
+        permission_indent = indent
+        next
+      }
+
+      if (in_permissions) {
+        if (indent > permission_indent) {
+          if (indent != permission_indent + 2 || entry != "contents: read") invalid = 1
+          else contents_read++
+          next
+        }
+        in_permissions = 0
+      }
+    }
+    END {
+      if (permission_blocks != 1 || contents_read != 1) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$workflow" || {
+    echo "workflow permissions must contain exactly one top-level contents: read entry: $workflow" >&2
     exit 1
-  fi
+  }
+}
+
+require_safe_host_commands() {
+  local workflow=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    function inspect(command) {
+      if (command ~ /(^|[^[:alnum:]_])(adb|emulator|sdkmanager|docker)([^[:alnum:]_]|$)/) invalid = 1
+    }
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (trim(code) == "") next
+      indent = indentation(code)
+      entry = trim(code)
+
+      if (in_run_block) {
+        if (indent > run_indent) {
+          inspect(entry)
+          next
+        }
+        in_run_block = 0
+      }
+
+      if (entry ~ /^-[ \t]+run:[ \t]*/ || entry ~ /^run:[ \t]*/) {
+        command = entry
+        sub(/^(-[ \t]+)?run:[ \t]*/, "", command)
+        if (command ~ /^[>|][+-]?$/) {
+          in_run_block = 1
+          run_indent = indent
+        } else inspect(command)
+      }
+    }
+    END { exit invalid ? 1 : 0 }
+  ' "$workflow" || {
+    echo "E2E host workflow must not run ADB, emulator, SDK manager, or Docker commands" >&2
+    exit 1
+  }
+}
+
+require_no_secrets() {
+  local workflow=$1
+  awk '
+    {
+      code = $0
+      sub(/[ \t]+#.*/, "", code)
+      if (code ~ /secrets[[:space:]]*\./) exit 1
+    }
+  ' "$workflow" || {
+    echo "E2E host workflow must not reference secrets" >&2
+    exit 1
+  }
+}
+
+require_make_target_command() {
+  local makefile=$1 target=$2 command=$3
+  awk -v target="$target" -v command="$command" '
+    $0 ~ "^" target ":" { in_target = 1; next }
+    in_target && $0 ~ /^[^[:space:]#][^:]*:/ { in_target = 0 }
+    in_target && index($0, command) > 0 { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$makefile" || {
+    echo "Make target $target must run: $command" >&2
+    exit 1
+  }
 }
 
 [[ -f "$MOBILE_WORKFLOW" ]] || { echo "mobile workflow missing: $MOBILE_WORKFLOW" >&2; exit 1; }
 [[ -f "$E2E_WORKFLOW" ]] || { echo "E2E host workflow missing: $E2E_WORKFLOW" >&2; exit 1; }
+[[ -f "$MAKEFILE" ]] || { echo "Makefile missing: $MAKEFILE" >&2; exit 1; }
 
 require_literal "$MOBILE_WORKFLOW" 'npm test -- --runInBand' 'mobile PR workflow must run all Jest tests'
 require_occurrences "$MOBILE_WORKFLOW" "'e2e/**'" 2 'mobile push and PR workflows must cover E2E changes'
@@ -54,6 +167,7 @@ require_occurrences "$MOBILE_WORKFLOW" "'.github/workflows/e2e-host.yml'" 2 'mob
 
 require_literal "$E2E_WORKFLOW" 'push:' 'E2E host workflow must trigger on push'
 require_literal "$E2E_WORKFLOW" 'pull_request:' 'E2E host workflow must trigger on pull requests'
+require_occurrences "$E2E_WORKFLOW" "'.github/workflows/mobile.yml'" 2 'E2E host push and PR workflows must cover mobile workflow changes'
 require_read_only_permissions "$E2E_WORKFLOW"
 require_pinned_actions "$E2E_WORKFLOW"
 for command in \
@@ -62,12 +176,13 @@ for command in \
   './e2e/scripts/validate-workflow.sh' \
   './e2e/scripts/preflight_test.sh' \
   './scripts/verify-offline-pairing-evidence.sh --self-test' \
-  './scripts/verify-release-evidence.sh --self-test'; do
+  './scripts/verify-release-evidence.sh --self-test' \
+  './scripts/verify-host-workflows_test.sh'; do
   require_literal "$E2E_WORKFLOW" "$command" "E2E host workflow is missing required command: $command"
 done
-if grep -Eq '^[[:space:]]*-[[:space:]]+run:[[:space:]].*(adb|emulator|sdkmanager|docker)([[:space:]]|$)|^[[:space:]]+run:[[:space:]].*(adb|emulator|sdkmanager|docker)([[:space:]]|$)' "$E2E_WORKFLOW" || grep -Eqi 'secrets\.' "$E2E_WORKFLOW"; then
-  echo "E2E host workflow must not require devices, Docker, or secrets" >&2
-  exit 1
-fi
+require_literal "$E2E_WORKFLOW" 'run: ./scripts/verify-host-workflows_test.sh' 'E2E host workflow must run the workflow verifier self-test'
+require_make_target_command "$MAKEFILE" 'host-verify' './scripts/verify-host-workflows_test.sh'
+require_safe_host_commands "$E2E_WORKFLOW"
+require_no_secrets "$E2E_WORKFLOW"
 
 echo 'host workflow validation passed'

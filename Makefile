@@ -50,6 +50,7 @@ host-verify: proto-test
 	./scripts/verify-offline-pairing-evidence.sh --self-test
 	./scripts/verify-release-evidence.sh --self-test
 	./scripts/verify-host-workflows.sh
+	./scripts/verify-host-workflows_test.sh
 	./scripts/verify-generated-clean.sh
 
 e2e-emulator: relay-build mobile-verify

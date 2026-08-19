@@ -12,6 +12,7 @@ on:
       - 'scripts/verify-host-workflows_test.sh'
       - '.github/workflows/e2e-host.yml'
       - '.github/workflows/e2e-android.yml'
+      - '.github/workflows/mobile.yml'
   pull_request:
     paths:
       - 'e2e/**'
@@ -23,6 +24,7 @@ on:
       - 'scripts/verify-host-workflows_test.sh'
       - '.github/workflows/e2e-host.yml'
       - '.github/workflows/e2e-android.yml'
+      - '.github/workflows/mobile.yml'
 
 permissions:
   contents: read
@@ -49,3 +51,5 @@ jobs:
         run: ./scripts/verify-release-evidence.sh --self-test
       - name: Verify host workflow contracts
         run: ./scripts/verify-host-workflows.sh
+      - name: Run host workflow verifier self-test
+        run: ./scripts/verify-host-workflows_test.sh
