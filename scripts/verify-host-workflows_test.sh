@@ -124,6 +124,38 @@ copy_workflows
 sed -i.bak '/verify-host-workflows_test\.sh/d' "$tmp/.github/workflows/e2e-host.yml"
 expect_rejection 'E2E host workflow omits verifier self-test'
 
+copy_workflows
+awk '/^[[:space:]]*\.\/scripts\/verify-host-workflows_test\.sh$/ { print "\t# ./scripts/verify-host-workflows_test.sh"; next } { print }' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'tabbed Make comment cannot satisfy verifier self-test command'
+
+copy_workflows
+awk '
+  $0 == "\tcd mobile && npm run typecheck" { typecheck = $0; next }
+  $0 == "\tcd mobile && npm test -- --runInBand" { print; print typecheck; next }
+  { print }
+' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'host verification commands must retain fail-fast order'
+
+copy_workflows
+awk '/^[[:space:]]*\.\/scripts\/verify-host-workflows\.sh$/ { print; print; next } { print }' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'host verification command must not be duplicated'
+
+copy_workflows
+sed -i.bak '/cd mobile && npm test -- --runInBand/d' "$tmp/Makefile"
+expect_rejection 'host verification must include mobile Jest'
+
+copy_workflows
+awk '
+  $0 == "\tcd mobile && npm run typecheck" { typecheck = $0; next }
+  $0 == "\tcd mobile && npm test -- --runInBand" { print; print typecheck; next }
+  { print }
+' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'mobile-verify must run Jest after typecheck'
+
 [[ "$missing_rejections" -eq 0 ]] || exit 1
 
 echo "host workflow verifier self-test passed"

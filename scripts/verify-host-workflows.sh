@@ -150,15 +150,94 @@ require_no_secrets() {
   }
 }
 
-require_make_target_command() {
-  local makefile=$1 target=$2 command=$3
-  awk -v target="$target" -v command="$command" '
-    $0 ~ "^" target ":" { in_target = 1; next }
-    in_target && $0 ~ /^[^[:space:]#][^:]*:/ { in_target = 0 }
-    in_target && index($0, command) > 0 { found = 1 }
-    END { exit found ? 0 : 1 }
+require_host_verify_recipe() {
+  local makefile=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    BEGIN {
+      expected[1] = "cd mobile && npm ci"
+      expected[2] = "cd mobile && npm run typecheck"
+      expected[3] = "cd mobile && npm test -- --runInBand"
+      expected[4] = "cd e2e && go test ./... -race -count=1"
+      expected[5] = "cd e2e && go vet ./..."
+      expected[6] = "./e2e/scripts/validate-workflow.sh"
+      expected[7] = "./e2e/scripts/preflight_test.sh"
+      expected[8] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
+      expected[9] = "./scripts/verify-release-evidence.sh --self-test"
+      expected[10] = "./scripts/verify-host-workflows.sh"
+      expected[11] = "./scripts/verify-host-workflows_test.sh"
+      expected[12] = "./scripts/verify-generated-clean.sh"
+    }
+    $0 ~ /^host-verify:[ \t]*proto-test[ \t]*$/ {
+      target_count++
+      in_target = 1
+      next
+    }
+    in_target {
+      if ($0 ~ /^[^ \t#][^:]*:/) {
+        in_target = 0
+        next
+      }
+      if ($0 ~ /^[ \t]/) {
+        recipe = trim($0)
+        if (recipe == "" || recipe ~ /^#/) next
+        observed++
+        if (observed > 12 || recipe != expected[observed]) invalid = 1
+      }
+    }
+    END {
+      if (target_count != 1 || observed != 12) invalid = 1
+      exit invalid ? 1 : 0
+    }
   ' "$makefile" || {
-    echo "Make target $target must run: $command" >&2
+    echo "host-verify must use the complete fail-fast host recipe exactly once and in order" >&2
+    exit 1
+  }
+}
+
+require_mobile_verify_recipe() {
+  local makefile=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    BEGIN {
+      expected[1] = "cd mobile && npm ci"
+      expected[2] = "cd mobile && npm run typecheck"
+      expected[3] = "cd mobile && npm test -- --runInBand"
+      expected[4] = "cd mobile && npx expo-doctor"
+      expected[5] = "cd mobile && npx expo prebuild --platform android --clean --no-install"
+      expected[6] = "cd mobile/android && ./gradlew --no-daemon lintDebug testDebugUnitTest assembleDebug"
+    }
+    $0 ~ /^mobile-verify:[ \t]*sync-proto[ \t]*$/ {
+      target_count++
+      in_target = 1
+      next
+    }
+    in_target {
+      if ($0 ~ /^[^ \t#][^:]*:/) {
+        in_target = 0
+        next
+      }
+      if ($0 ~ /^[ \t]/) {
+        recipe = trim($0)
+        if (recipe == "" || recipe ~ /^#/) next
+        observed++
+        if (observed > 6 || recipe != expected[observed]) invalid = 1
+      }
+    }
+    END {
+      if (target_count != 1 || observed != 6) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$makefile" || {
+    echo "mobile-verify must run its complete recipe with Jest immediately after typecheck" >&2
     exit 1
   }
 }
@@ -189,7 +268,8 @@ for command in \
   require_literal "$E2E_WORKFLOW" "$command" "E2E host workflow is missing required command: $command"
 done
 require_literal "$E2E_WORKFLOW" 'run: ./scripts/verify-host-workflows_test.sh' 'E2E host workflow must run the workflow verifier self-test'
-require_make_target_command "$MAKEFILE" 'host-verify' './scripts/verify-host-workflows_test.sh'
+require_host_verify_recipe "$MAKEFILE"
+require_mobile_verify_recipe "$MAKEFILE"
 require_approved_run_commands "$E2E_WORKFLOW"
 require_no_secrets "$E2E_WORKFLOW"
 
