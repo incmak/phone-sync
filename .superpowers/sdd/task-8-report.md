@@ -122,3 +122,34 @@ The integration regression runs `RunOfflinePairing` with production-shaped snaps
 | Unchanged Android seam compile | `:twinotify-core:compileDebugKotlin` | `BUILD SUCCESSFUL` | `.omo/evidence/task-8/fix-final-role-android-compile.log` |
 
 Physical acceptance remains pending and no fresh reviewer approval is claimed here.
+
+## Post-merge physical retry on 2026-08-19
+
+The complete offline pairing branch was fast-forwarded into the primary `main`
+checkout. A self-contained debug APK with an embedded JavaScript bundle was
+built and installed on two distinct physical phones on the same Wi-Fi subnet:
+POCO F1/API 35 and M2012K11AI/API 36. Both applications launched without Metro.
+
+The retry found and fixed one fresh-install bootstrap defect. The host must read
+the debug install token before it can issue an authenticated command, but the
+state provider did not create that token on startup. A physical API 36
+instrumentation regression failed before the fix and passed afterward. The
+provider now calls `E2eSessionToken.ensure()` from `onCreate()`. Commit:
+`37489c0 fix(e2e): bootstrap debug control token`.
+
+The automated two-phone ceremony is still not accepted. The POCO permits
+`run-as com.twinotify.app`, while the M2012K11AI ROM rejects the same command
+with an SELinux `seapp_context_lookup_internal` / `Permission denied` failure
+even though PackageManager reports the application as debuggable. The secure
+E2E channel intentionally depends on `run-as` so QR, SAS, session, and install
+credentials never cross public storage or command arguments. This control was
+not weakened to work around an OEM policy. Manual UI pairing remains possible,
+but the operator and phones were no longer available for the ceremony or for
+the required no-uplink packet and DNS capture. No physical pass is claimed.
+
+Fresh non-device verification after the retry passed: protocol and relay CI,
+all five E2E Go packages under the race detector plus `go vet`, mobile
+TypeScript and 36 focused Jest tests, the offline evidence verifier self-test,
+generated-source cleanliness, release-manifest isolation, and the Android
+native unit/Android-test-compile/lint gate. The release manifests contain no
+debug E2E receiver or provider.
