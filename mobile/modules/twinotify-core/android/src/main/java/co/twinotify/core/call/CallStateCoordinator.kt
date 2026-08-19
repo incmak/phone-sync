@@ -2,14 +2,22 @@ package co.twinotify.core.call
 
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+internal data class CallCoordinatorDebugState(
+    val registered: Boolean,
+    val sessionId: String?,
+    val pendingCount: Int,
+)
 
 /** Serializes framework callbacks into privacy-bounded, strictly increasing call sessions. */
 class CallStateCoordinator(
@@ -21,7 +29,9 @@ class CallStateCoordinator(
     private val lock = Any()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val callbackMutex = Mutex()
+    private val quiesceMutex = Mutex()
     private var registration: AutoCloseable? = null
+    private var registrationQuiesced = false
     private var sessionId: String? = null
     private var lastFrameworkState: CallFrameworkState? = null
     private var direction = CallDirection.UNKNOWN
@@ -49,6 +59,7 @@ class CallStateCoordinator(
                 registration = source.register { state ->
                     scope.launch { callbackMutex.withLock { onFrameworkState(state) } }
                 }
+                registrationQuiesced = false
                 _status.set(CallCaptureStatus(enabled = true))
                 status
             } catch (error: Throwable) {
@@ -63,6 +74,7 @@ class CallStateCoordinator(
         synchronized(lock) {
             if (registration != null) return status
             registration = AutoCloseable { }
+            registrationQuiesced = false
             _status.set(CallCaptureStatus(enabled = true))
             return status
         }
@@ -71,10 +83,58 @@ class CallStateCoordinator(
     suspend fun injectDebugState(frameworkState: CallFrameworkState): CallStateEvent? =
         callbackMutex.withLock { onFrameworkState(frameworkState) }
 
+    internal fun debugState(): CallCoordinatorDebugState = synchronized(lock) {
+        CallCoordinatorDebugState(
+            registered = registration != null && !registrationQuiesced,
+            sessionId = sessionId,
+            pendingCount = pendingEmits.size,
+        )
+    }
+
+    suspend fun quiesceAndTerminalize(terminalizeCommittedCalls: suspend () -> Unit) {
+        quiesceMutex.withLock {
+            val handle = synchronized(lock) {
+                _status.set(CallCaptureStatus(false, CallCaptureDisabledReason.DISABLED))
+                if (registrationQuiesced) null else registration
+            }
+            handle?.close()
+            synchronized(lock) {
+                if (registration === handle || handle == null) registrationQuiesced = true
+            }
+
+            val activeRetry = synchronized(lock) {
+                retryJob.also { retryJob = null }
+            }
+            activeRetry?.cancelAndJoin()
+
+            callbackMutex.withLock {
+                val callbackRetry = synchronized(lock) {
+                    retryJob.also { retryJob = null }
+                }
+                callbackRetry?.cancelAndJoin()
+
+                if (!drainPending(scheduleRetryOnFailure = false)) {
+                    throw ActiveCallRecoveryException("call_shutdown_failed")
+                }
+                terminalizeCommittedCalls()
+                synchronized(lock) {
+                    registration = null
+                    registrationQuiesced = false
+                    sessionId = null
+                    lastFrameworkState = null
+                    direction = CallDirection.UNKNOWN
+                    sequence = 0L
+                    pendingEmits.clear()
+                }
+            }
+        }
+    }
+
     fun stop() {
         val handle = synchronized(lock) {
-            val current = registration
+            val current = if (registrationQuiesced) null else registration
             registration = null
+            registrationQuiesced = false
             sessionId = null
             lastFrameworkState = null
             direction = CallDirection.UNKNOWN
@@ -94,6 +154,7 @@ class CallStateCoordinator(
     }
 
     private suspend fun onFrameworkState(frameworkState: CallFrameworkState): CallStateEvent? {
+        if (!_status.get().enabled) return null
         drainPending()
         val event = synchronized(lock) {
             if (!_status.get().enabled) return null
@@ -136,8 +197,13 @@ class CallStateCoordinator(
         val queued = synchronized(lock) { pendingEmits.isNotEmpty() }
         if (queued) {
             enqueuePending(event)
-        } else if (!deliver(event)) {
-            enqueuePending(event)
+        } else {
+            try {
+                if (!deliver(event)) enqueuePending(event)
+            } catch (cancellation: CancellationException) {
+                enqueuePending(event)
+                throw cancellation
+            }
         }
         return event
     }
@@ -146,6 +212,8 @@ class CallStateCoordinator(
         return try {
             emit(event)
             true
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (error: Throwable) {
             _status.updateAndGet { current -> current.copy(lastErrorCode = "call_callback_emit_failed") }
             false
@@ -153,14 +221,20 @@ class CallStateCoordinator(
     }
 
     /** Drains durable events in sequence order; the failed head remains queued for retry. */
-    private suspend fun drainPending(): Boolean {
+    private suspend fun drainPending(scheduleRetryOnFailure: Boolean = true): Boolean {
         while (true) {
             val next = synchronized(lock) {
                 pendingEmits.removeFirstOrNull()
             } ?: return true
-            if (!deliver(next)) {
+            val delivered = try {
+                deliver(next)
+            } catch (cancellation: CancellationException) {
                 synchronized(lock) { pendingEmits.addFirst(next) }
-                scheduleRetry()
+                throw cancellation
+            }
+            if (!delivered) {
+                synchronized(lock) { pendingEmits.addFirst(next) }
+                if (scheduleRetryOnFailure) scheduleRetry()
                 return false
             }
         }
@@ -183,6 +257,7 @@ class CallStateCoordinator(
 
     private fun scheduleRetry() {
         synchronized(lock) {
+            if (!_status.get().enabled) return
             if (retryJob?.isActive == true) return
             retryJob = scope.launch {
                 kotlinx.coroutines.delay(RETRY_DELAY_MS)

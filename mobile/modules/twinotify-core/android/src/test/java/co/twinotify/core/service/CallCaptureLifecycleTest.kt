@@ -3,7 +3,10 @@ package co.twinotify.core.service
 import co.twinotify.core.call.CallCaptureDecision
 import co.twinotify.core.call.CallCapturePolicy
 import co.twinotify.core.call.CallCaptureStatus
+import co.twinotify.core.call.CallShutdownConfigIntent
 import co.twinotify.core.call.CallSourceCapabilities
+import co.twinotify.core.call.GracefulCallShutdownGate
+import co.twinotify.core.call.GracefulCallShutdownResult
 import co.twinotify.core.call.CallFrameworkState
 import co.twinotify.core.call.ActiveCallRecoveryException
 import co.twinotify.core.call.CallCaptureStartupGate
@@ -580,6 +583,123 @@ class CallCaptureLifecycleTest {
     }
 
     @Test
+    fun reservationWinsBeforeObservationAndConcurrentNoServiceCallersShareWork() = runTest {
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val gate = GracefulCallShutdownGate()
+        val releaseTerminalizer = CompletableDeferred<Unit>()
+        var observations = 0
+        var terminalizerRuns = 0
+        val intent = CallShutdownConfigIntent(disableCallCapture = true, disableService = false)
+
+        val first = startCallShutdownBeforeActiveObservation(
+            gate = gate,
+            scope = scope,
+            intent = intent,
+            activeInstance = {
+                observations += 1
+                null
+            },
+            shutdownActive = { error("no active service expected") },
+            shutdownWithoutActive = {
+                terminalizerRuns += 1
+                releaseTerminalizer.await()
+                GracefulCallShutdownResult.Completed
+            },
+        )
+        assertTrue(gate.isReserved())
+        assertEquals(0, observations)
+
+        val second = startCallShutdownBeforeActiveObservation(
+            gate = gate,
+            scope = scope,
+            intent = intent,
+            activeInstance = { error("shared caller must not observe again") },
+            shutdownActive = { error("shared caller must not run") },
+            shutdownWithoutActive = { error("shared caller must not run") },
+        )
+        assertSame(first, second)
+        testScheduler.runCurrent()
+        assertEquals(1, observations)
+        assertEquals(1, terminalizerRuns)
+
+        releaseTerminalizer.complete(Unit)
+        testScheduler.runCurrent()
+        assertSame(first.await(), second.await())
+        scope.cancel()
+    }
+
+    @Test
+    fun reservationBeforeServicePublicationRoutesToPublishedServiceAndBlocksBothRegistrations() = runTest {
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val gate = GracefulCallShutdownGate()
+        val fence = CallCaptureLifecycleFence()
+        val release = CompletableDeferred<Unit>()
+        var published: String? = null
+        var activeRuns = 0
+        var normalRegistrations = 0
+        var debugRegistrations = 0
+
+        val shutdown = startCallShutdownBeforeActiveObservation(
+            gate = gate,
+            scope = scope,
+            intent = CallShutdownConfigIntent(true, false),
+            activeInstance = { published },
+            shutdownActive = {
+                activeRuns += 1
+                release.await()
+                GracefulCallShutdownResult.Completed
+            },
+            shutdownWithoutActive = { error("service publishes before observation") },
+        )
+        published = "service"
+        assertFalse(fence.start(admissionReserved = gate::isReserved) { normalRegistrations += 1 })
+        assertFalse(fence.start(admissionReserved = gate::isReserved) { debugRegistrations += 1 })
+
+        testScheduler.runCurrent()
+        assertEquals(1, activeRuns)
+        release.complete(Unit)
+        testScheduler.runCurrent()
+        shutdown.await()
+        assertEquals(0, normalRegistrations)
+        assertEquals(0, debugRegistrations)
+        scope.cancel()
+    }
+
+    @Test
+    fun servicePublicationBeforeReservationStillBlocksNormalAndDebugRegistration() = runTest {
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val gate = GracefulCallShutdownGate()
+        val fence = CallCaptureLifecycleFence()
+        val release = CompletableDeferred<Unit>()
+        val published = "service"
+        var activeRuns = 0
+        var registrations = 0
+
+        val shutdown = startCallShutdownBeforeActiveObservation(
+            gate = gate,
+            scope = scope,
+            intent = CallShutdownConfigIntent(false, true),
+            activeInstance = { published },
+            shutdownActive = {
+                activeRuns += 1
+                release.await()
+                GracefulCallShutdownResult.Completed
+            },
+            shutdownWithoutActive = { error("active service expected") },
+        )
+
+        assertFalse(fence.start(admissionReserved = gate::isReserved) { registrations += 1 })
+        assertFalse(fence.start(admissionReserved = gate::isReserved) { registrations += 1 })
+        testScheduler.runCurrent()
+        assertEquals(1, activeRuns)
+        release.complete(Unit)
+        testScheduler.runCurrent()
+        shutdown.await()
+        assertEquals(0, registrations)
+        scope.cancel()
+    }
+
+    @Test
     fun runtimeDisableClosesWithoutBlockingLaterStartup() {
         val fence = CallCaptureLifecycleFence()
         val firstSource = FencedRegistrationSource(blockRegistration = false)
@@ -604,6 +724,180 @@ class CallCaptureLifecycleTest {
         assertEquals(1, firstSource.closeAttempts.get())
         assertEquals(1, secondSource.registrationAttempts.get())
         fence.stop(terminal = false)
+    }
+
+    @Test
+    fun quiesceLeaseRejectsRegistrationImmediatelyAndFailureRetainsCoordinatorForRetry() {
+        val fence = CallCaptureLifecycleFence()
+        val firstSource = FencedRegistrationSource(blockRegistration = false)
+        val rejectedSource = FencedRegistrationSource(blockRegistration = false)
+        lateinit var installed: CallStateCoordinator
+
+        assertTrue(fence.start { install ->
+            installed = CallStateCoordinator(firstSource, emit = {})
+            startNormalCallCapture(
+                coordinator = installed,
+                install = install,
+                reportRegistrationFailure = { error("unexpected registration failure: $it") },
+            )
+        })
+
+        val failedLease = fence.beginQuiesce(terminal = false)
+        assertSame(installed, failedLease.coordinator)
+        assertFalse(fence.start { install ->
+            startNormalCallCapture(
+                coordinator = CallStateCoordinator(rejectedSource, emit = {}),
+                install = install,
+                reportRegistrationFailure = { error("unexpected registration failure: $it") },
+            )
+        })
+        fence.finishQuiesce(failedLease, completed = false)
+
+        val retryLease = fence.beginQuiesce(terminal = false)
+        assertSame(installed, retryLease.coordinator)
+        assertEquals(0, firstSource.closeAttempts.get())
+        assertEquals(0, rejectedSource.registrationAttempts.get())
+        fence.finishQuiesce(retryLease, completed = true)
+    }
+
+    @Test
+    fun quiesceSuccessDetachesClosesAndAllowsNonTerminalRestart() {
+        val fence = CallCaptureLifecycleFence()
+        val firstSource = FencedRegistrationSource(blockRegistration = false)
+        val secondSource = FencedRegistrationSource(blockRegistration = false)
+
+        assertTrue(fence.start { install ->
+            startNormalCallCapture(
+                coordinator = CallStateCoordinator(firstSource, emit = {}),
+                install = install,
+                reportRegistrationFailure = { error("unexpected registration failure: $it") },
+            )
+        })
+        val lease = fence.beginQuiesce(terminal = false)
+        fence.finishQuiesce(lease, completed = true)
+
+        assertNull(fence.current())
+        assertEquals(1, firstSource.closeAttempts.get())
+        assertTrue(fence.start { install ->
+            startNormalCallCapture(
+                coordinator = CallStateCoordinator(secondSource, emit = {}),
+                install = install,
+                reportRegistrationFailure = { error("unexpected registration failure: $it") },
+            )
+        })
+        assertEquals(1, secondSource.registrationAttempts.get())
+        fence.stop(terminal = false)
+    }
+
+    @Test
+    fun quiesceTerminalSuccessKeepsFencePermanentlyClosed() {
+        val fence = CallCaptureLifecycleFence()
+        val firstSource = FencedRegistrationSource(blockRegistration = false)
+        val rejectedSource = FencedRegistrationSource(blockRegistration = false)
+
+        assertTrue(fence.start { install ->
+            startNormalCallCapture(
+                coordinator = CallStateCoordinator(firstSource, emit = {}),
+                install = install,
+                reportRegistrationFailure = { error("unexpected registration failure: $it") },
+            )
+        })
+        val lease = fence.beginQuiesce(terminal = true)
+        fence.finishQuiesce(lease, completed = true)
+
+        assertFalse(fence.start { install ->
+            startNormalCallCapture(
+                coordinator = CallStateCoordinator(rejectedSource, emit = {}),
+                install = install,
+                reportRegistrationFailure = { error("unexpected registration failure: $it") },
+            )
+        })
+        assertEquals(1, firstSource.closeAttempts.get())
+        assertEquals(0, rejectedSource.registrationAttempts.get())
+    }
+
+    @Test
+    fun mergedServiceStopPromotesCaptureOnlyLeaseBeforeAdmissionRelease() {
+        val fence = CallCaptureLifecycleFence()
+        val firstSource = FencedRegistrationSource(blockRegistration = false)
+        val rejectedSource = FencedRegistrationSource(blockRegistration = false)
+
+        assertTrue(fence.start { install ->
+            startNormalCallCapture(
+                coordinator = CallStateCoordinator(firstSource, emit = {}),
+                install = install,
+                reportRegistrationFailure = { error("unexpected registration failure: $it") },
+            )
+        })
+        val captureOnlyLease = fence.beginQuiesce(terminal = false)
+        fence.finishQuiesce(
+            lease = captureOnlyLease,
+            completed = true,
+            terminal = true,
+        )
+
+        assertFalse(fence.start { install ->
+            startNormalCallCapture(
+                coordinator = CallStateCoordinator(rejectedSource, emit = {}),
+                install = install,
+                reportRegistrationFailure = { error("unexpected registration failure: $it") },
+            )
+        })
+        assertEquals(1, firstSource.closeAttempts.get())
+        assertEquals(0, rejectedSource.registrationAttempts.get())
+    }
+
+    @Test
+    fun quiesceUnexpectedTerminalStopLeavesActiveJournalUntouched() = runTest {
+        val source = FakeSource()
+        val journal = mutableListOf<String>()
+        val coordinator = CallStateCoordinator(
+            source = source,
+            emit = { journal += it.state.uppercase() },
+            dispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val fence = CallCaptureLifecycleFence()
+        assertTrue(fence.start { install ->
+            install(coordinator)
+            coordinator.start()
+        })
+        source.emit(CallFrameworkState.RINGING)
+        testScheduler.runCurrent()
+        assertEquals(listOf("RINGING"), journal)
+
+        fence.stop(terminal = true)
+        testScheduler.runCurrent()
+
+        assertEquals(listOf("RINGING"), journal)
+        assertNull(fence.current())
+    }
+
+    @Test
+    fun unexpectedServiceDestroyOnlyClosesFenceAndCancelsJobsLeavingActiveJournalForRecovery() = runTest {
+        val source = FakeSource()
+        val activeJournal = mutableListOf<String>()
+        val coordinator = CallStateCoordinator(
+            source = source,
+            emit = { activeJournal += it.state.uppercase() },
+            dispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val fence = CallCaptureLifecycleFence()
+        var jobsCancelled = false
+        assertTrue(fence.start { install ->
+            install(coordinator)
+            coordinator.start()
+        })
+        source.emit(CallFrameworkState.RINGING)
+        testScheduler.runCurrent()
+
+        executeUnexpectedServiceDestroy(
+            closeCallCapture = { fence.stop(terminal = true) },
+            cancelServiceJobs = { jobsCancelled = true },
+        )
+
+        assertEquals(listOf("RINGING"), activeJournal)
+        assertNull(fence.current())
+        assertTrue(jobsCancelled)
     }
 
     @Test

@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import co.twinotify.core.call.CallShutdownConfigIntent
 import kotlinx.coroutines.flow.first
 
 private val Context.syncServiceConfigDataStore by preferencesDataStore("twinotify_service_config")
@@ -18,6 +19,16 @@ data class ServiceConfig(
     val callCaptureEnabled: Boolean = false,
     val lastUserChangeAt: Long? = null,
     val revocationRequestedAt: Long? = null,
+)
+
+internal fun mergeCallShutdownIntent(
+    current: ServiceConfig,
+    intent: CallShutdownConfigIntent,
+    now: Long,
+): ServiceConfig = current.copy(
+    enabled = if (intent.disableService) false else current.enabled,
+    callCaptureEnabled = if (intent.disableCallCapture) false else current.callCaptureEnabled,
+    lastUserChangeAt = if (intent.disableService) now else current.lastUserChangeAt,
 )
 
 /** Single durable source of truth for service intent, relay endpoint, and revocation progress. */
@@ -69,6 +80,21 @@ object ServiceConfigStore {
     suspend fun setCallCaptureEnabled(ctx: Context, enabled: Boolean): ServiceConfig {
         ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
             prefs[CALL_CAPTURE_ENABLED] = enabled
+        }
+        return read(ctx)
+    }
+
+    internal suspend fun applyCallShutdownIntent(
+        ctx: Context,
+        intent: CallShutdownConfigIntent,
+        now: Long = System.currentTimeMillis(),
+    ): ServiceConfig {
+        ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
+            if (intent.disableCallCapture) prefs[CALL_CAPTURE_ENABLED] = false
+            if (intent.disableService) {
+                prefs[ENABLED] = false
+                prefs[LAST_USER_CHANGE_AT] = now
+            }
         }
         return read(ctx)
     }

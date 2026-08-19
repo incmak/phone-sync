@@ -23,12 +23,20 @@ import co.twinotify.core.call.CallCapturePolicy
 import co.twinotify.core.call.CallCaptureStatus
 import co.twinotify.core.call.CallStatePersister
 import co.twinotify.core.call.CallStateMaterializer
+import co.twinotify.core.call.CallShutdownConfigIntent
+import co.twinotify.core.call.GracefulCallShutdownGate
+import co.twinotify.core.call.GracefulCallShutdownResult
 import co.twinotify.core.call.DaoActiveCallRecoveryStore
 import co.twinotify.core.call.TelephonyCallStateSource
+import co.twinotify.core.call.gracefullyShutdownCallCapture
+import co.twinotify.core.call.persistDisabledForCallShutdown
 import co.twinotify.core.call.code
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CompletableDeferred
@@ -43,6 +51,129 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.collectLatest
 
+internal suspend fun executeCallCaptureStopRequest(
+    sharedShutdown: suspend () -> GracefulCallShutdownResult,
+    finalizeStop: suspend () -> Unit,
+) {
+    when (val result = sharedShutdown()) {
+        GracefulCallShutdownResult.Completed -> finalizeStop()
+        is GracefulCallShutdownResult.Failed -> throw co.twinotify.core.call.ActiveCallRecoveryException(result.code)
+    }
+}
+
+@OptIn(ExperimentalCoroutinesApi::class)
+internal suspend fun <T> awaitCallShutdownResult(
+    shutdown: Deferred<T>,
+): T = try {
+    shutdown.await()
+} catch (cancellation: CancellationException) {
+    // Read the exception recorded by this Deferred instead of guessing from an arbitrary cause
+    // chain. Deferred.await may wrap that exact object for stacktrace recovery.
+    throw (shutdown.getCompletionExceptionOrNull() as? CancellationException ?: cancellation)
+}
+
+internal class CallShutdownPhaseState {
+    private var terminalCustody = false
+
+    @Synchronized
+    fun hasTerminalCustody(): Boolean = terminalCustody
+
+    @Synchronized
+    fun markTerminalCustodyComplete() {
+        terminalCustody = true
+    }
+
+    @Synchronized
+    fun clearAfterConfigSuccess() {
+        terminalCustody = false
+    }
+}
+
+internal suspend fun executeCallShutdownPhases(
+    gate: GracefulCallShutdownGate,
+    phaseState: CallShutdownPhaseState = CallShutdownPhaseState(),
+    terminalize: suspend () -> Unit,
+    persistIntent: suspend (CallShutdownConfigIntent) -> Unit,
+    reportFailure: (String) -> Unit,
+): GracefulCallShutdownResult {
+    if (!phaseState.hasTerminalCustody()) {
+        val terminal = gracefullyShutdownCallCapture(
+            quiesceAndTerminalize = terminalize,
+            reportFailure = reportFailure,
+        )
+        if (terminal != GracefulCallShutdownResult.Completed) return terminal
+        phaseState.markTerminalCustodyComplete()
+    }
+    val config = gate.persistMergedIntent { intent ->
+        persistDisabledForCallShutdown(
+            persistDisabled = { persistIntent(intent) },
+            reportFailure = reportFailure,
+        )
+    }
+    if (config == GracefulCallShutdownResult.Completed) {
+        phaseState.clearAfterConfigSuccess()
+    }
+    return config
+}
+
+internal fun <T : Any> startCallShutdownBeforeActiveObservation(
+    gate: GracefulCallShutdownGate,
+    scope: CoroutineScope,
+    intent: CallShutdownConfigIntent,
+    activeInstance: () -> T?,
+    shutdownActive: suspend (T) -> GracefulCallShutdownResult,
+    shutdownWithoutActive: suspend () -> GracefulCallShutdownResult,
+): Deferred<GracefulCallShutdownResult> = gate.start(scope, intent) {
+    activeInstance()?.let { shutdownActive(it) } ?: shutdownWithoutActive()
+}
+
+internal class CallCaptureStopRequestGate {
+    private var active: Job? = null
+
+    @Synchronized
+    fun start(scope: CoroutineScope, request: suspend () -> Unit): Job {
+        active?.takeIf { it.isActive }?.let { return it }
+        val next = scope.launch(start = CoroutineStart.LAZY) { request() }
+        active = next
+        next.invokeOnCompletion {
+            synchronized(this) {
+                if (active === next) active = null
+            }
+        }
+        next.start()
+        return next
+    }
+}
+
+internal suspend fun resumeNormalCallCaptureAfterShutdown(
+    awaitRelease: suspend () -> Unit,
+    readConfig: suspend () -> ServiceConfig,
+    configure: (Boolean) -> Unit,
+) {
+    awaitRelease()
+    val config = readConfig()
+    if (config.enabled) configure(config.callCaptureEnabled)
+}
+
+internal suspend fun quiesceServiceJobsAfterCallShutdown(
+    fromRelayJob: Boolean,
+    activeRelay: Job?,
+    stopOtherChildren: suspend () -> Unit,
+    cancelAndJoinServiceScope: suspend () -> Unit,
+) {
+    if (!fromRelayJob) activeRelay?.cancelAndJoin()
+    stopOtherChildren()
+    if (!fromRelayJob) cancelAndJoinServiceScope()
+}
+
+internal fun executeUnexpectedServiceDestroy(
+    closeCallCapture: () -> Unit,
+    cancelServiceJobs: () -> Unit,
+) {
+    closeCallCapture()
+    cancelServiceJobs()
+}
+
 /** Avoids crash recovery while a live source can still be producing legitimate ACTIVE rows. */
 internal fun startCallCaptureRecoveryForServiceStart(
     captureStatus: CallCaptureStatus?,
@@ -50,26 +181,60 @@ internal fun startCallCaptureRecoveryForServiceStart(
 ): Job? = if (captureStatus?.enabled == true) null else startRecovery()
 
 /** Serializes coordinator registration and teardown across service lifecycle threads. */
+internal data class CallCaptureQuiesceLease(
+    val coordinator: CallStateCoordinator?,
+    val terminal: Boolean,
+)
+
 internal class CallCaptureLifecycleFence {
     private val monitor = Any()
     private var coordinator: CallStateCoordinator? = null
     private var terminal = false
+    private var quiescing = false
+    private var activeLease: CallCaptureQuiesceLease? = null
 
     fun current(): CallStateCoordinator? = synchronized(monitor) { coordinator }
 
     fun status(): CallCaptureStatus? = synchronized(monitor) { coordinator?.status }
 
-    fun start(startup: (install: (CallStateCoordinator?) -> Unit) -> Unit): Boolean =
+    fun start(
+        admissionReserved: () -> Boolean = { false },
+        startup: (install: (CallStateCoordinator?) -> Unit) -> Unit,
+    ): Boolean =
         synchronized(monitor) {
-            if (terminal) return false
+            if (terminal || quiescing || admissionReserved()) return false
             if (coordinator != null) return true
             startup { coordinator = it }
             true
         }
 
+    fun beginQuiesce(terminal: Boolean): CallCaptureQuiesceLease = synchronized(monitor) {
+        check(activeLease == null) { "call capture quiesce is already active" }
+        quiescing = true
+        CallCaptureQuiesceLease(coordinator, terminal).also { activeLease = it }
+    }
+
+    fun finishQuiesce(
+        lease: CallCaptureQuiesceLease,
+        completed: Boolean,
+        terminal: Boolean = lease.terminal,
+    ) {
+        val close = synchronized(monitor) {
+            check(activeLease === lease) { "call capture quiesce lease is not active" }
+            activeLease = null
+            if (!completed) return
+            if (terminal) this.terminal = true
+            quiescing = false
+            coordinator.also { coordinator = null }
+        }
+        close?.close()
+    }
+
     fun stop(terminal: Boolean) {
         synchronized(monitor) {
             if (terminal) this.terminal = true
+            activeLease = null
+            quiescing = terminal
             coordinator?.close()
             coordinator = null
         }
@@ -85,19 +250,84 @@ class SyncService : Service() {
         const val ACTION_STOP = "co.twinotify.service.STOP"
 
         @Volatile private var activeInstance: SyncService? = null
+        private val callShutdownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val callShutdownGate = GracefulCallShutdownGate()
+        private val callShutdownPhaseState = CallShutdownPhaseState()
+
+        private fun requestCallShutdown(
+            context: android.content.Context,
+            intent: CallShutdownConfigIntent,
+        ): Deferred<GracefulCallShutdownResult> {
+            val appContext = context.applicationContext
+            return startCallShutdownBeforeActiveObservation(
+                gate = callShutdownGate,
+                scope = callShutdownScope,
+                intent = intent,
+                activeInstance = { activeInstance },
+                shutdownActive = { it.runGracefulCallShutdown(intent.disableService) },
+                shutdownWithoutActive = { runGracefulCallShutdownWithoutService(appContext) },
+            )
+        }
+
+        suspend fun disableCallCaptureAndAwait(context: android.content.Context) {
+            executeCallCaptureStopRequest(
+                sharedShutdown = {
+                    requestCallShutdown(
+                        context,
+                        CallShutdownConfigIntent(disableCallCapture = true, disableService = false),
+                    ).let { awaitCallShutdownResult(it) }
+                },
+                finalizeStop = {
+                    SyncServiceStatus.setCallCapture(false, "call_capture_disabled")
+                },
+            )
+        }
+
+        suspend fun awaitCallShutdownRelease() {
+            callShutdownGate.awaitRelease()
+        }
 
         /** Stop all service-owned jobs and await cancellation before key/database cleanup. */
         suspend fun shutdownActive(
             ctx: android.content.Context,
             fromRelayJob: Boolean = false,
         ) {
-            val service = activeInstance
-            if (service != null) {
-                service.shutdownForUnpair(fromRelayJob)
-                service.shutdownCompleted.await()
-            }
-            ctx.stopService(Intent(ctx, SyncService::class.java))
+            executeCallCaptureStopRequest(
+                sharedShutdown = {
+                    requestCallShutdown(
+                        ctx,
+                        CallShutdownConfigIntent(disableCallCapture = false, disableService = true),
+                    ).let { awaitCallShutdownResult(it) }
+                },
+                finalizeStop = {
+                    val service = activeInstance
+                    if (service != null) {
+                        service.shutdownForUnpair(fromRelayJob)
+                        service.shutdownCompleted.await()
+                    }
+                    if (!fromRelayJob) {
+                        ctx.stopService(Intent(ctx, SyncService::class.java))
+                    }
+                },
+            )
         }
+
+        private suspend fun runGracefulCallShutdownWithoutService(
+            context: android.content.Context,
+        ): GracefulCallShutdownResult = executeCallShutdownPhases(
+            gate = callShutdownGate,
+            phaseState = callShutdownPhaseState,
+            terminalize = {
+                val dao = NotificationDb.get(context).reliableDeliveryDao()
+                val localDevice = DeviceIdentity.getOrCreate(context)
+                ActiveCallTerminalizer(
+                    store = DaoActiveCallRecoveryStore(dao),
+                    persister = CallStatePersister(context),
+                ).recover(localDevice)
+            },
+            persistIntent = { ServiceConfigStore.applyCallShutdownIntent(context, it) },
+            reportFailure = { SyncServiceStatus.setCallCapture(false, it) },
+        )
 
         /** Stop the live call-state source immediately when the JS opt-in is disabled. */
         fun stopActiveCallCapture() {
@@ -107,9 +337,9 @@ class SyncService : Service() {
 
         /** Debug-only synthetic source setup; no telephony data is read by this path. */
         fun startDebugCallCapture(): Boolean {
+            if (callShutdownGate.isReserved()) return false
             val service = activeInstance ?: return false
-            service.configureCallCapture(enabled = true, debugSynthetic = true)
-            return service.callCaptureLifecycle.status()?.enabled == true
+            return service.configureCallCapture(enabled = true, debugSynthetic = true)
         }
 
         suspend fun injectDebugCallState(state: String): CallStateEvent? {
@@ -128,6 +358,10 @@ class SyncService : Service() {
     private var retentionJob: Job? = null
     private var healthJob: Job? = null
     private var materializerJob: Job? = null
+    private var callCaptureReservationWaiter: Job? = null
+    private val actionStopGate = CallCaptureStopRequestGate()
+    private var retainedCallShutdownLease: CallCaptureQuiesceLease? = null
+    private var retainedCallShutdownTerminal = false
     private val callCaptureLifecycle = CallCaptureLifecycleFence()
     private val callCaptureStartupGate = CallCaptureStartupGate()
     private var foregroundStarted = false
@@ -142,7 +376,6 @@ class SyncService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        activeInstance = this
         NotifChannelSetup.ensureChannels(this)
         reliableDao = NotificationDb.get(this).reliableDeliveryDao()
         val dao = reliableDao
@@ -189,19 +422,13 @@ class SyncService : Service() {
                 retryScheduler = materializationStartupScheduler(applicationContext),
             ).materializePending()
         }
+        // Publish only after every field needed by a concurrently reserved shutdown is ready.
+        activeInstance = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            // Persist the user's choice before any service cancellation can occur. A null sticky
-            // restart must observe this value and remain stopped until the user starts again.
-            runBlocking(Dispatchers.IO) {
-                ServiceConfigStore.setEnabled(applicationContext, enabled = false)
-            }
-            stopCallCapture(terminal = true)
-            SyncServiceStatus.setState(SyncState.DISCONNECTED)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            requestActionStop()
             return START_NOT_STICKY
         }
 
@@ -239,11 +466,18 @@ class SyncService : Service() {
         shuttingDown = true
         foregroundStarted = false
         SyncServiceStatus.setState(SyncState.DISCONNECTED)
-        relayJob?.cancel()
-        retentionJob?.cancel()
-        healthJob?.cancel()
-        stopCallCapture(terminal = true)
-        scope.cancel()
+        // Android destruction cannot await durable shutdown. Keep any ACTIVE call rows as the
+        // crash journal for Plan 009 startup recovery and perform process-local teardown only.
+        executeUnexpectedServiceDestroy(
+            closeCallCapture = { stopCallCapture(terminal = true) },
+            cancelServiceJobs = {
+                relayJob?.cancel()
+                retentionJob?.cancel()
+                healthJob?.cancel()
+                materializerJob?.cancel()
+                scope.cancel()
+            },
+        )
         activeInstance = null
         shutdownCompleted.complete(Unit)
         super.onDestroy()
@@ -279,17 +513,19 @@ class SyncService : Service() {
         foregroundStarted = false
         stopCallCapture(terminal = true)
         val activeRelay = relayJob
-        activeRelay?.cancel()
-        // Peer-initiated unpair runs inside the relay job itself. Joining that job from its own
-        // coroutine would deadlock; cancellation is enough there, while local unpair awaits it.
-        if (!fromRelayJob) activeRelay?.join()
-        retentionJob?.cancelAndJoin()
-        healthJob?.cancelAndJoin()
-        materializerJob?.cancelAndJoin()
-        val scopeJob = scope.coroutineContext[Job]
-        scopeJob?.cancel()
-        if (!fromRelayJob) scopeJob?.join()
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        quiesceServiceJobsAfterCallShutdown(
+            fromRelayJob = fromRelayJob,
+            activeRelay = activeRelay,
+            stopOtherChildren = {
+                retentionJob?.cancelAndJoin()
+                healthJob?.cancelAndJoin()
+                materializerJob?.cancelAndJoin()
+            },
+            cancelAndJoinServiceScope = {
+                scope.coroutineContext[Job]?.cancelAndJoin()
+            },
+        )
+        if (!fromRelayJob) stopForeground(STOP_FOREGROUND_REMOVE)
         shutdownCompleted.complete(Unit)
     }
 
@@ -406,6 +642,7 @@ class SyncService : Service() {
             callCaptureStartupGate.start(
                 scope = scope,
                 recover = {
+                    callShutdownGate.awaitRelease()
                     val localDevice = DeviceIdentity.getOrCreate(applicationContext)
                     ActiveCallTerminalizer(
                         store = DaoActiveCallRecoveryStore(reliableDao),
@@ -415,7 +652,8 @@ class SyncService : Service() {
                 startCapture = {
                     // Read only after recovery. If this read fails, the helper
                     // reports a bounded failure and retries the full recovery.
-                    configureCallCapture(ServiceConfigStore.read(applicationContext).callCaptureEnabled)
+                    val config = ServiceConfigStore.read(applicationContext)
+                    if (config.enabled) configureCallCapture(config.callCaptureEnabled)
                 },
                 reportFailure = { code ->
                     SyncServiceStatus.setCallCapture(false, code)
@@ -424,13 +662,13 @@ class SyncService : Service() {
         }
     }
 
-    private fun configureCallCapture(enabled: Boolean, debugSynthetic: Boolean = false) {
+    private fun configureCallCapture(enabled: Boolean, debugSynthetic: Boolean = false): Boolean {
         if (!enabled) {
             stopCallCapture()
             SyncServiceStatus.setCallCapture(false, "call_capture_disabled")
-            return
+            return false
         }
-        callCaptureLifecycle.start { install ->
+        val accepted = callCaptureLifecycle.start(admissionReserved = callShutdownGate::isReserved) { install ->
             val source = TelephonyCallStateSource(applicationContext)
             when (val decision = CallCapturePolicy.decide(enabled, source.capabilities())) {
                 is CallCaptureDecision.Disabled -> {
@@ -473,6 +711,128 @@ class SyncService : Service() {
             val capability = if (status.enabled) CallStateMaterializer.mode.capabilityCode else null
             SyncServiceStatus.setCallCapture(status.enabled, status.lastErrorCode ?: status.reason?.code ?: capability)
         }
+        if (!accepted && callShutdownGate.isReserved()) {
+            SyncServiceStatus.setCallCapture(false, co.twinotify.core.call.CALL_SHUTDOWN_FAILED)
+            if (!debugSynthetic) resumeCallCaptureAfterShutdown()
+        }
+        return accepted && callCaptureLifecycle.status()?.enabled == true
+    }
+
+    private fun resumeCallCaptureAfterShutdown() {
+        if (callCaptureReservationWaiter?.isActive == true) return
+        lateinit var waiter: Job
+        waiter = scope.launch {
+            try {
+                resumeNormalCallCaptureAfterShutdown(
+                    awaitRelease = callShutdownGate::awaitRelease,
+                    readConfig = { ServiceConfigStore.read(applicationContext) },
+                    configure = { configureCallCapture(it) },
+                )
+            } finally {
+                if (callCaptureReservationWaiter === waiter) callCaptureReservationWaiter = null
+            }
+        }
+        callCaptureReservationWaiter = waiter
+    }
+
+    private suspend fun runGracefulCallShutdown(terminal: Boolean): GracefulCallShutdownResult {
+        retainedCallShutdownTerminal = retainedCallShutdownTerminal || terminal
+        val result = try {
+            executeCallShutdownPhases(
+                gate = callShutdownGate,
+                phaseState = callShutdownPhaseState,
+                terminalize = {
+                    val lease = callCaptureLifecycle.beginQuiesce(terminal)
+                    try {
+                        val terminalizeCommittedCalls: suspend () -> Unit = {
+                            val localDevice = DeviceIdentity.getOrCreate(applicationContext)
+                            ActiveCallTerminalizer(
+                                store = DaoActiveCallRecoveryStore(reliableDao),
+                                persister = CallStatePersister(applicationContext),
+                            ).recover(localDevice)
+                        }
+                        lease.coordinator?.quiesceAndTerminalize(terminalizeCommittedCalls)
+                            ?: terminalizeCommittedCalls()
+                        retainedCallShutdownLease = lease
+                    } catch (cancellation: CancellationException) {
+                        callCaptureLifecycle.finishQuiesce(lease, completed = false)
+                        throw cancellation
+                    } catch (failure: Exception) {
+                        callCaptureLifecycle.finishQuiesce(lease, completed = false)
+                        throw failure
+                    }
+                },
+                persistIntent = {
+                    retainedCallShutdownTerminal =
+                        retainedCallShutdownTerminal || it.disableService
+                    ServiceConfigStore.applyCallShutdownIntent(applicationContext, it)
+                },
+                reportFailure = { SyncServiceStatus.setCallCapture(false, it) },
+            )
+        } catch (cancellation: CancellationException) {
+            releaseRetainedCallShutdownLeaseAfterTerminalFailure()
+            throw cancellation
+        } catch (failure: Exception) {
+            releaseRetainedCallShutdownLeaseAfterTerminalFailure()
+            throw failure
+        }
+        if (result == GracefulCallShutdownResult.Completed) {
+            retainedCallShutdownLease?.let {
+                callCaptureLifecycle.finishQuiesce(
+                    it,
+                    completed = true,
+                    terminal = retainedCallShutdownTerminal,
+                )
+            }
+            retainedCallShutdownLease = null
+            retainedCallShutdownTerminal = false
+        } else if (!callShutdownPhaseState.hasTerminalCustody()) {
+            releaseRetainedCallShutdownLeaseAfterTerminalFailure()
+        }
+        return result
+    }
+
+    private fun releaseRetainedCallShutdownLeaseAfterTerminalFailure() {
+        if (callShutdownPhaseState.hasTerminalCustody()) return
+        retainedCallShutdownLease?.let {
+            callCaptureLifecycle.finishQuiesce(it, completed = false)
+        }
+        retainedCallShutdownLease = null
+        retainedCallShutdownTerminal = false
+    }
+
+    private fun requestActionStop() {
+        actionStopGate.start(scope) {
+            try {
+                executeCallCaptureStopRequest(
+                    sharedShutdown = {
+                        requestCallShutdown(
+                            applicationContext,
+                            CallShutdownConfigIntent(disableCallCapture = false, disableService = true),
+                        ).let { awaitCallShutdownResult(it) }
+                    },
+                    finalizeStop = { finalizeActionStop() },
+                )
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: co.twinotify.core.call.ActiveCallRecoveryException) {
+                SyncServiceStatus.setCallCapture(false, failure.code)
+            }
+        }
+    }
+
+    private suspend fun finalizeActionStop() {
+        if (shuttingDown) return
+        shuttingDown = true
+        foregroundStarted = false
+        relayJob?.cancelAndJoin()
+        retentionJob?.cancelAndJoin()
+        healthJob?.cancelAndJoin()
+        materializerJob?.cancelAndJoin()
+        SyncServiceStatus.setState(SyncState.DISCONNECTED)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        shutdownCompleted.complete(Unit)
+        stopSelf()
     }
 
     private fun stopCallCapture(terminal: Boolean = false) {

@@ -6,16 +6,26 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import co.twinotify.core.call.ActiveCallRecoveryException
 import co.twinotify.core.call.ActiveCallRecoverySummary
 import co.twinotify.core.call.ActiveCallTerminalizer
+import co.twinotify.core.call.CALL_SHUTDOWN_FAILED
+import co.twinotify.core.call.CallFrameworkState
+import co.twinotify.core.call.CallStateCoordinator
 import co.twinotify.core.call.CallDirection
 import co.twinotify.core.call.CallStateEvent
 import co.twinotify.core.call.CallStatePersistResult
 import co.twinotify.core.call.CallStatePersister
 import co.twinotify.core.call.DaoActiveCallRecoveryStore
+import co.twinotify.core.call.GracefulCallShutdownResult
+import co.twinotify.core.call.CallSourceCapabilities
+import co.twinotify.core.call.CallStateSource
+import co.twinotify.core.call.gracefullyShutdownCallCapture
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import org.junit.After
 import org.junit.Before
@@ -529,6 +539,26 @@ class ReliableDeliveryTransactionTest {
         assertEquals(listOf(ORIGIN), sink.expectedLocalOrigins)
     }
 
+    private suspend fun gracefulRoomShutdown(
+        coordinator: CallStateCoordinator,
+        terminalizer: ActiveCallTerminalizer,
+        beforeCompletion: suspend () -> Unit = {},
+        finalize: suspend () -> Unit = {},
+    ): GracefulCallShutdownResult {
+        val result = gracefullyShutdownCallCapture(
+            quiesceAndTerminalize = {
+                coordinator.quiesceAndTerminalize {
+                    terminalizer.recover(ORIGIN)
+                    beforeCompletion()
+                }
+            },
+            reportFailure = {},
+            delayBeforeRetry = {},
+        )
+        if (result == GracefulCallShutdownResult.Completed) finalize()
+        return result
+    }
+
     @Test
     fun recoveryOwnershipCheckRejectsDesiredOwnerMutationBeforeAnyWrite() = runBlocking {
         val local = callCanonical(sequence = 8)
@@ -551,6 +581,179 @@ class ReliableDeliveryTransactionTest {
         assertEquals(local, dao.canonical(local.canonId))
         assertNull(dao.nextCaptureSequence(local.canonId))
         assertNull(dao.outboundMessage(incoming.msgId))
+    }
+
+    @Test
+    fun gracefulShutdownCustodiesEveryLocalCallInRoomOrderBeforeClearingCoordinatorMemory() = runBlocking {
+        val first = callCanonical(
+            canonId = "call:22222222-2222-4222-8222-222222222222",
+            sequence = 2,
+            updatedAt = 100,
+        )
+        val second = callCanonical(
+            canonId = "call:11111111-1111-4111-8111-111111111111",
+            sequence = 8,
+            updatedAt = 200,
+        ).copy(
+            desiredPayloadJson =
+                """{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"active","direction":"outgoing"}""",
+        )
+        val remote = callCanonical(
+            canonId = "call:33333333-3333-4333-8333-333333333333",
+            origin = "remote-device",
+            sequence = 4,
+            updatedAt = 1,
+        )
+        val notification = canonical(sequence = 7, state = "ACTIVE", payload = "notification")
+        dao.putCanonical(second)
+        dao.putCanonical(remote)
+        dao.putCanonical(notification)
+        dao.putCanonical(first)
+
+        val coordinator = CallStateCoordinator(IdleCallSource(), emit = {})
+        coordinator.start()
+        coordinator.injectDebugState(CallFrameworkState.RINGING)
+        val memorySession = assertNotNull(coordinator.debugState().sessionId)
+        val persistedOrder = mutableListOf<String>()
+        val memoryDuringPersistence = mutableListOf<String?>()
+        val sink = DaoCallRecoverySink(dao) { event ->
+            persistedOrder += "call:${event.callSessionId}"
+            memoryDuringPersistence += coordinator.debugState().sessionId
+        }
+        val terminalizer = ActiveCallTerminalizer(
+            DaoActiveCallRecoveryStore(dao),
+            CallStatePersister(sink, sink),
+        )
+        var durableBeforeCompletion = false
+        var finalized = false
+
+        val result = gracefulRoomShutdown(
+            coordinator = coordinator,
+            terminalizer = terminalizer,
+            beforeCompletion = {
+                durableBeforeCompletion =
+                    dao.canonical(first.canonId)?.state == "CANCELLED" &&
+                        dao.canonical(second.canonId)?.state == "CANCELLED" &&
+                        dao.outboundMessage("recovery-3")?.state == "NEW" &&
+                        dao.outboundMessage("recovery-9")?.state == "NEW"
+            },
+            finalize = { finalized = true },
+        )
+
+        assertSame(GracefulCallShutdownResult.Completed, result)
+        assertTrue(durableBeforeCompletion)
+        assertTrue(finalized)
+        assertEquals(listOf(first.canonId, second.canonId), persistedOrder)
+        assertEquals(listOf<String?>(memorySession, memorySession), memoryDuringPersistence)
+        assertEquals(
+            listOf(
+                CallStateEvent(sessionId(first), "idle", CallDirection.INCOMING, 3),
+                CallStateEvent(sessionId(second), "idle", CallDirection.OUTGOING, 9),
+            ),
+            sink.events,
+        )
+        assertEquals(3, dao.canonical(first.canonId)?.latestSequence)
+        assertEquals(9, dao.canonical(second.canonId)?.latestSequence)
+        assertNull(dao.canonical(first.canonId)?.desiredPayloadJson)
+        assertNull(dao.canonical(second.canonId)?.desiredPayloadJson)
+        assertEquals(listOf("recovery-3", "recovery-9"), activeMessageIds())
+        assertEquals("call.state", dao.outboundMessage("recovery-3")?.eventType)
+        assertEquals("call.state", dao.outboundMessage("recovery-9")?.eventType)
+        assertEquals(remote, dao.canonical(remote.canonId))
+        assertEquals(notification, dao.canonical(notification.canonId))
+        assertFalse(coordinator.debugState().registered)
+        assertNull(coordinator.debugState().sessionId)
+        assertEquals(0, coordinator.debugState().pendingCount)
+    }
+
+    @Test
+    fun gracefulShutdownOutboxConflictRollsBackAndReturnsFailedWithoutFinalizing() = runBlocking {
+        val local = callCanonical(sequence = 8)
+        val conflict = outbound("recovery-9", sequence = null, eventType = "unpair")
+        dao.putCanonical(local)
+        dao.insertOutbound(conflict)
+        val coordinator = CallStateCoordinator(IdleCallSource(), emit = {})
+        coordinator.start()
+        coordinator.injectDebugState(CallFrameworkState.RINGING)
+        val retainedMemory = assertNotNull(coordinator.debugState().sessionId)
+        val sink = DaoCallRecoverySink(dao)
+        val terminalizer = ActiveCallTerminalizer(
+            DaoActiveCallRecoveryStore(dao),
+            CallStatePersister(sink, sink),
+        )
+        var finalized = false
+
+        val result = gracefulRoomShutdown(
+            coordinator = coordinator,
+            terminalizer = terminalizer,
+            finalize = { finalized = true },
+        )
+
+        assertEquals(GracefulCallShutdownResult.Failed(CALL_SHUTDOWN_FAILED), result)
+        assertFalse(finalized)
+        assertEquals(local, dao.canonical(local.canonId))
+        assertNull(dao.nextCaptureSequence(local.canonId))
+        assertEquals(conflict, dao.outboundMessage(conflict.msgId))
+        assertEquals(listOf(conflict.msgId), activeMessageIds())
+        assertEquals(3, sink.events.size)
+        assertEquals(retainedMemory, coordinator.debugState().sessionId)
+    }
+
+    @Test
+    fun repeatedGracefulShutdownAfterSuccessDoesNotCreateAnotherIdleOutboxRow() = runBlocking {
+        val local = callCanonical(sequence = 8)
+        dao.putCanonical(local)
+        val coordinator = CallStateCoordinator(IdleCallSource(), emit = {})
+        coordinator.start()
+        val sink = DaoCallRecoverySink(dao)
+        val terminalizer = ActiveCallTerminalizer(
+            DaoActiveCallRecoveryStore(dao),
+            CallStatePersister(sink, sink),
+        )
+
+        assertSame(
+            GracefulCallShutdownResult.Completed,
+            gracefulRoomShutdown(coordinator, terminalizer),
+        )
+        assertSame(
+            GracefulCallShutdownResult.Completed,
+            gracefulRoomShutdown(coordinator, terminalizer),
+        )
+
+        assertEquals(9, dao.canonical(local.canonId)?.latestSequence)
+        assertEquals(listOf("recovery-9"), activeMessageIds())
+        assertEquals(1, sink.events.size)
+    }
+
+    @Test
+    fun gracefulShutdownTreatsRemoteOwnershipFlipAsIdempotentWithoutMutation() = runBlocking {
+        val staleLocal = callCanonical(sequence = 8)
+        val remote = staleLocal.copy(originDevice = "remote-device", updatedAt = 1_001)
+        dao.putCanonical(staleLocal)
+        val store = object : co.twinotify.core.call.ActiveCallRecoveryStore {
+            override suspend fun activeLocalCalls(originDevice: String) = listOf(staleLocal)
+            override suspend fun canonical(canonId: String) = dao.canonical(canonId)
+            override suspend fun nextSequence(canonId: String): Long {
+                dao.putCanonical(remote)
+                return 9L
+            }
+        }
+        val sink = DaoCallRecoverySink(dao)
+        val coordinator = CallStateCoordinator(IdleCallSource(), emit = {})
+        var finalized = false
+
+        val result = gracefulRoomShutdown(
+            coordinator = coordinator,
+            terminalizer = ActiveCallTerminalizer(store, CallStatePersister(sink, sink)),
+            finalize = { finalized = true },
+        )
+
+        assertSame(GracefulCallShutdownResult.Completed, result)
+        assertTrue(finalized)
+        assertEquals(remote, dao.canonical(staleLocal.canonId))
+        assertNull(dao.nextCaptureSequence(staleLocal.canonId))
+        assertTrue(activeMessageIds().isEmpty())
+        assertEquals(listOf(ORIGIN), sink.expectedLocalOrigins)
     }
 
     @Test
@@ -705,9 +908,20 @@ class ReliableDeliveryTransactionTest {
 
     private enum class StaleMode { ACTIVE, CANCELLED }
 
+    private class IdleCallSource : CallStateSource {
+        override fun capabilities() = CallSourceCapabilities(
+            supported = true,
+            permissionGranted = true,
+        )
+
+        override fun register(listener: (CallFrameworkState) -> Unit): AutoCloseable =
+            AutoCloseable { }
+    }
+
     private class DaoCallRecoverySink(
         private val dao: ReliableDeliveryDao,
         private val staleMode: StaleMode? = null,
+        private val onPersist: (CallStateEvent) -> Unit = {},
     ) : co.twinotify.core.call.CallStateSink, co.twinotify.core.call.CallRecoveryStateSink {
         val events = mutableListOf<CallStateEvent>()
         val expectedLocalOrigins = mutableListOf<String>()
@@ -723,6 +937,7 @@ class ReliableDeliveryTransactionTest {
         ): CallStatePersistResult {
             events += event
             expectedLocalOrigins += expectedLocalOrigin
+            onPersist(event)
             val canonId = "call:${event.callSessionId}"
             val current = requireNotNull(dao.canonical(canonId))
             if (!staleInjected && staleMode != null) {

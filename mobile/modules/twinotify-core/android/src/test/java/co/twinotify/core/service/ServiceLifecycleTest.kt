@@ -1,5 +1,10 @@
 package co.twinotify.core.service
 
+import co.twinotify.core.call.CallShutdownConfigIntent
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -11,6 +16,7 @@ import kotlin.test.assertTrue
  * restart/boot contract remains executable on the JVM and cannot be hidden behind framework
  * behavior.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class ServiceLifecycleTest {
     private val paired = true
     private val relayUrl = "wss://relay.example.test/ws"
@@ -68,6 +74,98 @@ class ServiceLifecycleTest {
 
         assertTrue(started.enabled)
         assertEquals(relayUrl, started.relayUrl)
+    }
+
+    @Test
+    fun captureOnlyShutdownIntentPreservesServiceAndUnrelatedConfiguration() {
+        val existing = ServiceConfig(
+            enabled = true,
+            relayUrl = relayUrl,
+            alwaysConnected = false,
+            callCaptureEnabled = true,
+            lastUserChangeAt = 17L,
+            revocationRequestedAt = 19L,
+        )
+
+        val updated = mergeCallShutdownIntent(
+            existing,
+            CallShutdownConfigIntent(disableCallCapture = true, disableService = false),
+            now = 23L,
+        )
+
+        assertEquals(existing.copy(callCaptureEnabled = false), updated)
+    }
+
+    @Test
+    fun serviceStopIntentChangesOnlyServiceBitAndUserTimestamp() {
+        val existing = ServiceConfig(
+            enabled = true,
+            relayUrl = relayUrl,
+            alwaysConnected = false,
+            callCaptureEnabled = true,
+            lastUserChangeAt = 17L,
+            revocationRequestedAt = 19L,
+        )
+
+        val updated = mergeCallShutdownIntent(
+            existing,
+            CallShutdownConfigIntent(disableCallCapture = false, disableService = true),
+            now = 23L,
+        )
+
+        assertEquals(existing.copy(enabled = false, lastUserChangeAt = 23L), updated)
+    }
+
+    @Test
+    fun mergedShutdownIntentAtomicallyAppliesBothFalseBits() {
+        val existing = ServiceConfig(
+            enabled = true,
+            relayUrl = relayUrl,
+            callCaptureEnabled = true,
+            lastUserChangeAt = 17L,
+        )
+
+        val updated = mergeCallShutdownIntent(
+            existing,
+            CallShutdownConfigIntent(disableCallCapture = true, disableService = true),
+            now = 23L,
+        )
+
+        assertEquals(
+            existing.copy(enabled = false, callCaptureEnabled = false, lastUserChangeAt = 23L),
+            updated,
+        )
+    }
+
+    @Test
+    fun normalCaptureResumeWaitsThenRereadsPersistedFalseConfiguration() = runTest {
+        val release = CompletableDeferred<Unit>()
+        val order = mutableListOf<String>()
+        val configured = mutableListOf<Boolean>()
+        val resume = backgroundScope.launch {
+            resumeNormalCallCaptureAfterShutdown(
+                awaitRelease = {
+                    order += "await-release"
+                    release.await()
+                },
+                readConfig = {
+                    order += "read-config"
+                    ServiceConfig(enabled = true, callCaptureEnabled = false)
+                },
+                configure = {
+                    order += "configure"
+                    configured += it
+                },
+            )
+        }
+
+        testScheduler.runCurrent()
+        assertEquals(listOf("await-release"), order)
+        release.complete(Unit)
+        resume.join()
+
+        assertEquals(listOf("await-release", "read-config", "configure"), order)
+        assertEquals(listOf(false), configured)
     }
 
     @Test

@@ -38,6 +38,23 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.text.Normalizer
+import java.util.concurrent.CancellationException
+
+internal suspend fun <T> settleTwinotifyPromise(
+    code: String,
+    boundedMessage: String,
+    operation: suspend () -> T,
+    resolve: (T) -> Unit,
+    reject: (String, String, Throwable?) -> Unit,
+) {
+    try {
+        resolve(operation())
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        reject(code, boundedMessage, null)
+    }
+}
 
 class TwinotifyCoreModule internal constructor(
     offlinePairingRuntimeFactory: OfflinePairingRuntimeFactory?,
@@ -110,34 +127,55 @@ class TwinotifyCoreModule internal constructor(
 
         AsyncFunction("stopSyncService") { promise: Promise ->
             moduleScope.launch {
-                try {
-                    val ctx = requireContext()
-                    co.twinotify.core.service.ServiceConfigStore.setEnabled(ctx, false)
-                    val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java)
-                    ctx.stopService(intent)
-                    promise.resolve(null)
-                } catch (e: Throwable) { promise.reject("STOP_SVC", e.message ?: "err", e) }
+                settleTwinotifyPromise(
+                    code = "STOP_SVC",
+                    boundedMessage = "Unable to stop sync service",
+                    operation = {
+                        co.twinotify.core.service.SyncService.shutdownActive(requireContext())
+                        null
+                    },
+                    resolve = promise::resolve,
+                    reject = { code, message, cause -> promise.reject(code, message, cause) },
+                )
             }
         }
 
         AsyncFunction("setCallCaptureEnabled") { enabled: Boolean, promise: Promise ->
             moduleScope.launch {
-                try {
-                    val ctx = requireContext()
-                    val config = co.twinotify.core.service.ServiceConfigStore.setCallCaptureEnabled(ctx, enabled)
-                    if (!enabled) {
-                        // DataStore persistence alone would leave an already-running callback
-                        // registered until the next service restart. Tear down the live source now.
-                        co.twinotify.core.service.SyncService.stopActiveCallCapture()
-                    } else if (config.enabled) {
-                        val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java).apply {
-                            action = co.twinotify.core.service.SyncService.ACTION_START
-                            config.relayUrl?.let { putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, it) }
+                settleTwinotifyPromise(
+                    code = "CALL_CAPTURE",
+                    boundedMessage = if (enabled) {
+                        "Unable to enable call capture"
+                    } else {
+                        "Unable to disable call capture"
+                    },
+                    operation = {
+                        val ctx = requireContext()
+                        if (!enabled) {
+                            co.twinotify.core.service.SyncService.disableCallCaptureAndAwait(ctx)
+                            false
+                        } else {
+                            co.twinotify.core.service.SyncService.awaitCallShutdownRelease()
+                            val config = co.twinotify.core.service.ServiceConfigStore
+                                .setCallCaptureEnabled(ctx, true)
+                            if (config.enabled) {
+                                val intent = android.content.Intent(
+                                    ctx,
+                                    co.twinotify.core.service.SyncService::class.java,
+                                ).apply {
+                                    action = co.twinotify.core.service.SyncService.ACTION_START
+                                    config.relayUrl?.let {
+                                        putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, it)
+                                    }
+                                }
+                                ctx.startForegroundService(intent)
+                            }
+                            config.callCaptureEnabled
                         }
-                        ctx.startForegroundService(intent)
-                    }
-                    promise.resolve(config.callCaptureEnabled)
-                } catch (e: Throwable) { promise.reject("CALL_CAPTURE", e.message ?: "err", e) }
+                    },
+                    resolve = promise::resolve,
+                    reject = { code, message, cause -> promise.reject(code, message, cause) },
+                )
             }
         }
 

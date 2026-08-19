@@ -1,6 +1,7 @@
 package co.twinotify.core.service
 
 import android.content.Context
+import android.content.Intent
 import android.util.Base64
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.Encrypter
@@ -19,6 +20,14 @@ import co.twinotify.core.storage.ReplayGuard
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
+
+internal suspend fun executePeerUnpairAndRequestServiceStop(
+    unpair: suspend () -> Unit,
+    requestServiceStop: suspend () -> Unit,
+) {
+    unpair()
+    requestServiceStop()
+}
 
 class InboundDispatcher(
     private val ctx: Context,
@@ -330,14 +339,21 @@ class InboundDispatcher(
 
     private suspend fun handleUnpair() {
         android.util.Log.i("Twinotify", "peer initiated unpair — wiping local state")
-        co.twinotify.core.pairing.UnpairWorkflow.execute(
-            // This callback is invoked from the relay collection itself. The service must
-            // cancel that job, but cannot join its own coroutine without deadlocking.
-            stopAndAwait = { SyncService.shutdownActive(ctx, fromRelayJob = true) },
-            revokePeer = {},
-            wipeLocal = {
-                co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
-                SyncServiceStatus.notifyPeerUnpaired()
+        executePeerUnpairAndRequestServiceStop(
+            unpair = {
+                co.twinotify.core.pairing.UnpairWorkflow.execute(
+                    // This callback runs inside the relay collector. Graceful shutdown leaves
+                    // that job and its parent scope alive until the non-cancellable wipe returns.
+                    stopAndAwait = { SyncService.shutdownActive(ctx, fromRelayJob = true) },
+                    revokePeer = {},
+                    wipeLocal = {
+                        co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
+                        SyncServiceStatus.notifyPeerUnpaired()
+                    },
+                )
+            },
+            requestServiceStop = {
+                ctx.stopService(Intent(ctx, SyncService::class.java))
             },
         )
     }
