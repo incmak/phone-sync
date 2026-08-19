@@ -18,6 +18,7 @@ class PeerRecord(
     signPubkey: ByteArray,
     val displayName: String? = null,
     val lanBindingId: String? = null,
+    val relayRevocationRequired: Boolean? = null,
 ) {
     private val encryptionKey = encPubkey.copyOf()
     private val signingKey = signPubkey.copyOf()
@@ -43,6 +44,7 @@ object PeerStore {
     private val KEY_PEER_SIGN   = byteArrayPreferencesKey("peer_sign_pubkey")
     private val KEY_PEER_NAME   = stringPreferencesKey("peer_display_name")
     private val KEY_LAN_BINDING = stringPreferencesKey("lan_binding_id")
+    private val KEY_RELAY_REVOCATION_REQUIRED = booleanPreferencesKey("relay_revocation_required")
 
     suspend fun save(ctx: Context, r: PeerRecord) {
         ctx.peerDs.edit { e ->
@@ -51,6 +53,8 @@ object PeerStore {
             e[KEY_PEER_SIGN]   = r.signPubkey
             r.displayName?.let { e[KEY_PEER_NAME] = it } ?: e.remove(KEY_PEER_NAME)
             r.lanBindingId?.let { e[KEY_LAN_BINDING] = it } ?: e.remove(KEY_LAN_BINDING)
+            r.relayRevocationRequired?.let { e[KEY_RELAY_REVOCATION_REQUIRED] = it }
+                ?: e.remove(KEY_RELAY_REVOCATION_REQUIRED)
         }
     }
 
@@ -60,7 +64,14 @@ object PeerStore {
         val enc  = prefs[KEY_PEER_ENC]    ?: return null
         val sign = prefs[KEY_PEER_SIGN]   ?: return null
         val name = prefs[KEY_PEER_NAME]
-        return PeerRecord(dev, enc, sign, name, prefs[KEY_LAN_BINDING])
+        return PeerRecord(
+            dev,
+            enc,
+            sign,
+            name,
+            prefs[KEY_LAN_BINDING],
+            prefs[KEY_RELAY_REVOCATION_REQUIRED],
+        )
     }
 
     /** Atomically adds the sole public marker only if the relay identity still matches. */
@@ -99,6 +110,8 @@ object PeerStore {
                     prefs[KEY_PEER_SIGN] = proposedPeer.signPubkey
                     proposedPeer.displayName?.let { prefs[KEY_PEER_NAME] = it } ?: prefs.remove(KEY_PEER_NAME)
                     prefs[KEY_LAN_BINDING] = bindingId
+                    proposedPeer.relayRevocationRequired?.let { prefs[KEY_RELAY_REVOCATION_REQUIRED] = it }
+                        ?: prefs.remove(KEY_RELAY_REVOCATION_REQUIRED)
                     committed = true
                 }
             } else if (current != null && current.samePublicIdentity(expectedCurrent) &&
@@ -128,6 +141,13 @@ object PeerStore {
         val dev = prefs[KEY_PEER_DEVICE] ?: return null
         val enc = prefs[KEY_PEER_ENC] ?: return null
         val sign = prefs[KEY_PEER_SIGN] ?: return null
-        return PeerRecord(dev, enc, sign, prefs[KEY_PEER_NAME], prefs[KEY_LAN_BINDING])
+        return PeerRecord(
+            dev,
+            enc,
+            sign,
+            prefs[KEY_PEER_NAME],
+            prefs[KEY_LAN_BINDING],
+            prefs[KEY_RELAY_REVOCATION_REQUIRED],
+        )
     }
 }

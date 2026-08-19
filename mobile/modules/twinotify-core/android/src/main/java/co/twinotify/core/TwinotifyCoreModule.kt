@@ -407,7 +407,16 @@ class TwinotifyCoreModule internal constructor(
                     val enc  = Base64.getDecoder().decode(encB64)
                     val sign = Base64.getDecoder().decode(signB64)
                     val name = peerDisplayName.takeIf { it.isNotBlank() }
-                    PeerStore.save(ctx, PeerRecord(peerDeviceId, enc, sign, name))
+                    PeerStore.save(
+                        ctx,
+                        PeerRecord(
+                            peerDeviceId,
+                            enc,
+                            sign,
+                            name,
+                            relayRevocationRequired = true,
+                        ),
+                    )
                     co.twinotify.core.listener.CaptureCoordinator.get(ctx).resumeDeferred()
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("PEER_STORE", e.message ?: "err", e) }
@@ -462,27 +471,40 @@ class TwinotifyCoreModule internal constructor(
                     val ctx = requireContext()
                     val peer = PeerStore.load(ctx)
                     val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
-                    // Persist intent before stopping anything. This marker makes a lost 204
-                    // retryable as terminal 401 while the old signing key is still available.
-                    val markedConfig = co.twinotify.core.service.ServiceConfigStore.setRevocationRequestedAt(ctx)
+                    val revocationDecision = co.twinotify.core.pairing.UnpairRevocationPolicy.decide(
+                        peerPresent = peer != null,
+                        relayRevocationRequired = peer?.relayRevocationRequired,
+                        lanBindingId = peer?.lanBindingId,
+                        relayUrl = config.relayUrl,
+                    )
                     co.twinotify.core.pairing.UnpairWorkflow.execute(
                         stopAndAwait = {
                             offlinePairing.quiesceAndAwait()
                             co.twinotify.core.service.SyncService.shutdownActive(ctx)
                         },
                         revokePeer = {
-                            if (peer != null) {
-                                val relayUrl = config.relayUrl ?: error("paired device has no relay URL")
-                                val (_, sign) = CryptoStore.loadOrGenerate(ctx)
-                                val deviceId = DeviceIdentity.getOrCreate(ctx)
-                                val jwt = JwtMinter.mint(deviceId, sign.secretKey)
-                                PairProtocol.revoke(
-                                    relayUrl,
-                                    jwt,
-                                    debug = (ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
-                                    revocationMarkerPresent = markedConfig.revocationRequestedAt != null,
-                                )
-                            }
+                            co.twinotify.core.pairing.UnpairRevocationExecutor.execute(
+                                decision = revocationDecision,
+                                markRevocationIntent = {
+                                    // Persist intent immediately before the authenticated request.
+                                    // A lost 204 is then retryable as terminal 401 while the old
+                                    // signing key is still available.
+                                    co.twinotify.core.service.ServiceConfigStore
+                                        .setRevocationRequestedAt(ctx)
+                                        .revocationRequestedAt != null
+                                },
+                                revoke = { relayUrl, revocationMarkerPresent ->
+                                    val (_, sign) = CryptoStore.loadOrGenerate(ctx)
+                                    val deviceId = DeviceIdentity.getOrCreate(ctx)
+                                    val jwt = JwtMinter.mint(deviceId, sign.secretKey)
+                                    PairProtocol.revoke(
+                                        relayUrl,
+                                        jwt,
+                                        debug = (ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+                                        revocationMarkerPresent = revocationMarkerPresent,
+                                    )
+                                },
+                            )
                         },
                         wipeLocal = {
                             co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)

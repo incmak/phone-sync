@@ -356,7 +356,12 @@ object LanPairStore {
     }
 
     private fun copyPeer(peer: PeerRecord) = PeerRecord(
-        peer.deviceId, peer.encPubkey, peer.signPubkey, peer.displayName, peer.lanBindingId,
+        peer.deviceId,
+        peer.encPubkey,
+        peer.signPubkey,
+        peer.displayName,
+        peer.lanBindingId,
+        peer.relayRevocationRequired,
     )
 
     private fun copyBinding(binding: LanBinding) = LanBinding(

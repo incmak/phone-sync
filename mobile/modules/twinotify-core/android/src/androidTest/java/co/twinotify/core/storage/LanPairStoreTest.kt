@@ -55,7 +55,11 @@ class LanPairStoreTest {
 
     @Test
     fun freshOfflineCommitCreatesPeerAndMarkerOnlyAfterSealedVerification() = runBlocking {
-        val peer = peer(deviceId = "dev-00000000-0000-0000-0000-000000000011", name = "Fresh phone")
+        val peer = peer(
+            deviceId = "dev-00000000-0000-0000-0000-000000000011",
+            name = "Fresh phone",
+            relayRevocationRequired = false,
+        )
         assertNull(PeerStore.load(context))
 
         LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding()))
@@ -65,6 +69,7 @@ class LanPairStoreTest {
         assertContentEquals(peer.encPubkey, committed.encPubkey)
         assertContentEquals(peer.signPubkey, committed.signPubkey)
         assertEquals(peer.displayName, committed.displayName)
+        assertEquals(false, committed.relayRevocationRequired)
         assertNotNull(committed.lanBindingId)
         assertNotNull(LanPairStore.loadValidated(context, committed))
         Unit
@@ -110,6 +115,7 @@ class LanPairStoreTest {
         LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding()))
 
         val saved = assertNotNull(PeerStore.load(context))
+        assertEquals(true, saved.relayRevocationRequired)
         assertNotNull(saved.lanBindingId)
         assertEquals(null, PeerRecord::class.java.declaredFields.firstOrNull { it.name.contains("secret", ignoreCase = true) })
     }
@@ -304,7 +310,8 @@ class LanPairStoreTest {
         signSeed: Int = 0x31,
         name: String? = "phone",
         lanBindingId: String? = null,
-    ) = PeerRecord(deviceId, bytes(encSeed), bytes(signSeed), name, lanBindingId)
+        relayRevocationRequired: Boolean? = true,
+    ) = PeerRecord(deviceId, bytes(encSeed), bytes(signSeed), name, lanBindingId, relayRevocationRequired)
 
     private fun binding(secret: ByteArray = bytes(0x41)) = LanBinding(bytes(0x51), secret, 1, 123L)
 

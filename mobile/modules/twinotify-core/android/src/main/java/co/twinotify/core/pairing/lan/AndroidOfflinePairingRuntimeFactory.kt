@@ -145,6 +145,7 @@ internal class AndroidOfflinePairingCommitter(
                 value.peerEncryptionPublicKey,
                 value.peerSigningPublicKey,
                 value.peerDisplayName,
+                relayRevocationRequired = false,
             )
             val binding = LanBinding(
                 value.peerTlsSpkiSha256,
@@ -206,4 +207,11 @@ private class AndroidOfflinePairingSessionTransport(
     }
 }
 
-private fun PeerRecord.copyRecord() = PeerRecord(deviceId, encPubkey, signPubkey, displayName, lanBindingId)
+private fun PeerRecord.copyRecord() = PeerRecord(
+    deviceId,
+    encPubkey,
+    signPubkey,
+    displayName,
+    lanBindingId,
+    relayRevocationRequired,
+)
