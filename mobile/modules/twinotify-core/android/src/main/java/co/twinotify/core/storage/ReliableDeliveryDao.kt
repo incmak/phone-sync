@@ -86,11 +86,11 @@ sealed interface LegacyConversionResult {
     data class Conflict(val existingSha256: String) : LegacyConversionResult
 }
 
-sealed interface RelayAcceptanceResult {
-    data object Missing : RelayAcceptanceResult
-    data object DeletedReceipt : RelayAcceptanceResult
-    data object Accepted : RelayAcceptanceResult
-    data object AlreadyAccepted : RelayAcceptanceResult
+sealed interface CustodyAcceptanceResult {
+    data object Missing : CustodyAcceptanceResult
+    data object DeletedReceipt : CustodyAcceptanceResult
+    data object Accepted : CustodyAcceptanceResult
+    data object AlreadyAccepted : CustodyAcceptanceResult
 }
 
 sealed interface RelayReceiptResult {
@@ -123,16 +123,10 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     abstract suspend fun sendable(now: Long, limit: Int): List<OutboundMessage>
 
     @Query(
-        "UPDATE outbound_message SET state='ACCEPTED', relayAcceptedAt=:acceptedAt, " +
-            "nextAttemptAt=:retryAt WHERE msgId=:msgId",
-    )
-    abstract suspend fun markRelayAccepted(msgId: String, acceptedAt: Long, retryAt: Long): Int
-
-    @Query(
         "UPDATE outbound_message SET attempts=attempts + 1, nextAttemptAt=:retryAt " +
             "WHERE msgId=:msgId AND state IN ('NEW','ACCEPTED')",
     )
-    abstract suspend fun markRelaySent(msgId: String, retryAt: Long): Int
+    abstract suspend fun markSent(msgId: String, retryAt: Long): Int
 
     @Query("DELETE FROM outbound_message WHERE msgId=:msgId")
     abstract suspend fun deleteOutbound(msgId: String): Int
@@ -203,10 +197,16 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     protected abstract suspend fun clearMaterializationRetries()
 
     @Query(
-        "UPDATE outbound_message SET state='ACCEPTED', relayAcceptedAt=:acceptedAt, " +
+        "UPDATE outbound_message SET state='ACCEPTED', custodyAcceptedAt=:acceptedAt, " +
+            "custodyRoute=:route, " +
             "nextAttemptAt=:retryAt WHERE msgId=:msgId AND state='NEW'",
     )
-    protected abstract suspend fun acceptNewRelay(msgId: String, acceptedAt: Long, retryAt: Long): Int
+    protected abstract suspend fun acceptNewCustody(
+        msgId: String,
+        route: String,
+        acceptedAt: Long,
+        retryAt: Long,
+    ): Int
 
     @Query("SELECT msgId, envelopeSha256 FROM inbound_message WHERE relayAckState='READY' ORDER BY committedAt LIMIT :limit")
     abstract suspend fun readyRelayAcks(limit: Int): List<co.twinotify.core.service.RelayAckRecord>
@@ -549,30 +549,32 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         return ReceiptTransitionResult.ReadyForRelayAck
     }
 
-    /** Relay custody transition. Normal rows remain durable until a peer receipt; receipt rows do not. */
+    /** Route-neutral custody transition. Normal rows remain durable until a peer receipt; receipt rows do not. */
     @Transaction
-    open suspend fun acceptRelay(
+    open suspend fun acceptCustody(
         msgId: String,
+        route: String,
         acceptedAt: Long,
         retryAt: Long,
-    ): RelayAcceptanceResult {
-        val row = outboundMessage(msgId) ?: return RelayAcceptanceResult.Missing
+    ): CustodyAcceptanceResult {
+        require(route == "LAN" || route == "RELAY")
+        val row = outboundMessage(msgId) ?: return CustodyAcceptanceResult.Missing
         if (!row.requiresPeerReceipt) {
             return when (acceptReceipt(msgId)) {
                 ReceiptTransitionResult.ReadyForRelayAck,
                 ReceiptTransitionResult.AlreadyTransitioned,
-                -> RelayAcceptanceResult.DeletedReceipt
-                ReceiptTransitionResult.Missing -> RelayAcceptanceResult.Missing
+                -> CustodyAcceptanceResult.DeletedReceipt
+                ReceiptTransitionResult.Missing -> CustodyAcceptanceResult.Missing
                 ReceiptTransitionResult.NotReceipt -> {
                     deleteOutbound(msgId)
-                    RelayAcceptanceResult.DeletedReceipt
+                    CustodyAcceptanceResult.DeletedReceipt
                 }
             }
         }
-        if (row.state == "ACCEPTED") return RelayAcceptanceResult.AlreadyAccepted
-        if (row.state != "NEW") return RelayAcceptanceResult.AlreadyAccepted
-        check(acceptNewRelay(msgId, acceptedAt, retryAt) == 1)
-        return RelayAcceptanceResult.Accepted
+        if (row.state == "ACCEPTED") return CustodyAcceptanceResult.AlreadyAccepted
+        if (row.state != "NEW") return CustodyAcceptanceResult.AlreadyAccepted
+        check(acceptNewCustody(msgId, route, acceptedAt, retryAt) == 1)
+        return CustodyAcceptanceResult.Accepted
     }
 
     /** Apply an authenticated peer receipt with digest equality and terminal metadata only. */

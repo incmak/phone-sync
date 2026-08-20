@@ -1,7 +1,7 @@
 package co.twinotify.core.service
 
 import co.twinotify.core.storage.OutboundMessage
-import co.twinotify.core.storage.RelayAcceptanceResult
+import co.twinotify.core.storage.CustodyAcceptanceResult
 import co.twinotify.core.storage.RelayReceiptResult
 import co.twinotify.core.storage.LegacyForwardResult
 import kotlin.test.Test
@@ -14,22 +14,41 @@ class OutboxRepositoryTest {
     private val clock = { 1_000L }
 
     @Test
-    fun normalMessageSurvivesRelayAcceptedUntilPeerReceipt() = kotlinx.coroutines.test.runTest {
+    fun ordinaryMessageSurvivesEitherCustodyRouteUntilPeerReceipt() = kotlinx.coroutines.test.runTest {
         val store = FakeOutboxStore()
         store.rows["m1"] = message("m1", requiresPeerReceipt = true)
         val repo = OutboxRepository(store, clock)
-        assertEquals(OutboxTransition.Retained, repo.onRelayAccepted("m1", 1_000))
+        assertEquals(CustodyResult.Accepted, repo.onCustodyAccepted("m1", CustodyRoute.LAN, 1_000))
         assertNotNull(store.rows["m1"])
         assertEquals(OutboxTransition.Deleted, repo.onPeerReceipt("m1", digest, "applied", occurredAt = 2_000))
         assertNull(store.rows["m1"])
     }
 
     @Test
-    fun receiptMessageIsDeletedAfterRelayAccepted() = kotlinx.coroutines.test.runTest {
+    fun receiptMessageIsDeletedAfterEitherCustodyRouteAcceptsIt() = kotlinx.coroutines.test.runTest {
+        CustodyRoute.entries.forEach { route ->
+            val store = FakeOutboxStore()
+            store.rows["r-$route"] = message("r-$route", requiresPeerReceipt = false)
+
+            assertEquals(
+                CustodyResult.DeletedReceipt,
+                OutboxRepository(store, clock).onCustodyAccepted("r-$route", route, 1_000),
+            )
+            assertNull(store.rows["r-$route"])
+        }
+    }
+
+    @Test
+    fun duplicateCustodyAcceptanceIsIdempotentAndPreservesFirstRoute() = kotlinx.coroutines.test.runTest {
         val store = FakeOutboxStore()
-        store.rows["r1"] = message("r1", requiresPeerReceipt = false)
-        assertEquals(OutboxTransition.Deleted, OutboxRepository(store, clock).onRelayAccepted("r1", 1_000))
-        assertNull(store.rows["r1"])
+        store.rows["m1"] = message("m1", requiresPeerReceipt = true)
+        val repo = OutboxRepository(store, clock)
+
+        assertEquals(CustodyResult.Accepted, repo.onCustodyAccepted("m1", CustodyRoute.RELAY, 1_000))
+        assertEquals(CustodyResult.AlreadyAccepted, repo.onCustodyAccepted("m1", CustodyRoute.RELAY, 2_000))
+        assertEquals(CustodyResult.AlreadyAccepted, repo.onCustodyAccepted("m1", CustodyRoute.LAN, 3_000))
+        assertEquals(1_000, store.rows.getValue("m1").custodyAcceptedAt)
+        assertEquals("RELAY", store.rows.getValue("m1").custodyRoute)
     }
 
     @Test
@@ -45,26 +64,36 @@ class OutboxRepositoryTest {
     private fun message(id: String, requiresPeerReceipt: Boolean) = OutboundMessage(
         msgId = id, canonId = null, sequence = null, eventType = if (requiresPeerReceipt) "notif.post" else "peer.receipt",
         protocolVersion = 2, envelopeJson = "{}", envelopeSha256 = digest, byteSize = 2, createdAt = 1,
-        expiresAt = 10_000, relayAcceptedAt = null, attempts = 0, nextAttemptAt = 1,
+        expiresAt = 10_000, custodyAcceptedAt = null, custodyRoute = null, attempts = 0, nextAttemptAt = 1,
         state = "NEW", lastError = null, requiresPeerReceipt = requiresPeerReceipt,
     )
 
     private class FakeOutboxStore : OutboxStore {
         val rows = linkedMapOf<String, OutboundMessage>()
         override suspend fun sendable(now: Long, limit: Int) = rows.values.filter { it.nextAttemptAt <= now }.take(limit)
-        override suspend fun markRelaySent(msgId: String, retryAt: Long): Int {
+        override suspend fun markSent(msgId: String, retryAt: Long): Int {
             val row = rows[msgId] ?: return 0
             rows[msgId] = row.copy(attempts = row.attempts + 1, nextAttemptAt = retryAt)
             return 1
         }
         override suspend fun legacyForwarded(msgId: String, forwardedAt: Long) =
             if (rows.remove(msgId) != null) LegacyForwardResult.Deleted else LegacyForwardResult.Missing
-        override suspend fun acceptRelay(msgId: String, acceptedAt: Long, retryAt: Long): RelayAcceptanceResult {
-            val row = rows[msgId] ?: return RelayAcceptanceResult.Missing
-            if (!row.requiresPeerReceipt) { rows.remove(msgId); return RelayAcceptanceResult.DeletedReceipt }
-            if (row.state == "ACCEPTED") return RelayAcceptanceResult.AlreadyAccepted
-            rows[msgId] = row.copy(state = "ACCEPTED", relayAcceptedAt = acceptedAt, nextAttemptAt = retryAt)
-            return RelayAcceptanceResult.Accepted
+        override suspend fun acceptCustody(
+            msgId: String,
+            route: CustodyRoute,
+            acceptedAt: Long,
+            retryAt: Long,
+        ): CustodyAcceptanceResult {
+            val row = rows[msgId] ?: return CustodyAcceptanceResult.Missing
+            if (!row.requiresPeerReceipt) { rows.remove(msgId); return CustodyAcceptanceResult.DeletedReceipt }
+            if (row.state == "ACCEPTED") return CustodyAcceptanceResult.AlreadyAccepted
+            rows[msgId] = row.copy(
+                state = "ACCEPTED",
+                custodyAcceptedAt = acceptedAt,
+                custodyRoute = route.name,
+                nextAttemptAt = retryAt,
+            )
+            return CustodyAcceptanceResult.Accepted
         }
         override suspend fun applyPeerReceipt(ackedMsgId: String, envelopeSha256: String, status: String, reason: String?, occurredAt: Long): RelayReceiptResult {
             val row = rows[ackedMsgId] ?: return RelayReceiptResult.Missing

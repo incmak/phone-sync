@@ -1,18 +1,23 @@
 package co.twinotify.core.service
 
 import co.twinotify.core.storage.ActivityEvent
+import co.twinotify.core.storage.CustodyAcceptanceResult
 import co.twinotify.core.storage.LegacyForwardResult
 import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.ReliableDeliveryDao
-import co.twinotify.core.storage.RelayAcceptanceResult
 import co.twinotify.core.storage.RelayReceiptResult
 
 /** A narrow store seam keeps custody transitions deterministic and easy to test without Room. */
 interface OutboxStore {
     suspend fun sendable(now: Long, limit: Int): List<OutboundMessage>
-    suspend fun markRelaySent(msgId: String, retryAt: Long): Int
+    suspend fun markSent(msgId: String, retryAt: Long): Int
     suspend fun legacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult
-    suspend fun acceptRelay(msgId: String, acceptedAt: Long, retryAt: Long): RelayAcceptanceResult
+    suspend fun acceptCustody(
+        msgId: String,
+        route: CustodyRoute,
+        acceptedAt: Long,
+        retryAt: Long,
+    ): CustodyAcceptanceResult
     suspend fun applyPeerReceipt(
         ackedMsgId: String,
         envelopeSha256: String,
@@ -27,6 +32,15 @@ interface OutboxStore {
 }
 
 data class RelayAckRecord(val msgId: String, val envelopeSha256: String)
+
+enum class CustodyRoute { LAN, RELAY }
+
+sealed interface CustodyResult {
+    data object Missing : CustodyResult
+    data object DeletedReceipt : CustodyResult
+    data object Accepted : CustodyResult
+    data object AlreadyAccepted : CustodyResult
+}
 
 sealed interface RelayRejectionResult {
     data object Missing : RelayRejectionResult
@@ -45,9 +59,9 @@ sealed interface OutboxTransition {
 }
 
 /**
- * Durable outbox state machine. Relay acceptance is custody only: normal rows survive it until a
+ * Durable outbox state machine. Route acceptance is custody only: normal rows survive it until a
  * matching authenticated peer receipt. Receipt rows are the one exception and are removed once
- * the relay has durably accepted them, preventing receipt recursion.
+ * a route has durably accepted them, preventing receipt recursion.
  */
 class OutboxRepository(
     private val store: OutboxStore,
@@ -59,7 +73,7 @@ class OutboxRepository(
 
     suspend fun markSent(msgId: String, attempt: Int, now: Long = clock()): Boolean {
         val retryAt = now + retryPolicy.delay(attempt)
-        return store.markRelaySent(msgId, retryAt) == 1
+        return store.markSent(msgId, retryAt) == 1
     }
 
     suspend fun onLegacyForwarded(msgId: String, forwardedAt: Long = clock()): OutboxTransition =
@@ -69,15 +83,29 @@ class OutboxRepository(
             LegacyForwardResult.AlreadyTerminal -> OutboxTransition.AlreadyTerminal
         }
 
-    suspend fun onRelayAccepted(msgId: String, acceptedAt: Long = clock()): OutboxTransition {
+    suspend fun onCustodyAccepted(
+        msgId: String,
+        route: CustodyRoute,
+        acceptedAt: Long = clock(),
+    ): CustodyResult {
         val retryAt = acceptedAt + retryPolicy.delay(0)
-        return when (store.acceptRelay(msgId, acceptedAt, retryAt)) {
-            RelayAcceptanceResult.Missing -> OutboxTransition.Missing
-            RelayAcceptanceResult.DeletedReceipt -> OutboxTransition.Deleted
-            RelayAcceptanceResult.Accepted -> OutboxTransition.Retained
-            RelayAcceptanceResult.AlreadyAccepted -> OutboxTransition.Retained
+        return when (store.acceptCustody(msgId, route, acceptedAt, retryAt)) {
+            CustodyAcceptanceResult.Missing -> CustodyResult.Missing
+            CustodyAcceptanceResult.DeletedReceipt -> CustodyResult.DeletedReceipt
+            CustodyAcceptanceResult.Accepted -> CustodyResult.Accepted
+            CustodyAcceptanceResult.AlreadyAccepted -> CustodyResult.AlreadyAccepted
         }
     }
+
+    /** Relay protocol adapter boundary; durable custody remains route-neutral below this method. */
+    suspend fun onRelayAccepted(msgId: String, acceptedAt: Long = clock()): OutboxTransition =
+        when (onCustodyAccepted(msgId, CustodyRoute.RELAY, acceptedAt)) {
+            CustodyResult.Missing -> OutboxTransition.Missing
+            CustodyResult.DeletedReceipt -> OutboxTransition.Deleted
+            CustodyResult.Accepted,
+            CustodyResult.AlreadyAccepted,
+            -> OutboxTransition.Retained
+        }
 
     suspend fun onPeerReceipt(
         ackedMsgId: String,
@@ -139,10 +167,14 @@ data class RetryPolicy(
 /** Room adapter; all multi-field custody changes are transactional DAO operations. */
 class DaoOutboxStore(private val dao: ReliableDeliveryDao) : OutboxStore {
     override suspend fun sendable(now: Long, limit: Int): List<OutboundMessage> = dao.sendable(now, limit)
-    override suspend fun markRelaySent(msgId: String, retryAt: Long): Int = dao.markRelaySent(msgId, retryAt)
+    override suspend fun markSent(msgId: String, retryAt: Long): Int = dao.markSent(msgId, retryAt)
     override suspend fun legacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult = dao.markLegacyForwarded(msgId, forwardedAt)
-    override suspend fun acceptRelay(msgId: String, acceptedAt: Long, retryAt: Long): RelayAcceptanceResult =
-        dao.acceptRelay(msgId, acceptedAt, retryAt)
+    override suspend fun acceptCustody(
+        msgId: String,
+        route: CustodyRoute,
+        acceptedAt: Long,
+        retryAt: Long,
+    ): CustodyAcceptanceResult = dao.acceptCustody(msgId, route.name, acceptedAt, retryAt)
     override suspend fun applyPeerReceipt(
         ackedMsgId: String,
         envelopeSha256: String,

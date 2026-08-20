@@ -18,6 +18,7 @@ import co.twinotify.core.call.GracefulCallShutdownResult
 import co.twinotify.core.call.CallSourceCapabilities
 import co.twinotify.core.call.CallStateSource
 import co.twinotify.core.call.gracefullyShutdownCallCapture
+import co.twinotify.core.service.CustodyRoute
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -128,6 +129,7 @@ class ReliableDeliveryTransactionTest {
                 ),
             )
         }
+        Unit
     }
 
     @Test
@@ -156,10 +158,10 @@ class ReliableDeliveryTransactionTest {
             ),
         )
 
-        assertEquals("canon-1", dao.canonicalForMirrorIdentity("mirror-stable", 42))
-        assertEquals(1, dao.consumePeerCancel("canon-1"))
-        assertEquals(0, dao.consumePeerCancel("canon-1"))
-        assertEquals(false, dao.canonical("canon-1")!!.peerCancelPending)
+        assertEquals(CANON_ID, dao.canonicalForMirrorIdentity("mirror-stable", 42))
+        assertEquals(1, dao.consumePeerCancel(CANON_ID))
+        assertEquals(0, dao.consumePeerCancel(CANON_ID))
+        assertEquals(false, dao.canonical(CANON_ID)!!.peerCancelPending)
     }
 
     @Test
@@ -254,6 +256,7 @@ class ReliableDeliveryTransactionTest {
         assertIs<SnapshotCommitResult.Committed>(
             dao.commitSnapshot("digest-mismatch", snapshotDigest("new-canon", 4), committedAt = 300),
         )
+        Unit
     }
 
     @Test
@@ -291,18 +294,44 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
-    fun acceptedRelayRetryAdvancesAttemptBackoff() = runBlocking {
+    fun acceptedCustodyRetryAdvancesAttemptBackoffWithoutChangingFirstRoute() = runBlocking {
         dao.insertOutbound(outbound("accepted-retry", sequence = 1, eventType = "notif.post"))
         assertEquals(
-            RelayAcceptanceResult.Accepted,
-            dao.acceptRelay("accepted-retry", acceptedAt = 100, retryAt = 200),
+            CustodyAcceptanceResult.Accepted,
+            dao.acceptCustody("accepted-retry", CustodyRoute.RELAY.name, acceptedAt = 100, retryAt = 200),
+        )
+        assertEquals(
+            CustodyAcceptanceResult.AlreadyAccepted,
+            dao.acceptCustody("accepted-retry", CustodyRoute.LAN.name, acceptedAt = 300, retryAt = 400),
         )
 
-        assertEquals(1, dao.markRelaySent("accepted-retry", retryAt = 400))
+        assertEquals(1, dao.markSent("accepted-retry", retryAt = 400))
         val retried = dao.sendable(now = 400, limit = 1).single()
         assertEquals("ACCEPTED", retried.state)
+        assertEquals(100, retried.custodyAcceptedAt)
+        assertEquals(CustodyRoute.RELAY.name, retried.custodyRoute)
         assertEquals(1, retried.attempts)
         assertEquals(400, retried.nextAttemptAt)
+    }
+
+    @Test
+    fun custodyReceiptDeleteRollsBackWhenAckTransitionFails() = runBlocking {
+        val receipt = outbound("receipt-rollback", sequence = null, eventType = "peer.receipt").copy(
+            requiresPeerReceipt = false,
+        )
+        dao.insertOutbound(receipt)
+        dao.insertInbound(inbound("source", "source-digest").copy(receiptMsgId = receipt.msgId))
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_receipt_ack BEFORE UPDATE OF relayAckState ON inbound_message " +
+                "BEGIN SELECT RAISE(ABORT, 'forced receipt ack failure'); END",
+        )
+
+        assertFailsWith<android.database.sqlite.SQLiteException> {
+            dao.acceptCustody(receipt.msgId, CustodyRoute.LAN.name, acceptedAt = 100, retryAt = 200)
+        }
+
+        assertNotNull(dao.outboundMessage(receipt.msgId))
+        assertEquals("NONE", dao.inbound("source")!!.relayAckState)
     }
 
     @Test
@@ -823,7 +852,11 @@ class ReliableDeliveryTransactionTest {
                 "VALUES('activity-old','applied-old',NULL,'peer.receipt','applied',1,1,NULL)",
         )
 
-        dao.sweepRetention(now = 1_000, activityRetentionMs = 100, tombstoneRetentionMs = 100)
+        dao.sweepRetention(
+            now = 10 * 60 * 1_000L + 1_000,
+            activityRetentionMs = 100,
+            tombstoneRetentionMs = 100,
+        )
 
         assertNull(dao.inbound("applied-old"))
         assertTrue(dao.inbound("pending-old") != null)
@@ -898,7 +931,8 @@ class ReliableDeliveryTransactionTest {
         byteSize = 2,
         createdAt = sequence,
         expiresAt = 100_000,
-        relayAcceptedAt = null,
+        custodyAcceptedAt = null,
+        custodyRoute = null,
         attempts = 0,
         nextAttemptAt = sequence,
         state = "NEW",
@@ -988,7 +1022,8 @@ class ReliableDeliveryTransactionTest {
             byteSize = 2,
             createdAt = sequence,
             expiresAt = 100_000,
-            relayAcceptedAt = null,
+            custodyAcceptedAt = null,
+            custodyRoute = null,
             attempts = 0,
             nextAttemptAt = sequence,
             state = "NEW",
@@ -1009,7 +1044,8 @@ class ReliableDeliveryTransactionTest {
         byteSize = 2,
         createdAt = sequence ?: 0L,
         expiresAt = 100_000,
-        relayAcceptedAt = null,
+        custodyAcceptedAt = null,
+        custodyRoute = null,
         attempts = 0,
         nextAttemptAt = sequence ?: 0L,
         state = "NEW",

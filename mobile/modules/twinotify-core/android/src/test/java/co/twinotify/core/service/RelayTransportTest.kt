@@ -2,7 +2,7 @@ package co.twinotify.core.service
 
 import co.twinotify.core.storage.LegacyForwardResult
 import co.twinotify.core.storage.OutboundMessage
-import co.twinotify.core.storage.RelayAcceptanceResult
+import co.twinotify.core.storage.CustodyAcceptanceResult
 import co.twinotify.core.storage.RelayReceiptResult
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -569,7 +569,8 @@ class RelayTransportTest {
         byteSize = 1,
         createdAt = 1,
         expiresAt = 10_000,
-        relayAcceptedAt = null,
+        custodyAcceptedAt = null,
+        custodyRoute = null,
         attempts = 0,
         nextAttemptAt = 0,
         state = "NEW",
@@ -755,7 +756,7 @@ class RelayTransportTest {
 
         override suspend fun sendable(now: Long, limit: Int) = rows.take(limit)
 
-        override suspend fun markRelaySent(msgId: String, retryAt: Long): Int {
+        override suspend fun markSent(msgId: String, retryAt: Long): Int {
             putMarks += 1
             rows.removeAll { it.msgId == msgId }
             return 1
@@ -766,7 +767,12 @@ class RelayTransportTest {
             return if (removed) LegacyForwardResult.Deleted else LegacyForwardResult.Missing
         }
 
-        override suspend fun acceptRelay(msgId: String, acceptedAt: Long, retryAt: Long): RelayAcceptanceResult {
+        override suspend fun acceptCustody(
+            msgId: String,
+            route: CustodyRoute,
+            acceptedAt: Long,
+            retryAt: Long,
+        ): CustodyAcceptanceResult {
             acceptanceEntered.complete(Unit)
             blockAcceptanceUntil?.let { withContext(NonCancellable) { it.await() } }
             accepted += msgId
@@ -774,7 +780,7 @@ class RelayTransportTest {
                 readyAck = ack
                 linkedReceipt = null
             }
-            return RelayAcceptanceResult.Accepted
+            return CustodyAcceptanceResult.Accepted
         }
 
         override suspend fun applyPeerReceipt(

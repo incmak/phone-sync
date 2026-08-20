@@ -10,7 +10,7 @@ import co.twinotify.core.storage.MaterializationReceiptResult
 import co.twinotify.core.storage.MaterializationResult
 import co.twinotify.core.storage.MaterializationRetry
 import co.twinotify.core.storage.OutboundMessage
-import co.twinotify.core.storage.RelayAcceptanceResult
+import co.twinotify.core.storage.CustodyAcceptanceResult
 import co.twinotify.core.storage.RelayReceiptResult
 import java.security.MessageDigest
 import java.util.Base64
@@ -42,7 +42,10 @@ class ReliablePipelineTest {
 
         // Capture and relay custody are durable before the peer has acknowledged the event.
         assertEquals(listOf(post.msgId), outbox.sendable(now = 1_100).map { it.msgId })
-        assertEquals(OutboxTransition.Retained, outbox.onRelayAccepted(post.msgId, acceptedAt = 1_100))
+        assertEquals(
+            CustodyResult.Accepted,
+            outbox.onCustodyAccepted(post.msgId, CustodyRoute.RELAY, acceptedAt = 1_100),
+        )
         assertNotNull(store.outbound[post.msgId], "relay acceptance must not delete a normal row")
 
         // The real codec boundary is exercised before the receiver reducer sees the event.
@@ -86,7 +89,10 @@ class ReliablePipelineTest {
         )
         assertNull(store.outbound[post.msgId])
         assertNotNull(store.outbound[receipt.msgId])
-        assertEquals(OutboxTransition.Deleted, outbox.onRelayAccepted(receipt.msgId, acceptedAt = 6_400))
+        assertEquals(
+            CustodyResult.DeletedReceipt,
+            outbox.onCustodyAccepted(receipt.msgId, CustodyRoute.RELAY, acceptedAt = 6_400),
+        )
         assertTrue(store.readyAcks.contains(receipt.msgId))
 
         val update = event("update-2", "notif.update", 2, payload = "{\"title\":\"updated\"}")
@@ -103,7 +109,10 @@ class ReliablePipelineTest {
         assertEquals(2, store.state(update.canonId!!)?.materializedSequence)
         val updateReceipt = assertNotNull(store.outbound.values.singleOrNull { it.eventType == "peer.receipt" })
         assertEquals(OutboxTransition.Deleted, outbox.onPeerReceipt(update.msgId, updateRow.envelopeSha256, "applied", occurredAt = 7_100))
-        assertEquals(OutboxTransition.Deleted, outbox.onRelayAccepted(updateReceipt.msgId, acceptedAt = 7_101))
+        assertEquals(
+            CustodyResult.DeletedReceipt,
+            outbox.onCustodyAccepted(updateReceipt.msgId, CustodyRoute.RELAY, acceptedAt = 7_101),
+        )
 
         val cancel = event("cancel-3", "notif.cancel", 3, payload = "{\"reason\":\"dismissed\"}")
         val cancelRow = row(cancel, requiresPeerReceipt = true)
@@ -119,7 +128,10 @@ class ReliablePipelineTest {
         assertEquals("CANCELLED", store.state(cancel.canonId!!)?.state)
         val cancelReceipt = assertNotNull(store.outbound.values.singleOrNull { it.eventType == "peer.receipt" })
         assertEquals(OutboxTransition.Deleted, outbox.onPeerReceipt(cancel.msgId, cancelRow.envelopeSha256, "applied", occurredAt = 8_100))
-        assertEquals(OutboxTransition.Deleted, outbox.onRelayAccepted(cancelReceipt.msgId, acceptedAt = 8_101))
+        assertEquals(
+            CustodyResult.DeletedReceipt,
+            outbox.onCustodyAccepted(cancelReceipt.msgId, CustodyRoute.RELAY, acceptedAt = 8_101),
+        )
 
         // A delayed sequence-2 update is journaled as stale and cannot resurrect the cancelled item.
         val lateUpdate = update.copy(msgId = UUID.nameUUIDFromBytes("late-update-2".encodeToByteArray()).toString())
@@ -200,7 +212,7 @@ class ReliablePipelineTest {
             .filter { it.state in setOf("NEW", "ACCEPTED") && it.nextAttemptAt <= now }
             .take(limit)
 
-        override suspend fun markRelaySent(msgId: String, retryAt: Long): Int {
+        override suspend fun markSent(msgId: String, retryAt: Long): Int {
             val row = outbound[msgId] ?: return 0
             outbound[msgId] = row.copy(attempts = row.attempts + 1, nextAttemptAt = retryAt)
             return 1
@@ -209,16 +221,26 @@ class ReliablePipelineTest {
         override suspend fun legacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult =
             if (outbound.remove(msgId) != null) LegacyForwardResult.Deleted else LegacyForwardResult.Missing
 
-        override suspend fun acceptRelay(msgId: String, acceptedAt: Long, retryAt: Long): RelayAcceptanceResult {
-            val row = outbound[msgId] ?: return RelayAcceptanceResult.Missing
+        override suspend fun acceptCustody(
+            msgId: String,
+            route: CustodyRoute,
+            acceptedAt: Long,
+            retryAt: Long,
+        ): CustodyAcceptanceResult {
+            val row = outbound[msgId] ?: return CustodyAcceptanceResult.Missing
             if (!row.requiresPeerReceipt) {
                 outbound.remove(msgId)
                 readyAcks += msgId
-                return RelayAcceptanceResult.DeletedReceipt
+                return CustodyAcceptanceResult.DeletedReceipt
             }
-            if (row.state == "ACCEPTED") return RelayAcceptanceResult.AlreadyAccepted
-            outbound[msgId] = row.copy(state = "ACCEPTED", relayAcceptedAt = acceptedAt, nextAttemptAt = retryAt)
-            return RelayAcceptanceResult.Accepted
+            if (row.state == "ACCEPTED") return CustodyAcceptanceResult.AlreadyAccepted
+            outbound[msgId] = row.copy(
+                state = "ACCEPTED",
+                custodyAcceptedAt = acceptedAt,
+                custodyRoute = route.name,
+                nextAttemptAt = retryAt,
+            )
+            return CustodyAcceptanceResult.Accepted
         }
 
         override suspend fun applyPeerReceipt(
@@ -334,7 +356,8 @@ class ReliablePipelineTest {
             byteSize = envelope.encodeToByteArray().size.toLong(),
             createdAt = event.createdAt,
             expiresAt = event.expiresAt,
-            relayAcceptedAt = null,
+            custodyAcceptedAt = null,
+            custodyRoute = null,
             attempts = 0,
             nextAttemptAt = event.createdAt,
             state = "NEW",

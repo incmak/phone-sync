@@ -65,8 +65,101 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate4To5_preservesRowsAndMovesRelayAcceptanceToRouteNeutralCustody() {
+        helper.createDatabase(TEST_DB_V5, 4).apply {
+            execSQL(
+                "INSERT INTO outbound_message(" +
+                    "msgId,canonId,sequence,eventType,protocolVersion,envelopeJson,envelopeSha256," +
+                    "byteSize,createdAt,expiresAt,relayAcceptedAt,attempts,nextAttemptAt,state,lastError," +
+                    "requiresPeerReceipt) VALUES(" +
+                    "'accepted','canon',7,'notif.update',2,'{}','digest-a',2,10,20,123456789," +
+                    "3,30,'ACCEPTED','retry',1)",
+            )
+            execSQL(
+                "INSERT INTO outbound_message(" +
+                    "msgId,canonId,sequence,eventType,protocolVersion,envelopeJson,envelopeSha256," +
+                    "byteSize,createdAt,expiresAt,relayAcceptedAt,attempts,nextAttemptAt,state,lastError," +
+                    "requiresPeerReceipt) VALUES(" +
+                    "'new',NULL,NULL,'peer.receipt',2,'{}','digest-b',2,11,21,NULL,0,31,'NEW',NULL,0)",
+            )
+            execSQL(
+                "INSERT INTO inbound_message(" +
+                    "msgId,originDevice,envelopeSha256,eventType,canonId,sequence,outcome,committedAt," +
+                    "appliedAt,receiptMsgId,relayAckState) VALUES(" +
+                    "'inbound','peer','digest-c','notif.post','canon',7,'APPLIED',12,13,'new','READY')",
+            )
+            execSQL(
+                "INSERT INTO activity_event(" +
+                    "eventId,msgId,packageName,eventType,status,byteSize,occurredAt,detailCode) VALUES(" +
+                    "'activity','accepted','pkg','peer.receipt','applied',2,14,'ok')",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB_V5, 5, true, MIGRATION_4_5)
+        db.query(
+            "SELECT msgId,canonId,sequence,eventType,protocolVersion,envelopeJson,envelopeSha256," +
+                "byteSize,createdAt,expiresAt,custodyAcceptedAt,custodyRoute,attempts,nextAttemptAt," +
+                "state,lastError,requiresPeerReceipt FROM outbound_message ORDER BY msgId",
+        ).use { rows ->
+            assertTrue(rows.moveToFirst())
+            assertEquals("accepted", rows.getString(0))
+            assertEquals("canon", rows.getString(1))
+            assertEquals(7L, rows.getLong(2))
+            assertEquals("notif.update", rows.getString(3))
+            assertEquals(2, rows.getInt(4))
+            assertEquals("{}", rows.getString(5))
+            assertEquals("digest-a", rows.getString(6))
+            assertEquals(2L, rows.getLong(7))
+            assertEquals(10L, rows.getLong(8))
+            assertEquals(20L, rows.getLong(9))
+            assertEquals(123456789L, rows.getLong(10))
+            assertEquals("RELAY", rows.getString(11))
+            assertEquals(3, rows.getInt(12))
+            assertEquals(30L, rows.getLong(13))
+            assertEquals("ACCEPTED", rows.getString(14))
+            assertEquals("retry", rows.getString(15))
+            assertEquals(1, rows.getInt(16))
+            assertTrue(rows.moveToNext())
+            assertEquals("new", rows.getString(0))
+            assertTrue(rows.isNull(10))
+            assertTrue(rows.isNull(11))
+            assertEquals(0, rows.getInt(16))
+        }
+        db.query("PRAGMA index_list('outbound_message')").use { indices ->
+            val names = buildSet {
+                while (indices.moveToNext()) add(indices.getString(indices.getColumnIndexOrThrow("name")))
+            }
+            assertTrue("index_outbound_message_state" in names)
+            assertTrue("index_outbound_message_nextAttemptAt" in names)
+            assertTrue("index_outbound_message_canonId" in names)
+        }
+        db.query(
+            "SELECT originDevice,envelopeSha256,receiptMsgId,relayAckState FROM inbound_message " +
+                "WHERE msgId='inbound'",
+        ).use { inbound ->
+            assertTrue(inbound.moveToFirst())
+            assertEquals("peer", inbound.getString(0))
+            assertEquals("digest-c", inbound.getString(1))
+            assertEquals("new", inbound.getString(2))
+            assertEquals("READY", inbound.getString(3))
+        }
+        db.query(
+            "SELECT msgId,eventType,status,detailCode FROM activity_event WHERE eventId='activity'",
+        ).use { activity ->
+            assertTrue(activity.moveToFirst())
+            assertEquals("accepted", activity.getString(0))
+            assertEquals("peer.receipt", activity.getString(1))
+            assertEquals("applied", activity.getString(2))
+            assertEquals("ok", activity.getString(3))
+        }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
         const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"
+        const val TEST_DB_V5 = "reliable-delivery-migration-v5-test"
     }
 }

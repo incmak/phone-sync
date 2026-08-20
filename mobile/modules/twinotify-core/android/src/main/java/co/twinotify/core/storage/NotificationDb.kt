@@ -87,6 +87,41 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE outbound_message RENAME TO outbound_message_v4")
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS outbound_message (
+                msgId TEXT NOT NULL PRIMARY KEY, canonId TEXT, sequence INTEGER, eventType TEXT NOT NULL,
+                protocolVersion INTEGER NOT NULL, envelopeJson TEXT NOT NULL, envelopeSha256 TEXT NOT NULL,
+                byteSize INTEGER NOT NULL, createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL,
+                custodyAcceptedAt INTEGER, custodyRoute TEXT, attempts INTEGER NOT NULL,
+                nextAttemptAt INTEGER NOT NULL, state TEXT NOT NULL, lastError TEXT,
+                requiresPeerReceipt INTEGER NOT NULL)""",
+        )
+        db.execSQL(
+            """INSERT INTO outbound_message (
+                msgId, canonId, sequence, eventType, protocolVersion, envelopeJson, envelopeSha256,
+                byteSize, createdAt, expiresAt, custodyAcceptedAt, custodyRoute, attempts,
+                nextAttemptAt, state, lastError, requiresPeerReceipt)
+                SELECT msgId, canonId, sequence, eventType, protocolVersion, envelopeJson, envelopeSha256,
+                byteSize, createdAt, expiresAt, relayAcceptedAt,
+                CASE WHEN relayAcceptedAt IS NULL THEN NULL ELSE 'RELAY' END,
+                attempts, nextAttemptAt, state, lastError, requiresPeerReceipt
+                FROM outbound_message_v4""",
+        )
+        db.execSQL("DROP TABLE outbound_message_v4")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_outbound_message_state ON outbound_message(state)")
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_outbound_message_nextAttemptAt " +
+                "ON outbound_message(nextAttemptAt)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_outbound_message_canonId ON outbound_message(canonId)",
+        )
+    }
+}
+
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
 
@@ -100,7 +135,7 @@ object NotificationDb {
                 super.onOpen(db)
                 db.execSQL("PRAGMA foreign_keys = ON")
             }
-        }).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
+        }).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { instance = it }
     }
 }
 
@@ -117,7 +152,7 @@ object NotificationDb {
         SnapshotStage::class,
         MaterializationRetry::class,
     ],
-    version = 4,
+    version = 5,
 )
 abstract class NotificationDbImpl : RoomDatabase() {
     abstract fun notificationMapDao(): NotificationMapDao
