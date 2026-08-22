@@ -18,7 +18,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 
 interface AuthenticatedLanConnection : Closeable {
-    val peerDeviceId: String
+    /** What authentication produced. Simultaneous-connection arbitration reads it. */
+    val session: LanAuthenticatedSession
+    val peerDeviceId: String get() = session.peerDeviceId
     val incoming: Flow<LanFrame>
     suspend fun send(frame: LanFrame)
 }
@@ -245,13 +247,11 @@ private val TLS_CONTEXT_DOMAIN = "twinotify-lan-tls-session-context-v1".encodeTo
 
 private class DefaultAuthenticatedLanConnection(
     private val socket: LanTlsSocket,
-    session: LanAuthenticatedSession,
+    override val session: LanAuthenticatedSession,
 ) : AuthenticatedLanConnection {
     private val closed = AtomicBoolean(false)
     private val collecting = AtomicBoolean(false)
     private val sendMutex = Mutex()
-
-    override val peerDeviceId: String = session.peerDeviceId
 
     /**
      * One ordered reader, enforced. Two collectors would interleave reads of the

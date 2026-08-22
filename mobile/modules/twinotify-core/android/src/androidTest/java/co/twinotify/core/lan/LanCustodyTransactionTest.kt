@@ -173,7 +173,11 @@ class LanCustodyTransactionTest {
     )
 
     private class FakeConnection : AuthenticatedLanConnection {
-        override val peerDeviceId = "dev-00000000-0000-0000-0000-000000000002"
+        override val session = LanAuthenticatedSession(
+            peerDeviceId = "dev-00000000-0000-0000-0000-000000000002",
+            initiatorDeviceId = "dev-00000000-0000-0000-0000-000000000001",
+            sessionId = ByteArray(32) { it.toByte() },
+        )
         private val frames = Channel<LanFrame>(Channel.UNLIMITED)
         val written = mutableListOf<LanFrame>()
 

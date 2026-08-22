@@ -261,7 +261,11 @@ class LanTransportTest {
     private fun uuid(index: Int) = "22222222-2222-4222-8222-%012d".format(index)
 
     private class FakeConnection(blockWrites: Boolean = false) : AuthenticatedLanConnection {
-        override val peerDeviceId = "dev-00000000-0000-0000-0000-000000000002"
+        override val session = LanAuthenticatedSession(
+            peerDeviceId = "dev-00000000-0000-0000-0000-000000000002",
+            initiatorDeviceId = "dev-00000000-0000-0000-0000-000000000001",
+            sessionId = ByteArray(32) { it.toByte() },
+        )
         private val frames = Channel<LanFrame>(Channel.UNLIMITED)
         private val gate = CompletableDeferred<Unit>().also { if (!blockWrites) it.complete(Unit) }
         val written = mutableListOf<LanFrame>()
