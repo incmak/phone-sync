@@ -349,3 +349,61 @@ The self-test is fixture-only. It proves verifier behavior and must never be
 used as physical evidence. The audit fails when either device capture is
 missing, any hash or commit does not match the current release, a required
 scenario is not explicitly `pass`, or a required artifact is absent.
+
+## Direct LAN delivery
+
+These scenarios prove the notification arrived **and** that the direct route
+carried it. Asserting only the mirror would pass just as well over the relay, so
+each one asserts the observed route as well.
+
+| Scenario | Proves |
+| --- | --- |
+| `lan-direct-delivery` | A post crosses an authenticated direct session, the receiver mirrors it, the outbox drains, and both devices still report the direct route |
+| `lan-direct-dismiss` | A cancel converges over the direct route without resurrection |
+| `lan-restart-persistence` | A row survives the sender's process death and still converges |
+
+```bash
+cd e2e && go run ./cmd/twinotify-e2e -scenario lan-direct-delivery \
+  -serial-a "$E2E_DEVICE_A" -serial-b "$E2E_DEVICE_B" \
+  -evidence-dir /private/path/lan-evidence
+```
+
+The route predicates (`A.route.lan`, `B.route.relay`, `A.route.queued`) read the
+device's public route status only. They require `phase == authenticated`, so a
+route that is merely connecting never satisfies them.
+
+### Route evidence
+
+Every scenario result may carry a `route` block:
+
+| Field | Meaning |
+| --- | --- |
+| `route` | `lan`, `relay`, or `none` |
+| `phase` | `idle`, `connecting`, `authenticated`, or `reconnecting` |
+| `route_generation` | How many times the route has been re-established |
+| `queued_count` / `queued_bytes` | Durable work still awaiting delivery |
+| `receipt_at_ms` | When the peer receipt landed |
+| `error_code` | A stable code, never free-form text |
+
+Writing evidence fails closed if the block is half-filled, if a counter is
+negative, if an error code is not a stable code, or if any field anywhere in the
+result carries a network identifier or secret material (addresses, URLs, MAC
+addresses, SSIDs, key or token fields, private-key blocks, or long base64 runs).
+A 64-character hex digest is allowed, because it is bounded and not reversible.
+A scenario that observed no route at all omits the block rather than inventing
+one.
+
+### Still operator-driven
+
+Three parts of the direct-LAN matrix cannot be automated from the host as it
+stands and remain manual:
+
+- **LAN loss with relay fallback, and the return to LAN.** Turning a device's
+  network off removes the direct route and the relay together, so it cannot
+  isolate the two. A device control that disables only the direct route is
+  needed before this can be a host scenario.
+- **Bounded burst and unpair during traffic** on two physical handsets.
+- **The controlled no-uplink run.** This needs a network with no internet path
+  plus packet and DNS observation, per
+  [`scripts/verify-offline-pairing-evidence.sh`](../scripts/verify-offline-pairing-evidence.sh).
+  Nothing in the automated suite may be presented as this evidence.

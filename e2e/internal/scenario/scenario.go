@@ -94,6 +94,30 @@ var plans = map[string][]Step{
 		{Action: "A.shell.post:n1"}, {Action: "relay.accepted:n1"}, {Action: "A.network.off"},
 		{Action: "A.network.on"}, {Action: "A.reconcile", Predicate: "terminal.converged"},
 	},
+	// Direct delivery proves the notification arrived AND that the direct route
+	// carried it. Asserting only the mirror would pass just as well over relay.
+	"lan-direct-delivery": {
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.shell.post:n1", Predicate: "A.outbox.nonzero"},
+		{Predicate: "B.mirror.active:n1"},
+		{Predicate: "A.outbox.zero"},
+		{Predicate: "B.route.lan"},
+		{Predicate: "terminal.converged"},
+	},
+	"lan-direct-dismiss": {
+		{Predicate: "A.route.lan"},
+		{Action: "A.shell.post:n1"}, {Predicate: "B.mirror.active:n1"},
+		{Action: "A.shell.cancel:n1"},
+		{Predicate: "B.mirror.absent:n1"},
+		{Predicate: "B.route.lan"},
+		{Predicate: "terminal.converged"},
+	},
+	"lan-restart-persistence": {
+		{Predicate: "A.route.lan"},
+		{Action: "A.shell.post:n1"}, {Action: "A.force-stop"}, {Action: "A.restart"},
+		{Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"},
+		{Predicate: "terminal.converged"},
+	},
 	"expiry-snapshot": {
 		{Action: "A.shell.post:n1"}, {Action: "relay.expire.mailbox"}, {Action: "relay.snapshot"},
 		{Predicate: "B.mirror.active:n1"}, {Predicate: "terminal.converged"},
@@ -150,6 +174,9 @@ type Observation struct {
 	Sequence               int               `json:"sequence"`
 	Terminal               bool              `json:"terminal"`
 	LoopEvents             int               `json:"loop_events"`
+	Route                  string            `json:"route"`
+	RoutePhase             string            `json:"route_phase"`
+	QueuedBytes            int64             `json:"queued_bytes"`
 	Canonical              map[string]string `json:"-"`
 	CanonicalSequences     map[string]int    `json:"-"`
 }
@@ -161,9 +188,14 @@ func ParseObservation(payload []byte) (Observation, error) {
 			CallCaptureEnabled    bool   `json:"callCaptureEnabled"`
 			CallCaptureHealthCode string `json:"callCaptureHealthCode"`
 		} `json:"health"`
-		ActiveOutbox           int `json:"active_outbox"`
-		ActiveInbound          int `json:"active_inbound"`
-		PendingMaterialization int `json:"pending_materialization"`
+		Route struct {
+			Route string `json:"route"`
+			Phase string `json:"phase"`
+		} `json:"route"`
+		OutboxBytes            int64 `json:"outbox_bytes"`
+		ActiveOutbox           int   `json:"active_outbox"`
+		ActiveInbound          int   `json:"active_inbound"`
+		PendingMaterialization int   `json:"pending_materialization"`
 		Canonical              []struct {
 			CanonIDHash string `json:"canon_id_hash"`
 			State       string `json:"state"`
@@ -186,6 +218,9 @@ func ParseObservation(payload []byte) (Observation, error) {
 		Outbox:                 raw.ActiveOutbox,
 		ActiveInbound:          raw.ActiveInbound,
 		PendingMaterialization: raw.PendingMaterialization,
+		Route:                  raw.Route.Route,
+		RoutePhase:             raw.Route.Phase,
+		QueuedBytes:            raw.OutboxBytes,
 		Terminal:               raw.Health.Service == "connected" && raw.ActiveOutbox == 0 && raw.ActiveInbound == 0 && raw.PendingMaterialization == 0,
 		Canonical:              map[string]string{},
 		CanonicalSequences:     map[string]int{},

@@ -3,6 +3,7 @@ package scenario
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,8 @@ type ScenarioResult struct {
 	Before    map[string]Observation `json:"before"`
 	After     map[string]Observation `json:"after"`
 	ErrorCode string                 `json:"error_code,omitempty"`
+	// Route records which path actually carried the scenario.
+	Route RouteEvidence `json:"route,omitzero"`
 }
 
 func ErrorCode(err error) string {
@@ -44,6 +47,14 @@ func WriteEvidenceArtifacts(dir string, result ScenarioResult) error {
 	}
 	if result.Scenario == "" || (result.Status != "passed" && result.Status != "failed") {
 		return errors.New("invalid scenario result")
+	}
+	// A route record that names an endpoint, or evidence carrying secret material,
+	// must fail the write rather than reach an uploaded artifact.
+	if err := result.Route.Validate(); err != nil {
+		return fmt.Errorf("invalid route evidence: %w", err)
+	}
+	if err := RejectSensitiveEvidence(result); err != nil {
+		return fmt.Errorf("refusing to persist evidence: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err

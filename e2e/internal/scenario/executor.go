@@ -120,6 +120,8 @@ func knownPredicate(predicate string) bool {
 	switch predicate {
 	case "terminal.converged", "A.outbox.zero", "A.outbox.nonzero", "B.mirror.active:n1", "B.mirror.absent:n1", "B.mirror.sequence:3", "B.no-resurrection:n1", "B.health.connected", "B.health.offline", "A.source.absent:n1", "B.user-dismiss.reason":
 		return true
+	case "A.route.lan", "B.route.lan", "A.route.relay", "B.route.relay", "A.route.queued", "B.route.queued":
+		return true
 	default:
 		return false
 	}
@@ -366,6 +368,25 @@ func predicateSatisfied(name, predicate string, a, b Observation) bool {
 		return b.Health == "offline"
 	case predicate == "A.source.absent:n1":
 		return !a.Mirror
+	case strings.HasPrefix(predicate, "A.route."):
+		return routeSatisfied(strings.TrimPrefix(predicate, "A.route."), a)
+	case strings.HasPrefix(predicate, "B.route."):
+		return routeSatisfied(strings.TrimPrefix(predicate, "B.route."), b)
+	default:
+		return false
+	}
+}
+
+// routeSatisfied reads only the observed route, so a scenario can never claim
+// direct delivery from a relay session that merely looked healthy.
+func routeSatisfied(want string, o Observation) bool {
+	switch want {
+	case "lan", "relay":
+		return o.Route == want && o.RoutePhase == "authenticated"
+	case "queued":
+		// Durable work with nothing carrying it. This is the state the product
+		// reports as "Queued for delivery".
+		return o.Route == "none" && o.Outbox > 0
 	default:
 		return false
 	}

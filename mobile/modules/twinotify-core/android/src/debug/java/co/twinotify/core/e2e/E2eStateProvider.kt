@@ -70,6 +70,10 @@ class E2eStateProvider : ContentProvider() {
                 .put("peer_tls_pin_hash", binding?.let { sha256BytesHex(it.peerTlsSpkiSha256) } ?: JSONObject.NULL)
                 .put("offline_pairing", offline)
                 .put("health", JSONObject(SyncServiceStatus.health.value.toEventMap()))
+                // Route kind and phase only. toPublicMap carries no endpoint or address,
+                // so E2E evidence cannot pick up a network identifier from here.
+                .put("route", JSONObject(SyncServiceStatus.routeStatus.value.toPublicMap()))
+                .put("outbox_bytes", scalarLong(database, "SELECT COALESCE(SUM(byteSize),0) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')"))
                 .put("active_outbox", scalar(database, "SELECT COUNT(*) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')"))
                 .put("active_inbound", scalar(database, "SELECT COUNT(*) FROM inbound_message WHERE outcome='PENDING_PLATFORM'"))
                 .put("pending_materialization", scalar(database, "SELECT COUNT(*) FROM canonical_notification_state WHERE latestSequence > materializedSequence"))
@@ -84,6 +88,9 @@ class E2eStateProvider : ContentProvider() {
 
         private fun scalar(database: androidx.sqlite.db.SupportSQLiteDatabase, sql: String): Int =
             database.query(sql).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+
+        private fun scalarLong(database: androidx.sqlite.db.SupportSQLiteDatabase, sql: String): Long =
+            database.query(sql).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
 
         private fun canonical(database: androidx.sqlite.db.SupportSQLiteDatabase): JSONArray {
             val result = JSONArray()

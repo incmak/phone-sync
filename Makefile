@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify e2e-emulator e2e-offline-pairing release-audit clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify e2e-emulator e2e-lan-delivery e2e-offline-pairing release-audit clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -56,6 +56,11 @@ host-verify: proto-test
 
 e2e-emulator: relay-build mobile-verify
 	./e2e/scripts/run-two-emulators.sh
+
+e2e-lan-delivery:
+	@test -n "$(E2E_DEVICE_A)" -a -n "$(E2E_DEVICE_B)" -a "$(E2E_DEVICE_A)" != "$(E2E_DEVICE_B)" || { echo "two explicit distinct E2E_DEVICE_A/E2E_DEVICE_B serials are required" >&2; exit 2; }
+	@test -n "$(E2E_LAN_EVIDENCE_DIR)" || { echo "E2E_LAN_EVIDENCE_DIR is required" >&2; exit 2; }
+	cd e2e && go run ./cmd/twinotify-e2e -scenario lan-direct-delivery -serial-a "$(E2E_DEVICE_A)" -serial-b "$(E2E_DEVICE_B)" -evidence-dir "$(abspath $(E2E_LAN_EVIDENCE_DIR))"
 
 e2e-offline-pairing:
 	@test -n "$(E2E_DEVICE_A)" -a -n "$(E2E_DEVICE_B)" -a "$(E2E_DEVICE_A)" != "$(E2E_DEVICE_B)" || { echo "two explicit distinct E2E_DEVICE_A/E2E_DEVICE_B serials are required" >&2; exit 2; }
