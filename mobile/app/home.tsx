@@ -14,36 +14,19 @@ import {
   useTheme,
   TwWordmark,
   TwStatusDot,
-  TwConnectionState,
-  twStatusLabel,
   TwCard,
   TwSwitch,
-  TwBanner,
   TwButton,
   TwEmpty,
 } from '../components';
 import { useSyncStatus } from '../hooks/useSyncStatus';
+import { useRouteStatus } from '../hooks/useRouteStatus';
+import { presentRoute } from '../state/routePresentation';
 import { useMetrics } from '../hooks/useMetrics';
 import TwinotifyCoreModule, { PairStatus, SyncState } from '../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../state/onboardingState';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
-
-function syncStateToConnection(state: SyncState): TwConnectionState {
-  switch (state) {
-    case 'CONNECTED':      return 'relay';   // Phase 3: all connections are relay
-    case 'CONNECTING':     return 'pairing';
-    case 'OFFLINE_QUEUED': return 'offline';
-    case 'DISCONNECTED':   return 'offline';
-  }
-}
-
-const STATUS_COPY: Record<TwConnectionState, { title: string; body: string }> = {
-  lan:     { title: 'Direct on LAN',       body: 'Encrypted peer-to-peer over Wi-Fi. Fastest path.' },
-  relay:   { title: 'Over relay',          body: 'Relay-tunneled. Still end-to-end encrypted.' },
-  offline: { title: 'Offline',             body: "We can't reach your other phone right now." },
-  pairing: { title: 'Reconnecting…',       body: 'Renegotiating keys with your peer.' },
-};
 
 function serviceIsRunning(state: SyncState): boolean {
   return state === 'CONNECTED' || state === 'CONNECTING' || state === 'OFFLINE_QUEUED';
@@ -53,10 +36,9 @@ function serviceIsRunning(state: SyncState): boolean {
 
 export default function HomeScreen() {
   const theme = useTheme();
-  const { state, queuedCount: _queuedCount } = useSyncStatus();
-  const connection = syncStateToConnection(state);
+  const { state } = useSyncStatus();
+  const routeStatus = useRouteStatus();
   const metrics = useMetrics();
-  const copy = STATUS_COPY[connection];
 
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
   const [relayUrl, setRelayUrl] = useState<string | null>(null);
@@ -95,19 +77,19 @@ export default function HomeScreen() {
 
   const handleRetry = useCallback(async () => {
     try {
-      const url = relayUrl ?? 'wss://relay.twinotify.app';
-      await TwinotifyCoreModule.startSyncService(url);
+      await TwinotifyCoreModule.retryRoute();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error';
       Alert.alert('Error', msg);
     }
-  }, [relayUrl]);
+  }, []);
 
   // Display values
+  const route = presentRoute(routeStatus, pairStatus.paired);
   const peerLabel = pairStatus.paired
-    ? (pairStatus.peerDisplayName?.trim() || pairStatus.peerDeviceId?.slice(0, 8) || '—')
+    ? (pairStatus.peerDisplayName?.trim() || pairStatus.peerDeviceId?.slice(0, 8) || 'Unknown device')
     : 'Not paired';
-  const peerOnline = connection !== 'offline';
+  const peerReachable = route.state === 'direct' || route.state === 'relay';
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>
@@ -129,31 +111,31 @@ export default function HomeScreen() {
 
         {/* Hero status card */}
         <TwCard
-          tone={connection === 'offline' ? 'danger' : 'default'}
+          tone="default"
           style={styles.heroCard}
           padding={20}
         >
           {/* Top row: status label + mirror switch */}
           <View style={styles.heroTop}>
             <View style={styles.heroLeft}>
-              <View style={styles.statusRow}>
-                <TwStatusDot state={connection} size={9} />
-                <Text style={[styles.statusLabel, { color: theme.ink3, fontFamily: theme.fonts.uiSemi }]}>
-                  {twStatusLabel(connection).toUpperCase()}
+              <View
+                accessibilityRole="text"
+                accessibilityLiveRegion="polite"
+                accessibilityLabel={`${route.label}. ${route.explanation}`}
+              >
+                <Text style={[styles.heroTitle, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
+                  {route.label}
+                </Text>
+                <Text style={[styles.heroBody, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
+                  {route.explanation}
                 </Text>
               </View>
-              <Text style={[styles.heroTitle, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
-                {copy.title}
-              </Text>
-              <Text style={[styles.heroBody, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
-                {copy.body}
-              </Text>
             </View>
             <TwSwitch
               checked={mirrorOn}
               onChange={handleMirrorToggle}
               size="lg"
-              disabled={connection === 'offline'}
+              disabled={!pairStatus.paired}
             />
           </View>
 
@@ -174,7 +156,7 @@ export default function HomeScreen() {
             </View>
             <Text style={[styles.peerLabel, { color: theme.ink2, fontFamily: theme.fonts.ui }]} numberOfLines={1}>
               <Text style={{ color: theme.ink, fontFamily: theme.fonts.uiSemi }}>{peerLabel}</Text>
-              {pairStatus.paired ? ` · ${peerOnline ? 'online' : 'offline'}` : ''}
+              {pairStatus.paired && peerReachable ? ' · reachable' : ''}
             </Text>
             <Pressable onPress={() => router.push('/settings/pair')} hitSlop={8}>
               <Text style={[styles.chevron, { color: theme.ink3 }]}>›</Text>
@@ -204,31 +186,29 @@ export default function HomeScreen() {
           </View>
         </TwCard>
 
-        {/* Inline state-specific banners */}
-        {connection === 'offline' && (
-          <TwBanner
-            tone="danger"
-            title="Your other phone hasn't responded"
-            body="Check that it's online and Twinotify is running. We'll keep retrying."
-            style={styles.banner}
-            action={
-              <TwButton size="sm" variant="secondary" onPress={handleRetry}>
-                Retry now
-              </TwButton>
-            }
-          />
+        {route.action === 'retry' && (
+          <TwButton
+            size="md"
+            variant="secondary"
+            onPress={handleRetry}
+            style={styles.routeAction}
+            accessibilityHint="Tries your other phone again straight away"
+          >
+            Try again now
+          </TwButton>
         )}
-        {connection === 'pairing' && (
-          <TwBanner
-            tone="warn"
-            title="Temporarily out of sync"
-            body="Reconnecting with fresh keys. Should be a few seconds."
-            style={styles.banner}
-          />
+        {route.action === 'pair' && (
+          <TwButton
+            size="md"
+            variant="primary"
+            onPress={() => router.push('/pair/nearby')}
+            style={styles.routeAction}
+          >
+            Link your other phone
+          </TwButton>
         )}
-        {/* LAN direct transport ships in a later phase; relay is the only transport in Phase 3/4. */}
 
-        {/* Recent activity — Phase 3 empty state */}
+        {/* Recent activity */}
         <View style={styles.recentHeader}>
           <Text style={[styles.recentTitle, { color: theme.ink2, fontFamily: theme.fonts.uiSemi }]}>
             Recent
@@ -291,8 +271,6 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   heroLeft: { flex: 1, marginRight: 12 },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
-  statusLabel: { fontSize: 11, letterSpacing: 0.5 },
   heroTitle: { fontSize: 22, letterSpacing: -0.3, lineHeight: 28 },
   heroBody: { fontSize: 13, marginTop: 3, lineHeight: 18 },
   // Pair row
@@ -324,7 +302,7 @@ const styles = StyleSheet.create({
   metricLabel: { fontSize: 11, letterSpacing: 0.4, marginBottom: 2 },
   metricValue: { fontSize: 20, fontWeight: '600' },
   // Banners
-  banner: { marginTop: 12 },
+  routeAction: { marginTop: 12, alignSelf: 'flex-start' },
   // Recent
   recentHeader: {
     flexDirection: 'row',

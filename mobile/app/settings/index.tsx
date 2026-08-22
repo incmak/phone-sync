@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ScrollView,
   StyleSheet,
@@ -41,6 +41,7 @@ export default function SettingsScreen() {
 
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
   const [relayUrl, setRelayUrl] = useState<string | null>(null);
+  const [preferLan, setPreferLan] = useState(true);
   const [lockScreenPreview, setLockScreenPreview] = useState(false);
 
   useEffect(() => {
@@ -64,6 +65,16 @@ export default function SettingsScreen() {
     ? pairStatus.peerDeviceId.slice(0, 8)
     : 'Not paired';
   const peerStatusStr = pairStatus.paired ? `${peerShort} · ${connectionLabel(state)}` : 'Not paired';
+  const handlePreferLanChange = useCallback(async (next: boolean) => {
+    setPreferLan(next);
+    try {
+      await TwinotifyCoreModule.setPreferLan(next);
+    } catch {
+      // Keep the durable setting authoritative rather than showing a stale toggle.
+      setPreferLan(!next);
+    }
+  }, []);
+
   const relayDisplay = relayUrl ?? 'wss://relay.twinotify.app';
   const version = Constants.expoConfig?.version ?? '1.0.0-phase3';
 
@@ -125,10 +136,21 @@ export default function SettingsScreen() {
           />
           {divider}
           <TwRow
-            title="Prefer LAN"
-            subtitle="Coming in Phase 4"
-            trailing={<TwSwitch checked={false} disabled size="md" />}
-            style={styles.rowPadDisabled}
+            title="Prefer direct Wi-Fi"
+            subtitle={
+              preferLan
+                ? 'Delivers straight to your other phone when it is on the same Wi-Fi'
+                : 'Always delivers through the relay'
+            }
+            trailing={
+              <TwSwitch
+                checked={preferLan}
+                onChange={handlePreferLanChange}
+                size="md"
+                accessibilityLabel="Prefer direct Wi-Fi delivery"
+              />
+            }
+            style={styles.rowPad}
           />
         </TwCard>
 

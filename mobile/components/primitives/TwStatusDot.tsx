@@ -1,93 +1,49 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { View, StyleSheet } from 'react-native';
-import Animated, {
-  useAnimatedStyle,
-  useSharedValue,
-  withRepeat,
-  withTiming,
-  Easing,
-} from 'react-native-reanimated';
 import { useTheme } from '../Theme';
 import { TW_SEMANTIC } from '../tokens';
 
-export type TwConnectionState = 'lan' | 'relay' | 'offline' | 'pairing';
+/** The delivery states the product reports. Kept in step with `state/routePresentation`. */
+export type TwConnectionState = 'direct' | 'relay' | 'reconnecting' | 'queued' | 'unpaired';
 
 interface TwStatusDotProps {
   state?: TwConnectionState;
   size?: number;
 }
 
-const STATE_MAP: Record<TwConnectionState, { c: string; pulse: boolean }> = {
-  lan:     { c: TW_SEMANTIC.ok,     pulse: false },
-  relay:   { c: TW_SEMANTIC.info,   pulse: false },
-  offline: { c: TW_SEMANTIC.danger, pulse: false },
-  pairing: { c: TW_SEMANTIC.warn,   pulse: true  },
-};
-
-export function TwStatusDot({ state = 'offline', size = 10 }: TwStatusDotProps) {
-  useTheme(); // ensure we're inside provider
-  const { c, pulse } = STATE_MAP[state] ?? STATE_MAP.offline;
-
-  const scale = useSharedValue(1);
-  const opacity = useSharedValue(0.6);
-
-  useEffect(() => {
-    if (pulse) {
-      scale.value = withRepeat(
-        withTiming(2.4, { duration: 1600, easing: Easing.out(Easing.ease) }),
-        -1,
-        false,
-      );
-      opacity.value = withRepeat(
-        withTiming(0, { duration: 1600, easing: Easing.out(Easing.ease) }),
-        -1,
-        false,
-      );
-    } else {
-      scale.value = 1;
-      opacity.value = 0;
-    }
-  }, [pulse, scale, opacity]);
-
-  const pulseStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: scale.value }],
-    opacity: opacity.value,
-  }));
+/**
+ * A quiet presence marker for a device row.
+ *
+ * It does not pulse and carries no glow. A dot that breathes reads as decoration
+ * standing in for information, and the route itself is always stated in words
+ * next to it, so the colour only has to separate one row from another.
+ */
+export function TwStatusDot({ state = 'unpaired', size = 10 }: TwStatusDotProps) {
+  const theme = useTheme();
+  const stateColor: Record<TwConnectionState, string> = {
+    direct: TW_SEMANTIC.ok,
+    relay: TW_SEMANTIC.info,
+    reconnecting: TW_SEMANTIC.warn,
+    queued: TW_SEMANTIC.warn,
+    // An unlinked device is quiet ink, not a colour that competes for attention.
+    unpaired: theme.ink4,
+  };
+  const color = stateColor[state] ?? stateColor.unpaired;
 
   return (
-    <View style={[styles.container, { width: size, height: size }]}>
-      <View style={[styles.dot, { width: size, height: size, borderRadius: size / 2, backgroundColor: c }]} />
-      {pulse && (
-        <Animated.View
-          style={[
-            styles.pulse,
-            { width: size, height: size, borderRadius: size / 2, backgroundColor: c },
-            pulseStyle,
-          ]}
-        />
-      )}
-    </View>
+    <View
+      accessible={false}
+      importantForAccessibility="no"
+      style={[
+        styles.dot,
+        { width: size, height: size, borderRadius: size / 2, backgroundColor: color },
+      ]}
+    />
   );
 }
 
-export function twStatusLabel(state: TwConnectionState): string {
-  const map: Record<TwConnectionState, string> = {
-    lan:     'LAN · Direct',
-    relay:   'Relay · Encrypted',
-    offline: 'Offline',
-    pairing: 'Pairing…',
-  };
-  return map[state] ?? 'Unknown';
-}
-
 const styles = StyleSheet.create({
-  container: {
-    position: 'relative',
-  },
   dot: {
-    position: 'absolute',
-  },
-  pulse: {
-    position: 'absolute',
+    flexShrink: 0,
   },
 });

@@ -15,9 +15,17 @@ interface TwSwitchProps {
   onChange?: (next: boolean) => void;
   size?: TwSwitchSize;
   disabled?: boolean;
+  /** Required whenever the adjacent text does not already name the control. */
+  accessibilityLabel?: string;
 }
 
-export function TwSwitch({ checked, onChange, size = 'md', disabled }: TwSwitchProps) {
+export function TwSwitch({
+  checked,
+  onChange,
+  size = 'md',
+  disabled,
+  accessibilityLabel,
+}: TwSwitchProps) {
   const theme = useTheme();
   const w = size === 'lg' ? 52 : 44;
   const h = size === 'lg' ? 30 : 26;
@@ -50,6 +58,11 @@ export function TwSwitch({ checked, onChange, size = 'md', disabled }: TwSwitchP
     <Pressable
       onPress={() => !disabled && onChange?.(!checked)}
       disabled={disabled}
+      accessibilityRole="switch"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ checked, disabled: !!disabled }}
+      // A 44pt target regardless of the visual size of the track.
+      hitSlop={10}
       style={{ opacity: disabled ? 0.5 : 1 }}
     >
       <Animated.View

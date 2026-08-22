@@ -81,10 +81,12 @@ export default function PairSuccessScreen() {
           lineHeight: 22,
           maxWidth: 280,
         }}>
+          {/* Pairing commits trust. It does not prove a message can be delivered
+              yet, so this promises reachability rather than immediate mirroring. */}
           {verifiedComplete && peerName
-            ? `Paired with ${peerName}. Notifications will start mirroring immediately.`
+            ? `Paired with ${peerName}. Mirroring starts as soon as that phone is reachable.`
             : verifiedComplete
-              ? 'Your phones are paired. Notifications will start mirroring immediately.'
+              ? 'Your phones are paired. Mirroring starts as soon as the other phone is reachable.'
               : 'Waiting for the native pairing confirmation.'}
         </Text>
       </ScrollView>
