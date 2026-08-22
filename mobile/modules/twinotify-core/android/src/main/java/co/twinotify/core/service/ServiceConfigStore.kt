@@ -15,6 +15,8 @@ private val Context.syncServiceConfigDataStore by preferencesDataStore("twinotif
 data class ServiceConfig(
     val enabled: Boolean = false,
     val relayUrl: String? = null,
+    /** Try a direct LAN route before the relay. Defaults on: it is faster and private. */
+    val preferLan: Boolean = true,
     val alwaysConnected: Boolean = true,
     val callCaptureEnabled: Boolean = false,
     val lastUserChangeAt: Long? = null,
@@ -35,6 +37,7 @@ internal fun mergeCallShutdownIntent(
 object ServiceConfigStore {
     private val ENABLED = booleanPreferencesKey("enabled")
     private val RELAY_URL = stringPreferencesKey("relay_url")
+    private val PREFER_LAN = booleanPreferencesKey("prefer_lan")
     private val ALWAYS_CONNECTED = booleanPreferencesKey("always_connected")
     private val CALL_CAPTURE_ENABLED = booleanPreferencesKey("call_capture_enabled")
     private val LAST_USER_CHANGE_AT = longPreferencesKey("last_user_change_at")
@@ -45,6 +48,7 @@ object ServiceConfigStore {
         return ServiceConfig(
             enabled = prefs[ENABLED] ?: false,
             relayUrl = prefs[RELAY_URL],
+            preferLan = prefs[PREFER_LAN] ?: true,
             alwaysConnected = prefs[ALWAYS_CONNECTED] ?: true,
             callCaptureEnabled = prefs[CALL_CAPTURE_ENABLED] ?: false,
             lastUserChangeAt = prefs[LAST_USER_CHANGE_AT],
@@ -55,6 +59,14 @@ object ServiceConfigStore {
     suspend fun setEnabled(ctx: Context, enabled: Boolean, now: Long = System.currentTimeMillis()): ServiceConfig {
         ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
             prefs[ENABLED] = enabled
+            prefs[LAST_USER_CHANGE_AT] = now
+        }
+        return read(ctx)
+    }
+
+    suspend fun setPreferLan(ctx: Context, preferLan: Boolean, now: Long = System.currentTimeMillis()): ServiceConfig {
+        ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
+            prefs[PREFER_LAN] = preferLan
             prefs[LAST_USER_CHANGE_AT] = now
         }
         return read(ctx)

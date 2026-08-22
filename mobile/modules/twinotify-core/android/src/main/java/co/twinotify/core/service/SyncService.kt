@@ -442,11 +442,17 @@ class SyncService : Service() {
             }
         }
         val config = runBlocking(Dispatchers.IO) { ServiceConfigStore.read(applicationContext) }
-        val paired = runBlocking(Dispatchers.IO) { PeerStore.load(applicationContext) != null }
-        when (val decision = ServiceStartPolicy.decide(intent?.action, config, paired)) {
+        val peer = runBlocking(Dispatchers.IO) { PeerStore.load(applicationContext) }
+        val paired = peer != null
+        // A peer paired over the LAN has a binding and may have no relay at all.
+        val lanBound = peer?.lanBindingId != null
+        when (
+            val decision = ServiceStartPolicy.decide(intent?.action, config, paired, lanBound)
+        ) {
             is ServiceStartDecision.Stop -> {
                 SyncServiceStatus.setLastError(decision.reason)
                 SyncServiceStatus.setState(SyncState.DISCONNECTED)
+                SyncServiceStatus.clearRouteStatus()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -456,7 +462,16 @@ class SyncService : Service() {
                 foregroundStarted = true
                 recoverCallsBeforeNormalCapture()
                 scope.launch { runRetentionSweep() }
-                startRelay(decision.relayUrl)
+                if (decision.relayUrl != null) {
+                    startRelay(decision.relayUrl)
+                } else {
+                    // LAN-only peer: there is no relay to dial. Capture and durable
+                    // custody still run, and delivery waits on the direct route.
+                    SyncServiceStatus.setState(SyncState.OFFLINE_QUEUED)
+                    SyncServiceStatus.setRouteStatus(
+                        SyncRouteStatus(RouteKind.LAN, RoutePhase.CONNECTING, 0),
+                    )
+                }
             }
         }
         return START_STICKY

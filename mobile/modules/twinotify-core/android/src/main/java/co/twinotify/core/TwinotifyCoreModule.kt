@@ -82,7 +82,7 @@ class TwinotifyCoreModule internal constructor(
     override fun definition() = ModuleDefinition {
         Name("TwinotifyCore")
 
-        Events("onSyncStatus", "onPeerUnpair", "onOfflinePairingStatus")
+        Events("onSyncStatus", "onPeerUnpair", "onOfflinePairingStatus", "onRouteStatus")
 
         OnCreate {
             try {
@@ -95,6 +95,13 @@ class TwinotifyCoreModule internal constructor(
             moduleScope.launch {
                 co.twinotify.core.service.SyncServiceStatus.health.collect { health ->
                     sendEvent("onSyncStatus", health.toEventMap())
+                }
+            }
+            moduleScope.launch {
+                co.twinotify.core.service.SyncServiceStatus.routeStatus.collect { route ->
+                    // toPublicMap carries the route and phase only; no endpoint,
+                    // address, SSID, or peer identifier crosses the bridge.
+                    sendEvent("onRouteStatus", route.toPublicMap())
                 }
             }
             moduleScope.launch {
@@ -123,6 +130,45 @@ class TwinotifyCoreModule internal constructor(
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("START_SVC", e.message ?: "err", e) }
             }
+        }
+
+        /** Start a peer that pairs and delivers over the LAN and has no relay at all. */
+        AsyncFunction("startLanOnlySyncService") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    co.twinotify.core.service.ServiceConfigStore.setEnabled(ctx, true)
+                    val intent = android.content.Intent(
+                        ctx,
+                        co.twinotify.core.service.SyncService::class.java,
+                    ).apply { action = co.twinotify.core.service.SyncService.ACTION_START }
+                    ctx.startForegroundService(intent)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("START_LAN_SVC", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("setPreferLan") { preferLan: Boolean, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    co.twinotify.core.service.ServiceConfigStore.setPreferLan(requireContext(), preferLan)
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("PREFER_LAN", e.message ?: "err", e) }
+            }
+        }
+
+        /** Ask the coordinator to reconnect now instead of waiting out its backoff. */
+        AsyncFunction("retryRoute") { promise: Promise ->
+            try {
+                co.twinotify.core.service.SyncServiceStatus.requestRouteRetry()
+                promise.resolve(null)
+            } catch (e: Throwable) { promise.reject("RETRY_ROUTE", e.message ?: "err", e) }
+        }
+
+        AsyncFunction("getRouteStatus") { promise: Promise ->
+            try {
+                promise.resolve(co.twinotify.core.service.SyncServiceStatus.routeStatus.value.toPublicMap())
+            } catch (e: Throwable) { promise.reject("ROUTE_STATUS", e.message ?: "err", e) }
         }
 
         AsyncFunction("stopSyncService") { promise: Promise ->

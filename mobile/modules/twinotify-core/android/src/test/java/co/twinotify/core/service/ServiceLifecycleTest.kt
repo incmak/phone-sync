@@ -9,6 +9,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -207,5 +208,105 @@ class ServiceLifecycleTest {
         assertEquals("connected", SyncServiceStatus.health.value.service)
         assertEquals("online", SyncServiceStatus.health.value.transport)
         assertEquals(null, SyncServiceStatus.health.value.lastErrorCode)
+    }
+
+    // ---- Task 7: route-aware lifecycle -----------------------------------
+
+    @Test
+    fun lanBoundPeerStartsWithoutARelayUrl() {
+        val decision = ServiceStartPolicy.decide(
+            intentAction = null,
+            persisted = ServiceConfig(enabled = true, relayUrl = null),
+            paired = true,
+            lanBound = true,
+        )
+
+        val start = assertIs<ServiceStartDecision.Start>(decision)
+        assertNull(start.relayUrl)
+        assertTrue(start.lanBound)
+    }
+
+    @Test
+    fun relayOnlyPeerStaysRelayOnly() {
+        val decision = ServiceStartPolicy.decide(
+            intentAction = null,
+            persisted = ServiceConfig(enabled = true, relayUrl = "wss://relay.example"),
+            paired = true,
+            lanBound = false,
+        )
+
+        val start = assertIs<ServiceStartDecision.Start>(decision)
+        assertEquals("wss://relay.example", start.relayUrl)
+        assertFalse(start.lanBound)
+    }
+
+    @Test
+    fun aPairedPeerWithNeitherRouteDoesNotStart() {
+        val decision = ServiceStartPolicy.decide(
+            intentAction = null,
+            persisted = ServiceConfig(enabled = true, relayUrl = null),
+            paired = true,
+            lanBound = false,
+        )
+
+        assertEquals("no_route_available", assertIs<ServiceStartDecision.Stop>(decision).reason)
+    }
+
+    @Test
+    fun aUserStoppedServiceStaysStoppedEvenWhenLanBound() {
+        val decision = ServiceStartPolicy.decide(
+            intentAction = ServiceStartPolicy.BOOT_ACTION,
+            persisted = ServiceConfig(enabled = false, relayUrl = null),
+            paired = true,
+            lanBound = true,
+        )
+
+        assertEquals("disabled", assertIs<ServiceStartDecision.Stop>(decision).reason)
+    }
+
+    @Test
+    fun aLanOnlyPeerCanBeEnabledWithoutEverSupplyingARelayUrl() {
+        val enabled = ServiceStartPolicy.applyLanOnlyStart(ServiceConfig())
+
+        assertTrue(enabled.enabled)
+        assertNull(enabled.relayUrl)
+        assertIs<ServiceStartDecision.Start>(
+            ServiceStartPolicy.decide(null, enabled, paired = true, lanBound = true),
+        )
+    }
+
+    @Test
+    fun routeStatusReportsEachPhaseTruthfully() {
+        SyncServiceStatus.setRouteStatus(SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED, 0))
+        assertEquals(RouteKind.LAN, SyncServiceStatus.routeStatus.value.route)
+
+        SyncServiceStatus.setRouteStatus(SyncRouteStatus(RouteKind.RELAY, RoutePhase.AUTHENTICATED, 2))
+        assertEquals(RouteKind.RELAY, SyncServiceStatus.routeStatus.value.route)
+        assertEquals(2, SyncServiceStatus.routeStatus.value.queuedCount)
+
+        SyncServiceStatus.setRouteStatus(SyncRouteStatus(RouteKind.NONE, RoutePhase.RECONNECTING, 5))
+        assertEquals(RoutePhase.RECONNECTING, SyncServiceStatus.routeStatus.value.phase)
+        assertEquals(5, SyncServiceStatus.routeStatus.value.queuedCount)
+    }
+
+    @Test
+    fun routeStatusCarriesNoNetworkDetail() {
+        SyncServiceStatus.setRouteStatus(SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED, 1))
+
+        val rendered = SyncServiceStatus.routeStatus.value.toPublicMap()
+
+        assertEquals(setOf("route", "phase", "queued_count"), rendered.keys)
+        assertEquals("lan", rendered["route"])
+        assertEquals("authenticated", rendered["phase"])
+    }
+
+    @Test
+    fun stoppingClearsTheRouteStatusSoNoStaleRouteIsShown() {
+        SyncServiceStatus.setRouteStatus(SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED, 3))
+
+        SyncServiceStatus.clearRouteStatus()
+
+        assertEquals(RouteKind.NONE, SyncServiceStatus.routeStatus.value.route)
+        assertEquals(RoutePhase.IDLE, SyncServiceStatus.routeStatus.value.phase)
     }
 }

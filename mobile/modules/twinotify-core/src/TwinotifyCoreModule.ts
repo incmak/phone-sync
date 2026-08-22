@@ -1,7 +1,16 @@
 import { NativeModule, requireNativeModule } from 'expo-modules-core';
-import type { OfflinePairingStatus, OfflinePairingStatusEvent } from './TwinotifyCore.types';
+import type {
+  OfflinePairingStatus,
+  OfflinePairingStatusEvent,
+  RouteStatus,
+  RouteStatusEvent,
+} from './TwinotifyCore.types';
 
 export type {
+  DeliveryRoute,
+  DeliveryRoutePhase,
+  RouteStatus,
+  RouteStatusEvent,
   OfflinePairingErrorCode,
   OfflinePairingPhase,
   OfflinePairingRole,
@@ -42,6 +51,7 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   onSyncStatus: (evt: SyncStatus) => void;
   onPeerUnpair: () => void;
   onOfflinePairingStatus: OfflinePairingStatusEvent;
+  onRouteStatus: RouteStatusEvent;
 }> {
   getDeviceId(): Promise<string>;
   getPublicKeys(): Promise<KeyPair>;
@@ -69,8 +79,15 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   ping(relayUrl: string, authed: boolean): Promise<string>;
   // Sync service lifecycle
   startSyncService(relayUrl: string): Promise<void>;
+  /** Start a peer that pairs and delivers over the LAN and has no relay at all. */
+  startLanOnlySyncService(): Promise<void>;
   stopSyncService(): Promise<void>;
   getSyncStatus(): Promise<SyncStatus>;
+  getRouteStatus(): Promise<RouteStatus>;
+  /** Try a direct LAN route before the relay. */
+  setPreferLan(preferLan: boolean): Promise<void>;
+  /** Reconnect now instead of waiting out the current backoff. */
+  retryRoute(): Promise<void>;
   getPairStatus(): Promise<PairStatus>;
   // Permission helpers
   isNotificationListenerGranted(): Promise<boolean>;

@@ -13,11 +13,18 @@ class BootReceiver : BroadcastReceiver() {
         // even if an old SharedPreferences relay_url remains from a prior app version.
         val config = runBlocking { ServiceConfigStore.read(ctx) }
         val paired = runBlocking { PeerStore.load(ctx) != null }
-        val decision = ServiceStartPolicy.decide(Intent.ACTION_BOOT_COMPLETED, config, paired)
-        val relayUrl = (decision as? ServiceStartDecision.Start)?.relayUrl ?: return
+        val lanBound = runBlocking { PeerStore.load(ctx)?.lanBindingId != null }
+        val decision = ServiceStartPolicy.decide(
+            Intent.ACTION_BOOT_COMPLETED,
+            config,
+            paired,
+            lanBound,
+        )
+        val start = decision as? ServiceStartDecision.Start ?: return
         val svcIntent = Intent(ctx, SyncService::class.java).apply {
             action = SyncService.ACTION_START
-            putExtra(SyncService.EXTRA_RELAY_URL, relayUrl)
+            // A LAN-only peer has no relay URL to carry, and must still boot.
+            start.relayUrl?.let { putExtra(SyncService.EXTRA_RELAY_URL, it) }
         }
         ctx.startForegroundService(svcIntent)
     }

@@ -12,6 +12,28 @@ export type ChangeEventPayload = {
   value: string;
 };
 
+/** Which route is carrying delivery. `none` means no route is authenticated. */
+export type DeliveryRoute = 'lan' | 'relay' | 'none';
+
+export type DeliveryRoutePhase =
+  | 'idle'
+  | 'connecting'
+  | 'authenticated'
+  | 'reconnecting';
+
+/**
+ * The complete public description of delivery. It deliberately carries no
+ * endpoint, address, SSID, port, or peer identifier, so rendering it cannot
+ * leak private network detail.
+ */
+export interface RouteStatus {
+  route: DeliveryRoute;
+  phase: DeliveryRoutePhase;
+  queued_count: number;
+}
+
+export type RouteStatusEvent = (status: RouteStatus) => void;
+
 export type OfflinePairingRole = 'initiator' | 'joiner';
 
 export type OfflinePairingPhase =

@@ -10,6 +10,7 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.TestScope
@@ -163,6 +164,32 @@ class TransportCoordinatorTest {
 
         assertEquals(RouteKind.RELAY, coordinator.health.value.active)
         assertTrue(relay.session().sent.isEmpty(), "the coordinator drained a self-draining route")
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun anExplicitRetryCutsTheBackoffShortWithoutDisarmingIt() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true)
+        val retries = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = null,
+            clock = { testScheduler.currentTime },
+            retryRequests = retries,
+        )
+
+        val job = launch { coordinator.run() }
+        runCurrent()
+        val beforeRetry = lan.opens
+
+        retries.emit(Unit)
+        runCurrent()
+
+        assertEquals(beforeRetry + 1, lan.opens, "an explicit retry did not reconnect early")
+        // The attempt count survives, so repeated failures keep backing off.
+        assertTrue(coordinator.lastBackoffMs >= 5_000)
         job.cancelAndJoin()
     }
 

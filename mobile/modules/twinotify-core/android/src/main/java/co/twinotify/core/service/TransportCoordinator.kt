@@ -3,14 +3,19 @@ package co.twinotify.core.service
 import co.twinotify.core.storage.OutboundMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class RouteKind { LAN, RELAY, NONE }
 
@@ -68,6 +73,8 @@ class TransportCoordinator(
     private val retryPolicy: RetryPolicy = RetryPolicy(),
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val idlePollMs: Long = 1_000L,
+    /** Emits when a user asks to reconnect now, cutting the current backoff short. */
+    private val retryRequests: Flow<Unit> = emptyFlow(),
 ) {
     private val healthState = MutableStateFlow(RouteHealth())
     val health: StateFlow<RouteHealth> = healthState.asStateFlow()
@@ -154,7 +161,17 @@ class TransportCoordinator(
     private suspend fun backOff(attempt: Int) {
         val wait = retryPolicy.delay(attempt - 1)
         lastBackoffMs = wait
-        delay(wait)
+        // An explicit retry skips the remaining wait without discarding the attempt
+        // count, so a user can ask for one reconnection without disarming backoff.
+        withTimeoutOrNull(wait) {
+            try {
+                retryRequests.first()
+            } catch (_: NoSuchElementException) {
+                // A flow that completes without emitting must still let the full
+                // backoff elapse, or the coordinator would spin instead of waiting.
+                awaitCancellation()
+            }
+        }
     }
 
     private suspend fun publish(active: RouteKind, phase: RoutePhase) {

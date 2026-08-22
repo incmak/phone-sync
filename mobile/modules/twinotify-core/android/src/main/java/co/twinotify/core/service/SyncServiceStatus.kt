@@ -47,6 +47,23 @@ fun SyncHealth.toEventMap(): Map<String, Any?> = mapOf(
     },
 )
 
+/**
+ * What the app is allowed to render about delivery. It names the route and its phase
+ * and nothing else: no endpoint, address, SSID, port, or peer identifier ever reaches
+ * this type, so a UI cannot leak private network detail by rendering it.
+ */
+data class SyncRouteStatus(
+    val route: RouteKind = RouteKind.NONE,
+    val phase: RoutePhase = RoutePhase.IDLE,
+    val queuedCount: Int = 0,
+) {
+    fun toPublicMap(): Map<String, Any> = mapOf(
+        "route" to route.name.lowercase(),
+        "phase" to phase.name.lowercase(),
+        "queued_count" to queuedCount,
+    )
+}
+
 object SyncServiceStatus {
     private val _state = MutableStateFlow(SyncState.DISCONNECTED)
     val state: StateFlow<SyncState> = _state
@@ -67,8 +84,28 @@ object SyncServiceStatus {
         ),
     )
     val health: StateFlow<SyncHealth> = _health
+    private val _routeStatus = MutableStateFlow(SyncRouteStatus())
+    val routeStatus: StateFlow<SyncRouteStatus> = _routeStatus
+    private val _routeRetryRequested = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+
+    /** A user asking to reconnect now. The coordinator uses it to cut its backoff short. */
+    val routeRetryRequested: SharedFlow<Unit> = _routeRetryRequested
+
+    fun requestRouteRetry() {
+        _routeRetryRequested.tryEmit(Unit)
+    }
+
     private val _peerUnpaired = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     val peerUnpaired: SharedFlow<Unit> = _peerUnpaired
+
+    fun setRouteStatus(status: SyncRouteStatus) {
+        _routeStatus.value = status
+    }
+
+    /** A stopped service has no route. Leaving the last one would show a stale claim. */
+    fun clearRouteStatus() {
+        _routeStatus.value = SyncRouteStatus()
+    }
 
     fun setState(s: SyncState) {
         _state.value = s
