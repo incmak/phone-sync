@@ -21,6 +21,18 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
+/**
+ * What a route may tell the peer about one inbound envelope. `Accepted` and
+ * `Duplicate` are only ever returned after durable custody exists, so a route
+ * may acknowledge on either. `Rejected` carries a stable code and never means
+ * "retry": the envelope was refused, so a route closes rather than acknowledging.
+ */
+sealed interface InboundDispatchResult {
+    data class Accepted(val msgId: String, val envelopeSha256: String) : InboundDispatchResult
+    data class Duplicate(val msgId: String, val envelopeSha256: String) : InboundDispatchResult
+    data class Rejected(val code: String) : InboundDispatchResult
+}
+
 internal suspend fun executePeerUnpairAndRequestServiceStop(
     unpair: suspend () -> Unit,
     requestServiceStop: suspend () -> Unit,
@@ -40,13 +52,20 @@ class InboundDispatcher(
     private val stateMutex = Mutex()
     private val snapshots get() = snapshotCoordinator
 
-    suspend fun dispatch(raw: String) {
+    /**
+     * Relay callers may ignore the result; their acknowledgement semantics are
+     * unchanged. A direct route uses it, and must never acknowledge before the
+     * Room transaction boundary this returns from.
+     */
+    suspend fun dispatch(raw: String): InboundDispatchResult {
         val parsed = runCatching { JSONObject(raw) }.getOrNull()
         if (parsed?.optInt("v", 1) == ProtocolJson.VERSION) {
-            dispatchV2(raw)
-            return
+            return dispatchV2(raw)
         }
         dispatchV1(raw)
+        // v1 has no authenticated msg_id or digest to acknowledge. It stays a
+        // relay-only compatibility path; a direct route must refuse it.
+        return InboundDispatchResult.Rejected("legacy_v1")
     }
 
     /** Legacy v1 compatibility path. New relay deliveries use [dispatchV2]. */
@@ -91,10 +110,10 @@ class InboundDispatcher(
         }
     }
 
-    private suspend fun dispatchV2(raw: String) {
+    private suspend fun dispatchV2(raw: String): InboundDispatchResult {
         val peer = PeerStore.load(ctx) ?: run {
             android.util.Log.w("Twinotify", "no peer paired; dropping v2 inbound")
-            return
+            return InboundDispatchResult.Rejected("no_peer")
         }
         val (cryptoBox, _) = CryptoStore.loadOrGenerate(ctx)
         val opened = try {
@@ -111,7 +130,7 @@ class InboundDispatcher(
             ).open(raw)
         } catch (error: Throwable) {
             android.util.Log.w("Twinotify", "v2 authentication failed: ${error.message}")
-            return
+            return InboundDispatchResult.Rejected("auth_failed")
         }
         val inner = opened.inner
         if (inner.type == "peer.receipt") {
@@ -126,22 +145,22 @@ class InboundDispatcher(
             )
             SyncServiceStatus.setLastReceiptAt(System.currentTimeMillis())
             SyncServiceStatus.setQueueStats(reliableDao.activeOutboundCount(), reliableDao.activeOutboundBytes())
-            return
+            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.digest") {
             runCatching { snapshots.onDigest(inner) }
                 .onFailure { android.util.Log.w("Twinotify", "snapshot digest rejected", it) }
-            return
+            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.snapshot.begin") {
             runCatching { snapshots.onBegin(inner) }
                 .onFailure { android.util.Log.w("Twinotify", "snapshot begin rejected", it) }
-            return
+            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.snapshot.item") {
             runCatching { snapshots.onItem(inner) }
                 .onFailure { android.util.Log.w("Twinotify", "snapshot item rejected", it) }
-            return
+            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.snapshot.end") {
             val result = runCatching { snapshots.onEnd(inner) }
@@ -157,18 +176,17 @@ class InboundDispatcher(
                     retryScheduler = materializationStartupScheduler(ctx),
                 ).materializePending()
             }
-            return
+            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "call.state") {
-            dispatchCallState(inner, opened.envelopeSha256, peer.deviceId)
-            return
+            return dispatchCallState(inner, opened.envelopeSha256, peer.deviceId)
         }
         if (inner.type !in setOf("notif.post", "notif.update", "notif.cancel")) {
             // Receipt/control processing belongs to the transport task. Preserve the authenticated
             // event in the journal only when it has a canonical desired state.
-            return
+            return InboundDispatchResult.Rejected("unsupported_event")
         }
-        stateMutex.withLock {
+        return stateMutex.withLock {
             val canonId = requireNotNull(inner.canonId)
             val localDeviceId = DeviceIdentity.getOrCreate(ctx)
             val current = reliableDao.canonical(canonId)
@@ -180,7 +198,7 @@ class InboundDispatcher(
                 authenticatedPeerId = peer.deviceId,
             ) ?: run {
                 android.util.Log.w("Twinotify", "v2 cancel origin is not the paired peer")
-                return@withLock
+                return@withLock InboundDispatchResult.Rejected("unauthorized_cancel")
             }
             val desired = try {
                 when (
@@ -196,7 +214,7 @@ class InboundDispatcher(
                 }
             } catch (error: Throwable) {
                 android.util.Log.w("Twinotify", "v2 desired-state reduction rejected event", error)
-                return@withLock
+                return@withLock InboundDispatchResult.Rejected("reduction_rejected")
             }
             val inbound = InboundMessage(
                 msgId = inner.msgId,
@@ -221,17 +239,35 @@ class InboundDispatcher(
                 val retryId = reliableDao.nextMirrorLocalId()
                 commitDesired = commitDesired.copy(mirrorLocalId = retryId)
             }
+            // Every branch below reports state that is already durable, or refuses.
+            // Nothing here may report acceptance for a row that was not committed.
             when (val result = commitResult) {
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Committed,
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate,
-                -> NotificationMaterializer(
-                    dao = reliableDao,
-                    port = DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao),
-                    receiptFactory = DurableReceiptFactory(ctx),
-                    localDeviceId = localDeviceId,
-                    retryScheduler = materializationStartupScheduler(ctx),
-                ).materializePending()
-                else -> Unit
+                -> {
+                    NotificationMaterializer(
+                        dao = reliableDao,
+                        port = DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao),
+                        receiptFactory = DurableReceiptFactory(ctx),
+                        localDeviceId = localDeviceId,
+                        retryScheduler = materializationStartupScheduler(ctx),
+                    ).materializePending()
+                    // Platform materialization may still fail and retry. Custody is
+                    // already durable, so the peer is told to stop resending.
+                    if (result is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate) {
+                        InboundDispatchResult.Duplicate(inner.msgId, opened.envelopeSha256)
+                    } else {
+                        InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
+                    }
+                }
+                // Stale still inserts the inbound row, so custody exists.
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Stale ->
+                    InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
+                is co.twinotify.core.storage.InboundDesiredCommitResult.IdConflict ->
+                    InboundDispatchResult.Rejected("id_conflict")
+                is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision ->
+                    InboundDispatchResult.Rejected("mirror_identity_collision")
+                null -> InboundDispatchResult.Rejected("commit_failed")
             }
         }
     }
@@ -240,11 +276,11 @@ class InboundDispatcher(
         inner: co.twinotify.core.protocol.InnerEventV2,
         envelopeSha256: String,
         authenticatedPeerId: String,
-    ) {
-        stateMutex.withLock {
+    ): InboundDispatchResult {
+        return stateMutex.withLock {
             if (inner.originDevice != authenticatedPeerId) {
                 android.util.Log.w("Twinotify", "call state origin is not the paired peer")
-                return@withLock
+                return@withLock InboundDispatchResult.Rejected("unauthorized_call_origin")
             }
             val payload = inner.payloadObject()
             val event = CallStateEvent(
@@ -271,7 +307,7 @@ class InboundDispatcher(
                 )
             }.getOrElse {
                 android.util.Log.w("Twinotify", "call state rejected", it)
-                return@withLock
+                return@withLock InboundDispatchResult.Rejected("call_state_rejected")
             }
             val inbound = InboundMessage(
                 msgId = inner.msgId,
@@ -300,6 +336,17 @@ class InboundDispatcher(
                     localDeviceId = localDeviceId,
                     retryScheduler = materializationStartupScheduler(ctx),
                 ).materializePending()
+            }
+            when (commit) {
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate ->
+                    InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Committed,
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Stale,
+                -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+                is co.twinotify.core.storage.InboundDesiredCommitResult.IdConflict ->
+                    InboundDispatchResult.Rejected("id_conflict")
+                is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision ->
+                    InboundDispatchResult.Rejected("mirror_identity_collision")
             }
         }
     }

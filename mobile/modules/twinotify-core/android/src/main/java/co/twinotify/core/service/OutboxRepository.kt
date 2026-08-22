@@ -107,6 +107,16 @@ class OutboxRepository(
             -> OutboxTransition.Retained
         }
 
+    /** Direct-route adapter boundary; durable custody stays route-neutral below this method. */
+    suspend fun onLanAccepted(msgId: String, acceptedAt: Long = clock()): OutboxTransition =
+        when (onCustodyAccepted(msgId, CustodyRoute.LAN, acceptedAt)) {
+            CustodyResult.Missing -> OutboxTransition.Missing
+            CustodyResult.DeletedReceipt -> OutboxTransition.Deleted
+            CustodyResult.Accepted,
+            CustodyResult.AlreadyAccepted,
+            -> OutboxTransition.Retained
+        }
+
     suspend fun onPeerReceipt(
         ackedMsgId: String,
         envelopeSha256: String,
