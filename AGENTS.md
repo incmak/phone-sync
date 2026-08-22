@@ -41,7 +41,7 @@ cd relay && go test ./internal/store -race -count=1
 
 Run from `relay/`, not the repo root — the Go module lives there.
 
-`make verify` / `make proto-test` / `make relay-verify` are specified by the design doc but **not implemented yet** (protocol-relay plan Task 9). Use `make relay-test` today.
+`make verify` (proto + relay + mobile) is the one-command gate; `make host-verify` covers the host/E2E scripts without a device. Note `mobile-verify` runs `npm ci` and `expo prebuild --clean`, and `relay-verify` builds the Docker image, so both are slow and need network/docker. For a quick loop use `make relay-test` plus the module's own Gradle tasks.
 
 ### Mobile
 
@@ -125,7 +125,7 @@ Kotlin flow: `TwinotifyNotificationListener` captures → filters → `OutboundQ
 
 - `docs/superpowers/specs/2026-04-20-phone-sync-design.md` — overall system/crypto/threat model (v10).
 - `docs/superpowers/specs/2026-08-09-reliable-delivery-foundation-design.md` — the v2 protocol, data models, ordering, verification strategy, and release gate. Read this before touching mailbox, receipt, or sequencing code.
-- `docs/superpowers/plans/2026-08-09-reliable-delivery-{protocol-relay,android,verification}.md` — task-by-task plans, executed in that order. The relay plan is complete through Task 8; Task 9 (one-command verification) and the whole Android plan are open.
+- `docs/superpowers/plans/2026-08-09-reliable-delivery-{protocol-relay,android,verification}.md` — task-by-task plans, executed in that order. All three are complete. Active work is now `docs/superpowers/plans/2026-08-20-direct-lan-delivery.md` (Tasks 1-4 landed; 5-9 open), which supersedes the earlier `2026-08-18-direct-lan-transport.md`. `advisor-plans/README.md` tracks the audit-driven plans 001-010.
 - `MEMORY.md` — long-form session handoff, but **last updated 2026-04-21**: it predates the reliable-delivery work and describes Phase 4 as in progress. Trust `git log` and the code over it.
 - `docs/test-scenarios.md` — manual two-phone smoke scenarios. `docs/design/SCREEN_INVENTORY.md` — UI surface reference.
 
