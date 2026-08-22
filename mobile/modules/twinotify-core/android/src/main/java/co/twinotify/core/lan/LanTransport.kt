@@ -1,14 +1,22 @@
 package co.twinotify.core.lan
 
+import co.twinotify.core.service.AuthenticatedRouteSession
 import co.twinotify.core.service.InboundDispatchResult
 import co.twinotify.core.service.OutboxRepository
 import co.twinotify.core.service.OutboxTransition
+import co.twinotify.core.service.RouteKind
+import co.twinotify.core.service.TransportRoute
 import co.twinotify.core.storage.OutboundMessage
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 
 sealed interface LanTransportEvent {
     /** The peer took durable custody of one of our outbound rows. */
@@ -165,5 +173,57 @@ class LanTransport(
             // Nothing to take custody of, and nothing worth ending the session over.
             else -> null
         }
+    }
+}
+
+/**
+ * Adapts one direct LAN session to the coordinator's route contract.
+ *
+ * [open] returns only once the connection is authenticated and the session's inbound
+ * processor is running, so the coordinator never treats an unauthenticated socket as a
+ * usable route. The session is not self-draining: the coordinator's pump selects rows.
+ */
+class LanRoute(
+    private val connect: suspend () -> AuthenticatedLanConnection,
+    private val outbox: OutboxRepository,
+    private val dispatch: suspend (String) -> InboundDispatchResult,
+    private val scope: CoroutineScope,
+    private val onEvent: suspend (LanTransportEvent) -> Unit = {},
+) : TransportRoute {
+    override val kind: RouteKind = RouteKind.LAN
+
+    override suspend fun open(): AuthenticatedRouteSession {
+        val connection = connect()
+        val transport = LanTransport(connection, outbox, dispatch)
+        val closed = CompletableDeferred<String>()
+        val session = scope.launch {
+            try {
+                transport.run().collect { event ->
+                    onEvent(event)
+                    if (event is LanTransportEvent.Closed) closed.complete(event.code)
+                }
+            } finally {
+                closed.complete("session_ended")
+            }
+        }
+        return LanRouteSession(transport, closed, session)
+    }
+}
+
+private class LanRouteSession(
+    private val transport: LanTransport,
+    private val closed: CompletableDeferred<String>,
+    private val session: Job,
+) : AuthenticatedRouteSession {
+    override val kind: RouteKind = RouteKind.LAN
+
+    override suspend fun send(message: OutboundMessage) = transport.send(message)
+
+    override suspend fun awaitClosed(): String = closed.await()
+
+    override suspend fun close(code: String) {
+        runCatching { transport.close(code) }
+        session.cancelAndJoin()
+        closed.complete(code)
     }
 }
