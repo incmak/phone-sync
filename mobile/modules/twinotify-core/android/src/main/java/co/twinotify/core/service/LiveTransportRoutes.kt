@@ -40,6 +40,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 
@@ -183,7 +184,6 @@ class LiveTransportRoutesFactory(
             context: Context,
             outbox: OutboxRepository,
             dispatch: suspend (String) -> InboundDispatchResult,
-            scope: CoroutineScope,
             onLanEvent: suspend (LanTransportEvent) -> Unit = {},
         ): LiveTransportRoutesFactory {
             val appContext = context.applicationContext
@@ -206,13 +206,12 @@ class LiveTransportRoutesFactory(
                                     connect = { connection },
                                     outbox = outbox,
                                     dispatch = dispatch,
-                                    scope = scope,
                                     onEvent = onLanEvent,
                                 ).open()
                             },
                         )
                     },
-                    buildRelayRoute = { config -> LiveRelayTransportRoute(config.events, config.hooks, scope) },
+                    buildRelayRoute = { config -> LiveRelayTransportRoute(config.events, config.hooks) },
                 ),
             )
         }
@@ -431,14 +430,13 @@ private class LiveLanOwnedSession(
 class LiveRelayTransportRoute(
     private val events: () -> Flow<TransportEvent>,
     private val hooks: LiveRelayRouteHooks,
-    private val scope: CoroutineScope,
 ) : TransportRoute {
     override val kind: RouteKind = RouteKind.RELAY
 
     override suspend fun open(): AuthenticatedRouteSession {
         val authenticated = CompletableDeferred<Unit>()
         val closed = CompletableDeferred<String>()
-        val job = scope.launch {
+        val job = CoroutineScope(currentCoroutineContext()).launch {
             try {
                 events().collect { event ->
                     when (event) {

@@ -14,6 +14,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
@@ -187,7 +188,6 @@ class LanRoute(
     private val connect: suspend () -> AuthenticatedLanConnection,
     private val outbox: OutboxRepository,
     private val dispatch: suspend (String) -> InboundDispatchResult,
-    private val scope: CoroutineScope,
     private val onEvent: suspend (LanTransportEvent) -> Unit = {},
 ) : TransportRoute {
     override val kind: RouteKind = RouteKind.LAN
@@ -196,7 +196,7 @@ class LanRoute(
         val connection = connect()
         val transport = LanTransport(connection, outbox, dispatch)
         val closed = CompletableDeferred<String>()
-        val session = scope.launch {
+        val session = CoroutineScope(currentCoroutineContext()).launch {
             try {
                 transport.run().collect { event ->
                     onEvent(event)

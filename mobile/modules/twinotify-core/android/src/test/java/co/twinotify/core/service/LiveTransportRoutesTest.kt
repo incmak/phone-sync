@@ -23,15 +23,18 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTransportRoutesTest {
@@ -239,7 +242,6 @@ class LiveTransportRoutesTest {
                 onExpired = { expiries++ },
                 onEvent = { lifecycle += it.javaClass.simpleName },
             ),
-            scope = this,
         )
 
         val session = route.open()
@@ -257,6 +259,58 @@ class LiveTransportRoutesTest {
         session.close("done")
         session.close("again")
         assertEquals(1, upstreamCleanups)
+    }
+
+    @Test
+    fun relayGenerationJoinWaitsForActualAdapterWorkerFinalizerBeforeReplacementOpens() = runTest {
+        val workerFinalizerEntered = CompletableDeferred<Unit>()
+        val releaseWorkerFinalizer = CompletableDeferred<Unit>()
+        val sessionOpened = CompletableDeferred<Unit>()
+        val replacementOpened = CompletableDeferred<Unit>()
+        val route = LiveRelayTransportRoute(
+            events = {
+                flow {
+                    try {
+                        emit(TransportEvent.Authenticated(2))
+                        awaitCancellation()
+                    } finally {
+                        withContext(NonCancellable) {
+                            workerFinalizerEntered.complete(Unit)
+                            releaseWorkerFinalizer.await()
+                        }
+                    }
+                }
+            },
+            hooks = LiveRelayRouteHooks(dispatch = {}),
+        )
+        val generation = backgroundScope.launch {
+            val session = route.open()
+            sessionOpened.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                session.close("generation_replaced")
+            }
+        }
+        sessionOpened.await()
+        val replacement = backgroundScope.launch {
+            generation.join()
+            replacementOpened.complete(Unit)
+        }
+
+        generation.cancel()
+        runCurrent()
+        try {
+            assertTrue(workerFinalizerEntered.isCompleted)
+            assertFalse(generation.isCompleted, "generation joined before relay worker finalized")
+            assertFalse(replacementOpened.isCompleted, "replacement opened beside old relay worker")
+        } finally {
+            releaseWorkerFinalizer.complete(Unit)
+        }
+        generation.join()
+        replacement.join()
+        assertTrue(generation.isCompleted)
+        assertTrue(replacementOpened.isCompleted)
     }
 
     private fun config() = LiveLanRouteConfig(

@@ -16,14 +16,22 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.consumeAsFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class LanTransportTest {
     @Test
     fun sendsTheExactStoredEnvelopeForOneDueRow() = runTest {
@@ -221,6 +229,52 @@ class LanTransportTest {
         assertEquals(listOf(LanTransportEvent.Closed("session_already_started")), second)
     }
 
+    @Test
+    fun lanGenerationJoinWaitsForActualRouteWorkerFinalizerBeforeReplacementOpens() = runTest {
+        val workerStarted = CompletableDeferred<Unit>()
+        val workerFinalizerEntered = CompletableDeferred<Unit>()
+        val releaseWorkerFinalizer = CompletableDeferred<Unit>()
+        val replacementOpened = CompletableDeferred<Unit>()
+        val connection = FinalizingConnection(
+            workerStarted,
+            workerFinalizerEntered,
+            releaseWorkerFinalizer,
+        )
+        val route = LanRoute(
+            connect = { connection },
+            outbox = outbox(FakeStore()),
+            dispatch = { InboundDispatchResult.Accepted(MSG_A, DIGEST_A) },
+        )
+        val generation = backgroundScope.launch {
+            val session = route.open()
+            try {
+                awaitCancellation()
+            } finally {
+                session.close("generation_replaced")
+            }
+        }
+        workerStarted.await()
+        val replacement = backgroundScope.launch {
+            generation.join()
+            replacementOpened.complete(Unit)
+        }
+
+        generation.cancel()
+        runCurrent()
+        try {
+            assertTrue(workerFinalizerEntered.isCompleted)
+            assertTrue(!generation.isCompleted, "generation joined before LAN worker finalized")
+            assertTrue(!replacementOpened.isCompleted, "replacement opened beside old LAN worker")
+        } finally {
+            releaseWorkerFinalizer.complete(Unit)
+        }
+        generation.join()
+        replacement.join()
+        assertTrue(generation.isCompleted)
+        assertTrue(replacementOpened.isCompleted)
+        assertEquals(1, connection.closes)
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     private fun CoroutineScope.collectEvents(
@@ -281,6 +335,32 @@ class LanTransportTest {
         fun releaseWrites() = gate.complete(Unit)
         fun closeSession() = frames.close()
         override fun close() { frames.close() }
+    }
+
+    private class FinalizingConnection(
+        private val workerStarted: CompletableDeferred<Unit>,
+        private val workerFinalizerEntered: CompletableDeferred<Unit>,
+        private val releaseWorkerFinalizer: CompletableDeferred<Unit>,
+    ) : AuthenticatedLanConnection {
+        override val session = LanAuthenticatedSession(
+            peerDeviceId = "dev-00000000-0000-0000-0000-000000000002",
+            initiatorDeviceId = "dev-00000000-0000-0000-0000-000000000001",
+            sessionId = ByteArray(32) { it.toByte() },
+        )
+        var closes = 0
+        override val incoming: Flow<LanFrame> = flow {
+            try {
+                workerStarted.complete(Unit)
+                awaitCancellation()
+            } finally {
+                withContext(NonCancellable) {
+                    workerFinalizerEntered.complete(Unit)
+                    releaseWorkerFinalizer.await()
+                }
+            }
+        }
+        override suspend fun send(frame: LanFrame) = Unit
+        override fun close() { closes += 1 }
     }
 
     private class FakeStore(

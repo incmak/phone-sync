@@ -756,7 +756,6 @@ class SyncService : Service() {
                 context = applicationContext,
                 outbox = outbox,
                 dispatch = dispatcher::dispatch,
-                scope = scope,
                 onLanEvent = { updateQueueHealthNow() },
             )
             LiveServiceTransportLoop(
