@@ -1,0 +1,539 @@
+package co.twinotify.core.service
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import co.twinotify.core.crypto.CryptoStore
+import co.twinotify.core.lan.AuthenticatedLanConnection
+import co.twinotify.core.lan.DirectLanConnector
+import co.twinotify.core.lan.JsseLanDialer
+import co.twinotify.core.lan.JsseLanListener
+import co.twinotify.core.lan.LanAdvertisement
+import co.twinotify.core.lan.LanAdvertisementMatcher
+import co.twinotify.core.lan.LanConnectionRole
+import co.twinotify.core.lan.LanDialer
+import co.twinotify.core.lan.LanDiscovery
+import co.twinotify.core.lan.LanHandshake
+import co.twinotify.core.lan.LanListener
+import co.twinotify.core.lan.LanRoute
+import co.twinotify.core.lan.LanTransportEvent
+import co.twinotify.core.lan.SignedLanSocketHandshake
+import co.twinotify.core.lan.AndroidLanDiscovery
+import co.twinotify.core.pairing.lan.LanTlsContextFactory
+import co.twinotify.core.pairing.lan.PairingWifiNetworkLease
+import co.twinotify.core.pairing.lan.PairingWifiNetworkSelector
+import co.twinotify.core.storage.DeviceIdentity
+import co.twinotify.core.storage.LanBinding
+import co.twinotify.core.storage.LanPairStore
+import co.twinotify.core.storage.OutboundMessage
+import co.twinotify.core.storage.PeerRecord
+import co.twinotify.core.storage.PeerStore
+import java.io.Closeable
+import java.net.Inet4Address
+import java.time.Instant
+import java.time.ZoneOffset
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import javax.net.ssl.SSLServerSocket
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
+
+data class LiveTransportRoutes(
+    val lan: TransportRoute?,
+    val relay: TransportRoute?,
+)
+
+class LiveLocalRouteIdentity(
+    val deviceId: String,
+    signingKey: ByteArray,
+) {
+    private val key = signingKey.copyOf()
+    val signingKey: ByteArray get() = key.copyOf()
+}
+
+class LiveLanHandshakeConfig internal constructor(
+    val localDeviceId: String,
+    val peerDeviceId: String,
+    localSigningKey: ByteArray,
+    peerSigningKey: ByteArray,
+    val localRole: LanConnectionRole,
+    val protocolVersion: Int,
+) {
+    private val localKey = localSigningKey.copyOf()
+    private val peerKey = peerSigningKey.copyOf()
+    val localSigningKey: ByteArray get() = localKey.copyOf()
+    val peerSigningKey: ByteArray get() = peerKey.copyOf()
+
+    internal fun socketHandshake() = SignedLanSocketHandshake(
+        LanHandshake(
+            localDeviceId = localDeviceId,
+            peerDeviceId = peerDeviceId,
+            localSigningKey = localKey,
+            peerSigningKey = peerKey,
+            localRole = localRole,
+            protocolFloor = protocolVersion,
+        ),
+        protocolVersion = protocolVersion,
+    )
+}
+
+class LiveLanRouteConfig(
+    val localDeviceId: String,
+    val peerDeviceId: String,
+    localSigningKey: ByteArray,
+    peerSigningKey: ByteArray,
+    peerTlsSpkiSha256: ByteArray,
+    lanSecret: ByteArray,
+    val protocolVersion: Int,
+    val utcEpochDay: Long,
+) {
+    private val localKey = localSigningKey.copyOf()
+    private val peerKey = peerSigningKey.copyOf()
+    private val tlsPin = peerTlsSpkiSha256.copyOf()
+    private val secret = lanSecret.copyOf()
+
+    val localSigningKey: ByteArray get() = localKey.copyOf()
+    val peerSigningKey: ByteArray get() = peerKey.copyOf()
+    val peerTlsSpkiSha256: ByteArray get() = tlsPin.copyOf()
+    val lanSecret: ByteArray get() = secret.copyOf()
+    val localAdvertisementId: String = LanAdvertisement.derive(secret, localDeviceId, utcEpochDay)
+    private val peerAdvertisements = LanAdvertisementMatcher(secret, peerDeviceId).expectations(utcEpochDay)
+    val expectedPeerAdvertisementIds: Set<String> = peerAdvertisements.acceptedIds
+    val clockSkewPeerAdvertisementIds: Set<String> = peerAdvertisements.clockSkewIds
+
+    init {
+        require(localDeviceId != peerDeviceId) { "lan_identity_collision" }
+        require(protocolVersion > 0) { "lan_protocol_invalid" }
+    }
+
+    fun handshake(role: LanConnectionRole) = LiveLanHandshakeConfig(
+        localDeviceId,
+        peerDeviceId,
+        localKey,
+        peerKey,
+        role,
+        protocolVersion,
+    )
+}
+
+class LiveRelayRouteHooks(
+    val dispatch: suspend (String) -> Unit,
+    val onEvent: suspend (TransportEvent) -> Unit = {},
+    val onAuthenticated: suspend (Int) -> Unit = {},
+    val onExpired: suspend () -> Unit = {},
+)
+
+class LiveRelayRouteConfig(
+    val events: () -> Flow<TransportEvent>,
+    val hooks: LiveRelayRouteHooks = LiveRelayRouteHooks(dispatch = {}),
+)
+
+class LiveTransportRouteDependencies(
+    val loadPeer: suspend () -> PeerRecord?,
+    val loadValidatedBinding: suspend (PeerRecord) -> LanBinding?,
+    val loadLocalIdentity: suspend () -> LiveLocalRouteIdentity,
+    val buildLanRoute: (LiveLanRouteConfig) -> TransportRoute,
+    val buildRelayRoute: (LiveRelayRouteConfig) -> TransportRoute,
+)
+
+/** Loads route trust without letting unusable LAN state remove a valid relay path. */
+class LiveTransportRoutesFactory(
+    private val dependencies: LiveTransportRouteDependencies,
+) {
+    suspend fun create(
+        relay: LiveRelayRouteConfig?,
+        utcEpochDay: Long = Instant.now().atZone(ZoneOffset.UTC).toLocalDate().toEpochDay(),
+    ): LiveTransportRoutes {
+        val relayRoute = relay?.let(dependencies.buildRelayRoute)
+        val peer = dependencies.loadPeer() ?: return LiveTransportRoutes(null, relayRoute)
+        val binding = try {
+            dependencies.loadValidatedBinding(peer)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            null
+        } ?: return LiveTransportRoutes(null, relayRoute)
+        val identity = try {
+            dependencies.loadLocalIdentity()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            return LiveTransportRoutes(null, relayRoute)
+        }
+        val config = LiveLanRouteConfig(
+            localDeviceId = identity.deviceId,
+            peerDeviceId = peer.deviceId,
+            localSigningKey = identity.signingKey,
+            peerSigningKey = peer.signPubkey,
+            peerTlsSpkiSha256 = binding.peerTlsSpkiSha256,
+            lanSecret = binding.lanSecret,
+            protocolVersion = binding.protocolVersion,
+            utcEpochDay = utcEpochDay,
+        )
+        return LiveTransportRoutes(dependencies.buildLanRoute(config), relayRoute)
+    }
+
+    companion object {
+        fun production(
+            context: Context,
+            outbox: OutboxRepository,
+            dispatch: suspend (String) -> InboundDispatchResult,
+            scope: CoroutineScope,
+            onLanEvent: suspend (LanTransportEvent) -> Unit = {},
+        ): LiveTransportRoutesFactory {
+            val appContext = context.applicationContext
+            val attemptFactory = DefaultLiveLanAttemptFactory(AndroidLiveLanPlatform(appContext))
+            return LiveTransportRoutesFactory(
+                LiveTransportRouteDependencies(
+                    loadPeer = { PeerStore.load(appContext) },
+                    loadValidatedBinding = { peer -> LanPairStore.loadValidated(appContext, peer) },
+                    loadLocalIdentity = {
+                        val deviceId = DeviceIdentity.getOrCreate(appContext)
+                        val signingKeys = CryptoStore.loadOrGenerate(appContext).second
+                        LiveLocalRouteIdentity(deviceId, signingKeys.secretKey)
+                    },
+                    buildLanRoute = { config ->
+                        LiveLanTransportRoute(
+                            config,
+                            attemptFactory,
+                            sessionFactory = { connection ->
+                                LanRoute(
+                                    connect = { connection },
+                                    outbox = outbox,
+                                    dispatch = dispatch,
+                                    scope = scope,
+                                    onEvent = onLanEvent,
+                                ).open()
+                            },
+                        )
+                    },
+                    buildRelayRoute = { config -> LiveRelayTransportRoute(config.events, config.hooks, scope) },
+                ),
+            )
+        }
+    }
+}
+
+fun liveRelayRouteConfig(
+    outbox: OutboxRepository,
+    url: RelayWebSocketUrl,
+    authHeadersProvider: () -> Map<String, String>,
+    hooks: LiveRelayRouteHooks,
+): LiveRelayRouteConfig = LiveRelayRouteConfig(
+    events = {
+        RelayTransport(
+            outbox = outbox,
+            authHeadersProvider = authHeadersProvider,
+            reconnect = false,
+        ).run(url)
+    },
+    hooks = hooks,
+)
+
+interface LiveWifiLease : Closeable {
+    val networkToken: Any
+}
+
+data class LiveBoundLanListener(
+    val listener: LanListener,
+    val port: Int,
+) {
+    init { require(port in 1..65535) { "lan_listener_invalid_port" } }
+}
+
+interface LiveLanPlatform {
+    suspend fun acquireWifi(onLost: () -> Unit): LiveWifiLease
+    fun openListener(config: LiveLanRouteConfig, lease: LiveWifiLease): LiveBoundLanListener
+    fun openDiscovery(config: LiveLanRouteConfig, lease: LiveWifiLease, listenerPort: Int): LanDiscovery
+    fun openDialer(config: LiveLanRouteConfig, lease: LiveWifiLease): LanDialer
+}
+
+fun interface LiveLanAttemptFactory {
+    suspend fun open(config: LiveLanRouteConfig, onLost: () -> Unit): LiveLanAttempt
+}
+
+interface LiveLanAttempt {
+    suspend fun connect(): AuthenticatedLanConnection
+    fun abort()
+    suspend fun close()
+}
+
+class DefaultLiveLanAttemptFactory(
+    private val platform: LiveLanPlatform,
+) : LiveLanAttemptFactory {
+    override suspend fun open(config: LiveLanRouteConfig, onLost: () -> Unit): LiveLanAttempt {
+        val lost = AtomicBoolean(false)
+        val listenerRef = AtomicReference<LanListener?>()
+        val connectionRef = AtomicReference<AuthenticatedLanConnection?>()
+        var lease: LiveWifiLease? = null
+        var discovery: LanDiscovery? = null
+        try {
+            lease = platform.acquireWifi {
+                lost.set(true)
+                onLost()
+            }
+            if (lost.get()) throw IllegalStateException("lan_network_lost")
+            val bound = platform.openListener(config, lease)
+            listenerRef.set(bound.listener)
+            if (lost.get()) {
+                bound.listener.close()
+                throw IllegalStateException("lan_network_lost")
+            }
+            discovery = platform.openDiscovery(config, lease, bound.port)
+            val dialer = platform.openDialer(config, lease)
+            return DefaultLiveLanAttempt(
+                DirectLanConnector(discovery, bound.listener, dialer),
+                lease,
+                discovery,
+                bound.listener,
+                connectionRef,
+                lost,
+            )
+        } catch (error: Throwable) {
+            discovery?.close()
+            listenerRef.get()?.close()
+            lease?.close()
+            throw error
+        }
+    }
+}
+
+private class DefaultLiveLanAttempt(
+    private val connector: DirectLanConnector,
+    private val lease: LiveWifiLease,
+    private val discovery: LanDiscovery,
+    private val listener: LanListener,
+    private val connectionRef: AtomicReference<AuthenticatedLanConnection?>,
+    private val networkLost: AtomicBoolean,
+) : LiveLanAttempt {
+    private val closed = AtomicBoolean(false)
+    private val aborted = AtomicBoolean(false)
+    private val listenerClosed = AtomicBoolean(false)
+    private val discoveryClosed = AtomicBoolean(false)
+    private val connectionClosed = AtomicBoolean(false)
+
+    override suspend fun connect(): AuthenticatedLanConnection {
+        if (networkLost.get()) {
+            abort()
+            throw IllegalStateException("lan_network_lost")
+        }
+        val connection = connector.connect()
+        connectionRef.set(connection)
+        if (networkLost.get()) {
+            closeConnectionOnce()
+            throw IllegalStateException("lan_network_lost")
+        }
+        closeListenerOnce()
+        closeDiscoveryOnce()
+        return connection
+    }
+
+    override fun abort() {
+        if (!aborted.compareAndSet(false, true)) return
+        closeListenerOnce()
+        closeConnectionOnce()
+    }
+
+    override suspend fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        closeConnectionOnce()
+        closeListenerOnce()
+        closeDiscoveryOnce()
+        lease.close()
+    }
+
+    private fun closeConnectionOnce() {
+        val connection = connectionRef.get() ?: return
+        if (connectionClosed.compareAndSet(false, true)) connection.close()
+    }
+
+    private fun closeListenerOnce() {
+        if (listenerClosed.compareAndSet(false, true)) listener.close()
+    }
+
+    private suspend fun closeDiscoveryOnce() {
+        if (discoveryClosed.compareAndSet(false, true)) discovery.close()
+    }
+}
+
+/** A fresh attempt is created for every coordinator open and owns all of its resources. */
+class LiveLanTransportRoute(
+    private val config: LiveLanRouteConfig,
+    private val attemptFactory: LiveLanAttemptFactory,
+    private val sessionFactory: suspend (AuthenticatedLanConnection) -> AuthenticatedRouteSession,
+) : TransportRoute {
+    override val kind: RouteKind = RouteKind.LAN
+
+    override suspend fun open(): AuthenticatedRouteSession {
+        val attemptRef = AtomicReference<LiveLanAttempt?>()
+        val attempt = attemptFactory.open(config) { attemptRef.get()?.abort() }
+        attemptRef.set(attempt)
+        try {
+            val session = sessionFactory(attempt.connect())
+            return LiveLanOwnedSession(session, attempt)
+        } catch (error: Throwable) {
+            attempt.close()
+            throw error
+        }
+    }
+}
+
+private class LiveLanOwnedSession(
+    private val delegate: AuthenticatedRouteSession,
+    private val attempt: LiveLanAttempt,
+) : AuthenticatedRouteSession {
+    private val closed = AtomicBoolean(false)
+    override val kind: RouteKind = RouteKind.LAN
+    override suspend fun send(message: OutboundMessage) = delegate.send(message)
+    override suspend fun awaitClosed(): String = delegate.awaitClosed()
+    override suspend fun close(code: String) {
+        if (!closed.compareAndSet(false, true)) return
+        try {
+            delegate.close(code)
+        } finally {
+            attempt.close()
+        }
+    }
+}
+
+/** Converts the existing ordered relay flow into one coordinator-granted session. */
+class LiveRelayTransportRoute(
+    private val events: () -> Flow<TransportEvent>,
+    private val hooks: LiveRelayRouteHooks,
+    private val scope: CoroutineScope,
+) : TransportRoute {
+    override val kind: RouteKind = RouteKind.RELAY
+
+    override suspend fun open(): AuthenticatedRouteSession {
+        val authenticated = CompletableDeferred<Unit>()
+        val closed = CompletableDeferred<String>()
+        val job = scope.launch {
+            try {
+                events().collect { event ->
+                    when (event) {
+                        is TransportEvent.Delivery -> hooks.dispatch(event.envelope)
+                        is TransportEvent.Authenticated -> {
+                            hooks.onAuthenticated(event.floor)
+                            authenticated.complete(Unit)
+                        }
+                        is TransportEvent.RelayExpired -> hooks.onExpired()
+                        is TransportEvent.Failed -> if (!authenticated.isCompleted) {
+                            authenticated.completeExceptionally(event.error)
+                        }
+                        is TransportEvent.Closed -> {
+                            if (!authenticated.isCompleted) {
+                                authenticated.completeExceptionally(IllegalStateException("relay_closed_before_auth"))
+                            }
+                            closed.complete(event.reason ?: "relay_closed")
+                        }
+                        else -> Unit
+                    }
+                    hooks.onEvent(event)
+                }
+            } catch (error: CancellationException) {
+                if (!authenticated.isCompleted) authenticated.cancel(error)
+                throw error
+            } catch (error: Throwable) {
+                if (!authenticated.isCompleted) authenticated.completeExceptionally(error)
+                closed.complete("relay_failed")
+            } finally {
+                if (!authenticated.isCompleted) {
+                    authenticated.completeExceptionally(IllegalStateException("relay_ended_before_auth"))
+                }
+                closed.complete("relay_ended")
+            }
+        }
+        try {
+            authenticated.await()
+        } catch (error: Throwable) {
+            job.cancelAndJoin()
+            throw error
+        }
+        return LiveRelayRouteSession(job, closed)
+    }
+}
+
+private class LiveRelayRouteSession(
+    private val job: Job,
+    private val closed: CompletableDeferred<String>,
+) : AuthenticatedRouteSession {
+    private val stopped = AtomicBoolean(false)
+    override val kind: RouteKind = RouteKind.RELAY
+    override val selfDraining: Boolean = true
+    override suspend fun send(message: OutboundMessage): Nothing =
+        error("relay_session_is_self_draining")
+    override suspend fun awaitClosed(): String = closed.await()
+    override suspend fun close(code: String) {
+        if (!stopped.compareAndSet(false, true)) return
+        job.cancelAndJoin()
+        closed.complete(code)
+    }
+}
+
+private class AndroidLiveLanPlatform(
+    private val context: Context,
+) : LiveLanPlatform {
+    override suspend fun acquireWifi(onLost: () -> Unit): LiveWifiLease =
+        AndroidLiveWifiLease(PairingWifiNetworkSelector(context).acquire(onLost))
+
+    override fun openListener(config: LiveLanRouteConfig, lease: LiveWifiLease): LiveBoundLanListener {
+        val network = lease.network()
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+            ?: error("lan_unavailable")
+        val addresses = connectivity.getLinkProperties(network)?.linkAddresses.orEmpty()
+        val bindAddress = addresses.firstOrNull { it.address is Inet4Address && !it.address.isLoopbackAddress }
+            ?.address
+            ?: addresses.firstOrNull { !it.address.isLoopbackAddress && !it.address.isAnyLocalAddress }?.address
+            ?: error("lan_network_address_unavailable")
+        val server = LanTlsContextFactory.serverContext(config.peerTlsSpkiSha256)
+            .serverSocketFactory.createServerSocket(0, 1, bindAddress) as SSLServerSocket
+        server.needClientAuth = true
+        return LiveBoundLanListener(
+            JsseLanListener(
+                server,
+                config.peerTlsSpkiSha256,
+                handshakeFactory = { config.handshake(LanConnectionRole.ACCEPTOR).socketHandshake() },
+            ),
+            server.localPort,
+        )
+    }
+
+    override fun openDiscovery(
+        config: LiveLanRouteConfig,
+        lease: LiveWifiLease,
+        listenerPort: Int,
+    ): LanDiscovery = AndroidLanDiscovery(
+        context = context,
+        network = lease.network(),
+        localAdvertisementId = config.localAdvertisementId,
+        expectedAdvertisementIds = config.expectedPeerAdvertisementIds,
+        port = listenerPort,
+        clockSkewAdvertisementIds = config.clockSkewPeerAdvertisementIds,
+    )
+
+    override fun openDialer(config: LiveLanRouteConfig, lease: LiveWifiLease): LanDialer {
+        // Discovery candidates are created from this exact lease's Network and
+        // JsseLanDialer opens its plain socket through that candidate.
+        lease.network()
+        return JsseLanDialer(
+            LanTlsContextFactory.clientContext(config.peerTlsSpkiSha256),
+            config.peerTlsSpkiSha256,
+            handshakeFactory = { config.handshake(LanConnectionRole.INITIATOR).socketHandshake() },
+        )
+    }
+
+    private fun LiveWifiLease.network(): Network = networkToken as? Network
+        ?: error("lan_network_invalid")
+}
+
+private class AndroidLiveWifiLease(
+    private val delegate: PairingWifiNetworkLease,
+) : LiveWifiLease {
+    override val networkToken: Any get() = delegate.network
+    override fun close() = delegate.close()
+}
