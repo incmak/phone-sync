@@ -32,6 +32,43 @@ class RelayTransportTest {
     private val envelope = """{"v":2,"type":"enc","msg_id":"$originalId","origin_device":"dev-a","created_at":1000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}"""
 
     @Test
+    fun acceptedEventRetainsTypeAfterCustodyDeletesTheRow() = runTest {
+        val store = RecordingStore().apply { rows += outbound(putId, eventType = "unpair") }
+        val connector = ManualConnector()
+        val events = mutableListOf<TransportEvent>()
+        val job = backgroundScope.launch {
+            RelayTransport(store.repo, connector = connector, reconnect = false).run(endpoint).collect(events::add)
+        }
+        runCurrent()
+        connector.text(RelayFrame.Capabilities(listOf(2, 1), listOf(2), 2))
+        advanceTimeBy(1_000L)
+        runCurrent()
+
+        connector.text(RelayFrame.Accepted(putId, 1_001L))
+        runCurrent()
+
+        assertTrue(events.contains(TransportEvent.RelayAccepted(putId, 1_001L, "unpair")))
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun staleAcceptanceDoesNotFabricateAnEventType() = runTest {
+        val store = RecordingStore()
+        val connector = ManualConnector()
+        val events = mutableListOf<TransportEvent>()
+        val job = backgroundScope.launch {
+            RelayTransport(store.repo, connector = connector, reconnect = false).run(endpoint).collect(events::add)
+        }
+        runCurrent()
+        connector.text(RelayFrame.Capabilities(listOf(2, 1), listOf(2), 2))
+        connector.text(RelayFrame.Accepted(putId, 1_001L))
+        runCurrent()
+
+        assertTrue(events.contains(TransportEvent.RelayAccepted(putId, 1_001L, null)))
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun actualTransportAckWaitsForReceiptAcceptanceAndIsMarkedOnlyAfterSend() = runTest {
         val store = RecordingStore().apply {
             linkReceiptToAck(receiptId, RelayAckRecord(originalId, digest))
@@ -557,11 +594,15 @@ class RelayTransportTest {
         assertTrue(store.rows.isEmpty())
     }
 
-    private fun outbound(id: String, protocolVersion: Int = 2) = OutboundMessage(
+    private fun outbound(
+        id: String,
+        protocolVersion: Int = 2,
+        eventType: String = "notif.post",
+    ) = OutboundMessage(
         msgId = id,
         canonId = null,
         sequence = null,
-        eventType = "notif.post",
+        eventType = eventType,
         protocolVersion = protocolVersion,
         envelopeJson = if (protocolVersion == 2) envelope.replace(originalId, id) else
             """{"v":1,"type":"enc","msg_id":"$id","origin_device":"dev-a","ts":1000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}""",

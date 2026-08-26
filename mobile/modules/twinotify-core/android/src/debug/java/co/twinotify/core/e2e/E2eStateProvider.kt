@@ -10,7 +10,9 @@ import android.os.CancellationSignal
 import androidx.core.net.toUri
 import co.twinotify.core.service.SyncServiceStatus
 import co.twinotify.core.service.toEventMap
+import co.twinotify.core.service.ProductObservationTracker
 import co.twinotify.core.crypto.CryptoStore
+import co.twinotify.core.pairing.LocalUnpairStatus
 import co.twinotify.core.pairing.lan.LanIdentityStore
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.LanPairStore
@@ -27,6 +29,7 @@ class E2eStateProvider : ContentProvider() {
     companion object {
         const val AUTHORITY = "co.twinotify.app.e2e"
         val STATE_URI: Uri = "content://$AUTHORITY/state".toUri()
+        val ALLOWED_EVENT_COUNT_KEYS: Set<String> = ProductObservationTracker.EVENT_KEYS
 
         fun stateUri(context: Context): Uri = "content://${context.packageName}.e2e/state".toUri()
 
@@ -57,6 +60,9 @@ class E2eStateProvider : ContentProvider() {
             val route = SyncServiceStatus.routeStatus.value
             val outboxBytes = scalarLong(database, "SELECT COALESCE(SUM(byteSize),0) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')")
             val activeOutbox = scalar(database, "SELECT COUNT(*) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')")
+            require(activeOutbox in 0..2_000) { "active queue count exceeds production bound" }
+            require(outboxBytes in 0..134_217_728L) { "active queue bytes exceed production bound" }
+            ProductObservationTracker.recordQueue(activeOutbox, outboxBytes)
             val root = JSONObject()
                 .put("offline_pairing", offline)
                 .put("health", JSONObject(health.toEventMap()))
@@ -73,6 +79,7 @@ class E2eStateProvider : ContentProvider() {
                 .put("active_outbox", activeOutbox)
                 .put("active_inbound", scalar(database, "SELECT COUNT(*) FROM inbound_message WHERE outcome='PENDING_PLATFORM'"))
                 .put("pending_materialization", scalar(database, "SELECT COUNT(*) FROM canonical_notification_state WHERE latestSequence > materializedSequence"))
+                .put("product_observations", productObservations(context, database, activeOutbox, outboxBytes))
             root.put("canonical", canonical(database))
             root.put("activity", activity(database))
             root.toString()
@@ -119,6 +126,55 @@ class E2eStateProvider : ContentProvider() {
                 }
             }
             return result
+        }
+
+        private suspend fun productObservations(
+            context: Context,
+            database: androidx.sqlite.db.SupportSQLiteDatabase,
+            activeQueueCount: Int,
+            activeQueueBytes: Long,
+        ): JSONObject {
+            val tracked = ProductObservationTracker.snapshot()
+            val custody = tracked.custodyCounts.mapValues { (_, counts) -> counts.toMutableMap() }.toMutableMap()
+            database.query(
+                "SELECT custodyRoute, eventType, COUNT(*) FROM outbound_message " +
+                    "WHERE custodyRoute IN ('LAN','RELAY') GROUP BY custodyRoute, eventType",
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val route = cursor.getString(0).lowercase()
+                    val event = cursor.getString(1).replace('.', '_')
+                    if (route in custody && event in ALLOWED_EVENT_COUNT_KEYS) {
+                        val count = cursor.getLong(2).coerceIn(0L, ProductObservationTracker.MAX_COUNTER)
+                        custody.getValue(route)[event] = maxOf(custody.getValue(route).getValue(event), count)
+                    }
+                }
+            }
+            val custodyJson = JSONObject()
+            for (route in listOf("lan", "relay")) {
+                val counts = JSONObject()
+                for (event in ALLOWED_EVENT_COUNT_KEYS) {
+                    counts.put(event, custody.getValue(route).getValue(event))
+                }
+                custodyJson.put(route, counts)
+            }
+            val persistedReceipts = scalarLong(
+                database,
+                "SELECT COUNT(*) FROM activity_event WHERE eventType='peer.receipt'",
+            ).coerceIn(0L, ProductObservationTracker.MAX_COUNTER)
+            return JSONObject()
+                .put("paired", PeerStore.load(context) != null)
+                .put("custody_counts", custodyJson)
+                .put("peer_receipt_count", maxOf(tracked.peerReceiptCount, persistedReceipts))
+                .put("snapshot_digest_count", tracked.snapshotDigestCount)
+                .put("snapshot_begin_count", tracked.snapshotBeginCount)
+                .put("snapshot_end_count", tracked.snapshotEndCount)
+                .put("user_dismiss_count", tracked.userDismissCount)
+                .put("unpair_inbound_count", tracked.unpairInboundCount)
+                .put("unpair_outcome", LocalUnpairStatus.lastOutcome.value ?: "none")
+                .put("active_queue_count", activeQueueCount)
+                .put("active_queue_bytes", activeQueueBytes)
+                .put("peak_queue_count", maxOf(activeQueueCount, tracked.peakQueueCount))
+                .put("peak_queue_bytes", maxOf(activeQueueBytes, tracked.peakQueueBytes))
         }
 
         private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")

@@ -17,6 +17,27 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 
+internal fun submitRemovalWithObservation(
+    ownPackage: Boolean,
+    durablePeerCancelConsumed: Boolean,
+    inMemoryPeerCancelConsumed: Boolean,
+    removalReason: Int,
+    command: RemoveCommand,
+    submit: (RemoveCommand) -> Boolean,
+    recordUserDismiss: () -> Unit,
+): FilterResult {
+    val result = if (durablePeerCancelConsumed) {
+        FilterResult.Suppress
+    } else {
+        ReasonCodeFilter.filter(ownPackage, inMemoryPeerCancelConsumed, removalReason)
+    }
+    if (result is FilterResult.Emit) {
+        check(submit(command.copy(reason = result.reason))) { "durable capture lane rejected cancel" }
+        if (ownPackage) recordUserDismiss()
+    }
+    return result
+}
+
 /** Android callback adapter. It never depends on SyncService or a React Native lifecycle. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class TwinotifyNotificationListener : NotificationListenerService() {
@@ -139,17 +160,27 @@ class TwinotifyNotificationListener : NotificationListenerService() {
                 val canonId = reliableDao.canonicalForMirrorIdentity(sbn.tag.orEmpty(), sbn.id)
                     ?: dao.lookupByLocal(sbn.id, sbn.tag)
                     ?: return@launch
-                if (reliableDao.consumePeerCancel(canonId) > 0) {
-                    dao.deleteByCanonId(canonId)
-                    return@launch
-                }
-                processRemoved(sbn, canonId, ownPkg = true, reason, ts)
+                processRemoved(
+                    sbn,
+                    canonId,
+                    ownPkg = true,
+                    durablePeerCancelConsumed = reliableDao.consumePeerCancel(canonId) > 0,
+                    reason,
+                    ts,
+                )
             }
         } else {
             scope.launch(removalDispatcher) {
                 val canonId = reliableDao.canonicalForSourceKey(sbn.key)
                     ?: CanonIdBuilder.build(originDevice, sbn.packageName, sbn.id, sbn.tag)
-                processRemoved(sbn, canonId, ownPkg = false, reason, ts)
+                processRemoved(
+                    sbn,
+                    canonId,
+                    ownPkg = false,
+                    durablePeerCancelConsumed = false,
+                    reason,
+                    ts,
+                )
             }
         }
     }
@@ -158,20 +189,27 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         sbn: StatusBarNotification,
         canonId: String,
         ownPkg: Boolean,
+        durablePeerCancelConsumed: Boolean,
         reason: Int,
         timestamp: Long,
     ) {
         val canonInPending = PendingPeerCancel.consume(canonId)
-        when (val result = ReasonCodeFilter.filter(ownPkg, canonInPending, reason)) {
+        val command = RemoveCommand(canonId, sbn.key, "user_swipe", timestamp)
+        when (val result = submitRemovalWithObservation(
+            ownPackage = ownPkg,
+            durablePeerCancelConsumed = durablePeerCancelConsumed,
+            inMemoryPeerCancelConsumed = canonInPending,
+            removalReason = reason,
+            command = command,
+            submit = coordinator::submit,
+            recordUserDismiss = co.twinotify.core.service.ProductObservationTracker::recordUserDismiss,
+        )) {
             is FilterResult.Suppress -> if (ownPkg) scope.launch {
                 reliableDao.clearPeerCancelPending(canonId)
                 dao.deleteByCanonId(canonId)
             }
             is FilterResult.NoEmit -> Unit
             is FilterResult.Emit -> {
-                check(coordinator.submit(RemoveCommand(canonId, sbn.key, result.reason, timestamp))) {
-                    android.util.Log.e(TAG, "durable capture lane rejected cancel canon=$canonId")
-                }
                 if (ownPkg) scope.launch {
                     reliableDao.clearPeerCancelPending(canonId)
                     dao.deleteByCanonId(canonId)

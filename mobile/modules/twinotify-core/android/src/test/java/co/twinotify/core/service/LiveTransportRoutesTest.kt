@@ -39,6 +39,33 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTransportRoutesTest {
     @Test
+    fun custodyObservationsUseTypedEventsAndIgnoreUnknownTypes() {
+        ProductObservationTracker.clear()
+
+        recordRelayCustodyObservation(TransportEvent.RelayAccepted("relay", 1L, "unpair"))
+        recordLanCustodyObservation(
+            co.twinotify.core.lan.LanTransportEvent.PeerAccepted("lan", "peer.receipt"),
+        )
+        recordRelayCustodyObservation(TransportEvent.RelayAccepted("stale", 2L, null))
+
+        val snapshot = ProductObservationTracker.snapshot()
+        assertEquals(1L, snapshot.custodyCounts.getValue("relay").getValue("unpair"))
+        assertEquals(1L, snapshot.custodyCounts.getValue("lan").getValue("peer_receipt"))
+        assertEquals(0L, snapshot.custodyCounts.getValue("relay").getValue("notif_post"))
+    }
+
+    @Test
+    fun relayDeliveryFinalizesPostCustodyResultImmediately() = runTest {
+        val order = mutableListOf<String>()
+        dispatchRelayDeliveryWithFinalization {
+            order += "dispatch"
+            InboundDispatchResult.AcceptedAfterCustody("msg", "a".repeat(64)) {
+                order += "finalize"
+            }
+        }
+        assertEquals(listOf("dispatch", "finalize"), order)
+    }
+    @Test
     fun authenticatedRouteAcceptanceCompletesOnlyMatchingUnpairReservations() = runTest {
         val tracker = UnpairCustodyTracker()
         val relay = tracker.reserve("relay-unpair")

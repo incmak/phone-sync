@@ -57,6 +57,80 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.coroutineScope
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+
+internal data class ProductObservationSnapshot(
+    val custodyCounts: Map<String, Map<String, Long>>,
+    val peerReceiptCount: Long,
+    val snapshotDigestCount: Long,
+    val snapshotBeginCount: Long,
+    val snapshotEndCount: Long,
+    val userDismissCount: Long,
+    val unpairInboundCount: Long,
+    val peakQueueCount: Int,
+    val peakQueueBytes: Long,
+)
+
+/** Process-local, content-free counters fed only by authenticated production transitions. */
+internal object ProductObservationTracker {
+    const val MAX_COUNTER = 1_000_000_000L
+    val EVENT_KEYS = linkedSetOf(
+        "notif_post", "notif_update", "notif_cancel", "call_state", "state_digest",
+        "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair",
+        "peer_receipt",
+    )
+    private val custody = linkedMapOf(
+        "lan" to EVENT_KEYS.associateWith { AtomicLong() },
+        "relay" to EVENT_KEYS.associateWith { AtomicLong() },
+    )
+    private val authenticatedInbound = EVENT_KEYS.associateWith { AtomicLong() }
+    private val peakCount = AtomicLong()
+    private val peakBytes = AtomicLong()
+    private val userDismiss = AtomicLong()
+
+    fun recordCustody(route: String, eventType: String?) {
+        val key = eventType?.replace('.', '_') ?: return
+        custody[route]?.get(key)?.boundedIncrement()
+    }
+
+    fun recordAuthenticatedInbound(eventType: String) {
+        authenticatedInbound[eventType.replace('.', '_')]?.boundedIncrement()
+    }
+
+    fun recordUserDismiss() {
+        userDismiss.boundedIncrement()
+    }
+
+    fun recordQueue(count: Int, bytes: Long) {
+        if (count !in 0..2_000 || bytes !in 0..134_217_728L) return
+        peakCount.accumulateAndGet(count.toLong(), ::maxOf)
+        peakBytes.accumulateAndGet(bytes, ::maxOf)
+    }
+
+    fun snapshot(): ProductObservationSnapshot = ProductObservationSnapshot(
+        custodyCounts = custody.mapValues { (_, counts) -> counts.mapValues { it.value.get() } },
+        peerReceiptCount = authenticatedInbound.getValue("peer_receipt").get(),
+        snapshotDigestCount = authenticatedInbound.getValue("state_digest").get(),
+        snapshotBeginCount = authenticatedInbound.getValue("state_snapshot_begin").get(),
+        snapshotEndCount = authenticatedInbound.getValue("state_snapshot_end").get(),
+        userDismissCount = userDismiss.get(),
+        unpairInboundCount = authenticatedInbound.getValue("unpair").get(),
+        peakQueueCount = peakCount.get().toInt(),
+        peakQueueBytes = peakBytes.get(),
+    )
+
+    fun clear() {
+        custody.values.flatMap { it.values }.forEach { it.set(0) }
+        authenticatedInbound.values.forEach { it.set(0) }
+        peakCount.set(0)
+        peakBytes.set(0)
+        userDismiss.set(0)
+    }
+
+    private fun AtomicLong.boundedIncrement() {
+        updateAndGet { current -> if (current >= MAX_COUNTER) MAX_COUNTER else current + 1 }
+    }
+}
 
 internal suspend fun runTransportSideEffect(
     block: suspend () -> Unit,
@@ -71,6 +145,16 @@ internal suspend fun runTransportSideEffect(
     }
 }
 
+internal suspend fun dispatchRelayDeliveryWithFinalization(
+    dispatch: suspend () -> InboundDispatchResult?,
+) {
+    val result = dispatch()
+    if (result is InboundDispatchResult.AcceptedAfterCustody) {
+        // The relay has already durably accepted the sender's row before delivery to this client.
+        result.finalizeAfterCustody()
+    }
+}
+
 internal fun acceptRelayUnpairCustody(
     event: TransportEvent,
     tracker: UnpairCustodyTracker,
@@ -82,6 +166,16 @@ internal fun acceptLanUnpairCustody(
     tracker: UnpairCustodyTracker,
 ): Boolean = event is co.twinotify.core.lan.LanTransportEvent.PeerAccepted &&
     tracker.accept(event.msgId, CustodyRoute.LAN)
+
+internal fun recordRelayCustodyObservation(event: TransportEvent.RelayAccepted) {
+    ProductObservationTracker.recordCustody("relay", event.eventType)
+}
+
+internal fun recordLanCustodyObservation(
+    event: co.twinotify.core.lan.LanTransportEvent.PeerAccepted,
+) {
+    ProductObservationTracker.recordCustody("lan", event.eventType)
+}
 
 /**
  * Lifecycle-independent service transport loop. One coordinator owns both route selection and
@@ -513,6 +607,17 @@ class SyncService : Service() {
         fun notifyRoutePreferenceChanged() {
             activeInstance?.routePreferenceRestarter?.forceRestart()
         }
+
+        /** Debug source calls this seam; the emitted digest is the normal production event. */
+        internal suspend fun emitProductionSnapshotForE2e(): Boolean {
+            val service = activeInstance ?: return false
+            service.snapshotCoordinator.emitLocalDigest(DeviceIdentity.getOrCreate(service.applicationContext))
+            return true
+        }
+
+        internal fun clearProductObservationsForE2e() {
+            ProductObservationTracker.clear()
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -565,7 +670,11 @@ class SyncService : Service() {
             ),
             localOriginDevice = localDevice,
         )
-        dispatcher = InboundDispatcher(this, snapshotCoordinator)
+        dispatcher = InboundDispatcher(
+            this,
+            snapshotCoordinator,
+            onAuthenticatedEvent = ProductObservationTracker::recordAuthenticatedInbound,
+        )
         // Every health transition refreshes the foreground text from the same native snapshot.
         healthJob = scope.launch {
             SyncServiceStatus.health.collectLatest {
@@ -764,12 +873,15 @@ class SyncService : Service() {
                     },
                     hooks = LiveRelayRouteHooks(
                         dispatch = { envelope ->
-                            try {
-                                dispatcher.dispatch(envelope)
-                            } catch (cancellation: CancellationException) {
-                                throw cancellation
-                            } catch (_: Throwable) {
-                                SyncServiceStatus.setLastError("inbound_dispatch")
+                            dispatchRelayDeliveryWithFinalization {
+                                try {
+                                    dispatcher.dispatch(envelope)
+                                } catch (cancellation: CancellationException) {
+                                    throw cancellation
+                                } catch (_: Throwable) {
+                                    SyncServiceStatus.setLastError("inbound_dispatch")
+                                    null
+                                }
                             }
                         },
                         onEvent = { event ->
@@ -781,6 +893,7 @@ class SyncService : Service() {
                                 is TransportEvent.RelayRejected,
                                 -> updateQueueHealthNow()
                                 is TransportEvent.RelayAccepted -> {
+                                    recordRelayCustodyObservation(event)
                                     acceptRelayUnpairCustody(event, unpairCustodyTracker)
                                     updateQueueHealthNow()
                                 }
@@ -810,6 +923,9 @@ class SyncService : Service() {
                 outbox = outbox,
                 dispatch = dispatcher::dispatch,
                 onLanEvent = { event ->
+                    if (event is co.twinotify.core.lan.LanTransportEvent.PeerAccepted) {
+                        recordLanCustodyObservation(event)
+                    }
                     acceptLanUnpairCustody(event, unpairCustodyTracker)
                     updateQueueHealthNow()
                 },
@@ -838,6 +954,10 @@ class SyncService : Service() {
                         routeHealth.queuedCount,
                         reliableDao.activeOutboundBytes(),
                     )
+                    ProductObservationTracker.recordQueue(
+                        routeHealth.queuedCount,
+                        reliableDao.activeOutboundBytes(),
+                    )
                 },
             ).run(preferLan)
         }
@@ -861,9 +981,15 @@ class SyncService : Service() {
     private suspend fun updateQueueHealthNow() {
         runTransportSideEffect(
             block = {
+                val activeCount = reliableDao.activeOutboundCount()
+                val activeBytes = reliableDao.activeOutboundBytes()
                 SyncServiceStatus.setQueueStats(
-                    reliableDao.activeOutboundCount(),
-                    reliableDao.activeOutboundBytes(),
+                    activeCount,
+                    activeBytes,
+                )
+                ProductObservationTracker.recordQueue(
+                    activeCount,
+                    activeBytes,
                 )
             },
             onFailure = { SyncServiceStatus.setLastError("queue_health") },

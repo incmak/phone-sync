@@ -189,3 +189,22 @@ func TestRejectSensitiveEvidenceRejectsWrongShapesAndMissingRequiredFields(t *te
 		}
 	}
 }
+
+func TestEvidenceSanitizerRejectsUnknownProductObservationKey(t *testing.T) {
+	observation := map[string]any{
+		"health": "connected", "call_capture_enabled": false, "outbox": 0,
+		"active_inbound": 0, "pending_materialization": 0, "mirror": false,
+		"sequence": 0, "terminal": true, "loop_events": 0, "route": "lan",
+		"route_phase": "authenticated", "queued_bytes": 0, "route_generation": 1,
+		"raw_peer_id": "looks-harmless",
+	}
+	value := map[string]any{
+		"scenario": "post", "status": "passed", "events": []any{"post"},
+		"before": map[string]any{"A": observation, "B": observation},
+		"after":  map[string]any{"A": observation, "B": observation},
+		"route":  map[string]any{"route": "lan", "phase": "authenticated", "route_generation": 1, "queued_count": 0, "queued_bytes": 0},
+	}
+	if err := RejectSensitiveEvidence(value); err == nil {
+		t.Fatal("unknown product observation key passed")
+	}
+}

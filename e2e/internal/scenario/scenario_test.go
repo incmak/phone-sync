@@ -2,6 +2,7 @@ package scenario_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,70 @@ import (
 	"github.com/twinotify/phone-sync/e2e/internal/control"
 	"github.com/twinotify/phone-sync/e2e/internal/scenario"
 )
+
+func TestParseObservationRejectsMissingUnknownNullAndMalformedProductObservations(t *testing.T) {
+	base := validObservationPayloadForTest()
+	mutations := map[string]func(map[string]any){
+		"missing":   func(v map[string]any) { delete(v["product_observations"].(map[string]any), "paired") },
+		"unknown":   func(v map[string]any) { v["product_observations"].(map[string]any)["peer_id"] = "hidden" },
+		"null":      func(v map[string]any) { v["product_observations"].(map[string]any)["peer_receipt_count"] = nil },
+		"malformed": func(v map[string]any) { v["product_observations"].(map[string]any)["active_queue_count"] = -1 },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			value := cloneJSONMap(t, base)
+			mutate(value)
+			payload, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := scenario.ParseObservation(payload); err == nil {
+				t.Fatal("malformed observation passed")
+			}
+		})
+	}
+}
+
+func validObservationPayloadForTest() map[string]any {
+	counts := map[string]any{"notif_post": 0.0, "notif_update": 0.0, "notif_cancel": 0.0, "call_state": 0.0, "state_digest": 0.0, "state_snapshot_begin": 0.0, "state_snapshot_item": 0.0, "state_snapshot_end": 0.0, "unpair": 0.0, "peer_receipt": 0.0}
+	return map[string]any{
+		"offline_pairing": map[string]any{},
+		"health":          map[string]any{"service": "connected", "callCaptureEnabled": false, "callCaptureHealthCode": "call_capture_disabled"},
+		"route":           map[string]any{"route": "lan", "phase": "authenticated"},
+		"route_evidence":  map[string]any{"route": "lan", "phase": "authenticated", "route_generation": 1.0, "queued_count": 0.0, "queued_bytes": 0.0, "receipt_at_ms": 0.0, "error_code": ""},
+		"outbox_bytes":    0.0, "active_outbox": 0.0, "active_inbound": 0.0, "pending_materialization": 0.0,
+		"canonical": []any{}, "activity": []any{},
+		"product_observations": map[string]any{
+			"paired":             true,
+			"custody_counts":     map[string]any{"lan": counts, "relay": cloneMap(counts)},
+			"peer_receipt_count": 0.0, "snapshot_digest_count": 0.0, "snapshot_begin_count": 0.0,
+			"snapshot_end_count": 0.0, "user_dismiss_count": 0.0, "unpair_inbound_count": 0.0,
+			"unpair_outcome": "none", "active_queue_count": 0.0, "active_queue_bytes": 0.0,
+			"peak_queue_count": 0.0, "peak_queue_bytes": 0.0,
+		},
+	}
+}
+
+func cloneJSONMap(t *testing.T, value map[string]any) map[string]any {
+	t.Helper()
+	payload, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clone map[string]any
+	if err := json.Unmarshal(payload, &clone); err != nil {
+		t.Fatal(err)
+	}
+	return clone
+}
+
+func cloneMap(value map[string]any) map[string]any {
+	clone := make(map[string]any, len(value))
+	for key, item := range value {
+		clone[key] = item
+	}
+	return clone
+}
 
 type fakeBridge struct {
 	events        []string
@@ -534,7 +599,14 @@ func TestUnknownScenarioRejected(t *testing.T) {
 }
 
 func TestParseObservationUsesProviderSchema(t *testing.T) {
-	state, err := scenario.ParseObservation([]byte(`{"health":{"service":"connected"},"active_outbox":0,"active_inbound":0,"pending_materialization":0,"canonical":[{"canon_id_hash":"new-hash","state":"ACTIVE","sequence":3}],"activity":[{"event_type":"delivery_loop"}]}`))
+	payload := validObservationPayloadForTest()
+	payload["canonical"] = []any{map[string]any{"canon_id_hash": "new-hash", "state": "ACTIVE", "sequence": 3}}
+	payload["activity"] = []any{map[string]any{"event_type": "delivery_loop"}}
+	encoded, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	state, err := scenario.ParseObservation(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -134,6 +134,12 @@ func inspectClosedWorldScenario(root map[string]any) error {
 		"mirror": true, "sequence": true, "terminal": true, "loop_events": true,
 		"route": true, "route_phase": true, "queued_bytes": true, "route_generation": true,
 		"receipt_at_ms": true, "error_code": true,
+		"paired": true, "custody_counts": true, "peer_receipt_count": true,
+		"snapshot_digest_count": true, "snapshot_begin_count": true,
+		"snapshot_end_count": true, "user_dismiss_count": true,
+		"unpair_inbound_count": true, "unpair_outcome": true,
+		"active_queue_count": true, "active_queue_bytes": true,
+		"peak_queue_count": true, "peak_queue_bytes": true,
 	}
 	for _, groupName := range []string{"before", "after"} {
 		group, ok := root[groupName].(map[string]any)
@@ -238,6 +244,59 @@ func validateObservationShape(value map[string]any) error {
 			code, ok := raw.(string)
 			if !ok || !stableCodePattern.MatchString(code) {
 				return fmt.Errorf("%s must be a stable code", key)
+			}
+		}
+	}
+	for _, key := range []string{
+		"peer_receipt_count", "snapshot_digest_count", "snapshot_begin_count",
+		"snapshot_end_count", "user_dismiss_count", "unpair_inbound_count",
+	} {
+		if raw, present := value[key]; present {
+			number, ok := raw.(float64)
+			if !ok || number < 0 || number > 1_000_000_000 || number != float64(int64(number)) {
+				return fmt.Errorf("%s must be a bounded nonnegative integer", key)
+			}
+		}
+	}
+	for key, maximum := range map[string]float64{
+		"active_queue_count": 2_000, "peak_queue_count": 2_000,
+		"active_queue_bytes": 134_217_728, "peak_queue_bytes": 134_217_728,
+	} {
+		if raw, present := value[key]; present {
+			number, ok := raw.(float64)
+			if !ok || number < 0 || number > maximum || number != float64(int64(number)) {
+				return fmt.Errorf("%s must be a production-bounded nonnegative integer", key)
+			}
+		}
+	}
+	if raw, present := value["paired"]; present {
+		if _, ok := raw.(bool); !ok {
+			return errors.New("paired must be boolean")
+		}
+	}
+	if raw, present := value["unpair_outcome"]; present {
+		outcome, ok := raw.(string)
+		allowed := map[string]bool{"none": true, "lan": true, "relay": true, "timeout": true, "unavailable": true, "delivery_failed": true, "no_peer": true}
+		if !ok || !allowed[outcome] {
+			return errors.New("unpair_outcome is invalid")
+		}
+	}
+	if raw, present := value["custody_counts"]; present {
+		routes, ok := raw.(map[string]any)
+		if !ok || len(routes) != 2 {
+			return errors.New("custody_counts must contain lan and relay")
+		}
+		events := map[string]bool{"notif_post": true, "notif_update": true, "notif_cancel": true, "call_state": true, "state_digest": true, "state_snapshot_begin": true, "state_snapshot_item": true, "state_snapshot_end": true, "unpair": true, "peer_receipt": true}
+		for _, route := range []string{"lan", "relay"} {
+			counts, ok := routes[route].(map[string]any)
+			if !ok || len(counts) != len(events) {
+				return fmt.Errorf("custody_counts.%s is invalid", route)
+			}
+			for event, rawCount := range counts {
+				number, ok := rawCount.(float64)
+				if !events[event] || !ok || number < 0 || number > 1_000_000_000 || number != float64(int64(number)) {
+					return fmt.Errorf("custody_counts.%s.%s is invalid", route, event)
+				}
 			}
 		}
 	}

@@ -19,6 +19,9 @@ import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.storage.ReplayGuard
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 
 /**
@@ -30,6 +33,18 @@ import org.json.JSONObject
 sealed interface InboundDispatchResult {
     data class Accepted(val msgId: String, val envelopeSha256: String) : InboundDispatchResult
     data class Duplicate(val msgId: String, val envelopeSha256: String) : InboundDispatchResult
+    class AcceptedAfterCustody(
+        val msgId: String,
+        val envelopeSha256: String,
+        private val finalizer: suspend () -> Unit,
+    ) : InboundDispatchResult {
+        private val finalized = AtomicBoolean(false)
+
+        suspend fun finalizeAfterCustody() {
+            if (!finalized.compareAndSet(false, true)) return
+            withContext(NonCancellable) { finalizer() }
+        }
+    }
     data class Rejected(val code: String) : InboundDispatchResult
 }
 
@@ -41,11 +56,29 @@ internal suspend fun executePeerUnpairAndRequestServiceStop(
     requestServiceStop()
 }
 
+/**
+ * Runs only after v2 envelope authentication has succeeded. Returning acceptance after the
+ * production peer-unpair handler completes prevents an acknowledgement from claiming a wipe that
+ * did not happen; cancellation deliberately escapes so the route cannot acknowledge it.
+ */
+internal suspend fun dispatchAuthenticatedV2Unpair(
+    eventType: String,
+    msgId: String,
+    envelopeSha256: String,
+    preparePeerUnpair: suspend () -> Unit,
+    finalizeServiceStop: suspend () -> Unit,
+): InboundDispatchResult? {
+    if (eventType != "unpair") return null
+    preparePeerUnpair()
+    return InboundDispatchResult.AcceptedAfterCustody(msgId, envelopeSha256, finalizeServiceStop)
+}
+
 class InboundDispatcher(
     private val ctx: Context,
     private val snapshotCoordinator: SnapshotCoordinator = SnapshotCoordinator(
         NotificationDb.get(ctx.applicationContext).reliableDeliveryDao(),
     ),
+    private val onAuthenticatedEvent: (String) -> Unit = {},
 ) {
     private val reliableDao by lazy { NotificationDb.get(ctx.applicationContext).reliableDeliveryDao() }
     private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao)) }
@@ -133,6 +166,16 @@ class InboundDispatcher(
             return InboundDispatchResult.Rejected("auth_failed")
         }
         val inner = opened.inner
+        dispatchAuthenticatedV2Unpair(
+            eventType = inner.type,
+            msgId = inner.msgId,
+            envelopeSha256 = opened.envelopeSha256,
+            preparePeerUnpair = ::preparePeerUnpair,
+            finalizeServiceStop = ::requestServiceStopAfterPeerUnpair,
+        )?.let {
+            onAuthenticatedEvent(inner.type)
+            return it
+        }
         if (inner.type == "peer.receipt") {
             val payload = inner.payloadObject()
             val status = payload.getString("status")
@@ -145,21 +188,25 @@ class InboundDispatcher(
             )
             SyncServiceStatus.setLastReceiptAt(System.currentTimeMillis())
             SyncServiceStatus.setQueueStats(reliableDao.activeOutboundCount(), reliableDao.activeOutboundBytes())
+            onAuthenticatedEvent(inner.type)
             return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.digest") {
             runCatching { snapshots.onDigest(inner) }
                 .onFailure { android.util.Log.w("Twinotify", "snapshot digest rejected", it) }
+            onAuthenticatedEvent(inner.type)
             return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.snapshot.begin") {
             runCatching { snapshots.onBegin(inner) }
                 .onFailure { android.util.Log.w("Twinotify", "snapshot begin rejected", it) }
+            onAuthenticatedEvent(inner.type)
             return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.snapshot.item") {
             runCatching { snapshots.onItem(inner) }
                 .onFailure { android.util.Log.w("Twinotify", "snapshot item rejected", it) }
+            onAuthenticatedEvent(inner.type)
             return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.snapshot.end") {
@@ -176,6 +223,7 @@ class InboundDispatcher(
                     retryScheduler = materializationStartupScheduler(ctx),
                 ).materializePending()
             }
+            onAuthenticatedEvent(inner.type)
             return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "call.state") {
@@ -387,21 +435,26 @@ class InboundDispatcher(
     private suspend fun handleUnpair() {
         android.util.Log.i("Twinotify", "peer initiated unpair — wiping local state")
         executePeerUnpairAndRequestServiceStop(
-            unpair = {
-                co.twinotify.core.pairing.UnpairWorkflow.execute(
-                    // This callback runs inside the relay collector. Graceful shutdown leaves
-                    // that job and its parent scope alive until the non-cancellable wipe returns.
-                    stopAndAwait = { SyncService.shutdownActive(ctx, fromRelayJob = true) },
-                    revokePeer = {},
-                    wipeLocal = {
-                        co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
-                        SyncServiceStatus.notifyPeerUnpaired()
-                    },
-                )
-            },
-            requestServiceStop = {
-                ctx.stopService(Intent(ctx, SyncService::class.java))
+            unpair = ::preparePeerUnpair,
+            requestServiceStop = ::requestServiceStopAfterPeerUnpair,
+        )
+    }
+
+    private suspend fun preparePeerUnpair() {
+        co.twinotify.core.pairing.UnpairWorkflow.execute(
+            // Keep the current authenticated collector alive through the non-cancellable wipe.
+            // LAN finalizes service stop only after its acceptance write; relay already has
+            // server custody and runs that finalizer immediately after dispatch returns.
+            stopAndAwait = { SyncService.shutdownActive(ctx, fromRelayJob = true) },
+            revokePeer = {},
+            wipeLocal = {
+                co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
+                SyncServiceStatus.notifyPeerUnpaired()
             },
         )
+    }
+
+    private suspend fun requestServiceStopAfterPeerUnpair() {
+        ctx.stopService(Intent(ctx, SyncService::class.java))
     }
 }

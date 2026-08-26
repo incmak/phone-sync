@@ -16,10 +16,98 @@ import org.junit.runner.RunWith
 import org.json.JSONObject
 import java.nio.file.Files
 import java.io.File
+import co.twinotify.core.listener.PendingPeerCancel
 
 @RunWith(AndroidJUnit4::class)
 class E2eControlSecurityTest {
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
+
+    @Test
+    fun userDismissStimulusCancelsPersistedIdentityWithoutPlantingPeerTombstone() {
+        PendingPeerCancel.clearForTest()
+        val cancelled = mutableListOf<Pair<String, Int>>()
+
+        cancelMirrorAsUser("persisted-tag", 42) { tag, id -> cancelled += tag to id }
+
+        assertEquals(listOf("persisted-tag" to 42), cancelled)
+        assertEquals(0, PendingPeerCancel.sizeForTest())
+    }
+
+    @Test
+    fun productionBackedControlsAreAuthenticatedClosedWorldAndContentFree() {
+        val calls = mutableListOf<String>()
+        val receiver = E2eControlReceiver(
+            controls = object : E2eProductionControls {
+                override suspend fun dismissNewestMirror(context: Context): E2eControlOutcome {
+                    calls += "dismiss"
+                    return E2eControlOutcome("ok", "requested")
+                }
+
+                override suspend fun emitSnapshot(context: Context): E2eControlOutcome {
+                    calls += "snapshot"
+                    return E2eControlOutcome("ok", "emitted")
+                }
+
+                override suspend fun localUnpair(context: Context): E2eControlOutcome {
+                    calls += "unpair"
+                    return E2eControlOutcome("ok", "lan")
+                }
+            },
+        )
+        val token = E2eSessionToken.forTest(context, "production-control-allowlist")
+
+        for ((name, call) in listOf(
+            "DISMISS_NEWEST_MIRROR" to "dismiss",
+            "EMIT_SNAPSHOT" to "snapshot",
+            "LOCAL_UNPAIR" to "unpair",
+        )) {
+            assertEquals("unauthorized", receiver.executeForTest(
+                context,
+                E2eCommand("$name-unauthorized", name, token = "wrong"),
+            ).code)
+            assertEquals("invalid", receiver.executeForTest(
+                context,
+                E2eCommand("$name-extra", name, token = token, params = mapOf("raw_id" to "forbidden")),
+            ).code)
+            val result = receiver.executeForTest(context, E2eCommand(name, name, token = token))
+            assertEquals("ok", result.code)
+            val retained = result.toJson().toString()
+            assertFalse(retained.contains("raw_id"))
+            assertFalse(retained.contains("canon", ignoreCase = true))
+            assertFalse(retained.contains("message", ignoreCase = true))
+            assertEquals(call, calls.last())
+        }
+    }
+
+    @Test
+    fun productionObservationBlockIsClosedBoundedAndContentFree() {
+        val root = JSONObject(E2eStateProvider.snapshotJson(context))
+        val observation = root.getJSONObject("product_observations")
+        assertEquals(
+            setOf(
+                "paired", "custody_counts", "peer_receipt_count", "snapshot_digest_count",
+                "snapshot_begin_count", "snapshot_end_count", "user_dismiss_count",
+                "unpair_inbound_count", "unpair_outcome", "active_queue_count",
+                "active_queue_bytes", "peak_queue_count", "peak_queue_bytes",
+            ),
+            observation.keys().asSequence().toSet(),
+        )
+        assertTrue(observation.getLong("active_queue_count") in 0..2_000)
+        assertTrue(observation.getLong("active_queue_bytes") in 0..134_217_728)
+        assertTrue(observation.getLong("peak_queue_count") in 0..2_000)
+        assertTrue(observation.getLong("peak_queue_bytes") in 0..134_217_728)
+        val custody = observation.getJSONObject("custody_counts")
+        assertEquals(setOf("lan", "relay"), custody.keys().asSequence().toSet())
+        for (route in listOf("lan", "relay")) {
+            val counts = custody.getJSONObject(route)
+            assertTrue(counts.keys().asSequence().all { it in E2eStateProvider.ALLOWED_EVENT_COUNT_KEYS })
+            assertTrue(counts.keys().asSequence().all { counts.getLong(it) in 0..1_000_000_000 })
+        }
+        val serialized = observation.toString()
+        for (forbidden in listOf("device_id", "package", "canon", "msg_id", "title", "text", "token", "tls", "relay_url")) {
+            assertFalse(serialized.contains(forbidden, ignoreCase = true), forbidden)
+        }
+    }
 
     @Test
     fun wrongSessionTokenCannotExecuteCommand() {

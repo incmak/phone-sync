@@ -172,27 +172,60 @@ func stepsWithTag(steps []Step, tag string) []Step {
 }
 
 type Observation struct {
-	Health                 string            `json:"health"`
-	CallCaptureEnabled     bool              `json:"call_capture_enabled"`
-	CallCaptureHealthCode  string            `json:"call_capture_health_code,omitempty"`
-	Outbox                 int               `json:"outbox"`
-	ActiveInbound          int               `json:"active_inbound"`
-	PendingMaterialization int               `json:"pending_materialization"`
-	Mirror                 bool              `json:"mirror"`
-	Sequence               int               `json:"sequence"`
-	Terminal               bool              `json:"terminal"`
-	LoopEvents             int               `json:"loop_events"`
-	Route                  string            `json:"route"`
-	RoutePhase             string            `json:"route_phase"`
-	QueuedBytes            int64             `json:"queued_bytes"`
-	RouteGeneration        int               `json:"route_generation"`
-	ReceiptAtMs            int64             `json:"receipt_at_ms,omitempty"`
-	ErrorCode              string            `json:"error_code,omitempty"`
-	Canonical              map[string]string `json:"-"`
-	CanonicalSequences     map[string]int    `json:"-"`
+	Health                 string                      `json:"health"`
+	CallCaptureEnabled     bool                        `json:"call_capture_enabled"`
+	CallCaptureHealthCode  string                      `json:"call_capture_health_code,omitempty"`
+	Outbox                 int                         `json:"outbox"`
+	ActiveInbound          int                         `json:"active_inbound"`
+	PendingMaterialization int                         `json:"pending_materialization"`
+	Mirror                 bool                        `json:"mirror"`
+	Sequence               int                         `json:"sequence"`
+	Terminal               bool                        `json:"terminal"`
+	LoopEvents             int                         `json:"loop_events"`
+	Route                  string                      `json:"route"`
+	RoutePhase             string                      `json:"route_phase"`
+	QueuedBytes            int64                       `json:"queued_bytes"`
+	RouteGeneration        int                         `json:"route_generation"`
+	ReceiptAtMs            int64                       `json:"receipt_at_ms,omitempty"`
+	ErrorCode              string                      `json:"error_code,omitempty"`
+	Paired                 bool                        `json:"paired"`
+	CustodyCounts          map[string]map[string]int64 `json:"custody_counts,omitempty"`
+	PeerReceiptCount       int64                       `json:"peer_receipt_count"`
+	SnapshotDigestCount    int64                       `json:"snapshot_digest_count"`
+	SnapshotBeginCount     int64                       `json:"snapshot_begin_count"`
+	SnapshotEndCount       int64                       `json:"snapshot_end_count"`
+	UserDismissCount       int64                       `json:"user_dismiss_count"`
+	UnpairInboundCount     int64                       `json:"unpair_inbound_count"`
+	UnpairOutcome          string                      `json:"unpair_outcome,omitempty"`
+	ActiveQueueCount       int                         `json:"active_queue_count"`
+	ActiveQueueBytes       int64                       `json:"active_queue_bytes"`
+	PeakQueueCount         int                         `json:"peak_queue_count"`
+	PeakQueueBytes         int64                       `json:"peak_queue_bytes"`
+	Canonical              map[string]string           `json:"-"`
+	CanonicalSequences     map[string]int              `json:"-"`
 }
 
 func ParseObservation(payload []byte) (Observation, error) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return Observation{}, fmt.Errorf("decode E2E state: %w", err)
+	}
+	allowedRoot := map[string]bool{
+		"offline_pairing": true, "health": true, "route": true, "route_evidence": true,
+		"outbox_bytes": true, "active_outbox": true, "active_inbound": true,
+		"pending_materialization": true, "canonical": true, "activity": true,
+		"product_observations": true,
+	}
+	for key := range root {
+		if !allowedRoot[key] {
+			return Observation{}, fmt.Errorf("E2E state unknown field %q", key)
+		}
+	}
+	for key := range allowedRoot {
+		if raw, ok := root[key]; !ok || string(raw) == "null" {
+			return Observation{}, fmt.Errorf("E2E state missing %s", key)
+		}
+	}
 	var raw struct {
 		Health struct {
 			Service               string `json:"service"`
@@ -224,12 +257,17 @@ func ParseObservation(payload []byte) (Observation, error) {
 		Activity []struct {
 			EventType string `json:"event_type"`
 		} `json:"activity"`
+		Product json.RawMessage `json:"product_observations"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return Observation{}, fmt.Errorf("decode E2E state: %w", err)
 	}
 	if raw.Health.Service == "" {
 		return Observation{}, errors.New("E2E state missing health.service")
+	}
+	product, err := parseProductObservations(raw.Product)
+	if err != nil {
+		return Observation{}, err
 	}
 	state := Observation{
 		Health:                 raw.Health.Service,
@@ -244,6 +282,19 @@ func ParseObservation(payload []byte) (Observation, error) {
 		RouteGeneration:        raw.RouteEvidence.Generation,
 		ReceiptAtMs:            raw.RouteEvidence.ReceiptAtMs,
 		ErrorCode:              raw.RouteEvidence.ErrorCode,
+		Paired:                 product.Paired,
+		CustodyCounts:          product.CustodyCounts,
+		PeerReceiptCount:       product.PeerReceiptCount,
+		SnapshotDigestCount:    product.SnapshotDigestCount,
+		SnapshotBeginCount:     product.SnapshotBeginCount,
+		SnapshotEndCount:       product.SnapshotEndCount,
+		UserDismissCount:       product.UserDismissCount,
+		UnpairInboundCount:     product.UnpairInboundCount,
+		UnpairOutcome:          product.UnpairOutcome,
+		ActiveQueueCount:       product.ActiveQueueCount,
+		ActiveQueueBytes:       product.ActiveQueueBytes,
+		PeakQueueCount:         product.PeakQueueCount,
+		PeakQueueBytes:         product.PeakQueueBytes,
 		Terminal:               raw.Health.Service == "connected" && raw.ActiveOutbox == 0 && raw.ActiveInbound == 0 && raw.PendingMaterialization == 0,
 		Canonical:              map[string]string{},
 		CanonicalSequences:     map[string]int{},
@@ -264,6 +315,139 @@ func ParseObservation(payload []byte) (Observation, error) {
 		}
 	}
 	return state, nil
+}
+
+var productEventKeys = map[string]bool{
+	"notif_post": true, "notif_update": true, "notif_cancel": true, "call_state": true,
+	"state_digest": true, "state_snapshot_begin": true, "state_snapshot_item": true,
+	"state_snapshot_end": true, "unpair": true, "peer_receipt": true,
+}
+
+type productObservations struct {
+	Paired              bool
+	CustodyCounts       map[string]map[string]int64
+	PeerReceiptCount    int64
+	SnapshotDigestCount int64
+	SnapshotBeginCount  int64
+	SnapshotEndCount    int64
+	UserDismissCount    int64
+	UnpairInboundCount  int64
+	UnpairOutcome       string
+	ActiveQueueCount    int
+	ActiveQueueBytes    int64
+	PeakQueueCount      int
+	PeakQueueBytes      int64
+}
+
+func parseProductObservations(payload []byte) (productObservations, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return productObservations{}, errors.New("E2E state malformed product_observations")
+	}
+	allowed := map[string]bool{
+		"paired": true, "custody_counts": true, "peer_receipt_count": true,
+		"snapshot_digest_count": true, "snapshot_begin_count": true, "snapshot_end_count": true,
+		"user_dismiss_count": true, "unpair_inbound_count": true, "unpair_outcome": true,
+		"active_queue_count": true, "active_queue_bytes": true, "peak_queue_count": true,
+		"peak_queue_bytes": true,
+	}
+	for key := range fields {
+		if !allowed[key] {
+			return productObservations{}, fmt.Errorf("E2E state unknown product observation %q", key)
+		}
+	}
+	for key := range allowed {
+		if raw, ok := fields[key]; !ok || string(raw) == "null" {
+			return productObservations{}, fmt.Errorf("E2E state missing product observation %s", key)
+		}
+	}
+	var paired bool
+	if err := json.Unmarshal(fields["paired"], &paired); err != nil {
+		return productObservations{}, errors.New("E2E state malformed paired")
+	}
+	readInt := func(key string, maximum int64) (int64, error) {
+		var value int64
+		if err := json.Unmarshal(fields[key], &value); err != nil || value < 0 || value > maximum {
+			return 0, fmt.Errorf("E2E state malformed %s", key)
+		}
+		return value, nil
+	}
+	peerReceipts, err := readInt("peer_receipt_count", 1_000_000_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	digests, err := readInt("snapshot_digest_count", 1_000_000_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	begins, err := readInt("snapshot_begin_count", 1_000_000_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	ends, err := readInt("snapshot_end_count", 1_000_000_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	dismisses, err := readInt("user_dismiss_count", 1_000_000_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	unpairs, err := readInt("unpair_inbound_count", 1_000_000_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	activeCount, err := readInt("active_queue_count", 2_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	activeBytes, err := readInt("active_queue_bytes", 134_217_728)
+	if err != nil {
+		return productObservations{}, err
+	}
+	peakCount, err := readInt("peak_queue_count", 2_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	peakBytes, err := readInt("peak_queue_bytes", 134_217_728)
+	if err != nil {
+		return productObservations{}, err
+	}
+	var outcome string
+	if err := json.Unmarshal(fields["unpair_outcome"], &outcome); err != nil || !map[string]bool{"none": true, "lan": true, "relay": true, "timeout": true, "unavailable": true, "delivery_failed": true, "no_peer": true}[outcome] {
+		return productObservations{}, errors.New("E2E state malformed unpair_outcome")
+	}
+	var custodyRaw map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(fields["custody_counts"], &custodyRaw); err != nil || len(custodyRaw) != 2 {
+		return productObservations{}, errors.New("E2E state malformed custody_counts")
+	}
+	custody := map[string]map[string]int64{}
+	for _, route := range []string{"lan", "relay"} {
+		counts, ok := custodyRaw[route]
+		if !ok || len(counts) != len(productEventKeys) {
+			return productObservations{}, fmt.Errorf("E2E state malformed custody_counts.%s", route)
+		}
+		custody[route] = map[string]int64{}
+		for key := range counts {
+			if !productEventKeys[key] {
+				return productObservations{}, fmt.Errorf("E2E state unknown custody event %q", key)
+			}
+		}
+		for key := range productEventKeys {
+			raw, ok := counts[key]
+			var value int64
+			if !ok || string(raw) == "null" || json.Unmarshal(raw, &value) != nil || value < 0 || value > 1_000_000_000 {
+				return productObservations{}, fmt.Errorf("E2E state malformed custody_counts.%s.%s", route, key)
+			}
+			custody[route][key] = value
+		}
+	}
+	return productObservations{
+		Paired: paired, CustodyCounts: custody, PeerReceiptCount: peerReceipts,
+		SnapshotDigestCount: digests, SnapshotBeginCount: begins, SnapshotEndCount: ends,
+		UserDismissCount: dismisses, UnpairInboundCount: unpairs, UnpairOutcome: outcome,
+		ActiveQueueCount: int(activeCount), ActiveQueueBytes: activeBytes,
+		PeakQueueCount: int(peakCount), PeakQueueBytes: peakBytes,
+	}, nil
 }
 
 func AssertConverged(name string, state Observation) error {

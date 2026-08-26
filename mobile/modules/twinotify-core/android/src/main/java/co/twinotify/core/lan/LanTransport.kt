@@ -21,7 +21,7 @@ import kotlinx.coroutines.launch
 
 sealed interface LanTransportEvent {
     /** The peer took durable custody of one of our outbound rows. */
-    data class PeerAccepted(val msgId: String) : LanTransportEvent
+    data class PeerAccepted(val msgId: String, val eventType: String? = null) : LanTransportEvent
 
     /** We took durable custody of one of the peer's events and acknowledged it. */
     data class Committed(val msgId: String, val duplicate: Boolean) : LanTransportEvent
@@ -56,7 +56,9 @@ class LanTransport(
      * Digest we actually put on the wire per in-flight message. An acknowledgement
      * that does not match what we sent must not take custody of the stored row.
      */
-    private val inFlight = Collections.synchronizedMap(HashMap<String, String>())
+    private data class InFlight(val envelopeSha256: String, val eventType: String)
+
+    private val inFlight = Collections.synchronizedMap(HashMap<String, InFlight>())
 
     private val started = AtomicBoolean(false)
 
@@ -67,7 +69,7 @@ class LanTransport(
      * serialize on the connection's single writer and suspend rather than drop.
      */
     suspend fun send(message: OutboundMessage) {
-        inFlight[message.msgId] = message.envelopeSha256
+        inFlight[message.msgId] = InFlight(message.envelopeSha256, message.eventType)
         connection.send(LanFrame.Put(message.envelopeJson.encodeToByteArray()))
     }
 
@@ -151,6 +153,14 @@ class LanTransport(
                 connection.send(LanFrame.Accepted(result.msgId, result.envelopeSha256))
                 LanTransportEvent.Committed(result.msgId, duplicate = true)
             }
+            is InboundDispatchResult.AcceptedAfterCustody -> try {
+                connection.send(LanFrame.Accepted(result.msgId, result.envelopeSha256))
+                LanTransportEvent.Committed(result.msgId, duplicate = false)
+            } finally {
+                // The authenticated control has already completed shutdown + wipe. Service stop
+                // must happen after the acceptance attempt and must survive write cancellation.
+                result.finalizeAfterCustody()
+            }
             is InboundDispatchResult.Rejected -> {
                 connection.send(LanFrame.Close(result.code))
                 LanTransportEvent.Closed(result.code)
@@ -160,8 +170,8 @@ class LanTransport(
 
     /** Take custody of one outbound row, but only for the digest we actually sent. */
     private suspend fun acknowledgeOutbound(frame: LanFrame.Accepted): LanTransportEvent? {
-        val sentDigest = inFlight[frame.msgId]
-        if (sentDigest != null && sentDigest != frame.envelopeSha256) {
+        val sent = inFlight[frame.msgId]
+        if (sent != null && sent.envelopeSha256 != frame.envelopeSha256) {
             connection.send(LanFrame.Close("ack_digest_mismatch"))
             return LanTransportEvent.Closed("ack_digest_mismatch")
         }
@@ -170,7 +180,7 @@ class LanTransport(
             // Ordinary rows stay until an authenticated peer receipt; receipt rows are deleted.
             OutboxTransition.Retained,
             OutboxTransition.Deleted,
-            -> LanTransportEvent.PeerAccepted(frame.msgId)
+            -> LanTransportEvent.PeerAccepted(frame.msgId, sent?.eventType)
             // Nothing to take custody of, and nothing worth ending the session over.
             else -> null
         }

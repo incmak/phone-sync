@@ -19,6 +19,7 @@ import co.twinotify.core.service.ServiceConfigStore
 import co.twinotify.core.service.SyncService
 import co.twinotify.core.service.SyncServiceStatus
 import co.twinotify.core.storage.DeviceIdentity
+import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.PeerRecord
 import co.twinotify.core.storage.PeerStore
 import java.io.File
@@ -34,6 +35,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import androidx.core.content.edit
+import androidx.core.app.NotificationManagerCompat
+import co.twinotify.core.auth.JwtMinter
+import co.twinotify.core.pairing.ProductionLocalUnpairEntryPoint
+import co.twinotify.core.pairing.awaitLocalUnpairResultAndRecord
 import org.json.JSONObject
 
 private const val MAX_DETAIL_LENGTH = 256
@@ -77,8 +82,63 @@ data class E2eCommandResult(
     }.also { require(it.toString().encodeToByteArray().size <= MAX_JSON_BYTES) { "bounded E2E result exceeded" } }
 }
 
+internal data class E2eControlOutcome(val code: String, val outcome: String)
+
+internal interface E2eProductionControls {
+    suspend fun dismissNewestMirror(context: Context): E2eControlOutcome
+    suspend fun emitSnapshot(context: Context): E2eControlOutcome
+    suspend fun localUnpair(context: Context): E2eControlOutcome
+}
+
+internal fun cancelMirrorAsUser(
+    persistedTag: String,
+    persistedId: Int,
+    cancel: (String, Int) -> Unit,
+) {
+    require(persistedTag.isNotBlank() && persistedId > 0) { "invalid persisted mirror identity" }
+    // Deliberately no PendingPeerCancel mutation: Android's real listener callback is the oracle.
+    cancel(persistedTag, persistedId)
+}
+
+private object DefaultE2eProductionControls : E2eProductionControls {
+    override suspend fun dismissNewestMirror(context: Context): E2eControlOutcome {
+        val database = NotificationDb.get(context).openHelper.readableDatabase
+        val identity = database.query(
+            "SELECT mirrorLocalTag, mirrorLocalId FROM canonical_notification_state " +
+                "WHERE state='ACTIVE' AND mirrorLocalTag IS NOT NULL AND mirrorLocalId IS NOT NULL " +
+                "ORDER BY updatedAt DESC LIMIT 1",
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) null else cursor.getString(0) to cursor.getInt(1)
+        } ?: return E2eControlOutcome("not_found", "no_active_mirror")
+        // Intentionally bypass MirrorDismisser: a local-user stimulus must not plant a peer-cancel
+        // tombstone before Android reports the real notification-listener removal callback.
+        cancelMirrorAsUser(identity.first, identity.second, NotificationManagerCompat.from(context)::cancel)
+        return E2eControlOutcome("ok", "requested")
+    }
+
+    override suspend fun emitSnapshot(context: Context): E2eControlOutcome =
+        if (SyncService.emitProductionSnapshotForE2e()) {
+            E2eControlOutcome("ok", "emitted")
+        } else {
+            E2eControlOutcome("unavailable", "service_inactive")
+        }
+
+    override suspend fun localUnpair(context: Context): E2eControlOutcome {
+        val result = awaitLocalUnpairResultAndRecord(
+            ProductionLocalUnpairEntryPoint.start(
+                context = context,
+                quiesceOfflinePairing = { E2eOfflinePairingControl.quiesceAndAwait(context) },
+            ),
+        )
+        return E2eControlOutcome("ok", result.custody.statusCode)
+    }
+
+}
+
 /** Debug-only command bridge. Every command is authenticated by the install-scoped token. */
-class E2eControlReceiver : BroadcastReceiver() {
+class E2eControlReceiver internal constructor(
+    private val controls: E2eProductionControls = DefaultE2eProductionControls,
+) : BroadcastReceiver() {
     companion object {
         const val ACTION_CONTROL = "co.twinotify.e2e.CONTROL"
         const val EXTRA_REQUEST_ID = "request_id"
@@ -93,6 +153,7 @@ class E2eControlReceiver : BroadcastReceiver() {
             "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
             "SET_LAN_AVAILABLE",
+            "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "LOCAL_UNPAIR",
             "OFFLINE_PAIR_START", "OFFLINE_PAIR_JOIN", "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL", "OFFLINE_PAIR_QUERY",
         )
 
@@ -357,6 +418,9 @@ class E2eControlReceiver : BroadcastReceiver() {
                     .put("sequence", event.sequence),
             )
         }
+        "DISMISS_NEWEST_MIRROR" -> controls.dismissNewestMirror(context).toResult(requestId)
+        "EMIT_SNAPSHOT" -> controls.emitSnapshot(context).toResult(requestId)
+        "LOCAL_UNPAIR" -> controls.localUnpair(context).toResult(requestId)
         "OFFLINE_PAIR_START" -> {
             val displayName = command.param("display_name")
                 ?: return E2eCommandResult(requestId, "invalid", "display_name required")
@@ -412,6 +476,7 @@ class E2eControlReceiver : BroadcastReceiver() {
         }
         "CLEAR_ACTIVITY" -> {
             E2eStateProvider.clearActivity(context)
+            SyncService.clearProductObservationsForE2e()
             E2eCommandResult(requestId, "ok")
         }
         "STATUS" -> E2eCommandResult(requestId, "ok", payload = JSONObject(E2eStateProvider.snapshotJson(context)))
@@ -434,6 +499,7 @@ class E2eControlReceiver : BroadcastReceiver() {
             "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL" -> setOf("secret_input_id")
             "OFFLINE_PAIR_QUERY" -> emptySet()
             "SET_LAN_AVAILABLE" -> setOf("available")
+            "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "LOCAL_UNPAIR" -> emptySet()
             else -> return null
         }
         if (command.params.keys.any { it !in allowed }) return "unexpected parameter"
@@ -498,6 +564,12 @@ class E2eControlReceiver : BroadcastReceiver() {
 
     private fun E2eCommand.timeoutMs(): Long = param("timeout_ms")?.toLongOrNull()?.coerceIn(1_000L, 300_000L)
         ?: 60_000L
+
+    private fun E2eControlOutcome.toResult(requestId: String): E2eCommandResult = E2eCommandResult(
+        requestId = requestId,
+        code = code,
+        payload = JSONObject().put("outcome", outcome),
+    )
 }
 
 internal object E2eOfflinePairingControl {
@@ -517,6 +589,7 @@ internal object E2eOfflinePairingControl {
     fun confirm(context: Context, sessionId: String) = controller(context).confirm(sessionId)
     suspend fun cancel(context: Context, sessionId: String) = controller(context).cancel(sessionId)
     fun status(context: Context): OfflinePairingPublicStatus = controller(context).getStatus()
+    suspend fun quiesceAndAwait(context: Context) = controller(context).quiesceAndAwait()
 
     fun publicStatus(context: Context): JSONObject {
         val status = status(context)

@@ -20,6 +20,57 @@ import kotlin.test.assertSame
 @OptIn(ExperimentalCoroutinesApi::class)
 class LocalUnpairCoordinatorTest {
     @Test
+    fun sharedProductionEntryPointCoalescesUiAndDebugCallers() = runTest {
+        val release = CompletableDeferred<Unit>()
+        var executions = 0
+        var persisted = 0
+        val quiescedBy = mutableListOf<String>()
+        val entryPoint = SharedLocalUnpairEntryPoint(backgroundScope)
+        val execute: suspend () -> LocalUnpairResult = {
+                executions += 1
+                persisted += 1
+                release.await()
+                LocalUnpairResult(MSG_ID, LocalUnpairCustodyOutcome.LAN)
+            }
+
+        val ui = entryPoint.start({ quiescedBy += "ui" }, execute)
+        val debug = entryPoint.start({ quiescedBy += "debug" }, execute)
+        runCurrent()
+        release.complete(Unit)
+
+        assertEquals(true, ui.sharesExecutionWith(debug))
+        assertEquals(MSG_ID, awaitLocalUnpairResult(ui).msgId)
+        assertEquals(MSG_ID, awaitLocalUnpairResult(debug).msgId)
+        assertEquals(1, executions)
+        assertEquals(1, persisted)
+        assertEquals(listOf("ui", "debug"), quiescedBy)
+    }
+
+    @Test
+    fun sharedProductionEntryPointLaterNoPeerIsANewNoOp() = runTest {
+        var executions = 0
+        val entryPoint = SharedLocalUnpairEntryPoint(backgroundScope)
+        val execute: suspend () -> LocalUnpairResult = {
+                executions += 1
+                if (executions == 1) {
+                    LocalUnpairResult(MSG_ID, LocalUnpairCustodyOutcome.LAN)
+                } else {
+                    LocalUnpairResult(null, LocalUnpairCustodyOutcome.NO_PEER)
+                }
+            }
+        var quiesces = 0
+
+        assertEquals(MSG_ID, awaitLocalUnpairResult(entryPoint.start({ quiesces += 1 }, execute)).msgId)
+        runCurrent()
+        val later = awaitLocalUnpairResult(entryPoint.start({ quiesces += 1 }, execute))
+
+        assertEquals(LocalUnpairCustodyOutcome.NO_PEER, later.custody)
+        assertEquals(null, later.msgId)
+        assertEquals(2, executions)
+        assertEquals(2, quiesces)
+    }
+
+    @Test
     fun lanCustodyReleasesTeardownInExactOrder() = runTest {
         val steps = mutableListOf<String>()
         val tracker = UnpairCustodyTracker()

@@ -80,7 +80,6 @@ class TwinotifyCoreModule internal constructor(
     constructor() : this(null)
 
     private val moduleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val localUnpairGate = co.twinotify.core.pairing.LocalUnpairRequestGate()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val offlinePairing = OfflinePairingApiController(
         moduleScope,
@@ -600,63 +599,10 @@ class TwinotifyCoreModule internal constructor(
         AsyncFunction("unpair") { promise: Promise ->
             moduleScope.launch {
                 try {
-                    val request = localUnpairGate.start(moduleScope) {
-                        val ctx = requireContext()
-                        val peer = PeerStore.load(ctx)
-                            ?: return@start co.twinotify.core.pairing.LocalUnpairResult(
-                                msgId = null,
-                                custody = co.twinotify.core.pairing.LocalUnpairCustodyOutcome.NO_PEER,
-                            )
-                        val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
-                        val revocationDecision = co.twinotify.core.pairing.UnpairRevocationPolicy.decide(
-                            peerPresent = true,
-                            relayRevocationRequired = peer.relayRevocationRequired,
-                            lanBindingId = peer.lanBindingId,
-                            relayUrl = config.relayUrl,
-                        )
-                        co.twinotify.core.pairing.LocalUnpairCoordinator(
-                            prepare = {
-                                offlinePairing.quiesceAndAwait()
-                                co.twinotify.core.service.SyncService.prepareLocalUnpair(ctx)
-                            },
-                            persistUnpair = { msgId ->
-                                co.twinotify.core.listener.DurableCapturePersister(ctx).persistUnpair(
-                                    reason = "local_user",
-                                    originDevice = DeviceIdentity.getOrCreate(ctx),
-                                    timestamp = System.currentTimeMillis(),
-                                    msgId = msgId,
-                                )
-                            },
-                            revokePeer = {
-                                co.twinotify.core.pairing.UnpairRevocationExecutor.execute(
-                                    decision = revocationDecision,
-                                    markRevocationIntent = {
-                                        // Persist intent immediately before the authenticated request.
-                                        // A lost 204 is retryable as terminal 401 while the old key lives.
-                                        co.twinotify.core.service.ServiceConfigStore
-                                            .setRevocationRequestedAt(ctx)
-                                            .revocationRequestedAt != null
-                                    },
-                                    revoke = { relayUrl, revocationMarkerPresent ->
-                                        val (_, sign) = CryptoStore.loadOrGenerate(ctx)
-                                        val deviceId = DeviceIdentity.getOrCreate(ctx)
-                                        val jwt = JwtMinter.mint(deviceId, sign.secretKey)
-                                        PairProtocol.revoke(
-                                            relayUrl,
-                                            jwt,
-                                            debug = (ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
-                                            revocationMarkerPresent = revocationMarkerPresent,
-                                        )
-                                    },
-                                )
-                            },
-                            wipeLocal = {
-                                co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
-                                co.twinotify.core.service.SyncServiceStatus.notifyPeerUnpaired()
-                            },
-                            onCustodyOutcome = co.twinotify.core.pairing.LocalUnpairStatus::record,
-                        ).execute()
-                    }
+                    val request = co.twinotify.core.pairing.ProductionLocalUnpairEntryPoint.start(
+                        requireContext(),
+                        offlinePairing::quiesceAndAwait,
+                    )
                     co.twinotify.core.pairing.awaitLocalUnpairResultAndRecord(request)
                     promise.resolve(null)
                 } catch (cancellation: CancellationException) {

@@ -74,6 +74,56 @@ class LanTransportTest {
     }
 
     @Test
+    fun postCustodyFinalizerRunsAfterAcceptanceWriteExactlyOnce() = runTest {
+        val order = mutableListOf<String>()
+        val connection = ObservingConnection { frame -> order += "write:${frame::class.simpleName}" }
+        val result = InboundDispatchResult.AcceptedAfterCustody(MSG_A, DIGEST_A) { order += "finalize" }
+        val transport = LanTransport(connection, outbox(FakeStore())) { result }
+        val collected = collectEvents(transport)
+
+        connection.deliver(LanFrame.Put("{}".encodeToByteArray()))
+        connection.closeSession()
+        collected.await()
+        result.finalizeAfterCustody()
+
+        assertEquals(listOf("write:Accepted", "finalize"), order)
+    }
+
+    @Test
+    fun postCustodyFinalizerRunsNonCancellableWhenAcceptanceWriteFails() = runTest {
+        var finalizers = 0
+        val connection = ObservingConnection { throw IllegalStateException("write failed") }
+        val transport = LanTransport(connection, outbox(FakeStore())) {
+            InboundDispatchResult.AcceptedAfterCustody(MSG_A, DIGEST_A) { finalizers += 1 }
+        }
+        val collected = collectEvents(transport)
+
+        connection.deliver(LanFrame.Put("{}".encodeToByteArray()))
+        collected.await()
+
+        assertEquals(1, finalizers)
+        assertTrue(connection.written.none { it is LanFrame.Accepted })
+    }
+
+    @Test
+    fun postCustodyFinalizerRunsWhenAcceptanceWriteIsCancelled() = runTest {
+        val writeStarted = CompletableDeferred<Unit>()
+        var finalizers = 0
+        val connection = ObservingConnection { writeStarted.complete(Unit); awaitCancellation() }
+        val transport = LanTransport(connection, outbox(FakeStore())) {
+            InboundDispatchResult.AcceptedAfterCustody(MSG_A, DIGEST_A) { finalizers += 1 }
+        }
+        val collector = backgroundScope.launch { transport.run().toList() }
+
+        connection.deliver(LanFrame.Put("{}".encodeToByteArray()))
+        writeStarted.await()
+        collector.cancel()
+        collector.join()
+
+        assertEquals(1, finalizers)
+    }
+
+    @Test
     fun durableDuplicateReplaysTheSameAcceptanceWithoutRematerializing() = runTest {
         var dispatches = 0
         val connection = FakeConnection()
@@ -127,7 +177,7 @@ class LanTransportTest {
         val events = collected.await()
 
         assertEquals(listOf(MSG_A to CustodyRoute.LAN), store.accepted)
-        assertTrue(events.contains(LanTransportEvent.PeerAccepted(MSG_A)))
+        assertTrue(events.contains(LanTransportEvent.PeerAccepted(MSG_A, "notif.post")))
     }
 
     @Test
@@ -137,13 +187,26 @@ class LanTransportTest {
         val transport = transport(connection, store)
         val collected = collectEvents(transport)
 
-        transport.send(row(MSG_A, "{\"v\":2}", digest = DIGEST_A))
+        transport.send(row(MSG_A, "{\"v\":2}", digest = DIGEST_A, eventType = "peer.receipt"))
         connection.deliver(LanFrame.Accepted(MSG_A, DIGEST_A))
         connection.closeSession()
         val events = collected.await()
 
         assertEquals(listOf(MSG_A to CustodyRoute.LAN), store.accepted)
-        assertTrue(events.contains(LanTransportEvent.PeerAccepted(MSG_A)))
+        assertTrue(events.contains(LanTransportEvent.PeerAccepted(MSG_A, "peer.receipt")))
+    }
+
+    @Test
+    fun staleAcceptanceDoesNotFabricateAnEventType() = runTest {
+        val connection = FakeConnection()
+        val transport = transport(connection, FakeStore(acceptance = CustodyAcceptanceResult.Missing))
+        val collected = collectEvents(transport)
+
+        connection.deliver(LanFrame.Accepted(MSG_A, DIGEST_A))
+        connection.closeSession()
+        val events = collected.await()
+
+        assertTrue(events.none { it is LanTransportEvent.PeerAccepted })
     }
 
     @Test
@@ -292,11 +355,16 @@ class LanTransportTest {
 
     private fun outbox(store: FakeStore) = OutboxRepository(store, clock = { 1_000L })
 
-    private fun row(msgId: String, envelope: String, digest: String = DIGEST_A) = OutboundMessage(
+    private fun row(
+        msgId: String,
+        envelope: String,
+        digest: String = DIGEST_A,
+        eventType: String = "notif.post",
+    ) = OutboundMessage(
         msgId = msgId,
         canonId = null,
         sequence = null,
-        eventType = "notif.post",
+        eventType = eventType,
         protocolVersion = 2,
         envelopeJson = envelope,
         envelopeSha256 = digest,
@@ -335,6 +403,26 @@ class LanTransportTest {
         fun releaseWrites() = gate.complete(Unit)
         fun closeSession() = frames.close()
         override fun close() { frames.close() }
+    }
+
+    private class ObservingConnection(
+        private val onSend: suspend (LanFrame) -> Unit,
+    ) : AuthenticatedLanConnection {
+        override val session = LanAuthenticatedSession(
+            peerDeviceId = "dev-00000000-0000-0000-0000-000000000002",
+            initiatorDeviceId = "dev-00000000-0000-0000-0000-000000000001",
+            sessionId = ByteArray(32),
+        )
+        private val frames = Channel<LanFrame>(Channel.UNLIMITED)
+        val written = mutableListOf<LanFrame>()
+        override val incoming: Flow<LanFrame> = frames.consumeAsFlow()
+        override suspend fun send(frame: LanFrame) {
+            onSend(frame)
+            written += frame
+        }
+        override fun close() { frames.close() }
+        suspend fun deliver(frame: LanFrame) { frames.send(frame) }
+        fun closeSession() { frames.close() }
     }
 
     private class FinalizingConnection(

@@ -34,7 +34,7 @@ sealed interface TransportEvent {
     data class Authenticated(val floor: Int) : TransportEvent
     data object LegacyOnlineOnly : TransportEvent
     data class LegacyForwarded(val msgId: String) : TransportEvent
-    data class RelayAccepted(val msgId: String, val acceptedAt: Long) : TransportEvent
+    data class RelayAccepted(val msgId: String, val acceptedAt: Long, val eventType: String? = null) : TransportEvent
     data class RelayRejected(val msgId: String, val reason: String) : TransportEvent
     data class RelayExpired(val msgId: String, val expiredAt: Long) : TransportEvent
     data class Delivery(val acceptedAt: Long, val envelope: String) : TransportEvent
@@ -118,6 +118,7 @@ class RelayTransport(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val reconnect: Boolean = true,
 ) {
+    private val pendingEventTypes = Collections.synchronizedMap(HashMap<String, String>())
     fun run(url: RelayWebSocketUrl): Flow<TransportEvent> = channelFlow {
         var previousDelay = MIN_BACKOFF_MS
         var attempt = 0
@@ -266,21 +267,25 @@ class RelayTransport(
                         break
                     } else when (frame) {
                     is RelayFrame.Accepted -> {
+                        val eventType = pendingEventTypes.remove(frame.msgId)
                         outbox.onRelayAccepted(frame.msgId, frame.acceptedAt)
-                        emit(TransportEvent.RelayAccepted(frame.msgId, frame.acceptedAt))
+                        emit(TransportEvent.RelayAccepted(frame.msgId, frame.acceptedAt, eventType))
                         // The periodic flusher owns outbound puts. Re-querying the whole
                         // sendable/ACK sets for every accepted frame can starve raw-frame
                         // draining during a reconnect burst and trigger the overflow guard.
                     }
                     is RelayFrame.LegacyForwarded -> {
+                        pendingEventTypes.remove(frame.msgId)
                         outbox.onLegacyForwarded(frame.msgId, clock())
                         emit(TransportEvent.LegacyForwarded(frame.msgId))
                     }
                     is RelayFrame.Rejected -> {
+                        pendingEventTypes.remove(frame.msgId)
                         outbox.onRelayRejected(frame.msgId, frame.reason, attempt = 0)
                         emit(TransportEvent.RelayRejected(frame.msgId, frame.reason))
                     }
                     is RelayFrame.Expired -> {
+                        pendingEventTypes.remove(frame.msgId)
                         outbox.onRelayExpired(frame.msgId, frame.expiredAt)
                         emit(TransportEvent.RelayExpired(frame.msgId, frame.expiredAt))
                     }
@@ -353,7 +358,11 @@ class RelayTransport(
         // Floor 2 can durably carry both v2 and migrated v1 envelopes. The codec
         // validates each version while preserving the envelope bytes.
         for (row in outbox.sendable(limit = 32, now = clock())) {
-            if (!socket.send(RelayFrameCodec.encode(RelayFrame.Put(row.envelopeJson)))) return false
+            pendingEventTypes[row.msgId] = row.eventType
+            if (!socket.send(RelayFrameCodec.encode(RelayFrame.Put(row.envelopeJson)))) {
+                pendingEventTypes.remove(row.msgId)
+                return false
+            }
             outbox.markSent(row.msgId, row.attempts, clock())
         }
         return true

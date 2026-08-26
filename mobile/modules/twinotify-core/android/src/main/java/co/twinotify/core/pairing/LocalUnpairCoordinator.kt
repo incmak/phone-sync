@@ -1,12 +1,23 @@
 package co.twinotify.core.pairing
 
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import co.twinotify.core.auth.JwtMinter
+import co.twinotify.core.crypto.CryptoStore
+import co.twinotify.core.listener.DurableCapturePersister
+import co.twinotify.core.service.ServiceConfigStore
+import co.twinotify.core.service.SyncService
+import co.twinotify.core.service.SyncServiceStatus
 import co.twinotify.core.service.CustodyRoute
 import co.twinotify.core.service.PreparedLocalUnpairService
+import co.twinotify.core.storage.DeviceIdentity
+import co.twinotify.core.storage.PeerStore
 import java.util.UUID
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -18,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.SupervisorJob
 
 internal enum class LocalUnpairCustodyOutcome(val statusCode: String) {
     LAN("lan"),
@@ -135,6 +147,82 @@ internal class LocalUnpairRequestGate {
                 shared.deferred.cancel(cancellation)
             }
         }
+    }
+}
+
+/** One process-wide admission gate shared by every production local-unpair caller. */
+internal class SharedLocalUnpairEntryPoint(
+    private val executionScope: CoroutineScope,
+) {
+    private val gate = LocalUnpairRequestGate()
+
+    suspend fun start(
+        quiesceOfflinePairing: suspend () -> Unit,
+        execute: suspend () -> LocalUnpairResult,
+    ): LocalUnpairRequest {
+        quiesceOfflinePairing()
+        return gate.start(executionScope, execute)
+    }
+}
+
+/** The sole production orchestration for UI and authenticated debug local-unpair requests. */
+internal object ProductionLocalUnpairEntryPoint {
+    private val shared = SharedLocalUnpairEntryPoint(
+        CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    )
+
+    suspend fun start(
+        context: Context,
+        quiesceOfflinePairing: suspend () -> Unit,
+    ): LocalUnpairRequest = shared.start(quiesceOfflinePairing) {
+        execute(context.applicationContext)
+    }
+
+    private suspend fun execute(context: Context): LocalUnpairResult {
+        val peer = PeerStore.load(context) ?: return LocalUnpairResult(
+            msgId = null,
+            custody = LocalUnpairCustodyOutcome.NO_PEER,
+        )
+        val config = ServiceConfigStore.read(context)
+        val revocationDecision = UnpairRevocationPolicy.decide(
+            peerPresent = true,
+            relayRevocationRequired = peer.relayRevocationRequired,
+            lanBindingId = peer.lanBindingId,
+            relayUrl = config.relayUrl,
+        )
+        return LocalUnpairCoordinator(
+            prepare = { SyncService.prepareLocalUnpair(context) },
+            persistUnpair = { msgId ->
+                DurableCapturePersister(context).persistUnpair(
+                    reason = "local_user",
+                    originDevice = DeviceIdentity.getOrCreate(context),
+                    timestamp = System.currentTimeMillis(),
+                    msgId = msgId,
+                )
+            },
+            revokePeer = {
+                UnpairRevocationExecutor.execute(
+                    decision = revocationDecision,
+                    markRevocationIntent = {
+                        ServiceConfigStore.setRevocationRequestedAt(context).revocationRequestedAt != null
+                    },
+                    revoke = { relayUrl, markerPresent ->
+                        val (_, sign) = CryptoStore.loadOrGenerate(context)
+                        PairProtocol.revoke(
+                            relayUrl,
+                            JwtMinter.mint(DeviceIdentity.getOrCreate(context), sign.secretKey),
+                            debug = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+                            revocationMarkerPresent = markerPresent,
+                        )
+                    },
+                )
+            },
+            wipeLocal = {
+                UnpairOps.wipeAll(context)
+                SyncServiceStatus.notifyPeerUnpaired()
+            },
+            onCustodyOutcome = LocalUnpairStatus::record,
+        ).execute()
     }
 }
 
