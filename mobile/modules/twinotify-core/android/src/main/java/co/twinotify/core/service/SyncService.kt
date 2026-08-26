@@ -50,6 +50,106 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.coroutineScope
+import java.util.concurrent.atomic.AtomicBoolean
+
+internal suspend fun runTransportSideEffect(
+    block: suspend () -> Unit,
+    onFailure: (Throwable) -> Unit,
+) {
+    try {
+        block()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (error: Throwable) {
+        onFailure(error)
+    }
+}
+
+/**
+ * Lifecycle-independent service transport loop. One coordinator owns both route selection and
+ * outbox draining; the Android Service owns only this loop's Job.
+ */
+internal class LiveServiceTransportLoop(
+    private val outbox: OutboxRepository,
+    private val loadRoutes: suspend () -> LiveTransportRoutes,
+    private val queuedCount: suspend () -> Int,
+    private val retryRequests: Flow<Unit> = emptyFlow(),
+    private val onAuthenticatedRoute: suspend (RouteKind) -> Unit = {},
+    private val publishHealth: suspend (RouteHealth) -> Unit,
+) {
+    private val healthState = MutableStateFlow(RouteHealth())
+    val health: StateFlow<RouteHealth> = healthState.asStateFlow()
+
+    suspend fun run(preferLan: Boolean) {
+        val routes = loadRoutes()
+        val coordinator = TransportCoordinator(
+            outbox = outbox,
+            lan = routes.lan,
+            relay = routes.relay,
+            preferLan = preferLan,
+            queuedCount = queuedCount,
+            retryRequests = retryRequests,
+        )
+        coroutineScope {
+            var authenticatedRoute = RouteKind.NONE
+            val healthPublisher = launch {
+                coordinator.health.collect { health ->
+                    if (health.phase == RoutePhase.AUTHENTICATED) {
+                        if (health.active != authenticatedRoute) {
+                            authenticatedRoute = health.active
+                            onAuthenticatedRoute(health.active)
+                        }
+                    } else {
+                        authenticatedRoute = RouteKind.NONE
+                    }
+                    healthState.value = health
+                    publishHealth(health)
+                }
+            }
+            try {
+                coordinator.run()
+            } finally {
+                healthPublisher.cancelAndJoin()
+            }
+        }
+    }
+}
+
+/** Conflates preference bursts and never starts a replacement before the old loop is joined. */
+internal class SerializedTransportRestarter(
+    private val isCurrentActive: () -> Boolean,
+    private val stopCurrent: suspend () -> Unit,
+    private val readPreference: suspend () -> Boolean,
+    private val startCurrent: suspend (Boolean) -> Unit,
+) {
+    private val requests = Channel<Unit>(capacity = Channel.CONFLATED)
+    private val forceRequested = AtomicBoolean(false)
+
+    fun ensureStarted() {
+        requests.trySend(Unit)
+    }
+
+    fun forceRestart() {
+        forceRequested.set(true)
+        requests.trySend(Unit)
+    }
+
+    suspend fun run() {
+        for (ignored in requests) {
+            val active = isCurrentActive()
+            val force = forceRequested.getAndSet(false)
+            if (active && !force) continue
+            if (active) stopCurrent()
+            startCurrent(readPreference())
+        }
+    }
+}
 
 internal suspend fun executeCallCaptureStopRequest(
     sharedShutdown: suspend () -> GracefulCallShutdownResult,
@@ -164,6 +264,14 @@ internal suspend fun quiesceServiceJobsAfterCallShutdown(
     if (!fromRelayJob) activeRelay?.cancelAndJoin()
     stopOtherChildren()
     if (!fromRelayJob) cancelAndJoinServiceScope()
+}
+
+internal suspend fun stopRoutePreferenceOwner(
+    fromTransportJob: Boolean,
+    cancelOwner: () -> Unit,
+    cancelAndJoinOwner: suspend () -> Unit,
+) {
+    if (fromTransportJob) cancelOwner() else cancelAndJoinOwner()
 }
 
 internal fun executeUnexpectedServiceDestroy(
@@ -351,10 +459,16 @@ class SyncService : Service() {
             }
             return activeInstance?.callCaptureLifecycle?.current()?.injectDebugState(frameworkState)
         }
+
+        /** Called only after the new preference is durable. */
+        fun notifyRoutePreferenceChanged() {
+            activeInstance?.routePreferenceRestarter?.forceRestart()
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var relayJob: Job? = null
+    private var transportJob: Job? = null
+    private var routePreferenceJob: Job? = null
     private var retentionJob: Job? = null
     private var healthJob: Job? = null
     private var materializerJob: Job? = null
@@ -373,6 +487,15 @@ class SyncService : Service() {
     private lateinit var outbox: OutboxRepository
     private lateinit var dispatcher: InboundDispatcher
     private lateinit var snapshotCoordinator: SnapshotCoordinator
+    private val routePreferenceRestarter = SerializedTransportRestarter(
+        isCurrentActive = { transportJob?.isActive == true },
+        stopCurrent = {
+            transportJob?.cancelAndJoin()
+            transportJob = null
+        },
+        readPreference = { ServiceConfigStore.read(applicationContext).preferLan },
+        startCurrent = { preferLan -> restartTransportFromPersistedConfig(preferLan) },
+    )
 
     override fun onCreate() {
         super.onCreate()
@@ -422,6 +545,7 @@ class SyncService : Service() {
                 retryScheduler = materializationStartupScheduler(applicationContext),
             ).materializePending()
         }
+        routePreferenceJob = scope.launch { routePreferenceRestarter.run() }
         // Publish only after every field needed by a concurrently reserved shutdown is ready.
         activeInstance = this
     }
@@ -462,16 +586,9 @@ class SyncService : Service() {
                 foregroundStarted = true
                 recoverCallsBeforeNormalCapture()
                 scope.launch { runRetentionSweep() }
-                if (decision.relayUrl != null) {
-                    startRelay(decision.relayUrl)
-                } else {
-                    // LAN-only peer: there is no relay to dial. Capture and durable
-                    // custody still run, and delivery waits on the direct route.
-                    SyncServiceStatus.setState(SyncState.OFFLINE_QUEUED)
-                    SyncServiceStatus.setRouteStatus(
-                        SyncRouteStatus(RouteKind.LAN, RoutePhase.CONNECTING, 0),
-                    )
-                }
+                // Initial start and live preference changes share one serialized owner. It
+                // rereads the durable config, so a start racing a toggle cannot use stale order.
+                routePreferenceRestarter.ensureStarted()
             }
         }
         return START_STICKY
@@ -486,7 +603,8 @@ class SyncService : Service() {
         executeUnexpectedServiceDestroy(
             closeCallCapture = { stopCallCapture(terminal = true) },
             cancelServiceJobs = {
-                relayJob?.cancel()
+                transportJob?.cancel()
+                routePreferenceJob?.cancel()
                 retentionJob?.cancel()
                 healthJob?.cancel()
                 materializerJob?.cancel()
@@ -527,7 +645,7 @@ class SyncService : Service() {
         shuttingDown = true
         foregroundStarted = false
         stopCallCapture(terminal = true)
-        val activeRelay = relayJob
+        val activeRelay = transportJob
         quiesceServiceJobsAfterCallShutdown(
             fromRelayJob = fromRelayJob,
             activeRelay = activeRelay,
@@ -535,6 +653,13 @@ class SyncService : Service() {
                 retentionJob?.cancelAndJoin()
                 healthJob?.cancelAndJoin()
                 materializerJob?.cancelAndJoin()
+                // A forced preference restart may currently be joining this transport. A
+                // peer-unpair callback must cancel that owner instead of joining the cycle.
+                stopRoutePreferenceOwner(
+                    fromTransportJob = fromRelayJob,
+                    cancelOwner = { routePreferenceJob?.cancel() },
+                    cancelAndJoinOwner = { routePreferenceJob?.cancelAndJoin() },
+                )
             },
             cancelAndJoinServiceScope = {
                 scope.coroutineContext[Job]?.cancelAndJoin()
@@ -552,9 +677,9 @@ class SyncService : Service() {
         else -> "Stopped - syncing is disabled."
     }
 
-    private fun startRelay(input: String) {
-        if (relayJob?.isActive == true) return
-        relayJob = scope.launch {
+    private fun startTransport(relayInput: String?, preferLan: Boolean) {
+        if (transportJob?.isActive == true) return
+        transportJob = scope.launch {
             while (isActive) {
                 try {
                     legacyMigration.await()
@@ -569,87 +694,125 @@ class SyncService : Service() {
                 }
             }
             if (!isActive) return@launch
-            val endpoints = try {
-                RelayUrlPolicy.parse(
-                    input,
-                    debug = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
-                )
-            } catch (error: Throwable) {
-                SyncServiceStatus.setState(SyncState.OFFLINE_QUEUED)
-                SyncServiceStatus.setLastError("invalid_relay_url")
-                return@launch
-            }
             val deviceId = DeviceIdentity.getOrCreate(applicationContext)
-            val (_, signingKeys) = CryptoStore.loadOrGenerate(applicationContext)
-            val transport = RelayTransport(
+            val relayConfig = relayInput?.let { input ->
+                val endpoints = try {
+                    RelayUrlPolicy.parse(
+                        input,
+                        debug = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+                    )
+                } catch (_: Throwable) {
+                    SyncServiceStatus.setLastError("invalid_relay_url")
+                    null
+                } ?: return@let null
+                val (_, signingKeys) = CryptoStore.loadOrGenerate(applicationContext)
+                liveRelayRouteConfig(
+                    outbox = outbox,
+                    url = endpoints.webSocket,
+                    authHeadersProvider = {
+                        mapOf("Authorization" to "Bearer " + JwtMinter.mint(deviceId, signingKeys.secretKey))
+                    },
+                    hooks = LiveRelayRouteHooks(
+                        dispatch = { envelope ->
+                            try {
+                                dispatcher.dispatch(envelope)
+                            } catch (cancellation: CancellationException) {
+                                throw cancellation
+                            } catch (_: Throwable) {
+                                SyncServiceStatus.setLastError("inbound_dispatch")
+                            }
+                        },
+                        onEvent = { event ->
+                            when (event) {
+                                TransportEvent.LegacyOnlineOnly -> SyncServiceStatus.setState(
+                                    SyncState.LEGACY_ONLINE_ONLY,
+                                )
+                                is TransportEvent.LegacyForwarded,
+                                is TransportEvent.RelayAccepted,
+                                is TransportEvent.RelayRejected,
+                                -> updateQueueHealthNow()
+                                is TransportEvent.Failed -> SyncServiceStatus.setLastError(
+                                    event.error.javaClass.simpleName,
+                                )
+                                is TransportEvent.Closed -> SyncServiceStatus.setLastError("transport_closed")
+                                else -> Unit
+                            }
+                        },
+                        onAuthenticated = { floor ->
+                            SyncServiceStatus.setProtocolFloor(floor)
+                            updateQueueHealthNow()
+                        },
+                        onExpired = {
+                            updateQueueHealthNow()
+                            runTransportSideEffect(
+                                block = { snapshotCoordinator.emitLocalDigest(deviceId) },
+                                onFailure = { SyncServiceStatus.setLastError("snapshot_emit") },
+                            )
+                        },
+                    ),
+                )
+            }
+            val routeFactory = LiveTransportRoutesFactory.production(
+                context = applicationContext,
                 outbox = outbox,
-                // RelayTransport reconnects within the same run. Mint per connector attempt so
-                // a retry after the 60-second JWT lifetime is authenticated with a fresh token.
-                authHeadersProvider = {
-                    mapOf("Authorization" to "Bearer " + JwtMinter.mint(deviceId, signingKeys.secretKey))
-                },
+                dispatch = dispatcher::dispatch,
+                scope = scope,
+                onLanEvent = { updateQueueHealthNow() },
             )
-            // Keep the downstream delivery budget small because each envelope may approach
-            // the protocol's 1 MiB limit. RelayTransport suspends at its flow boundary until
-            // this ordered worker accepts the next item; no Delivery is silently discarded.
-            val deliveryQueue = Channel<String>(capacity = 4)
-            val deliveryWorker = scope.launch {
-                for (envelope in deliveryQueue) {
-                    runCatching { dispatcher.dispatch(envelope) }
-                        .onFailure { SyncServiceStatus.setLastError("inbound_dispatch") }
-                }
-            }
-            try {
-                transport.run(endpoints.webSocket).collect { event ->
-                    when (event) {
-                    TransportEvent.Connected -> {
-                        SyncServiceStatus.setState(SyncState.CONNECTING)
+            LiveServiceTransportLoop(
+                outbox = outbox,
+                loadRoutes = { routeFactory.create(relayConfig) },
+                queuedCount = { reliableDao.activeOutboundCount() },
+                retryRequests = SyncServiceStatus.routeRetryRequested,
+                onAuthenticatedRoute = {
+                    try {
+                        snapshotCoordinator.emitLocalDigest(deviceId)
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (_: Throwable) {
+                        SyncServiceStatus.setLastError("snapshot_emit")
                     }
-                    is TransportEvent.Authenticated -> {
-                        SyncServiceStatus.setProtocolFloor(event.floor)
-                        SyncServiceStatus.setState(SyncState.CONNECTED)
-                        updateQueueHealth(reliableDao)
-                        scope.launch {
-                            runCatching { snapshotCoordinator.emitLocalDigest(deviceId) }
-                        }
-                    }
-                    TransportEvent.LegacyOnlineOnly -> {
-                        SyncServiceStatus.setState(SyncState.LEGACY_ONLINE_ONLY)
-                    }
-                    is TransportEvent.LegacyForwarded -> scope.launch { updateQueueHealth(reliableDao) }
-                    is TransportEvent.Delivery -> deliveryQueue.send(event.envelope)
-                    is TransportEvent.RelayAccepted,
-                    is TransportEvent.RelayRejected,
-                    -> scope.launch { updateQueueHealth(reliableDao) }
-                    is TransportEvent.RelayExpired -> {
-                        scope.launch { updateQueueHealth(reliableDao) }
-                        scope.launch { runCatching { snapshotCoordinator.emitLocalDigest(deviceId) } }
-                    }
-                    is TransportEvent.Failed,
-                    is TransportEvent.Closed,
-                    -> if (isActive) {
-                        SyncServiceStatus.setLastError(
-                            (event as? TransportEvent.Failed)?.error?.javaClass?.simpleName ?: "transport_closed",
-                        )
-                        SyncServiceStatus.setState(SyncState.OFFLINE_QUEUED)
-                        updateQueueHealth(reliableDao)
-                    }
-                }
-                }
-            } finally {
-                deliveryQueue.close()
-                deliveryWorker.cancelAndJoin()
-            }
+                },
+                publishHealth = { routeHealth ->
+                    val status = routeHealth.toSyncRouteStatus()
+                    SyncServiceStatus.setRouteStatus(status)
+                    SyncServiceStatus.setState(
+                        status.toSyncState(SyncServiceStatus.health.value.protocolFloor),
+                    )
+                    SyncServiceStatus.setQueueStats(
+                        routeHealth.queuedCount,
+                        reliableDao.activeOutboundBytes(),
+                    )
+                },
+            ).run(preferLan)
         }
     }
 
-    private fun updateQueueHealth(dao: co.twinotify.core.storage.ReliableDeliveryDao) {
-        scope.launch {
-            runCatching {
-                SyncServiceStatus.setQueueStats(dao.activeOutboundCount(), dao.activeOutboundBytes())
-                updateForegroundCompat()
-            }
+    private suspend fun restartTransportFromPersistedConfig(preferLan: Boolean) {
+        if (shuttingDown) return
+        val config = ServiceConfigStore.read(applicationContext)
+        val peer = PeerStore.load(applicationContext)
+        val decision = ServiceStartPolicy.decide(
+            intentAction = null,
+            persisted = config,
+            paired = peer != null,
+            lanBound = peer?.lanBindingId != null,
+        )
+        if (decision is ServiceStartDecision.Start) {
+            startTransport(decision.relayUrl, preferLan)
         }
+    }
+
+    private suspend fun updateQueueHealthNow() {
+        runTransportSideEffect(
+            block = {
+                SyncServiceStatus.setQueueStats(
+                    reliableDao.activeOutboundCount(),
+                    reliableDao.activeOutboundBytes(),
+                )
+            },
+            onFailure = { SyncServiceStatus.setLastError("queue_health") },
+        )
     }
 
     private fun recoverCallsBeforeNormalCapture() {
@@ -840,10 +1003,11 @@ class SyncService : Service() {
         if (shuttingDown) return
         shuttingDown = true
         foregroundStarted = false
-        relayJob?.cancelAndJoin()
+        transportJob?.cancelAndJoin()
         retentionJob?.cancelAndJoin()
         healthJob?.cancelAndJoin()
         materializerJob?.cancelAndJoin()
+        routePreferenceJob?.cancelAndJoin()
         SyncServiceStatus.setState(SyncState.DISCONNECTED)
         stopForeground(STOP_FOREGROUND_REMOVE)
         shutdownCompleted.complete(Unit)

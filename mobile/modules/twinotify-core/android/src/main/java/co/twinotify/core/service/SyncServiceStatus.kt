@@ -64,6 +64,23 @@ data class SyncRouteStatus(
     )
 }
 
+internal fun RouteHealth.toSyncRouteStatus(): SyncRouteStatus = SyncRouteStatus(
+    route = active,
+    phase = phase,
+    queuedCount = queuedCount,
+)
+
+internal fun SyncRouteStatus.toSyncState(protocolFloor: Int = 2): SyncState = when (phase) {
+    RoutePhase.AUTHENTICATED -> if (route == RouteKind.RELAY && protocolFloor == 1) {
+        SyncState.LEGACY_ONLINE_ONLY
+    } else {
+        SyncState.CONNECTED
+    }
+    RoutePhase.CONNECTING -> SyncState.CONNECTING
+    RoutePhase.RECONNECTING -> SyncState.OFFLINE_QUEUED
+    RoutePhase.IDLE -> SyncState.DISCONNECTED
+}
+
 object SyncServiceStatus {
     private val _state = MutableStateFlow(SyncState.DISCONNECTED)
     val state: StateFlow<SyncState> = _state
@@ -137,6 +154,7 @@ object SyncServiceStatus {
         require(bytes >= 0) { "queued bytes must be non-negative" }
         _queuedCount.value = count
         _health.value = _health.value.copy(queuedCount = count, queuedBytes = bytes)
+        _routeStatus.value = _routeStatus.value.copy(queuedCount = count)
     }
 
     fun setProtocolFloor(floor: Int) {

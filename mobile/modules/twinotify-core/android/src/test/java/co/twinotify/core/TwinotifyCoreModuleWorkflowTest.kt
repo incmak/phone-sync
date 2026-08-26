@@ -26,6 +26,19 @@ import kotlin.test.assertSame
 @OptIn(ExperimentalCoroutinesApi::class)
 class TwinotifyCoreModuleWorkflowTest {
     @Test
+    fun routePreferenceIsPersistedBeforeTheLiveServiceIsNotified() = runTest {
+        val order = mutableListOf<String>()
+
+        persistRoutePreferenceThenNotifyService(
+            preferLan = false,
+            persist = { order += "persist-$it" },
+            notifyService = { order += "notify" },
+        )
+
+        assertEquals(listOf("persist-false", "notify"), order)
+    }
+
+    @Test
     fun completedShutdownReleasesAdmissionBeforeFinalization() = runTest {
         val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val gate = GracefulCallShutdownGate()

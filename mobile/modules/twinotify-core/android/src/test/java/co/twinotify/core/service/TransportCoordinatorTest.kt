@@ -52,6 +52,50 @@ class TransportCoordinatorTest {
     }
 
     @Test
+    fun relayPreferenceIsLiveAndFallsBackToLanWhenRelayIsUnavailable() = runTest {
+        val store = FakeStore(rows = listOf(row("a")))
+        val lan = FakeRoute(RouteKind.LAN)
+        val relay = FakeRoute(RouteKind.RELAY, failOpen = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            preferLan = false,
+            queuedCount = { store.due().size },
+            clock = { testScheduler.currentTime },
+        )
+
+        val job = launch { coordinator.run() }
+        runCurrent()
+
+        assertEquals(1, relay.opens, "relay was not attempted first")
+        assertEquals(RouteKind.LAN, coordinator.health.value.active)
+        assertEquals(listOf("a"), lan.session().sent.map { it.msgId })
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun relayPreferenceDoesNotOpenLanWhileRelayIsHealthy() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            preferLan = false,
+            clock = { testScheduler.currentTime },
+        )
+
+        val job = launch { coordinator.run() }
+        runCurrent()
+
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+        assertEquals(0, lan.opens, "LAN opened in parallel with the preferred relay")
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun onlyOneRouteEverDrainsTheOutbox() = runTest {
         val store = FakeStore(rows = listOf(row("a"), row("b")))
         val lan = FakeRoute(RouteKind.LAN)

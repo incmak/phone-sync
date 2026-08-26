@@ -40,6 +40,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.text.Normalizer
 import java.util.concurrent.CancellationException
 
+internal suspend fun persistRoutePreferenceThenNotifyService(
+    preferLan: Boolean,
+    persist: suspend (Boolean) -> Unit,
+    notifyService: () -> Unit,
+) {
+    persist(preferLan)
+    notifyService()
+}
+
 internal suspend fun <T> settleTwinotifyPromise(
     code: String,
     boundedMessage: String,
@@ -151,7 +160,15 @@ class TwinotifyCoreModule internal constructor(
         AsyncFunction("setPreferLan") { preferLan: Boolean, promise: Promise ->
             moduleScope.launch {
                 try {
-                    co.twinotify.core.service.ServiceConfigStore.setPreferLan(requireContext(), preferLan)
+                    persistRoutePreferenceThenNotifyService(
+                        preferLan = preferLan,
+                        persist = {
+                            co.twinotify.core.service.ServiceConfigStore.setPreferLan(requireContext(), it)
+                        },
+                        notifyService = {
+                            co.twinotify.core.service.SyncService.notifyRoutePreferenceChanged()
+                        },
+                    )
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("PREFER_LAN", e.message ?: "err", e) }
             }

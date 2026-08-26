@@ -290,6 +290,32 @@ class ServiceLifecycleTest {
     }
 
     @Test
+    fun custodyQueueUpdatesKeepAuthenticatedLanAndRelayPublicTruthInSync() {
+        for (route in listOf(RouteKind.LAN, RouteKind.RELAY)) {
+            SyncServiceStatus.setRouteStatus(
+                SyncRouteStatus(route, RoutePhase.AUTHENTICATED, queuedCount = 3),
+            )
+
+            SyncServiceStatus.setQueueStats(count = 1, bytes = 42)
+
+            assertEquals(1, SyncServiceStatus.health.value.queuedCount)
+            assertEquals(1, SyncServiceStatus.routeStatus.value.queuedCount)
+            assertEquals(route, SyncServiceStatus.routeStatus.value.route)
+            assertEquals(RoutePhase.AUTHENTICATED, SyncServiceStatus.routeStatus.value.phase)
+        }
+    }
+
+    @Test
+    fun authenticatedFloorOneRelayPreservesLegacyOnlineOnlyState() {
+        val relay = SyncRouteStatus(RouteKind.RELAY, RoutePhase.AUTHENTICATED, 0)
+        val lan = SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED, 0)
+
+        assertEquals(SyncState.LEGACY_ONLINE_ONLY, relay.toSyncState(protocolFloor = 1))
+        assertEquals(SyncState.CONNECTED, relay.toSyncState(protocolFloor = 2))
+        assertEquals(SyncState.CONNECTED, lan.toSyncState(protocolFloor = 1))
+    }
+
+    @Test
     fun routeStatusCarriesNoNetworkDetail() {
         SyncServiceStatus.setRouteStatus(SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED, 1))
 

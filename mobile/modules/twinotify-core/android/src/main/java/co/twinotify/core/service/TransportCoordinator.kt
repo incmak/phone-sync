@@ -69,6 +69,8 @@ class TransportCoordinator(
     private val outbox: OutboxRepository,
     private val lan: TransportRoute?,
     private val relay: TransportRoute?,
+    /** Chooses route order only; the coordinator still grants exactly one session. */
+    private val preferLan: Boolean = true,
     private val queuedCount: suspend () -> Int = { 0 },
     private val retryPolicy: RetryPolicy = RetryPolicy(),
     private val clock: () -> Long = { System.currentTimeMillis() },
@@ -110,9 +112,10 @@ class TransportCoordinator(
         }
     }
 
-    /** LAN first, relay only when no direct session can be authenticated. */
+    /** Open routes in the configured order, granting at most one authenticated session. */
     private suspend fun openPreferred(): AuthenticatedRouteSession? {
-        for (route in listOfNotNull(lan, relay)) {
+        val routes = if (preferLan) listOfNotNull(lan, relay) else listOfNotNull(relay, lan)
+        for (route in routes) {
             val session = try {
                 route.open()
             } catch (error: CancellationException) {
