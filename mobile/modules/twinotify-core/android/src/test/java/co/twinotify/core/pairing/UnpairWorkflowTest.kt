@@ -295,7 +295,7 @@ class UnpairWorkflowTest {
     }
 
     @Test
-    fun peerRelayJobReturnsThroughWipeBeforeRequestingServiceStopWithoutSelfCancellation() = runTest {
+    fun peerRelayJobWipesWithoutOutboundResponseOrCustodyWaitBeforeSafeServiceStop() = runTest {
         val currentRelay = currentCoroutineContext()[Job]!!
         val steps = mutableListOf<String>()
         var parentScopeStops = 0

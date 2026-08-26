@@ -71,6 +71,18 @@ internal suspend fun runTransportSideEffect(
     }
 }
 
+internal fun acceptRelayUnpairCustody(
+    event: TransportEvent,
+    tracker: UnpairCustodyTracker,
+): Boolean = event is TransportEvent.RelayAccepted &&
+    tracker.accept(event.msgId, CustodyRoute.RELAY)
+
+internal fun acceptLanUnpairCustody(
+    event: co.twinotify.core.lan.LanTransportEvent,
+    tracker: UnpairCustodyTracker,
+): Boolean = event is co.twinotify.core.lan.LanTransportEvent.PeerAccepted &&
+    tracker.accept(event.msgId, CustodyRoute.LAN)
+
 /**
  * Lifecycle-independent service transport loop. One coordinator owns both route selection and
  * outbox draining; the Android Service owns only this loop's Job.
@@ -429,6 +441,34 @@ class SyncService : Service() {
             )
         }
 
+        /**
+         * Terminalize calls and durably disable the service while leaving the active route alive.
+         * The returned handle owns the later, idempotent resource join after the unpair custody
+         * attempt has completed.
+         */
+        internal suspend fun prepareLocalUnpair(
+            ctx: android.content.Context,
+        ): PreparedLocalUnpairService {
+            executeCallCaptureStopRequest(
+                sharedShutdown = {
+                    requestCallShutdown(
+                        ctx,
+                        CallShutdownConfigIntent(disableCallCapture = false, disableService = true),
+                    ).let { awaitCallShutdownResult(it) }
+                },
+                finalizeStop = {},
+            )
+            val service = activeInstance
+            val tracker = service?.unpairCustodyTracker ?: UnpairCustodyTracker()
+            return preparedLocalUnpairService(service?.transportJob, tracker) {
+                if (service != null) {
+                    service.shutdownForUnpair(fromRelayJob = false)
+                    service.shutdownCompleted.await()
+                }
+                ctx.stopService(Intent(ctx, SyncService::class.java))
+            }
+        }
+
         private suspend fun runGracefulCallShutdownWithoutService(
             context: android.content.Context,
         ): GracefulCallShutdownResult = executeCallShutdownPhases(
@@ -483,6 +523,7 @@ class SyncService : Service() {
     private var materializerJob: Job? = null
     private var callCaptureReservationWaiter: Job? = null
     private val actionStopGate = CallCaptureStopRequestGate()
+    private val unpairCustodyTracker = UnpairCustodyTracker()
     private var retainedCallShutdownLease: CallCaptureQuiesceLease? = null
     private var retainedCallShutdownTerminal = false
     private val callCaptureLifecycle = CallCaptureLifecycleFence()
@@ -737,9 +778,12 @@ class SyncService : Service() {
                                     SyncState.LEGACY_ONLINE_ONLY,
                                 )
                                 is TransportEvent.LegacyForwarded,
-                                is TransportEvent.RelayAccepted,
                                 is TransportEvent.RelayRejected,
                                 -> updateQueueHealthNow()
+                                is TransportEvent.RelayAccepted -> {
+                                    acceptRelayUnpairCustody(event, unpairCustodyTracker)
+                                    updateQueueHealthNow()
+                                }
                                 is TransportEvent.Failed -> SyncServiceStatus.setLastError(
                                     event.error.javaClass.simpleName,
                                 )
@@ -765,7 +809,10 @@ class SyncService : Service() {
                 context = applicationContext,
                 outbox = outbox,
                 dispatch = dispatcher::dispatch,
-                onLanEvent = { updateQueueHealthNow() },
+                onLanEvent = { event ->
+                    acceptLanUnpairCustody(event, unpairCustodyTracker)
+                    updateQueueHealthNow()
+                },
             )
             LiveServiceTransportLoop(
                 outbox = outbox,

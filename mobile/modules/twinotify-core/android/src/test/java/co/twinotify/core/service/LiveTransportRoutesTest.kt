@@ -39,6 +39,26 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTransportRoutesTest {
     @Test
+    fun authenticatedRouteAcceptanceCompletesOnlyMatchingUnpairReservations() = runTest {
+        val tracker = UnpairCustodyTracker()
+        val relay = tracker.reserve("relay-unpair")
+        val lan = tracker.reserve("lan-unpair")
+
+        assertFalse(acceptRelayUnpairCustody(TransportEvent.RelayAccepted("stale", 1L), tracker))
+        assertTrue(acceptRelayUnpairCustody(TransportEvent.RelayAccepted("relay-unpair", 2L), tracker))
+        assertTrue(
+            acceptLanUnpairCustody(
+                co.twinotify.core.lan.LanTransportEvent.PeerAccepted("lan-unpair"),
+                tracker,
+            ),
+        )
+
+        assertEquals(CustodyRoute.RELAY, relay.await(5_000L))
+        assertEquals(CustodyRoute.LAN, lan.await(5_000L))
+        assertEquals(0, tracker.pendingCount())
+    }
+
+    @Test
     fun validatedBindingBuildsLanRouteFromStoredPeerAndLocalIdentity() = runTest {
         val expectedLan = route(RouteKind.LAN)
         var loadedPeer: PeerRecord? = null

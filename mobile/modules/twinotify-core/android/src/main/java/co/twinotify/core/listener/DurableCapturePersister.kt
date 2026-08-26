@@ -237,12 +237,19 @@ class DurableCapturePersister(context: Context) : CapturePersister {
     }
 
     /** Control events have no canonical sequence but use the same durable v2 outbox boundary. */
-    suspend fun persistUnpair(reason: String, originDevice: String, timestamp: Long) {
+    suspend fun persistUnpair(reason: String, originDevice: String, timestamp: Long): String =
+        persistUnpair(reason, originDevice, timestamp, UUID.randomUUID().toString())
+
+    suspend fun persistUnpair(
+        reason: String,
+        originDevice: String,
+        timestamp: Long,
+        msgId: String,
+    ): String {
         val peer = PeerStore.load(appContext)
             ?: throw CaptureNotPairedException("unpair capture requires a paired peer")
         val createdAt = timestamp.coerceAtLeast(0L).coerceAtLeast(System.currentTimeMillis())
         val expiresAt = createdAt + RETENTION_MS
-        val msgId = UUID.randomUUID().toString()
         val inner = InnerEventV2(
             msgId = msgId,
             originDevice = originDevice,
@@ -292,6 +299,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
                 requiresPeerReceipt = false,
             ),
         )
+        return msgId
     }
 
     /** Encrypts and durably queues one authenticated snapshot control/item event. */
