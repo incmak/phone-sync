@@ -450,18 +450,90 @@ describe('offline pairing UI behavior', () => {
   });
 
   test('keeps a native-complete pairing finished when relay sync cannot restart', async () => {
-    await OnboardingState.setPairingMode('nearby');
+    await OnboardingState.setPairingMode('relay');
     global.__TWINOTIFY_CORE__.getOfflinePairingStatus.mockResolvedValue(activeStatus({
       phase: 'complete',
       completed: true,
     }));
     global.__TWINOTIFY_CORE__.startSyncService.mockRejectedValue(new Error('relay unavailable'));
     await OnboardingState.setRelayUrl('wss://relay.invalid/ws');
+    global.__TWINOTIFY_CORE__.getPairStatus.mockResolvedValue({ paired: true });
 
     renderScreen(<SuccessScreen />);
 
     expect(await screen.findByText('Twinned.')).toBeTruthy();
+    await waitFor(() => {
+      expect(global.__TWINOTIFY_CORE__.startSyncService)
+        .toHaveBeenCalledWith('wss://relay.invalid/ws');
+    });
     expect(screen.getByText('Done')).toBeTruthy();
+  });
+
+  test('starts LAN-only sync after offline pairing', async () => {
+    await OnboardingState.setPairingMode('nearby');
+    global.__TWINOTIFY_CORE__.getOfflinePairingStatus.mockResolvedValue(activeStatus({
+      phase: 'complete',
+      completed: true,
+    }));
+
+    renderScreen(<SuccessScreen />);
+
+    expect(await screen.findByText('Twinned.')).toBeTruthy();
+    await waitFor(() => {
+      expect(global.__TWINOTIFY_CORE__.startLanOnlySyncService).toHaveBeenCalledTimes(1);
+    });
+    expect(global.__TWINOTIFY_CORE__.startSyncService).not.toHaveBeenCalled();
+  });
+
+  test('keeps offline pairing complete when LAN-only startup fails', async () => {
+    await OnboardingState.setPairingMode('nearby');
+    global.__TWINOTIFY_CORE__.getOfflinePairingStatus.mockResolvedValue(activeStatus({
+      phase: 'complete',
+      completed: true,
+    }));
+    global.__TWINOTIFY_CORE__.startLanOnlySyncService.mockRejectedValue(new Error('LAN unavailable'));
+
+    renderScreen(<SuccessScreen />);
+
+    expect(await screen.findByText('Twinned.')).toBeTruthy();
+    await waitFor(() => {
+      expect(global.__TWINOTIFY_CORE__.startLanOnlySyncService).toHaveBeenCalledTimes(1);
+    });
+    expect(global.__TWINOTIFY_CORE__.startSyncService).not.toHaveBeenCalled();
+    expect(AsyncStorage.setItem).toHaveBeenCalledWith('twinotify_onboarding_complete', 'true');
+  });
+
+  test('ignores a stale relay URL for nearby pairing', async () => {
+    await OnboardingState.setPairingMode('nearby');
+    await OnboardingState.setRelayUrl('wss://stale-relay.invalid/ws');
+    global.__TWINOTIFY_CORE__.getOfflinePairingStatus.mockResolvedValue(activeStatus({
+      phase: 'complete',
+      completed: true,
+    }));
+
+    renderScreen(<SuccessScreen />);
+
+    expect(await screen.findByText('Twinned.')).toBeTruthy();
+    await waitFor(() => {
+      expect(global.__TWINOTIFY_CORE__.startLanOnlySyncService).toHaveBeenCalledTimes(1);
+    });
+    expect(global.__TWINOTIFY_CORE__.startSyncService).not.toHaveBeenCalled();
+  });
+
+  test('keeps relay pairing complete without starting a service when relay URL is absent', async () => {
+    await OnboardingState.setPairingMode('relay');
+    global.__TWINOTIFY_CORE__.getPairStatus.mockResolvedValue({ paired: true });
+
+    renderScreen(<SuccessScreen />);
+
+    expect(await screen.findByText('Twinned.')).toBeTruthy();
+    await waitFor(() => expect(global.__TWINOTIFY_CORE__.getPairStatus).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(global.__TWINOTIFY_CORE__.startSyncService).not.toHaveBeenCalled();
+    expect(global.__TWINOTIFY_CORE__.startLanOnlySyncService).not.toHaveBeenCalled();
   });
 
   test('offers a nearby upgrade without replacing an existing relay identity on mismatch', async () => {

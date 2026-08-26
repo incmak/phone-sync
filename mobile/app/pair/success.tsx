@@ -27,13 +27,17 @@ export default function PairSuccessScreen() {
         if (ps.peerDisplayName?.trim()) {
           setPeerName(ps.peerDisplayName.trim());
         }
-        const relayUrl = await OnboardingState.getRelayUrl();
-        if (relayUrl) {
-          try {
-            await TwinotifyCoreModule.startSyncService(relayUrl);
-          } catch {
-            // Pairing is already committed; the home screen can retry relay sync.
+        try {
+          if (pairingMode === 'nearby') {
+            await TwinotifyCoreModule.startLanOnlySyncService();
+          } else {
+            const relayUrl = await OnboardingState.getRelayUrl();
+            if (relayUrl) {
+              await TwinotifyCoreModule.startSyncService(relayUrl);
+            }
           }
+        } catch {
+          // Pairing is already committed; the home screen can retry sync.
         }
       } catch {
         setVerifiedComplete(false);
