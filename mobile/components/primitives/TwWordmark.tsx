@@ -19,7 +19,10 @@ export function TwWordmark({ size = 20, color, accent, variant = 'pair' }: TwWor
     <View style={styles.row}>
       <TwLogo size={size * 1.4} color={fg} accent={ac} variant={variant} />
       <View style={{ marginLeft: size * 0.4 }}>
-        <Text style={[styles.wordmark, { fontSize: size, color: fg, fontFamily: theme.fonts.uiSemi }]}>
+        <Text
+          allowFontScaling={false}
+          style={[styles.wordmark, { fontSize: size, lineHeight: size * 1.3, color: fg, fontFamily: theme.fonts.uiSemi }]}
+        >
           twin<Text style={{ color: ac }}>otify</Text>
         </Text>
       </View>

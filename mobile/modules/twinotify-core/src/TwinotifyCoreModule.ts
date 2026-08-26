@@ -22,7 +22,7 @@ export type KeyPair = { encPubkey: string; signPubkey: string };
 export type EncryptResult = { ciphertext: string; nonce: string };
 export type MetricsSnapshot = { mirroredToday: number; blockedToday: number; latencyMs: number };
 
-export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'OFFLINE_QUEUED';
+export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'LEGACY_ONLINE_ONLY' | 'OFFLINE_QUEUED';
 
 export interface SyncStatus {
   state: SyncState;
@@ -86,6 +86,7 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   getRouteStatus(): Promise<RouteStatus>;
   /** Try a direct LAN route before the relay. */
   setPreferLan(preferLan: boolean): Promise<void>;
+  getPreferLan(): Promise<boolean>;
   /** Reconnect now instead of waiting out the current backoff. */
   retryRoute(): Promise<void>;
   getPairStatus(): Promise<PairStatus>;

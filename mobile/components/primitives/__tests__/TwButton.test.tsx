@@ -3,19 +3,28 @@ import { StyleSheet } from 'react-native';
 import { render, screen } from '@testing-library/react-native';
 
 import { ThemeProvider } from '../../Theme';
-import { TwButton } from '../TwButton';
+import { pressedButtonScale, TwButton } from '../TwButton';
 
 function renderButton(element: React.ReactElement) {
   return render(<ThemeProvider>{element}</ThemeProvider>);
 }
 
 describe('TwButton accessibility contract', () => {
+  test('does not scale on press when reduced motion is enabled', () => {
+    expect(pressedButtonScale(true, true)).toBe(1);
+    expect(pressedButtonScale(false, true)).toBeLessThan(1);
+  });
+
   test('infers a button name and keeps the small target at least 48dp', () => {
     renderButton(<TwButton size="sm">Continue</TwButton>);
 
     const button = screen.getByRole('button', { name: 'Continue' });
     const style = StyleSheet.flatten(button.props.style);
     expect(style.minHeight ?? style.height).toBeGreaterThanOrEqual(48);
+    const label = screen.getByText('Continue');
+    const labelStyle = StyleSheet.flatten(label.props.style);
+    expect(label.props.allowFontScaling).not.toBe(false);
+    expect(labelStyle.lineHeight).toBeGreaterThan(labelStyle.fontSize);
   });
 
   test('keeps an explicit accessible name and exposes loading as disabled and busy', () => {

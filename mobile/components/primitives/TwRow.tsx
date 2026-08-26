@@ -9,9 +9,11 @@ interface TwRowProps {
   trailing?: React.ReactNode;
   onPress?: () => void;
   style?: ViewStyle;
+  accessibilityLabel?: string;
+  accessibilityHint?: string;
 }
 
-export function TwRow({ leading, title, subtitle, trailing, onPress, style }: TwRowProps) {
+export function TwRow({ leading, title, subtitle, trailing, onPress, style, accessibilityLabel, accessibilityHint }: TwRowProps) {
   const theme = useTheme();
 
   const inner = (
@@ -20,14 +22,12 @@ export function TwRow({ leading, title, subtitle, trailing, onPress, style }: Tw
       <View style={styles.content}>
         <Text
           style={[styles.title, { color: theme.ink, fontFamily: theme.fonts.uiMedium }]}
-          numberOfLines={1}
         >
           {title}
         </Text>
         {subtitle !== undefined && (
           <Text
             style={[styles.subtitle, { color: theme.ink3, fontFamily: theme.fonts.ui }]}
-            numberOfLines={1}
           >
             {subtitle}
           </Text>
@@ -39,7 +39,13 @@ export function TwRow({ leading, title, subtitle, trailing, onPress, style }: Tw
 
   if (onPress) {
     return (
-      <Pressable onPress={onPress} style={[styles.row, style]}>
+      <Pressable
+        onPress={onPress}
+        style={[styles.row, style]}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel ?? (subtitle ? `${title}, ${subtitle}` : title)}
+        accessibilityHint={accessibilityHint}
+      >
         {inner}
       </Pressable>
     );

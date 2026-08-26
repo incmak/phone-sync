@@ -151,6 +151,15 @@ internal class SerializedTransportRestarter(
     }
 }
 
+internal inline fun admitTransportGeneration(
+    currentActive: Boolean,
+    beginGeneration: () -> Unit,
+): Boolean {
+    if (currentActive) return false
+    beginGeneration()
+    return true
+}
+
 internal suspend fun executeCallCaptureStopRequest(
     sharedShutdown: suspend () -> GracefulCallShutdownResult,
     finalizeStop: suspend () -> Unit,
@@ -678,7 +687,7 @@ class SyncService : Service() {
     }
 
     private fun startTransport(relayInput: String?, preferLan: Boolean) {
-        if (transportJob?.isActive == true) return
+        if (!admitTransportGeneration(transportJob?.isActive == true, SyncServiceStatus::beginRouteGeneration)) return
         transportJob = scope.launch {
             while (isActive) {
                 try {

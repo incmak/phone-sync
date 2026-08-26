@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import TwinotifyCoreModule from '../modules/twinotify-core/src/TwinotifyCoreModule';
 import type { RouteStatus } from '../modules/twinotify-core/src/TwinotifyCoreModule';
 
-const NOT_CONNECTED: RouteStatus = { route: 'none', phase: 'idle', queued_count: 0 };
+const NOT_CONNECTED: RouteStatus = { route: 'none', phase: 'idle', queued_count: 0, route_generation: 0 };
 
 /**
  * The live delivery route, straight from the native status. Nothing here infers a

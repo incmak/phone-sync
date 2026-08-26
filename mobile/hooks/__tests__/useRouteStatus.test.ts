@@ -26,7 +26,7 @@ describe('useRouteStatus', () => {
 
     const { result } = renderHook(() => useRouteStatus());
 
-    expect(result.current).toEqual({ route: 'none', phase: 'idle', queued_count: 0 });
+    expect(result.current).toEqual({ route: 'none', phase: 'idle', queued_count: 0, route_generation: 0 });
   });
 
   it('reports the direct route when the native status says so', async () => {

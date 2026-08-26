@@ -5,6 +5,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -21,6 +23,16 @@ import kotlin.test.assertTrue
 class ServiceLifecycleTest {
     private val paired = true
     private val relayUrl = "wss://relay.example.test/ws"
+
+    @Test
+    fun duplicateActiveStartDoesNotAdvanceTransportGeneration() {
+        var generations = 0
+
+        assertFalse(admitTransportGeneration(currentActive = true) { generations++ })
+        assertEquals(0, generations)
+        assertTrue(admitTransportGeneration(currentActive = false) { generations++ })
+        assertEquals(1, generations)
+    }
 
     @Test
     fun nullStickyRestart_enabledPairedAndConfigured_starts() {
@@ -266,7 +278,9 @@ class ServiceLifecycleTest {
 
     @Test
     fun aLanOnlyPeerCanBeEnabledWithoutEverSupplyingARelayUrl() {
-        val enabled = ServiceStartPolicy.applyLanOnlyStart(ServiceConfig())
+        val enabled = ServiceStartPolicy.applyLanOnlyStart(
+            ServiceConfig(enabled = false, relayUrl = "wss://stale-relay.example"),
+        )
 
         assertTrue(enabled.enabled)
         assertNull(enabled.relayUrl)
@@ -321,18 +335,45 @@ class ServiceLifecycleTest {
 
         val rendered = SyncServiceStatus.routeStatus.value.toPublicMap()
 
-        assertEquals(setOf("route", "phase", "queued_count"), rendered.keys)
+        assertEquals(setOf("route", "phase", "queued_count", "route_generation"), rendered.keys)
         assertEquals("lan", rendered["route"])
         assertEquals("authenticated", rendered["phase"])
     }
 
     @Test
     fun stoppingClearsTheRouteStatusSoNoStaleRouteIsShown() {
+        val generation = SyncServiceStatus.beginRouteGeneration()
         SyncServiceStatus.setRouteStatus(SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED, 3))
 
         SyncServiceStatus.clearRouteStatus()
 
         assertEquals(RouteKind.NONE, SyncServiceStatus.routeStatus.value.route)
         assertEquals(RoutePhase.IDLE, SyncServiceStatus.routeStatus.value.phase)
+        assertEquals(generation, SyncServiceStatus.routeStatus.value.routeGeneration)
+    }
+
+    @Test
+    fun concurrentRouteUpdatesCannotPublishAnOlderGeneration() {
+        val start = CountDownLatch(1)
+        val maximum = AtomicInteger(SyncServiceStatus.routeStatus.value.routeGeneration)
+        val generator = Thread {
+            start.await()
+            repeat(500) {
+                maximum.accumulateAndGet(SyncServiceStatus.beginRouteGeneration(), ::maxOf)
+            }
+        }
+        val observer = Thread {
+            start.await()
+            repeat(500) {
+                SyncServiceStatus.setRouteStatus(SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED))
+            }
+        }
+        generator.start()
+        observer.start()
+        start.countDown()
+        generator.join()
+        observer.join()
+
+        assertEquals(maximum.get(), SyncServiceStatus.routeStatus.value.routeGeneration)
     }
 }

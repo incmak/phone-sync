@@ -4,6 +4,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
+import java.util.concurrent.atomic.AtomicInteger
 
 enum class SyncState { DISCONNECTED, CONNECTING, CONNECTED, LEGACY_ONLINE_ONLY, OFFLINE_QUEUED }
 
@@ -56,11 +58,13 @@ data class SyncRouteStatus(
     val route: RouteKind = RouteKind.NONE,
     val phase: RoutePhase = RoutePhase.IDLE,
     val queuedCount: Int = 0,
+    val routeGeneration: Int = 0,
 ) {
     fun toPublicMap(): Map<String, Any> = mapOf(
         "route" to route.name.lowercase(),
         "phase" to phase.name.lowercase(),
         "queued_count" to queuedCount,
+        "route_generation" to routeGeneration,
     )
 }
 
@@ -104,6 +108,7 @@ object SyncServiceStatus {
     private val _routeStatus = MutableStateFlow(SyncRouteStatus())
     val routeStatus: StateFlow<SyncRouteStatus> = _routeStatus
     private val _routeRetryRequested = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+    private val routeGeneration = AtomicInteger(0)
 
     /** A user asking to reconnect now. The coordinator uses it to cut its backoff short. */
     val routeRetryRequested: SharedFlow<Unit> = _routeRetryRequested
@@ -116,12 +121,18 @@ object SyncServiceStatus {
     val peerUnpaired: SharedFlow<Unit> = _peerUnpaired
 
     fun setRouteStatus(status: SyncRouteStatus) {
-        _routeStatus.value = status
+        _routeStatus.update { status.copy(routeGeneration = routeGeneration.get()) }
+    }
+
+    fun beginRouteGeneration(): Int {
+        val next = routeGeneration.incrementAndGet()
+        _routeStatus.update { it.copy(routeGeneration = next) }
+        return next
     }
 
     /** A stopped service has no route. Leaving the last one would show a stale claim. */
     fun clearRouteStatus() {
-        _routeStatus.value = SyncRouteStatus()
+        _routeStatus.update { SyncRouteStatus(routeGeneration = routeGeneration.get()) }
     }
 
     fun setState(s: SyncState) {

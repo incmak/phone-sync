@@ -82,6 +82,16 @@ object ServiceConfigStore {
         return read(ctx)
     }
 
+    /** Atomically enable direct-only delivery and remove any retained relay endpoint. */
+    suspend fun setLanOnlyEnabled(ctx: Context, now: Long = System.currentTimeMillis()): ServiceConfig {
+        ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
+            prefs[ENABLED] = true
+            prefs.remove(RELAY_URL)
+            prefs[LAST_USER_CHANGE_AT] = now
+        }
+        return read(ctx)
+    }
+
     suspend fun setAlwaysConnected(ctx: Context, alwaysConnected: Boolean): ServiceConfig {
         ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
             prefs[ALWAYS_CONNECTED] = alwaysConnected

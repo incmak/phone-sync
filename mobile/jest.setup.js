@@ -87,6 +87,14 @@ const mockTwinotifyCore = {
   awaitPairSig: jest.fn(),
   deviceBCompletePairing: jest.fn(),
   startSyncService: jest.fn(),
+  startLanOnlySyncService: jest.fn(),
+  stopSyncService: jest.fn(),
+  getPreferLan: jest.fn(async () => true),
+  setPreferLan: jest.fn(),
+  retryRoute: jest.fn(),
+  getRouteStatus: jest.fn(async () => ({ route: 'none', phase: 'idle', queued_count: 0, route_generation: 0 })),
+  getSyncStatus: jest.fn(async () => ({ state: 'DISCONNECTED', queuedCount: 0 })),
+  getMetrics: jest.fn(async () => ({ mirroredToday: 0, blockedToday: 0, latencyMs: 0 })),
   unpair: jest.fn(),
 };
 

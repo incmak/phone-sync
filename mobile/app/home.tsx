@@ -13,7 +13,6 @@ import { router } from 'expo-router';
 import {
   useTheme,
   TwWordmark,
-  TwStatusDot,
   TwCard,
   TwSwitch,
   TwButton,
@@ -29,7 +28,7 @@ import { OnboardingState } from '../state/onboardingState';
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function serviceIsRunning(state: SyncState): boolean {
-  return state === 'CONNECTED' || state === 'CONNECTING' || state === 'OFFLINE_QUEUED';
+  return state === 'CONNECTED' || state === 'LEGACY_ONLINE_ONLY' || state === 'CONNECTING' || state === 'OFFLINE_QUEUED';
 }
 
 // ── component ─────────────────────────────────────────────────────────────────
@@ -63,8 +62,8 @@ export default function HomeScreen() {
     setMirrorOn(next);
     try {
       if (next) {
-        const url = relayUrl ?? 'wss://relay.twinotify.app';
-        await TwinotifyCoreModule.startSyncService(url);
+        if (relayUrl) await TwinotifyCoreModule.startSyncService(relayUrl);
+        else await TwinotifyCoreModule.startLanOnlySyncService();
       } else {
         await TwinotifyCoreModule.stopSyncService();
       }
@@ -85,7 +84,7 @@ export default function HomeScreen() {
   }, []);
 
   // Display values
-  const route = presentRoute(routeStatus, pairStatus.paired);
+  const route = presentRoute(routeStatus, pairStatus.paired, mirrorOn);
   const peerLabel = pairStatus.paired
     ? (pairStatus.peerDisplayName?.trim() || pairStatus.peerDeviceId?.slice(0, 8) || 'Unknown device')
     : 'Not paired';
@@ -102,8 +101,9 @@ export default function HomeScreen() {
           <TwWordmark size={17} />
           <Pressable
             onPress={() => router.push('/settings')}
-            style={[styles.iconBtn, { backgroundColor: theme.fill }]}
-            hitSlop={8}
+            style={({ pressed }) => [styles.iconBtn, { opacity: pressed ? 0.55 : 1 }]}
+            accessibilityRole="button"
+            accessibilityLabel="Open settings"
           >
             <Text style={[styles.iconText, { color: theme.ink }]}>⚙</Text>
           </Pressable>
@@ -119,6 +119,7 @@ export default function HomeScreen() {
           <View style={styles.heroTop}>
             <View style={styles.heroLeft}>
               <View
+                accessible
                 accessibilityRole="text"
                 accessibilityLiveRegion="polite"
                 accessibilityLabel={`${route.label}. ${route.explanation}`}
@@ -136,29 +137,22 @@ export default function HomeScreen() {
               onChange={handleMirrorToggle}
               size="lg"
               disabled={!pairStatus.paired}
+              accessibilityLabel="Mirror notifications"
             />
           </View>
 
           {/* Pair row */}
           <View style={[styles.pairRow, { backgroundColor: theme.fill, borderColor: theme.border }]}>
-            <View style={styles.pairBadges}>
-              <View style={[styles.roleBadge, { backgroundColor: theme.ink }]}>
-                <Text style={[styles.roleBadgeText, { color: theme.bg, fontFamily: theme.fonts.mono }]}>
-                  A
-                </Text>
-              </View>
-              <Text style={[styles.arrow, { color: theme.ink3 }]}>→</Text>
-              <View style={[styles.roleBadge, { backgroundColor: theme.accent }]}>
-                <Text style={[styles.roleBadgeText, { color: '#fff', fontFamily: theme.fonts.mono }]}>
-                  B
-                </Text>
-              </View>
-            </View>
-            <Text style={[styles.peerLabel, { color: theme.ink2, fontFamily: theme.fonts.ui }]} numberOfLines={1}>
+            <Text style={[styles.peerLabel, { color: theme.ink2, fontFamily: theme.fonts.ui }]}>
               <Text style={{ color: theme.ink, fontFamily: theme.fonts.uiSemi }}>{peerLabel}</Text>
               {pairStatus.paired && peerReachable ? ' · reachable' : ''}
             </Text>
-            <Pressable onPress={() => router.push('/settings/pair')} hitSlop={8}>
+            <Pressable
+              onPress={() => router.push('/settings/pair')}
+              accessibilityRole="button"
+              accessibilityLabel="Open paired device settings"
+              style={styles.peerAction}
+            >
               <Text style={[styles.chevron, { color: theme.ink3 }]}>›</Text>
             </Pressable>
           </View>
@@ -166,19 +160,23 @@ export default function HomeScreen() {
           {/* Metrics row */}
           <View style={styles.metricsRow}>
             <View style={styles.metric}>
-              <Text style={[styles.metricLabel, { color: theme.ink4, fontFamily: theme.fonts.uiSemi }]}>TODAY</Text>
+              <Text style={[styles.metricLabel, { color: theme.ink3, fontFamily: theme.fonts.uiSemi }]}>Today</Text>
               <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>
                 {metrics.mirroredToday}
               </Text>
             </View>
             <View style={styles.metric}>
-              <Text style={[styles.metricLabel, { color: theme.ink4, fontFamily: theme.fonts.uiSemi }]}>LATENCY</Text>
-              <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>
-                {metrics.latencyMs > 0 ? `${metrics.latencyMs}ms` : '0ms'}
+              <Text style={[styles.metricLabel, { color: theme.ink3, fontFamily: theme.fonts.uiSemi }]}>Latency</Text>
+              <Text style={[
+                styles.metricValue,
+                metrics.latencyMs <= 0 && styles.metricEmptyValue,
+                { color: theme.ink, fontFamily: metrics.latencyMs > 0 ? theme.fonts.mono : theme.fonts.uiSemi },
+              ]} accessibilityLabel={metrics.latencyMs > 0 ? undefined : 'Latency not measured'}>
+                {metrics.latencyMs > 0 ? `${metrics.latencyMs}ms` : 'No data'}
               </Text>
             </View>
             <View style={styles.metric}>
-              <Text style={[styles.metricLabel, { color: theme.ink4, fontFamily: theme.fonts.uiSemi }]}>BLOCKED</Text>
+              <Text style={[styles.metricLabel, { color: theme.ink3, fontFamily: theme.fonts.uiSemi }]}>Blocked</Text>
               <Text style={[styles.metricValue, { color: theme.ink, fontFamily: theme.fonts.mono }]}>
                 {metrics.blockedToday}
               </Text>
@@ -231,14 +229,6 @@ export default function HomeScreen() {
           >
             App filter
           </TwButton>
-          <TwButton
-            variant="secondary"
-            size="sm"
-            fullWidth
-            onPress={() => router.push('/settings')}
-          >
-            Settings
-          </TwButton>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -255,9 +245,9 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
   },
   iconBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    minWidth: 44,
+    minHeight: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -284,23 +274,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginBottom: 16,
   },
-  pairBadges: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  roleBadge: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  roleBadgeText: { fontSize: 11, fontWeight: '700' },
-  arrow: { fontSize: 14 },
   peerLabel: { flex: 1, fontSize: 13 },
   chevron: { fontSize: 22 },
+  peerAction: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   // Metrics
   metricsRow: { flexDirection: 'row', gap: 12 },
   metric: { flex: 1 },
-  metricLabel: { fontSize: 11, letterSpacing: 0.4, marginBottom: 2 },
+  metricLabel: { fontSize: 12, letterSpacing: 0, marginBottom: 2 },
   metricValue: { fontSize: 20, fontWeight: '600' },
+  metricEmptyValue: { fontSize: 13, lineHeight: 18 },
   // Banners
   routeAction: { marginTop: 12, alignSelf: 'flex-start' },
   // Recent
@@ -314,5 +296,5 @@ const styles = StyleSheet.create({
   recentTitle: { fontSize: 14, letterSpacing: -0.1 },
   recentCard: { overflow: 'hidden' },
   // CTAs
-  ctaRow: { flexDirection: 'row', gap: 8, marginTop: 16 },
+  ctaRow: { gap: 8, marginTop: 16 },
 });

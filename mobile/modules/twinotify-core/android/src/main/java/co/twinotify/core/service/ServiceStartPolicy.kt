@@ -41,5 +41,5 @@ object ServiceStartPolicy {
 
     /** Enable a peer that pairs and delivers over the LAN and has no relay at all. */
     fun applyLanOnlyStart(persisted: ServiceConfig): ServiceConfig =
-        persisted.copy(enabled = true)
+        persisted.copy(enabled = true, relayUrl = null)
 }

@@ -108,6 +108,27 @@ class LiveTransportRoutesTest {
     }
 
     @Test
+    fun longLivedRouteRecomputesAdvertisementDayForEveryOpen() = runTest {
+        val openedDays = mutableListOf<Long>()
+        var day = DAY
+        val route = LiveLanTransportRoute(
+            config(),
+            attemptFactory = LiveLanAttemptFactory { opened, _ ->
+                openedDays += opened.utcEpochDay
+                RecordingAttempt(CompletableDeferred(FakeConnection()))
+            },
+            sessionFactory = { RecordingSession(RouteKind.LAN) },
+            utcEpochDay = { day },
+        )
+
+        route.open().close("first")
+        day += 1
+        route.open().close("next_day")
+
+        assertEquals(listOf(DAY, DAY + 1), openedDays)
+    }
+
+    @Test
     fun listenerEphemeralPortIsPublishedOnTheSelectedWifiLease() = runTest {
         val platform = RecordingPlatform()
         val attempt = DefaultLiveLanAttemptFactory(platform).open(config()) {}

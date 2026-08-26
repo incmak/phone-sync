@@ -21,6 +21,7 @@ const (
 	actionNetwork
 	actionForceStop
 	actionReconcile
+	actionLanAvailability
 	actionUnsupported
 )
 
@@ -49,6 +50,8 @@ func (a action) eventID() string {
 		return "force-stop:" + a.device
 	case actionReconcile:
 		return "reconcile:" + a.device
+	case actionLanAvailability:
+		return "lan-available:" + a.device + ":" + fmt.Sprint(a.enabled)
 	default:
 		return "unsupported"
 	}
@@ -72,6 +75,8 @@ func parseAction(raw string) (action, error) {
 		return action{kind: actionReconcile, device: "A", original: raw}, nil
 	case "B.reconcile":
 		return action{kind: actionReconcile, device: "B", original: raw}, nil
+	case "A.lan.fail", "B.lan.fail", "A.lan.restore", "B.lan.restore":
+		return action{kind: actionLanAvailability, device: raw[:1], enabled: strings.HasSuffix(raw, ".restore"), original: raw}, nil
 	case "A.restart", "B.restart", "B.reboot", "relay.sigterm", "relay.restart.same-db", "B.ui.xml.find-mirror:n1", "B.ui.swipe-dismiss:n1", "relay.drop.receipt:n1", "relay.accepted:n1", "relay.expire.mailbox", "relay.snapshot", "B.listener.rebind":
 		return action{kind: actionUnsupported, original: raw}, nil
 	}
@@ -174,16 +179,18 @@ type Bridge interface {
 }
 
 type Executor struct {
-	bridge      Bridge
-	stepTimeout time.Duration
-	baseline    map[string]map[string]string
+	bridge        Bridge
+	stepTimeout   time.Duration
+	baseline      map[string]map[string]string
+	lanFaulted    map[string]bool
+	deliveryRoute *RouteEvidence
 }
 
 func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
 	if bridge == nil || stepTimeout <= 0 {
 		panic("scenario bridge and positive timeout are required")
 	}
-	return &Executor{bridge: bridge, stepTimeout: stepTimeout, baseline: map[string]map[string]string{}}
+	return &Executor{bridge: bridge, stepTimeout: stepTimeout, baseline: map[string]map[string]string{}, lanFaulted: map[string]bool{}}
 }
 
 func (e *Executor) Run(ctx context.Context, name string) error {
@@ -208,6 +215,13 @@ func failedResult(name string, err error) ScenarioResult {
 
 func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result ScenarioResult, runErr error) {
 	result = ScenarioResult{Scenario: plan.Name, Status: "failed", Before: map[string]Observation{}, After: map[string]Observation{}}
+	if len(plan.Children) == 0 {
+		// Executor instances are reusable, but evidence and cleanup responsibility
+		// belong to exactly one public run.
+		e.baseline = map[string]map[string]string{}
+		e.lanFaulted = map[string]bool{}
+		e.deliveryRoute = nil
+	}
 	if err := ValidateExecutablePlan(plan); err != nil {
 		result.ErrorCode = errorCode(err)
 		return result, err
@@ -216,9 +230,21 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		return e.runAggregate(ctx, plan)
 	}
 	defer func() {
+		for device, faulted := range e.lanFaulted {
+			if faulted {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
+				_, err := e.bridge.Control(cleanupCtx, device, "SET_LAN_AVAILABLE", map[string]string{"available": "true"})
+				cancel()
+				if runErr == nil && err != nil {
+					runErr = fmt.Errorf("restore LAN fault %s: %w", device, err)
+				}
+			}
+		}
 		var finalSnapshotErr error
 		for _, device := range []string{"A", "B"} {
-			state, err := e.bridge.Snapshot(context.WithoutCancel(ctx), device)
+			snapshotCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
+			state, err := e.bridge.Snapshot(snapshotCtx, device)
+			cancel()
 			if err == nil {
 				result.After[device] = state
 			} else if finalSnapshotErr == nil {
@@ -227,6 +253,13 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		}
 		if runErr == nil && finalSnapshotErr != nil {
 			runErr = finalSnapshotErr
+		}
+		if runErr == nil {
+			var evidenceErr error
+			result.Route, evidenceErr = deriveRouteEvidence(plan, result.Before, result.After, e.deliveryRoute)
+			if evidenceErr != nil {
+				runErr = evidenceErr
+			}
 		}
 		if runErr != nil {
 			result.ErrorCode = errorCode(runErr)
@@ -260,6 +293,35 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 			}
 		}
 	}
+	return result, nil
+}
+
+func deriveRouteEvidence(plan ScenarioPlan, before, states map[string]Observation, delivery *RouteEvidence) (RouteEvidence, error) {
+	hasRouteClaim := false
+	for _, step := range plan.Steps {
+		hasRouteClaim = hasRouteClaim || strings.Contains(step.Predicate, ".route.")
+	}
+	if !hasRouteClaim {
+		return RouteEvidence{}, nil
+	}
+	if delivery == nil {
+		return RouteEvidence{}, errors.New("route-claiming scenario observed no delivery action")
+	}
+	a, okA := states["A"]
+	b, okB := states["B"]
+	if !okA || !okB {
+		return RouteEvidence{}, errors.New("route evidence requires both terminal observations")
+	}
+	if a.Route != b.Route || a.RoutePhase != b.RoutePhase {
+		return RouteEvidence{}, fmt.Errorf("mixed terminal route observations: %s/%s", a.Route, b.Route)
+	}
+	receipt := int64(0)
+	if a.ReceiptAtMs > before["A"].ReceiptAtMs {
+		receipt = a.ReceiptAtMs
+	}
+	result := *delivery
+	result.ReceiptAtMs = receipt
+	result.ErrorCode = a.ErrorCode
 	return result, nil
 }
 
@@ -297,6 +359,16 @@ func (e *Executor) action(ctx context.Context, action string) error {
 	}
 	switch a.kind {
 	case actionPost:
+		observed, err := e.bridge.Snapshot(ctx, a.device)
+		if err != nil {
+			return err
+		}
+		if observed.Route != "" && observed.Route != "none" && observed.RoutePhase != "authenticated" {
+			return errors.New("delivery action has no authenticated route observation")
+		}
+		if observed.Route != "" && observed.Route != "none" {
+			e.deliveryRoute = &RouteEvidence{Route: observed.Route, Phase: observed.RoutePhase, Generation: observed.RouteGeneration, QueuedCount: observed.Outbox, QueuedBytes: observed.QueuedBytes}
+		}
 		return e.bridge.Post(ctx, a.device, a.tag, a.text)
 	case actionCancel:
 		return e.bridge.Cancel(ctx, a.device, a.tag)
@@ -306,6 +378,15 @@ func (e *Executor) action(ctx context.Context, action string) error {
 		return e.bridge.ForceStop(ctx, a.device)
 	case actionReconcile:
 		return e.bridge.Reconcile(ctx, a.device)
+	case actionLanAvailability:
+		if !a.enabled {
+			e.lanFaulted[a.device] = true
+		}
+		_, err := e.bridge.Control(ctx, a.device, "SET_LAN_AVAILABLE", map[string]string{"available": fmt.Sprint(a.enabled)})
+		if err == nil && a.enabled {
+			e.lanFaulted[a.device] = false
+		}
+		return err
 	case actionUnsupported:
 		return fmt.Errorf("%w: %s", ErrUnsupportedEnvironment, action)
 	default:

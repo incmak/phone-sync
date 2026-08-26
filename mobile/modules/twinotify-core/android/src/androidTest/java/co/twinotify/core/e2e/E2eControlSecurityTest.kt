@@ -124,6 +124,32 @@ class E2eControlSecurityTest {
     }
 
     @Test
+    fun lanFaultControlRequiresAuthClosedParamsAndBoundedBoolean() {
+        val receiver = E2eControlReceiver()
+        val token = E2eSessionToken.forTest(context, "lan-fault-control")
+        assertEquals("unauthorized", receiver.executeForTest(
+            context, E2eCommand("lan-wrong-token", "SET_LAN_AVAILABLE", token = "wrong", params = mapOf("available" to "false")),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context, E2eCommand("lan-missing", "SET_LAN_AVAILABLE", token = token),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context, E2eCommand("lan-extra", "SET_LAN_AVAILABLE", token = token, params = mapOf("available" to "false", "ssid" to "forbidden")),
+        ).code)
+        assertEquals("error", receiver.executeForTest(
+            context, E2eCommand("lan-invalid", "SET_LAN_AVAILABLE", token = token, params = mapOf("available" to "maybe")),
+        ).code)
+        assertEquals("ok", receiver.executeForTest(
+            context, E2eCommand("lan-disable", "SET_LAN_AVAILABLE", token = token, params = mapOf("available" to "false")),
+        ).code)
+        assertTrue(context.getSharedPreferences("e2e-control", Context.MODE_PRIVATE).getLong("lan_fault_until_ms", 0L) > System.currentTimeMillis())
+        assertEquals("ok", receiver.executeForTest(
+            context, E2eCommand("lan-enable", "SET_LAN_AVAILABLE", token = token, params = mapOf("available" to "true")),
+        ).code)
+        assertFalse(context.getSharedPreferences("e2e-control", Context.MODE_PRIVATE).contains("lan_fault_until_ms"))
+    }
+
+    @Test
     fun stateQueryContainsNoNotificationContent() {
         val token = E2eSessionToken.forTest(context, "state-query")
         val uri = E2eStateProvider.stateUri(context).buildUpon().appendQueryParameter("token", token).build()
@@ -146,9 +172,13 @@ class E2eControlSecurityTest {
             assertTrue(offline.keys().asSequence().all {
                 it in setOf("role", "phase", "error_code", "completed", "session_id_hash", "sas_hash")
             })
-            assertTrue(root.has("device_application_identity_hash"))
-            assertTrue(root.has("peer_application_identity_hash"))
-            assertTrue(root.has("lan_binding_present"))
+            assertFalse(root.has("device_id"))
+            assertFalse(root.has("paired_peer"))
+            assertFalse(state.contains("tls_pin", ignoreCase = true))
+            assertEquals(
+                setOf("route", "phase", "route_generation", "queued_count", "queued_bytes", "receipt_at_ms", "error_code"),
+                root.getJSONObject("route_evidence").keys().asSequence().toSet(),
+            )
         }
     }
 

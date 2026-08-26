@@ -49,6 +49,14 @@ internal suspend fun persistRoutePreferenceThenNotifyService(
     notifyService()
 }
 
+internal suspend fun persistLanOnlyConfigThenStart(
+    persist: suspend () -> Unit,
+    start: () -> Unit,
+) {
+    persist()
+    start()
+}
+
 internal suspend fun <T> settleTwinotifyPromise(
     code: String,
     boundedMessage: String,
@@ -146,14 +154,24 @@ class TwinotifyCoreModule internal constructor(
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
-                    co.twinotify.core.service.ServiceConfigStore.setEnabled(ctx, true)
-                    val intent = android.content.Intent(
-                        ctx,
-                        co.twinotify.core.service.SyncService::class.java,
-                    ).apply { action = co.twinotify.core.service.SyncService.ACTION_START }
-                    ctx.startForegroundService(intent)
+                    persistLanOnlyConfigThenStart(
+                        persist = {
+                            co.twinotify.core.service.ServiceConfigStore.setLanOnlyEnabled(ctx)
+                        },
+                        start = {
+                            val intent = android.content.Intent(
+                                ctx,
+                                co.twinotify.core.service.SyncService::class.java,
+                            ).apply { action = co.twinotify.core.service.SyncService.ACTION_START }
+                            ctx.startForegroundService(intent)
+                        },
+                    )
                     promise.resolve(null)
-                } catch (e: Throwable) { promise.reject("START_LAN_SVC", e.message ?: "err", e) }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (e: Throwable) {
+                    promise.reject("START_LAN_SVC", "Unable to start direct delivery", e)
+                }
             }
         }
 
@@ -171,6 +189,18 @@ class TwinotifyCoreModule internal constructor(
                     )
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("PREFER_LAN", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("getPreferLan") { promise: Promise ->
+            moduleScope.launch {
+                settleTwinotifyPromise(
+                    code = "GET_PREFER_LAN",
+                    boundedMessage = "route_preference_unavailable",
+                    operation = { co.twinotify.core.service.ServiceConfigStore.read(requireContext()).preferLan },
+                    resolve = promise::resolve,
+                    reject = promise::reject,
+                )
             }
         }
 

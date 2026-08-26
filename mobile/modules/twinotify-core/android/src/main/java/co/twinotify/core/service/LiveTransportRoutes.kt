@@ -120,6 +120,17 @@ class LiveLanRouteConfig(
         role,
         protocolVersion,
     )
+
+    fun forUtcEpochDay(day: Long) = LiveLanRouteConfig(
+        localDeviceId = localDeviceId,
+        peerDeviceId = peerDeviceId,
+        localSigningKey = localKey,
+        peerSigningKey = peerKey,
+        peerTlsSpkiSha256 = tlsPin,
+        lanSecret = secret,
+        protocolVersion = protocolVersion,
+        utcEpochDay = day,
+    )
 }
 
 class LiveRelayRouteHooks(
@@ -208,6 +219,13 @@ class LiveTransportRoutesFactory(
                                     dispatch = dispatch,
                                     onEvent = onLanEvent,
                                 ).open()
+                            },
+                            allowAttempt = {
+                                val debuggable = appContext.applicationInfo.flags and
+                                    android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+                                val faultUntil = appContext.getSharedPreferences("e2e-control", Context.MODE_PRIVATE)
+                                    .getLong("lan_fault_until_ms", 0L)
+                                !debuggable || faultUntil <= System.currentTimeMillis()
                             },
                         )
                     },
@@ -391,12 +409,18 @@ class LiveLanTransportRoute(
     private val config: LiveLanRouteConfig,
     private val attemptFactory: LiveLanAttemptFactory,
     private val sessionFactory: suspend (AuthenticatedLanConnection) -> AuthenticatedRouteSession,
+    private val utcEpochDay: () -> Long = {
+        Instant.now().atZone(ZoneOffset.UTC).toLocalDate().toEpochDay()
+    },
+    private val allowAttempt: () -> Boolean = { true },
 ) : TransportRoute {
     override val kind: RouteKind = RouteKind.LAN
 
     override suspend fun open(): AuthenticatedRouteSession {
+        check(allowAttempt()) { "lan_debug_unavailable" }
+        val currentConfig = config.forUtcEpochDay(utcEpochDay())
         val attemptRef = AtomicReference<LiveLanAttempt?>()
-        val attempt = attemptFactory.open(config) { attemptRef.get()?.abort() }
+        val attempt = attemptFactory.open(currentConfig) { attemptRef.get()?.abort() }
         attemptRef.set(attempt)
         try {
             val session = sessionFactory(attempt.connect())

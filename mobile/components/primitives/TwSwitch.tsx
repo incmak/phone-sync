@@ -5,6 +5,7 @@ import Animated, {
   useSharedValue,
   withTiming,
   interpolateColor,
+  useReducedMotion,
 } from 'react-native-reanimated';
 import { useTheme } from '../Theme';
 
@@ -33,16 +34,17 @@ export function TwSwitch({
   const thumbOffOn = w - d - 3;
 
   const progress = useSharedValue(checked ? 1 : 0);
+  const reduceMotion = useReducedMotion();
 
   useEffect(() => {
-    progress.value = withTiming(checked ? 1 : 0, { duration: 180 });
-  }, [checked, progress]);
+    progress.value = withTiming(checked ? 1 : 0, { duration: reduceMotion ? 0 : 180 });
+  }, [checked, progress, reduceMotion]);
 
   const trackStyle = useAnimatedStyle(() => ({
     backgroundColor: interpolateColor(
       progress.value,
       [0, 1],
-      [theme.borderHi, theme.accent],
+      [theme.switchOff, theme.accent],
     ),
   }));
 

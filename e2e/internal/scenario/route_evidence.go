@@ -2,7 +2,9 @@ package scenario
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 )
@@ -93,7 +95,153 @@ func RejectSensitiveEvidence(value any) error {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		return fmt.Errorf("evidence is not inspectable: %w", err)
 	}
+	if root, ok := decoded.(map[string]any); ok {
+		if _, isScenario := root["scenario"]; isScenario {
+			if err := inspectClosedWorldScenario(root); err != nil {
+				return err
+			}
+		}
+	}
 	return inspectEvidence("", decoded)
+}
+
+func inspectClosedWorldScenario(root map[string]any) error {
+	allowedRoot := map[string]bool{"scenario": true, "status": true, "events": true, "before": true, "after": true, "error_code": true, "route": true}
+	for key := range root {
+		if !allowedRoot[key] {
+			return fmt.Errorf("evidence field %q is not allowlisted", key)
+		}
+	}
+	scenarioName, scenarioOK := root["scenario"].(string)
+	status, statusOK := root["status"].(string)
+	if !scenarioOK || scenarioName == "" || !statusOK || (status != "passed" && status != "failed") {
+		return errors.New("evidence scenario/status shape is invalid")
+	}
+	if events, ok := root["events"].([]any); !ok {
+		if !(status == "failed" && root["events"] == nil) {
+			return errors.New("evidence events must be an array")
+		}
+	} else {
+		for _, event := range events {
+			if _, ok := event.(string); !ok {
+				return errors.New("evidence event must be a string")
+			}
+		}
+	}
+	allowedObservation := map[string]bool{
+		"health": true, "call_capture_enabled": true, "call_capture_health_code": true,
+		"outbox": true, "active_inbound": true, "pending_materialization": true,
+		"mirror": true, "sequence": true, "terminal": true, "loop_events": true,
+		"route": true, "route_phase": true, "queued_bytes": true, "route_generation": true,
+		"receipt_at_ms": true, "error_code": true,
+	}
+	for _, groupName := range []string{"before", "after"} {
+		group, ok := root[groupName].(map[string]any)
+		if !ok {
+			return fmt.Errorf("evidence %s must be an object", groupName)
+		}
+		if status == "passed" && (group["A"] == nil || group["B"] == nil) {
+			return fmt.Errorf("passed evidence %s requires A and B", groupName)
+		}
+		for device, raw := range group {
+			if device != "A" && device != "B" {
+				return fmt.Errorf("evidence device %q is not allowlisted", device)
+			}
+			observation, ok := raw.(map[string]any)
+			if !ok {
+				return fmt.Errorf("evidence %s.%s must be an object", groupName, device)
+			}
+			for key := range observation {
+				if !allowedObservation[key] {
+					return fmt.Errorf("evidence field %q is not allowlisted", groupName+"."+device+"."+key)
+				}
+			}
+			for _, key := range []string{"health", "outbox", "active_inbound", "pending_materialization", "mirror", "sequence", "terminal", "loop_events", "route", "route_phase", "queued_bytes", "route_generation"} {
+				if _, present := observation[key]; !present {
+					return fmt.Errorf("evidence %s.%s missing %s", groupName, device, key)
+				}
+			}
+			if err := validateObservationShape(observation); err != nil {
+				return fmt.Errorf("evidence %s.%s: %w", groupName, device, err)
+			}
+		}
+	}
+	allowedRoute := map[string]bool{"route": true, "phase": true, "route_generation": true, "queued_count": true, "queued_bytes": true, "receipt_at_ms": true, "error_code": true}
+	route, ok := root["route"].(map[string]any)
+	if !ok {
+		if status == "failed" && root["route"] == nil {
+			return nil
+		}
+		return errors.New("evidence route must be an object")
+	}
+	if route != nil {
+		for key := range route {
+			if !allowedRoute[key] {
+				return fmt.Errorf("evidence route field %q is not allowlisted", key)
+			}
+		}
+		if len(route) != 0 {
+			for _, key := range []string{"route", "phase", "route_generation", "queued_count", "queued_bytes"} {
+				if _, present := route[key]; !present {
+					return fmt.Errorf("evidence route missing %s", key)
+				}
+			}
+			encoded, _ := json.Marshal(route)
+			var typed RouteEvidence
+			if err := json.Unmarshal(encoded, &typed); err != nil {
+				return fmt.Errorf("evidence route shape is invalid: %w", err)
+			}
+			if err := typed.Validate(); err != nil {
+				return fmt.Errorf("evidence route is invalid: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateObservationShape(value map[string]any) error {
+	stringEnum := func(key string, allowed map[string]bool) error {
+		text, ok := value[key].(string)
+		if !ok || !allowed[text] {
+			return fmt.Errorf("%s is invalid", key)
+		}
+		return nil
+	}
+	if err := stringEnum("health", map[string]bool{"stopped": true, "connecting": true, "connected": true, "degraded": true, "offline": true}); err != nil {
+		return err
+	}
+	if err := stringEnum("route", routeKinds); err != nil {
+		return err
+	}
+	if err := stringEnum("route_phase", routePhases); err != nil {
+		return err
+	}
+	for _, key := range []string{"mirror", "terminal", "call_capture_enabled"} {
+		if _, ok := value[key].(bool); !ok {
+			return fmt.Errorf("%s must be boolean", key)
+		}
+	}
+	for _, key := range []string{"outbox", "active_inbound", "pending_materialization", "sequence", "loop_events", "queued_bytes", "route_generation"} {
+		number, ok := value[key].(float64)
+		if !ok || number < 0 || number > math.MaxInt64 || number != float64(int64(number)) {
+			return fmt.Errorf("%s must be a nonnegative integer", key)
+		}
+	}
+	if receipt, present := value["receipt_at_ms"]; present {
+		number, ok := receipt.(float64)
+		if !ok || number < 0 || number > math.MaxInt64 || number != float64(int64(number)) {
+			return errors.New("receipt_at_ms must be a nonnegative integer")
+		}
+	}
+	for _, key := range []string{"call_capture_health_code", "error_code"} {
+		if raw, present := value[key]; present {
+			code, ok := raw.(string)
+			if !ok || !stableCodePattern.MatchString(code) {
+				return fmt.Errorf("%s must be a stable code", key)
+			}
+		}
+	}
+	return nil
 }
 
 func inspectEvidence(path string, value any) error {

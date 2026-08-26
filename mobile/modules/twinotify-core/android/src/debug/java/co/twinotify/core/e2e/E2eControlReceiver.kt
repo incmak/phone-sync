@@ -17,6 +17,7 @@ import co.twinotify.core.pairing.PairNotifyClient
 import co.twinotify.core.pairing.PairProtocol
 import co.twinotify.core.service.ServiceConfigStore
 import co.twinotify.core.service.SyncService
+import co.twinotify.core.service.SyncServiceStatus
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.PeerRecord
 import co.twinotify.core.storage.PeerStore
@@ -91,6 +92,7 @@ class E2eControlReceiver : BroadcastReceiver() {
             "PAIR_INIT", "PAIR_JOIN", "AWAIT_PEER_HELLO", "SIGN_CONFIRMATION",
             "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
+            "SET_LAN_AVAILABLE",
             "OFFLINE_PAIR_START", "OFFLINE_PAIR_JOIN", "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL", "OFFLINE_PAIR_QUERY",
         )
 
@@ -309,6 +311,17 @@ class E2eControlReceiver : BroadcastReceiver() {
             }
             E2eCommandResult(requestId, "ok")
         }
+        "SET_LAN_AVAILABLE" -> {
+            val available = command.param("available") ?: return E2eCommandResult(requestId, "invalid", "available required")
+            require(available == "true" || available == "false") { "available must be true or false" }
+            context.getSharedPreferences("e2e-control", Context.MODE_PRIVATE).edit {
+                if (available.toBoolean()) remove("lan_fault_until_ms")
+                else putLong("lan_fault_until_ms", System.currentTimeMillis() + 120_000L)
+            }
+            SyncService.notifyRoutePreferenceChanged()
+            SyncServiceStatus.requestRouteRetry()
+            E2eCommandResult(requestId, "ok")
+        }
         "RECONCILE" -> {
             val relayUrl = ServiceConfigStore.read(context).relayUrl
                 ?: return E2eCommandResult(requestId, "invalid", "relay URL is not configured")
@@ -420,6 +433,7 @@ class E2eControlReceiver : BroadcastReceiver() {
             "OFFLINE_PAIR_JOIN" -> setOf("display_name", "secret_input_id")
             "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL" -> setOf("secret_input_id")
             "OFFLINE_PAIR_QUERY" -> emptySet()
+            "SET_LAN_AVAILABLE" -> setOf("available")
             else -> return null
         }
         if (command.params.keys.any { it !in allowed }) return "unexpected parameter"

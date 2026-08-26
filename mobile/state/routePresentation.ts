@@ -1,6 +1,6 @@
 import type { RouteStatus } from '../modules/twinotify-core/src/TwinotifyCoreModule';
 
-export type DeliveryState = 'direct' | 'relay' | 'reconnecting' | 'queued' | 'unpaired';
+export type DeliveryState = 'direct' | 'relay' | 'reconnecting' | 'queued' | 'paused' | 'unpaired';
 
 export type DeliveryAction = 'retry' | 'pair';
 
@@ -22,7 +22,7 @@ export interface DeliveryPresentation {
  * infers "offline" from relay state: a healthy direct route reports Direct on
  * Wi-Fi even with no relay connection at all.
  */
-export function presentRoute(status: RouteStatus, paired: boolean): DeliveryPresentation {
+export function presentRoute(status: RouteStatus, paired: boolean, enabled: boolean = true): DeliveryPresentation {
   const queuedCount = Math.max(0, status.queued_count ?? 0);
 
   if (!paired) {
@@ -32,6 +32,15 @@ export function presentRoute(status: RouteStatus, paired: boolean): DeliveryPres
       explanation: 'Link your other phone to start mirroring notifications.',
       action: 'pair',
       queuedCount: 0,
+    };
+  }
+
+  if (!enabled) {
+    return {
+      state: 'paused',
+      label: 'Paused',
+      explanation: 'Turn on mirroring when you want delivery to resume.',
+      queuedCount,
     };
   }
 

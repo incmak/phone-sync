@@ -6,11 +6,13 @@ import {
   ActivityIndicator,
   type PressableProps,
   type ViewStyle,
+  useWindowDimensions,
 } from 'react-native';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
   withTiming,
+  useReducedMotion,
 } from 'react-native-reanimated';
 import { useTheme } from '../Theme';
 import { TW_SEMANTIC, hexWithAlpha } from '../tokens';
@@ -36,6 +38,10 @@ const SIZE_CONFIG = {
   lg: { minHeight: 56, paddingHorizontal: 22, paddingVertical: 15, fontSize: 16 },
 } as const;
 
+export function pressedButtonScale(reduceMotion: boolean, pressed: boolean): number {
+  return pressed && !reduceMotion ? 0.97 : 1;
+}
+
 export function TwButton({
   variant = 'primary',
   size = 'md',
@@ -51,7 +57,9 @@ export function TwButton({
   testID,
 }: TwButtonProps) {
   const theme = useTheme();
+  const { fontScale } = useWindowDimensions();
   const scale = useSharedValue(1);
+  const reduceMotion = useReducedMotion();
   const s = SIZE_CONFIG[size];
   const isDisabled = Boolean(disabled || loading);
   const inferredLabel = typeof children === 'string' || typeof children === 'number'
@@ -63,12 +71,15 @@ export function TwButton({
   }));
 
   const handlePressIn = useCallback(() => {
-    if (!disabled) scale.value = withTiming(0.97, { duration: 80 });
-  }, [disabled, scale]);
+    if (!disabled) {
+      const next = pressedButtonScale(reduceMotion, true);
+      scale.value = reduceMotion ? next : withTiming(next, { duration: 80 });
+    }
+  }, [disabled, reduceMotion, scale]);
 
   const handlePressOut = useCallback(() => {
-    scale.value = withTiming(1, { duration: 120 });
-  }, [scale]);
+    scale.value = reduceMotion ? 1 : withTiming(1, { duration: 120 });
+  }, [reduceMotion, scale]);
 
   // Resolve background + text colors per variant
   let bg = '';
@@ -115,7 +126,7 @@ export function TwButton({
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
         disabled={isDisabled}
-        style={[
+        style={({ pressed }) => [
           styles.base,
           {
             minHeight: s.minHeight,
@@ -125,7 +136,7 @@ export function TwButton({
             borderColor: borderColor,
             borderWidth: borderColor ? 1 : 0,
             borderRadius: theme.radius.md,
-            opacity: isDisabled ? 0.4 : 1,
+            opacity: isDisabled ? 0.4 : pressed && reduceMotion ? 0.82 : 1,
           },
           fullWidth && styles.fullWidth,
         ]}
@@ -141,6 +152,7 @@ export function TwButton({
                   styles.label,
                   {
                     fontSize: s.fontSize,
+                    lineHeight: Math.ceil(s.fontSize * 1.3 * Math.max(1, fontScale)),
                     color: textColor,
                     fontFamily: theme.fonts.uiSemi,
                   },

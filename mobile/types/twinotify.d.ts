@@ -2,6 +2,7 @@ export type SyncState =
   | 'DISCONNECTED'
   | 'CONNECTING'
   | 'CONNECTED'
+  | 'LEGACY_ONLINE_ONLY'
   | 'OFFLINE_QUEUED';
 
 export interface SyncStatus {
@@ -71,9 +72,12 @@ export interface TwinotifyCoreAPI {
   storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string): Promise<void>;
   unpair(): Promise<void>;
   startSyncService(relayUrl: string): Promise<void>;
+  startLanOnlySyncService(): Promise<void>;
   stopSyncService(): Promise<void>;
   getSyncStatus(): Promise<SyncStatus>;
   getPairStatus(): Promise<PairStatus>;
+  getPreferLan(): Promise<boolean>;
+  setPreferLan(preferLan: boolean): Promise<void>;
   isNotificationListenerGranted(): Promise<boolean>;
   openListenerSettings(): Promise<void>;
   isPostNotificationsGranted(): Promise<boolean>;

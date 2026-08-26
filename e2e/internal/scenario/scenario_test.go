@@ -26,6 +26,70 @@ type terminalSnapshotFailureBridge struct {
 	snapshots int
 }
 
+type blockingTerminalSnapshotBridge struct {
+	*fakeBridge
+	snapshots int
+	blocked   map[string]bool
+}
+
+func (b *blockingTerminalSnapshotBridge) Snapshot(ctx context.Context, device string) (scenario.Observation, error) {
+	b.snapshots++
+	if b.snapshots >= 10 {
+		b.blocked[device] = true
+		<-ctx.Done()
+		return scenario.Observation{}, ctx.Err()
+	}
+	return b.fakeBridge.Snapshot(ctx, device)
+}
+
+type faultFailureBridge struct{ *fakeBridge }
+
+type routeAfterPostBridge struct {
+	*fakeBridge
+	setLanAfterPost bool
+}
+
+func (b *routeAfterPostBridge) Post(ctx context.Context, device, tag, text string) error {
+	if err := b.fakeBridge.Post(ctx, device, tag, text); err != nil {
+		return err
+	}
+	if b.setLanAfterPost {
+		for _, peer := range []string{"A", "B"} {
+			state := b.states[peer]
+			state.Route = "lan"
+			state.RoutePhase = "authenticated"
+			b.states[peer] = state
+		}
+	}
+	return nil
+}
+
+type blockingRestoreBridge struct {
+	*fakeBridge
+	restoreAttempts map[string]bool
+}
+
+func (b *blockingRestoreBridge) Control(ctx context.Context, device, name string, params map[string]string) (control.Result, error) {
+	if name == "SET_LAN_AVAILABLE" && params["available"] == "true" {
+		b.restoreAttempts[device] = true
+		<-ctx.Done()
+		return control.Result{}, ctx.Err()
+	}
+	return b.fakeBridge.Control(ctx, device, name, params)
+}
+
+func (b *blockingRestoreBridge) Post(context.Context, string, string, string) error {
+	return errors.New("delivery interrupted")
+}
+
+func (f *faultFailureBridge) Control(ctx context.Context, device, name string, params map[string]string) (control.Result, error) {
+	if device == "B" && name == "SET_LAN_AVAILABLE" && params["available"] == "false" {
+		_, _ = f.fakeBridge.Control(ctx, device, name, params)
+		return control.Result{}, errors.New("fault injection interrupted")
+	}
+	return f.fakeBridge.Control(ctx, device, name, params)
+}
+
 func (f *terminalSnapshotFailureBridge) Snapshot(ctx context.Context, device string) (scenario.Observation, error) {
 	f.snapshots++
 	if f.snapshots >= 10 && device == "B" {
@@ -34,9 +98,20 @@ func (f *terminalSnapshotFailureBridge) Snapshot(ctx context.Context, device str
 	return f.fakeBridge.Snapshot(ctx, device)
 }
 
-func (f *fakeBridge) Control(_ context.Context, device, name string, _ map[string]string) (control.Result, error) {
+func (f *fakeBridge) Control(_ context.Context, device, name string, params map[string]string) (control.Result, error) {
 	f.calls++
 	f.events = append(f.events, device+"."+name)
+	if name == "SET_LAN_AVAILABLE" {
+		state := f.states[device]
+		if params["available"] == "true" {
+			state.Route = "lan"
+		} else {
+			state.Route = "relay"
+		}
+		state.RoutePhase = "authenticated"
+		state.RouteGeneration++
+		f.states[device] = state
+	}
 	return control.Result{}, nil
 }
 func (f *fakeBridge) Post(_ context.Context, device, tag, text string) error {
@@ -52,6 +127,7 @@ func (f *fakeBridge) Post(_ context.Context, device, tag, text string) error {
 		stateA.Canonical = map[string]string{}
 	}
 	stateA.Outbox = 1
+	stateA.ReceiptAtMs++
 	stateA.Canonical[tag] = "ACTIVE"
 	f.states[device] = stateA
 	if device == "A" {
@@ -113,6 +189,12 @@ func (f *fakeBridge) Reconcile(_ context.Context, device string) error {
 func (f *fakeBridge) Snapshot(_ context.Context, device string) (scenario.Observation, error) {
 	f.calls++
 	state := f.states[device]
+	if state.Health == "" {
+		state.Health = "stopped"
+	}
+	if state.Route == "" {
+		state.Route, state.RoutePhase = "none", "idle"
+	}
 	state.Terminal = true
 	if device == "B" {
 		state.Mirror = len(state.Canonical) > 0
@@ -207,13 +289,19 @@ func TestCoreCorrectnessRunsIndependentTaggedScenarios(t *testing.T) {
 }
 
 func TestResultEvidenceIsDerivedFromObservedSnapshots(t *testing.T) {
-	bridge := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
-	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "offline")
+	bridge := &fakeBridge{states: map[string]scenario.Observation{
+		"A": {Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 7, QueuedBytes: 42, ReceiptAtMs: 1700000000000},
+		"B": {Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 8},
+	}}
+	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "lan-direct-delivery")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Status != "passed" || result.After["B"].Health != "connected" || len(result.Events) == 0 {
 		t.Fatalf("result=%+v", result)
+	}
+	if result.Route.Route != "lan" || result.Route.Phase != "authenticated" || result.Route.Generation != 7 || result.Route.ReceiptAtMs != 1700000000001 {
+		t.Fatalf("route evidence was not derived from the observed executor state: %+v", result.Route)
 	}
 	dir := t.TempDir()
 	if err := scenario.WriteEvidenceArtifacts(dir, result); err != nil {
@@ -223,7 +311,7 @@ func TestResultEvidenceIsDerivedFromObservedSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result.After["B"] = scenario.Observation{Health: "offline", Outbox: 9}
+	result.After["B"] = scenario.Observation{Health: "offline", Route: "none", RoutePhase: "idle", Outbox: 9}
 	if err := scenario.WriteEvidenceArtifacts(dir, result); err != nil {
 		t.Fatal(err)
 	}
@@ -233,6 +321,113 @@ func TestResultEvidenceIsDerivedFromObservedSnapshots(t *testing.T) {
 	}
 	if string(before) == string(after) || !strings.Contains(string(after), `"offline"`) || !strings.Contains(string(after), `"outbox":9`) {
 		t.Fatalf("state evidence did not reflect observation: %s", after)
+	}
+}
+
+func TestLanFallbackAndReturnUsesRoutePreferenceWithoutChangingRadios(t *testing.T) {
+	plan, err := scenario.Plan("lan-relay-fallback-return")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scenario.ValidateExecutablePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range plan.Actions() {
+		if strings.Contains(action, "network.") {
+			t.Fatalf("route fallback must not alter radios: %s", action)
+		}
+	}
+}
+
+func TestFallbackEvidenceRecordsRelayDeliveryThenLanReturn(t *testing.T) {
+	bridge := &fakeBridge{states: map[string]scenario.Observation{
+		"A": {Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 1},
+		"B": {Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 1},
+	}}
+	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "lan-relay-fallback-return")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Route.Route != "relay" || result.After["A"].Route != "lan" || result.After["B"].Route != "lan" {
+		t.Fatalf("delivery and return evidence disagree: route=%+v after=%+v", result.Route, result.After)
+	}
+}
+
+func TestExecutorReuseDoesNotInheritDeliveryRoute(t *testing.T) {
+	base := &fakeBridge{states: map[string]scenario.Observation{
+		"A": {Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 1},
+		"B": {Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 1},
+	}}
+	bridge := &routeAfterPostBridge{fakeBridge: base}
+	executor := scenario.NewExecutor(bridge, 50*time.Millisecond)
+	if _, err := executor.RunResult(context.Background(), "lan-relay-fallback-return"); err != nil {
+		t.Fatal(err)
+	}
+	for _, peer := range []string{"A", "B"} {
+		state := base.states[peer]
+		state.Route = "none"
+		state.RoutePhase = "idle"
+		base.states[peer] = state
+	}
+	bridge.setLanAfterPost = true
+
+	result, err := executor.RunResult(context.Background(), "lan-direct-delivery")
+	if err == nil || result.Route.Route != "" {
+		t.Fatalf("later run inherited delivery route: result=%+v err=%v", result, err)
+	}
+}
+
+func TestExecutorReuseDoesNotRepeatPriorLanFaultCleanup(t *testing.T) {
+	base := &fakeBridge{states: map[string]scenario.Observation{
+		"A": {Health: "connected", Route: "lan", RoutePhase: "authenticated"},
+		"B": {Health: "connected", Route: "lan", RoutePhase: "authenticated"},
+	}}
+	executor := scenario.NewExecutor(&faultFailureBridge{base}, 50*time.Millisecond)
+	if _, err := executor.RunResult(context.Background(), "lan-relay-fallback-return"); err == nil {
+		t.Fatal("expected interrupted first run")
+	}
+	base.events = nil
+
+	if _, err := executor.RunResult(context.Background(), "post"); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range base.events {
+		if strings.Contains(event, "SET_LAN_AVAILABLE") {
+			t.Fatalf("later run repeated stale cleanup: %v", base.events)
+		}
+	}
+}
+
+func TestInterruptedFallbackRestoresAnyAppliedLanFault(t *testing.T) {
+	base := &fakeBridge{states: map[string]scenario.Observation{
+		"A": {Health: "connected", Route: "lan", RoutePhase: "authenticated"},
+		"B": {Health: "connected", Route: "lan", RoutePhase: "authenticated"},
+	}}
+	_, err := scenario.NewExecutor(&faultFailureBridge{base}, 50*time.Millisecond).RunResult(context.Background(), "lan-relay-fallback-return")
+	if err == nil {
+		t.Fatal("expected interrupted fault setup")
+	}
+	if base.states["A"].Route != "lan" || base.states["B"].Route != "lan" {
+		t.Fatalf("LAN fault was stranded: %+v", base.states)
+	}
+}
+
+func TestBlockingFallbackRestoresAreBoundedAndBestEffortForBothDevices(t *testing.T) {
+	base := &fakeBridge{states: map[string]scenario.Observation{
+		"A": {Health: "connected", Route: "lan", RoutePhase: "authenticated"},
+		"B": {Health: "connected", Route: "lan", RoutePhase: "authenticated"},
+	}}
+	bridge := &blockingRestoreBridge{fakeBridge: base, restoreAttempts: map[string]bool{}}
+	started := time.Now()
+	result, err := scenario.NewExecutor(bridge, 20*time.Millisecond).RunResult(context.Background(), "lan-relay-fallback-return")
+	if err == nil || result.Status != "failed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded cleanup took %s", elapsed)
+	}
+	if !bridge.restoreAttempts["A"] || !bridge.restoreAttempts["B"] {
+		t.Fatalf("cleanup did not attempt both devices: %+v", bridge.restoreAttempts)
 	}
 }
 
@@ -271,6 +466,22 @@ func TestTerminalSnapshotFailureNeverProducesPassedEvidence(t *testing.T) {
 	}
 	if strings.Contains(string(state), `"passed"`) || !strings.Contains(string(state), `"execution_failed"`) {
 		t.Fatalf("terminal snapshot failure evidence=%s", state)
+	}
+}
+
+func TestBlockingTerminalSnapshotsAreBoundedAndAttemptBothDevices(t *testing.T) {
+	base := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
+	bridge := &blockingTerminalSnapshotBridge{fakeBridge: base, blocked: map[string]bool{}}
+	started := time.Now()
+	result, err := scenario.NewExecutor(bridge, 20*time.Millisecond).RunResult(context.Background(), "post")
+	if err == nil || result.Status != "failed" || result.ErrorCode != "execution_failed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded terminal snapshots took %s", elapsed)
+	}
+	if !bridge.blocked["A"] || !bridge.blocked["B"] {
+		t.Fatalf("terminal evidence did not attempt both devices: %+v", bridge.blocked)
 	}
 }
 

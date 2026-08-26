@@ -52,29 +52,25 @@ class E2eStateProvider : ContentProvider() {
             E2eSessionToken.ensure(context)
             val db = NotificationDb.get(context)
             val database = db.openHelper.readableDatabase
-            val peer = PeerStore.load(context)
-            val deviceId = DeviceIdentity.getOrCreate(context)
-            val keys = CryptoStore.loadOrGenerate(context)
-            val binding = peer?.takeIf { it.lanBindingId != null }?.let { LanPairStore.loadValidated(context, it) }
             val offline = E2eOfflinePairingControl.publicStatus(context)
-            if (offline.optString("phase") == "idle" && binding != null) {
-                offline.put("phase", "complete").put("completed", true)
-            }
+            val health = SyncServiceStatus.health.value
+            val route = SyncServiceStatus.routeStatus.value
+            val outboxBytes = scalarLong(database, "SELECT COALESCE(SUM(byteSize),0) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')")
+            val activeOutbox = scalar(database, "SELECT COUNT(*) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')")
             val root = JSONObject()
-                .put("device_id", deviceId)
-                .put("paired_peer", peer?.deviceId)
-                .put("device_application_identity_hash", applicationIdentityHash(deviceId, keys.first.publicKey, keys.second.publicKey))
-                .put("peer_application_identity_hash", peer?.let { applicationIdentityHash(it.deviceId, it.encPubkey, it.signPubkey) } ?: JSONObject.NULL)
-                .put("lan_binding_present", binding != null)
-                .put("local_tls_pin_hash", binding?.let { sha256BytesHex(LanIdentityStore.loadOrCreate().spkiSha256) } ?: JSONObject.NULL)
-                .put("peer_tls_pin_hash", binding?.let { sha256BytesHex(it.peerTlsSpkiSha256) } ?: JSONObject.NULL)
                 .put("offline_pairing", offline)
-                .put("health", JSONObject(SyncServiceStatus.health.value.toEventMap()))
-                // Route kind and phase only. toPublicMap carries no endpoint or address,
-                // so E2E evidence cannot pick up a network identifier from here.
-                .put("route", JSONObject(SyncServiceStatus.routeStatus.value.toPublicMap()))
-                .put("outbox_bytes", scalarLong(database, "SELECT COALESCE(SUM(byteSize),0) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')"))
-                .put("active_outbox", scalar(database, "SELECT COUNT(*) FROM outbound_message WHERE state IN ('NEW','ACCEPTED')"))
+                .put("health", JSONObject(health.toEventMap()))
+                .put("route", JSONObject(route.toPublicMap()))
+                .put("route_evidence", JSONObject()
+                    .put("route", route.route.name.lowercase())
+                    .put("phase", route.phase.name.lowercase())
+                    .put("route_generation", route.routeGeneration)
+                    .put("queued_count", activeOutbox)
+                    .put("queued_bytes", outboxBytes)
+                    .put("receipt_at_ms", health.lastReceiptAt ?: JSONObject.NULL)
+                    .put("error_code", health.lastErrorCode ?: JSONObject.NULL))
+                .put("outbox_bytes", outboxBytes)
+                .put("active_outbox", activeOutbox)
                 .put("active_inbound", scalar(database, "SELECT COUNT(*) FROM inbound_message WHERE outcome='PENDING_PLATFORM'"))
                 .put("pending_materialization", scalar(database, "SELECT COUNT(*) FROM canonical_notification_state WHERE latestSequence > materializedSequence"))
             root.put("canonical", canonical(database))

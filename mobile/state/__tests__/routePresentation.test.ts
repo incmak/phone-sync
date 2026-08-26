@@ -9,6 +9,16 @@ const status = (over: Partial<RouteStatus> = {}): RouteStatus => ({
 });
 
 describe('presentRoute', () => {
+  it('reports a paired idle service as paused when mirroring is disabled', () => {
+    const p = presentRoute(status({ route: 'none', phase: 'idle' }), true, false);
+
+    expect(p).toMatchObject({
+      state: 'paused',
+      label: 'Paused',
+      explanation: 'Turn on mirroring when you want delivery to resume.',
+    });
+  });
+
   it('reports Direct on Wi-Fi for an authenticated LAN route', () => {
     const p = presentRoute(status({ route: 'lan', phase: 'authenticated' }), true);
 

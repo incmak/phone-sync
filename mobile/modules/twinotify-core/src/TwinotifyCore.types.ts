@@ -30,6 +30,7 @@ export interface RouteStatus {
   route: DeliveryRoute;
   phase: DeliveryRoutePhase;
   queued_count: number;
+  route_generation?: number;
 }
 
 export type RouteStatusEvent = (status: RouteStatus) => void;

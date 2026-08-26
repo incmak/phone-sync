@@ -112,6 +112,14 @@ var plans = map[string][]Step{
 		{Predicate: "B.route.lan"},
 		{Predicate: "terminal.converged"},
 	},
+	"lan-relay-fallback-return": {
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.lan.fail"}, {Action: "B.lan.fail"},
+		{Predicate: "A.route.relay"}, {Predicate: "B.route.relay"},
+		{Action: "A.shell.post:n1"}, {Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"},
+		{Action: "A.lan.restore"}, {Action: "B.lan.restore"},
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"}, {Predicate: "terminal.converged"},
+	},
 	"lan-restart-persistence": {
 		{Predicate: "A.route.lan"},
 		{Action: "A.shell.post:n1"}, {Action: "A.force-stop"}, {Action: "A.restart"},
@@ -177,6 +185,9 @@ type Observation struct {
 	Route                  string            `json:"route"`
 	RoutePhase             string            `json:"route_phase"`
 	QueuedBytes            int64             `json:"queued_bytes"`
+	RouteGeneration        int               `json:"route_generation"`
+	ReceiptAtMs            int64             `json:"receipt_at_ms,omitempty"`
+	ErrorCode              string            `json:"error_code,omitempty"`
 	Canonical              map[string]string `json:"-"`
 	CanonicalSequences     map[string]int    `json:"-"`
 }
@@ -192,6 +203,15 @@ func ParseObservation(payload []byte) (Observation, error) {
 			Route string `json:"route"`
 			Phase string `json:"phase"`
 		} `json:"route"`
+		RouteEvidence struct {
+			Route       string `json:"route"`
+			Phase       string `json:"phase"`
+			Generation  int    `json:"route_generation"`
+			QueuedCount int    `json:"queued_count"`
+			QueuedBytes int64  `json:"queued_bytes"`
+			ReceiptAtMs int64  `json:"receipt_at_ms"`
+			ErrorCode   string `json:"error_code"`
+		} `json:"route_evidence"`
 		OutboxBytes            int64 `json:"outbox_bytes"`
 		ActiveOutbox           int   `json:"active_outbox"`
 		ActiveInbound          int   `json:"active_inbound"`
@@ -218,9 +238,12 @@ func ParseObservation(payload []byte) (Observation, error) {
 		Outbox:                 raw.ActiveOutbox,
 		ActiveInbound:          raw.ActiveInbound,
 		PendingMaterialization: raw.PendingMaterialization,
-		Route:                  raw.Route.Route,
-		RoutePhase:             raw.Route.Phase,
-		QueuedBytes:            raw.OutboxBytes,
+		Route:                  raw.RouteEvidence.Route,
+		RoutePhase:             raw.RouteEvidence.Phase,
+		QueuedBytes:            raw.RouteEvidence.QueuedBytes,
+		RouteGeneration:        raw.RouteEvidence.Generation,
+		ReceiptAtMs:            raw.RouteEvidence.ReceiptAtMs,
+		ErrorCode:              raw.RouteEvidence.ErrorCode,
 		Terminal:               raw.Health.Service == "connected" && raw.ActiveOutbox == 0 && raw.ActiveInbound == 0 && raw.PendingMaterialization == 0,
 		Canonical:              map[string]string{},
 		CanonicalSequences:     map[string]int{},

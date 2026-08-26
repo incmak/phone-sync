@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
+import { View, Text, Pressable, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import Svg, { Circle } from 'react-native-svg';
@@ -18,13 +18,14 @@ function HeroRings({ accent, border }: { accent: string; border: string }) {
 
 export default function WelcomeScreen() {
   const theme = useTheme();
+  const { fontScale } = useWindowDimensions();
 
   return (
     <SafeAreaView
       edges={['top', 'bottom']}
       style={[styles.safe, { backgroundColor: theme.bg }]}
     >
-      <View style={styles.container}>
+      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
           <TwWordmark size={22} />
         </View>
@@ -38,20 +39,27 @@ export default function WelcomeScreen() {
             style={[
               theme.type.display,
               styles.headline,
-              { color: theme.ink, fontFamily: theme.fonts.uiBold },
+              {
+                color: theme.ink,
+                fontFamily: theme.fonts.uiBold,
+                lineHeight: theme.type.display.lineHeight * fontScale,
+              },
             ]}
           >
-            Mirror every{'\n'}notification.
+            Mirror selected notifications.
           </Text>
           <Text
             style={[
               theme.type.body,
-              styles.body,
-              { color: theme.ink3, fontFamily: theme.fonts.ui },
+              {
+                color: theme.ink3,
+                fontFamily: theme.fonts.ui,
+                lineHeight: theme.type.body.lineHeight * fontScale,
+              },
             ]}
           >
-            Your phone&#39;s alerts, delivered silently to your second device — end-to-end encrypted,
-            no accounts, no cloud.
+            Send selected alerts to your second phone. End-to-end encrypted,
+            with no account required.
           </Text>
         </View>
 
@@ -68,30 +76,35 @@ export default function WelcomeScreen() {
           <Pressable
             style={styles.secondaryLink}
             onPress={() => router.replace('/onboarding/role')}
+            accessibilityRole="button"
+            accessibilityLabel="I already have a code"
           >
             <Text
               style={[
                 theme.type.bodyMed,
-                { color: theme.accent, fontFamily: theme.fonts.uiMedium },
+                {
+                  color: theme.accentText,
+                  fontFamily: theme.fonts.uiMedium,
+                  lineHeight: theme.type.bodyMed.lineHeight * fontScale,
+                },
               ]}
             >
               I already have a code
             </Text>
           </Pressable>
         </View>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { flex: 1, paddingHorizontal: 24, paddingTop: 12, paddingBottom: 8 },
+  container: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 12, paddingBottom: 8 },
   header: { alignItems: 'center', marginBottom: 8 },
-  hero: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  copy: { marginBottom: 32 },
+  hero: { minHeight: 360, alignItems: 'center', justifyContent: 'center' },
+  copy: { marginBottom: 32, flexShrink: 0 },
   headline: { marginBottom: 12 },
-  body: { opacity: 0.9 },
-  actions: { gap: 16, paddingBottom: 8 },
-  secondaryLink: { alignItems: 'center', paddingVertical: 8 },
+  actions: { gap: 16, paddingBottom: 8, flexShrink: 0 },
+  secondaryLink: { alignItems: 'center', justifyContent: 'center', minHeight: 44, paddingVertical: 8 },
 });

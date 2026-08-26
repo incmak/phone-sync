@@ -26,6 +26,18 @@ import kotlin.test.assertSame
 @OptIn(ExperimentalCoroutinesApi::class)
 class TwinotifyCoreModuleWorkflowTest {
     @Test
+    fun lanOnlyConfigIsPersistedBeforeServiceAdmission() = runTest {
+        val order = mutableListOf<String>()
+
+        persistLanOnlyConfigThenStart(
+            persist = { order += "persist-direct-only" },
+            start = { order += "start-service" },
+        )
+
+        assertEquals(listOf("persist-direct-only", "start-service"), order)
+    }
+
+    @Test
     fun routePreferenceIsPersistedBeforeTheLiveServiceIsNotified() = runTest {
         val order = mutableListOf<String>()
 

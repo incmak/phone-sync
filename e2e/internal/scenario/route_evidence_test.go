@@ -114,6 +114,8 @@ func TestRejectSensitiveEvidenceAllowsOrdinaryScenarioEvidence(t *testing.T) {
 		Status:   "passed",
 		Events:   []string{"post", "accepted", "receipt"},
 		Route:    validRoute(),
+		Before:   map[string]Observation{"A": {Health: "stopped", Route: "none", RoutePhase: "idle"}, "B": {Health: "stopped", Route: "none", RoutePhase: "idle"}},
+		After:    map[string]Observation{"A": {Health: "stopped", Route: "none", RoutePhase: "idle"}, "B": {Health: "stopped", Route: "none", RoutePhase: "idle"}},
 	}
 
 	if err := RejectSensitiveEvidence(result); err != nil {
@@ -128,5 +130,62 @@ func TestRejectSensitiveEvidenceAllowsADigestButNotAKey(t *testing.T) {
 	}
 	if err := RejectSensitiveEvidence(digest); err != nil {
 		t.Fatalf("expected a hex digest to be allowed, got %v", err)
+	}
+}
+
+func TestRejectSensitiveEvidenceIsClosedWorld(t *testing.T) {
+	result := ScenarioResult{Scenario: "post", Status: "passed"}
+	encoded := map[string]any{
+		"scenario":              result.Scenario,
+		"status":                result.Status,
+		"events":                []string{},
+		"before":                map[string]any{},
+		"after":                 map[string]any{},
+		"route":                 map[string]any{},
+		"unexpected_diagnostic": "looks harmless",
+	}
+	if err := RejectSensitiveEvidence(encoded); err == nil {
+		t.Fatal("unknown evidence field must fail closed")
+	}
+}
+
+func TestRejectSensitiveEvidenceRejectsWrongShapesAndMissingRequiredFields(t *testing.T) {
+	observation := func() map[string]any {
+		return map[string]any{
+			"health": "connected", "call_capture_enabled": false, "outbox": 0,
+			"active_inbound": 0, "pending_materialization": 0, "mirror": false,
+			"sequence": 0, "terminal": true, "loop_events": 0, "route": "lan",
+			"route_phase": "authenticated", "queued_bytes": 0, "route_generation": 1,
+		}
+	}
+	base := func() map[string]any {
+		return map[string]any{
+			"scenario": "post", "status": "passed", "events": []any{"post"},
+			"before": map[string]any{"A": observation(), "B": observation()},
+			"after":  map[string]any{"A": observation(), "B": observation()},
+			"route":  map[string]any{"route": "lan", "phase": "authenticated", "route_generation": 1, "queued_count": 0, "queued_bytes": 0},
+		}
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"before scalar":       func(v map[string]any) { v["before"] = "not-an-object" },
+		"events object":       func(v map[string]any) { v["events"] = map[string]any{} },
+		"route array":         func(v map[string]any) { v["route"] = []any{} },
+		"missing observation": func(v map[string]any) { delete(v["after"].(map[string]any)["A"].(map[string]any), "route_generation") },
+		"wrong health type":   func(v map[string]any) { v["after"].(map[string]any)["A"].(map[string]any)["health"] = 7 },
+		"negative queue":      func(v map[string]any) { v["after"].(map[string]any)["A"].(map[string]any)["outbox"] = -1 },
+		"invalid route enum":  func(v map[string]any) { v["after"].(map[string]any)["A"].(map[string]any)["route"] = "bluetooth" },
+		"missing route field": func(v map[string]any) { delete(v["route"].(map[string]any), "route_generation") },
+		"wrong receipt type": func(v map[string]any) {
+			v["after"].(map[string]any)["A"].(map[string]any)["receipt_at_ms"] = "yesterday"
+		},
+		"raw error text": func(v map[string]any) {
+			v["after"].(map[string]any)["A"].(map[string]any)["error_code"] = "TLS failed at 192.0.2.1"
+		},
+	} {
+		value := base()
+		mutate(value)
+		if err := RejectSensitiveEvidence(value); err == nil {
+			t.Fatalf("%s passed", name)
+		}
 	}
 }

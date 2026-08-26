@@ -148,6 +148,7 @@ export interface Theme {
   shadowLg: typeof TW_SHADOW.lg | typeof TW_SHADOW.dLg;
   bg: string; card: string; fill: string; hover: string;
   border: string; borderHi: string;
+  switchOff: string;
   ink: string; ink2: string; ink3: string; ink4: string;
   accent: string; accentHi: string; accentLo: string; accentText: string;
 }
@@ -169,6 +170,7 @@ export function twTheme({ hue = 180, dark = false } = {}): Theme {
     hover:     dark ? n.dSurface3 : n.surface3,
     border:    dark ? n.dBorder   : n.border,
     borderHi:  dark ? n.dBorderHigh : n.borderHigh,
+    switchOff: dark ? n.dInk3 : n.ink3,
     ink:       dark ? n.dInk      : n.ink,
     ink2:      dark ? n.dInk2     : n.ink2,
     ink3:      dark ? n.dInk3     : n.ink3,
