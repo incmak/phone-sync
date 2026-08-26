@@ -122,6 +122,21 @@ class LiveTransportRoutesTest {
     }
 
     @Test
+    fun listenerConstructionWindowLossClosesEveryCreatedResourceExactlyOnce() = runTest {
+        val platform = RecordingPlatform()
+        val factory = DefaultLiveLanAttemptFactory(
+            platform = platform,
+            afterListenerRegistered = platform::loseWifi,
+        )
+
+        assertFailsWith<IllegalStateException> { factory.open(config()) {} }
+
+        assertEquals(1, platform.listenerCloses)
+        assertEquals(0, platform.discoveryCloses)
+        assertEquals(1, platform.leaseCloses)
+    }
+
+    @Test
     fun initiatorAndAcceptorAgreeOnRolesAndUseTheStoredPeerSigningKey() {
         val config = config()
 

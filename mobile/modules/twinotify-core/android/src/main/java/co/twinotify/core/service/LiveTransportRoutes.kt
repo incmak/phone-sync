@@ -265,39 +265,32 @@ interface LiveLanAttempt {
 
 class DefaultLiveLanAttemptFactory(
     private val platform: LiveLanPlatform,
+    private val afterListenerRegistered: () -> Unit = {},
 ) : LiveLanAttemptFactory {
     override suspend fun open(config: LiveLanRouteConfig, onLost: () -> Unit): LiveLanAttempt {
         val lost = AtomicBoolean(false)
-        val listenerRef = AtomicReference<LanListener?>()
-        val connectionRef = AtomicReference<AuthenticatedLanConnection?>()
-        var lease: LiveWifiLease? = null
-        var discovery: LanDiscovery? = null
+        val resources = LiveLanAttemptResources()
         try {
-            lease = platform.acquireWifi {
+            val lease = platform.acquireWifi {
                 lost.set(true)
                 onLost()
             }
+            resources.installLease(lease)
             if (lost.get()) throw IllegalStateException("lan_network_lost")
             val bound = platform.openListener(config, lease)
-            listenerRef.set(bound.listener)
-            if (lost.get()) {
-                bound.listener.close()
-                throw IllegalStateException("lan_network_lost")
-            }
-            discovery = platform.openDiscovery(config, lease, bound.port)
+            resources.installListener(bound.listener)
+            afterListenerRegistered()
+            if (lost.get()) throw IllegalStateException("lan_network_lost")
+            val discovery = platform.openDiscovery(config, lease, bound.port)
+            resources.installDiscovery(discovery)
             val dialer = platform.openDialer(config, lease)
             return DefaultLiveLanAttempt(
                 DirectLanConnector(discovery, bound.listener, dialer),
-                lease,
-                discovery,
-                bound.listener,
-                connectionRef,
+                resources,
                 lost,
             )
         } catch (error: Throwable) {
-            discovery?.close()
-            listenerRef.get()?.close()
-            lease?.close()
+            resources.closeAll()
             throw error
         }
     }
@@ -305,17 +298,11 @@ class DefaultLiveLanAttemptFactory(
 
 private class DefaultLiveLanAttempt(
     private val connector: DirectLanConnector,
-    private val lease: LiveWifiLease,
-    private val discovery: LanDiscovery,
-    private val listener: LanListener,
-    private val connectionRef: AtomicReference<AuthenticatedLanConnection?>,
+    private val resources: LiveLanAttemptResources,
     private val networkLost: AtomicBoolean,
 ) : LiveLanAttempt {
     private val closed = AtomicBoolean(false)
     private val aborted = AtomicBoolean(false)
-    private val listenerClosed = AtomicBoolean(false)
-    private val discoveryClosed = AtomicBoolean(false)
-    private val connectionClosed = AtomicBoolean(false)
 
     override suspend fun connect(): AuthenticatedLanConnection {
         if (networkLost.get()) {
@@ -323,41 +310,80 @@ private class DefaultLiveLanAttempt(
             throw IllegalStateException("lan_network_lost")
         }
         val connection = connector.connect()
-        connectionRef.set(connection)
+        resources.installConnection(connection)
         if (networkLost.get()) {
-            closeConnectionOnce()
+            resources.closeConnectionOnce()
             throw IllegalStateException("lan_network_lost")
         }
-        closeListenerOnce()
-        closeDiscoveryOnce()
+        resources.closeListenerOnce()
+        resources.closeDiscoveryOnce()
         return connection
     }
 
     override fun abort() {
         if (!aborted.compareAndSet(false, true)) return
-        closeListenerOnce()
-        closeConnectionOnce()
+        resources.closeActiveOnce()
     }
 
     override suspend fun close() {
         if (!closed.compareAndSet(false, true)) return
+        resources.closeAll()
+    }
+}
+
+/** One cleanup authority shared by construction failure, network loss and session shutdown. */
+private class LiveLanAttemptResources {
+    private val lease = AtomicReference<LiveWifiLease?>()
+    private val discovery = AtomicReference<LanDiscovery?>()
+    private val listener = AtomicReference<LanListener?>()
+    private val connection = AtomicReference<AuthenticatedLanConnection?>()
+    private val leaseClosed = AtomicBoolean(false)
+    private val discoveryClosed = AtomicBoolean(false)
+    private val listenerClosed = AtomicBoolean(false)
+    private val connectionClosed = AtomicBoolean(false)
+
+    fun installLease(value: LiveWifiLease) {
+        check(lease.compareAndSet(null, value)) { "lan_lease_already_installed" }
+    }
+
+    fun installDiscovery(value: LanDiscovery) {
+        check(discovery.compareAndSet(null, value)) { "lan_discovery_already_installed" }
+    }
+
+    fun installListener(value: LanListener) {
+        check(listener.compareAndSet(null, value)) { "lan_listener_already_installed" }
+    }
+
+    fun installConnection(value: AuthenticatedLanConnection) {
+        check(connection.compareAndSet(null, value)) { "lan_connection_already_installed" }
+    }
+
+    fun closeActiveOnce() {
+        closeListenerOnce()
+        closeConnectionOnce()
+    }
+
+    fun closeConnectionOnce() {
+        val value = connection.get() ?: return
+        if (connectionClosed.compareAndSet(false, true)) value.close()
+    }
+
+    fun closeListenerOnce() {
+        val value = listener.get() ?: return
+        if (listenerClosed.compareAndSet(false, true)) value.close()
+    }
+
+    suspend fun closeDiscoveryOnce() {
+        val value = discovery.get() ?: return
+        if (discoveryClosed.compareAndSet(false, true)) value.close()
+    }
+
+    suspend fun closeAll() {
         closeConnectionOnce()
         closeListenerOnce()
         closeDiscoveryOnce()
-        lease.close()
-    }
-
-    private fun closeConnectionOnce() {
-        val connection = connectionRef.get() ?: return
-        if (connectionClosed.compareAndSet(false, true)) connection.close()
-    }
-
-    private fun closeListenerOnce() {
-        if (listenerClosed.compareAndSet(false, true)) listener.close()
-    }
-
-    private suspend fun closeDiscoveryOnce() {
-        if (discoveryClosed.compareAndSet(false, true)) discovery.close()
+        val value = lease.get()
+        if (value != null && leaseClosed.compareAndSet(false, true)) value.close()
     }
 }
 
