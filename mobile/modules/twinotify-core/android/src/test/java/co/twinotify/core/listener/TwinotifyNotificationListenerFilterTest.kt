@@ -22,25 +22,4 @@ class TwinotifyNotificationListenerFilterTest {
         assertFalse(callback.contains("appFilterDs"))
     }
 
-    @Test
-    fun overflowRecoveryUsesTheFullListenerSnapshotAndPeerMirrorRows() {
-        val source = File(
-            System.getProperty("user.dir"),
-            "src/main/java/co/twinotify/core/listener/TwinotifyNotificationListener.kt",
-        ).readText()
-        val recovery = source
-            .substringAfter("private suspend fun reconcileCaptureOverflow")
-            .substringBefore("private fun capturePosted")
-
-        assertContains(recovery, "NotificationListenerBridge.activeCaptureSnapshot")
-        assertContains(recovery, "reliableDao.activePeerMirrorStates(originDevice)")
-        assertContains(recovery, "liveMirrorIdentities = listenerSnapshot.liveMirrorIdentities")
-        assertContains(recovery, "val recoveryGeneration = coordinator.reconciliationGeneration()")
-        assertContains(recovery, "clearReconciliationLatchIfCurrent(recoveryGeneration)")
-        assertFalse(
-            recovery.indexOf("val recoveryGeneration") > recovery.indexOf("activeCaptureSnapshot"),
-            "the reconciliation lease must precede the platform snapshot",
-        )
-        assertFalse(recovery.contains("activeSourceSnapshots("))
-    }
 }

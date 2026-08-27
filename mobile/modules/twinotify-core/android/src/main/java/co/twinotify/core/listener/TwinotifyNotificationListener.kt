@@ -42,6 +42,61 @@ internal fun submitRemovalWithObservation(
     return result
 }
 
+/** One listener reconciliation worker owns the pass at a time. */
+internal class CaptureReconciliationRequestGate {
+    @JvmInline
+    value class Lease internal constructor(val generation: Long)
+
+    private var activeLease: Lease? = null
+    private var rerunRequested = false
+    private var nextGeneration = 0L
+
+    @Synchronized
+    fun claimInitialPass(): Lease? {
+        if (activeLease != null) {
+            rerunRequested = true
+            return null
+        }
+        nextGeneration += 1L
+        return Lease(nextGeneration).also { activeLease = it }
+    }
+
+    @Synchronized
+    fun completePass(lease: Lease): Boolean {
+        if (activeLease != lease) return false
+        if (rerunRequested) {
+            rerunRequested = false
+            return true
+        }
+        activeLease = null
+        return false
+    }
+
+    @Synchronized
+    fun cancel(lease: Lease) {
+        if (activeLease != lease) return
+        activeLease = null
+        rerunRequested = false
+    }
+}
+
+internal suspend fun runCaptureReconciliationPassLoop(
+    gate: CaptureReconciliationRequestGate,
+    lease: CaptureReconciliationRequestGate.Lease,
+    onFailure: (Throwable) -> Unit = {},
+    runPass: suspend () -> Unit,
+) {
+    do {
+        try {
+            runPass()
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            throw cancellation
+        } catch (error: Throwable) {
+            onFailure(error)
+        }
+    } while (gate.completePass(lease))
+}
+
 /** Android callback adapter. It never depends on SyncService or a React Native lifecycle. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class TwinotifyNotificationListener : NotificationListenerService() {
@@ -52,8 +107,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
     private lateinit var denylist: Set<String>
     private lateinit var originDevice: String
     private lateinit var coordinator: CaptureCoordinator
-    private val reconciliationLock = Any()
-    private var reconciliationRunning = false
+    private val reconciliationRequestGate = CaptureReconciliationRequestGate()
 
     override fun onCreate() {
         super.onCreate()
@@ -216,22 +270,17 @@ class TwinotifyNotificationListener : NotificationListenerService() {
 
     private fun requestCaptureReconciliation() {
         if (!NotificationListenerBridge.isAttached() || !coordinator.reconciliationNeeded()) return
-        val shouldLaunch = synchronized(reconciliationLock) {
-            if (reconciliationRunning) false else {
-                reconciliationRunning = true
-                true
-            }
-        }
-        if (!shouldLaunch) return
+        val lease = reconciliationRequestGate.claimInitialPass() ?: return
         scope.launch {
             try {
-                reconcileCaptureOverflow()
-            } catch (cancellation: kotlinx.coroutines.CancellationException) {
-                throw cancellation
-            } catch (_: Throwable) {
-                android.util.Log.w(TAG, "capture_reconciliation_unavailable")
+                runCaptureReconciliationPassLoop(
+                    gate = reconciliationRequestGate,
+                    lease = lease,
+                    onFailure = { android.util.Log.w(TAG, "capture_reconciliation_unavailable") },
+                    runPass = ::reconcileCaptureOverflow,
+                )
             } finally {
-                synchronized(reconciliationLock) { reconciliationRunning = false }
+                reconciliationRequestGate.cancel(lease)
             }
         }
     }
