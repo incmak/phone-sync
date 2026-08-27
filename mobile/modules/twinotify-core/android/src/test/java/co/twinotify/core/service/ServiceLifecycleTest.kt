@@ -25,6 +25,112 @@ class ServiceLifecycleTest {
     private val relayUrl = "wss://relay.example.test/ws"
 
     @Test
+    fun foregroundRequestPromotesBeforeNoRoutePolicyReadsAndStop() {
+        val order = mutableListOf<String>()
+
+        val result = executeForegroundServiceRequest(
+            action = SyncService.ACTION_START,
+            promote = { order += "foreground" },
+            decideConfiguredStart = {
+                order += "config"
+                val config = ServiceStartPolicy.applyLanOnlyStart(ServiceConfig())
+                order += "peer"
+                order += "policy"
+                ServiceStartPolicy.decide(
+                    SyncService.ACTION_START,
+                    config,
+                    paired = true,
+                    lanBound = false,
+                )
+            },
+            onActionStop = { error("not an ACTION_STOP request") },
+            onPolicyStop = {
+                order += "stop:${it.reason}"
+                it.reason
+            },
+            onStart = { error("missing LAN binding must not start") },
+        )
+
+        assertEquals("no_route_available", result)
+        assertEquals(
+            listOf("foreground", "config", "peer", "policy", "stop:no_route_available"),
+            order,
+        )
+    }
+
+    @Test
+    fun freshActionStopPromotesWithoutReadingConfiguration() {
+        val order = mutableListOf<String>()
+
+        val result = executeForegroundServiceRequest(
+            action = SyncService.ACTION_STOP,
+            promote = { order += "foreground" },
+            decideConfiguredStart = { error("ACTION_STOP must not read lifecycle state") },
+            onActionStop = {
+                order += "action-stop"
+                "user_disabled"
+            },
+            onPolicyStop = { error("ACTION_STOP is not a configured policy stop") },
+            onStart = { error("ACTION_STOP must not start") },
+        )
+
+        assertEquals("user_disabled", result)
+        assertEquals(listOf("foreground", "action-stop"), order)
+    }
+
+    @Test
+    fun validConfiguredStartPromotesExactlyOnceBeforeStarting() {
+        val order = mutableListOf<String>()
+
+        val result = executeForegroundServiceRequest(
+            action = SyncService.ACTION_START,
+            promote = { order += "foreground" },
+            decideConfiguredStart = {
+                order += "config"
+                ServiceStartPolicy.decide(
+                    SyncService.ACTION_START,
+                    ServiceConfig(enabled = true, relayUrl = relayUrl),
+                    paired = true,
+                )
+            },
+            onActionStop = { error("not an ACTION_STOP request") },
+            onPolicyStop = { error("configured relay must start") },
+            onStart = {
+                order += "start"
+                "started"
+            },
+        )
+
+        assertEquals("started", result)
+        assertEquals(listOf("foreground", "config", "start"), order)
+    }
+
+    @Test
+    fun foregroundNotificationOwnerSkipsSameSnapshotAndRefreshesChangedHealth() {
+        val owner = ForegroundNotificationOwner<String>()
+        val rendered = mutableListOf<String>()
+
+        owner.promote("connecting", rendered::add)
+        owner.promote("connecting", rendered::add)
+        owner.refresh("connecting", rendered::add)
+        owner.refresh("connected", rendered::add)
+
+        assertEquals(listOf("connecting", "connected"), rendered)
+    }
+
+    @Test
+    fun foregroundNotificationOwnerStopsRefreshingAfterRemoval() {
+        val owner = ForegroundNotificationOwner<String>()
+        val rendered = mutableListOf<String>()
+
+        owner.promote("connecting", rendered::add)
+        owner.remove()
+        owner.refresh("connected", rendered::add)
+
+        assertEquals(listOf("connecting"), rendered)
+    }
+
+    @Test
     fun duplicateActiveStartDoesNotAdvanceTransportGeneration() {
         var generations = 0
 

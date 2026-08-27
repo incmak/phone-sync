@@ -416,6 +416,50 @@ internal fun executeUnexpectedServiceDestroy(
     cancelServiceJobs()
 }
 
+/** Satisfies Android's foreground-service contract before lifecycle policy can block or stop. */
+internal inline fun <T> executeForegroundServiceRequest(
+    action: String?,
+    promote: () -> Unit,
+    decideConfiguredStart: () -> ServiceStartDecision,
+    onActionStop: () -> T,
+    onPolicyStop: (ServiceStartDecision.Stop) -> T,
+    onStart: (ServiceStartDecision.Start) -> T,
+): T {
+    promote()
+    if (action == SyncService.ACTION_STOP) return onActionStop()
+    return when (val decision = decideConfiguredStart()) {
+        is ServiceStartDecision.Stop -> onPolicyStop(decision)
+        is ServiceStartDecision.Start -> onStart(decision)
+    }
+}
+
+/** Owns foreground notification rendering across promotion, health refresh, and removal. */
+internal class ForegroundNotificationOwner<T : Any> {
+    private var active = false
+    private var rendered: T? = null
+
+    @Synchronized
+    fun promote(snapshot: T, render: (T) -> Unit) {
+        if (active && rendered == snapshot) return
+        render(snapshot)
+        rendered = snapshot
+        active = true
+    }
+
+    @Synchronized
+    fun refresh(snapshot: T, render: (T) -> Unit) {
+        if (!active || rendered == snapshot) return
+        render(snapshot)
+        rendered = snapshot
+    }
+
+    @Synchronized
+    fun remove() {
+        active = false
+        rendered = null
+    }
+}
+
 /** Avoids crash recovery while a live source can still be producing legitimate ACTIVE rows. */
 internal fun startCallCaptureRecoveryForServiceStart(
     captureStatus: CallCaptureStatus?,
@@ -662,7 +706,7 @@ class SyncService : Service() {
     private var retainedCallShutdownTerminal = false
     private val callCaptureLifecycle = CallCaptureLifecycleFence()
     private val callCaptureStartupGate = CallCaptureStartupGate()
-    private var foregroundStarted = false
+    private val foregroundNotificationOwner = ForegroundNotificationOwner<SyncHealth>()
     private var shuttingDown = false
     private val shutdownCompleted = CompletableDeferred<Unit>()
     private lateinit var legacyMigration: Deferred<LegacyMigrationSummary>
@@ -707,7 +751,7 @@ class SyncService : Service() {
         // Every health transition refreshes the foreground text from the same native snapshot.
         healthJob = scope.launch {
             SyncServiceStatus.health.collectLatest {
-                if (foregroundStarted && !shuttingDown) updateForegroundCompat()
+                if (!shuttingDown) foregroundNotificationOwner.refresh(it, ::startForegroundCompat)
             }
         }
         retentionJob = scope.launch {
@@ -739,52 +783,66 @@ class SyncService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            requestActionStop()
-            return START_NOT_STICKY
-        }
-
-        // Explicit user starts carry the freshly entered URL. Persist both fields before the
-        // socket is attempted so pairing remains complete even when the relay is unavailable.
-        val requestedUrl = intent?.getStringExtra(EXTRA_RELAY_URL)
-        if (intent?.action == ACTION_START && !requestedUrl.isNullOrBlank()) {
-            runBlocking(Dispatchers.IO) {
-                ServiceConfigStore.setRelayUrl(applicationContext, requestedUrl)
-                ServiceConfigStore.setEnabled(applicationContext, enabled = true)
-            }
-        }
-        val config = runBlocking(Dispatchers.IO) { ServiceConfigStore.read(applicationContext) }
-        val peer = runBlocking(Dispatchers.IO) { PeerStore.load(applicationContext) }
-        val paired = peer != null
-        // A peer paired over the LAN has a binding and may have no relay at all.
-        val lanBound = peer?.lanBindingId != null
-        when (
-            val decision = ServiceStartPolicy.decide(intent?.action, config, paired, lanBound)
-        ) {
-            is ServiceStartDecision.Stop -> {
+        return executeForegroundServiceRequest(
+            action = intent?.action,
+            promote = {
+                updatePostPermissionStatus()
+                val health = SyncServiceStatus.health.value
+                foregroundNotificationOwner.promote(health, ::startForegroundCompat)
+                // Close the race where health changes between the snapshot read and promotion.
+                foregroundNotificationOwner.refresh(
+                    SyncServiceStatus.health.value,
+                    ::startForegroundCompat,
+                )
+            },
+            decideConfiguredStart = {
+                // Explicit user starts carry the freshly entered URL. Persist both fields before
+                // the socket is attempted so pairing remains complete when the relay is offline.
+                val requestedUrl = intent?.getStringExtra(EXTRA_RELAY_URL)
+                if (intent?.action == ACTION_START && !requestedUrl.isNullOrBlank()) {
+                    runBlocking(Dispatchers.IO) {
+                        ServiceConfigStore.setRelayUrl(applicationContext, requestedUrl)
+                        ServiceConfigStore.setEnabled(applicationContext, enabled = true)
+                    }
+                }
+                val config = runBlocking(Dispatchers.IO) {
+                    ServiceConfigStore.read(applicationContext)
+                }
+                val peer = runBlocking(Dispatchers.IO) { PeerStore.load(applicationContext) }
+                ServiceStartPolicy.decide(
+                    intent?.action,
+                    config,
+                    paired = peer != null,
+                    lanBound = peer?.lanBindingId != null,
+                )
+            },
+            onActionStop = {
+                requestActionStop()
+                START_NOT_STICKY
+            },
+            onPolicyStop = { decision ->
+                clearForegroundOwnership()
                 SyncServiceStatus.setLastError(decision.reason)
                 SyncServiceStatus.setState(SyncState.DISCONNECTED)
                 SyncServiceStatus.clearRouteStatus()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
-                return START_NOT_STICKY
-            }
-            is ServiceStartDecision.Start -> {
-                startForegroundCompat()
-                foregroundStarted = true
+                START_NOT_STICKY
+            },
+            onStart = {
                 recoverCallsBeforeNormalCapture()
                 scope.launch { runRetentionSweep() }
                 // Initial start and live preference changes share one serialized owner. It
                 // rereads the durable config, so a start racing a toggle cannot use stale order.
                 routePreferenceRestarter.ensureStarted()
-            }
-        }
-        return START_STICKY
+                START_STICKY
+            },
+        )
     }
 
     override fun onDestroy() {
         shuttingDown = true
-        foregroundStarted = false
+        clearForegroundOwnership()
         SyncServiceStatus.setState(SyncState.DISCONNECTED)
         // Android destruction cannot await durable shutdown. Keep any ACTIVE call rows as the
         // crash journal for Plan 009 startup recovery and perform process-local teardown only.
@@ -806,14 +864,16 @@ class SyncService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startForegroundCompat() {
+    private fun updatePostPermissionStatus() {
         SyncServiceStatus.setPostPermission(
             ContextCompat.checkSelfPermission(
                 this,
                 android.Manifest.permission.POST_NOTIFICATIONS,
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
         )
-        val health = SyncServiceStatus.health.value
+    }
+
+    private fun startForegroundCompat(health: SyncHealth) {
         val notif: Notification = NotificationCompat.Builder(this, NotifChannelSetup.CHANNEL_FGS)
             .setContentTitle("Twinotify active")
             .setContentText(foregroundText(health))
@@ -823,15 +883,14 @@ class SyncService : Service() {
         startForeground(FGS_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
     }
 
-    private fun updateForegroundCompat() {
-        if (!foregroundStarted || shuttingDown) return
-        startForegroundCompat()
+    private fun clearForegroundOwnership() {
+        foregroundNotificationOwner.remove()
     }
 
     private suspend fun shutdownForUnpair(fromRelayJob: Boolean) {
         if (shuttingDown) return
         shuttingDown = true
-        foregroundStarted = false
+        clearForegroundOwnership()
         stopCallCapture(terminal = true)
         val activeRelay = transportJob
         quiesceServiceJobsAfterCallShutdown(
@@ -1212,7 +1271,7 @@ class SyncService : Service() {
     private suspend fun finalizeActionStop() {
         if (shuttingDown) return
         shuttingDown = true
-        foregroundStarted = false
+        clearForegroundOwnership()
         transportJob?.cancelAndJoin()
         retentionJob?.cancelAndJoin()
         healthJob?.cancelAndJoin()
