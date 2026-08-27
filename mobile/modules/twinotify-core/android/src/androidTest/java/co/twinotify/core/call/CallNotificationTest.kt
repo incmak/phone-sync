@@ -45,6 +45,11 @@ class CallNotificationTest {
             NotifChannelSetup.ensureChannels(context)
             val notification = CallStateMaterializer.build(context, state, state.mirrorLocalId!!)
 
+            assertEquals(NotifChannelSetup.CHANNEL_CALLS, notification.channelId)
+            assertEquals(
+                NotificationManager.IMPORTANCE_HIGH,
+                manager.getNotificationChannel(NotifChannelSetup.CHANNEL_CALLS)?.importance,
+            )
             assertEquals(Notification.CATEGORY_CALL, notification.category)
             assertTrue(notification.actions?.isEmpty() != false, "call mirror must not expose controls")
             assertEquals(null, notification.contentIntent)

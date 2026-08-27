@@ -26,6 +26,35 @@ import kotlin.test.assertSame
 @OptIn(ExperimentalCoroutinesApi::class)
 class TwinotifyCoreModuleWorkflowTest {
     @Test
+    fun permissionDenialCannotPersistEnabledAndUsesGracefulDisable() = runTest {
+        val order = mutableListOf<String>()
+
+        val enabled = applyCallCapturePreference(
+            requestedEnabled = true,
+            permissionGranted = false,
+            disableGracefully = { order += "disable" },
+            enable = { order += "enable"; true },
+        )
+
+        assertFalse(enabled)
+        assertEquals(listOf("disable"), order)
+    }
+
+    @Test
+    fun permissionGrantedEnablementReturnsDurableNativeTruth() = runTest {
+        val order = mutableListOf<String>()
+
+        val enabled = applyCallCapturePreference(
+            requestedEnabled = true,
+            permissionGranted = true,
+            disableGracefully = { order += "disable" },
+            enable = { order += "enable"; true },
+        )
+
+        assertEquals(true, enabled)
+        assertEquals(listOf("enable"), order)
+    }
+    @Test
     fun lanOnlyConfigIsPersistedBeforeServiceAdmission() = runTest {
         val order = mutableListOf<String>()
 

@@ -59,7 +59,7 @@ class CallStateCoordinatorTest {
 
         assertEquals(listOf("active"), events.map { it.state })
         assertEquals(1L, events.single().sequence)
-        assertEquals(CallDirection.OUTGOING, events.single().direction)
+        assertEquals(CallDirection.UNKNOWN, events.single().direction)
         coordinator.close()
     }
 
@@ -180,7 +180,7 @@ class CallStateCoordinatorTest {
     }
 
     @Test
-    fun offhookFirstCallAfterIdleStartsFreshOutgoingSession() = runTest {
+    fun offhookFirstCallAfterIdleStartsFreshUnknownDirectionSession() = runTest {
         val source = FakeSource()
         val delivered = mutableListOf<CallStateEvent>()
         val ids = ArrayDeque(listOf(SESSION_ID, SECOND_SESSION_ID))
@@ -199,7 +199,7 @@ class CallStateCoordinatorTest {
         try {
             assertEquals(SECOND_SESSION_ID, secondActive?.callSessionId)
             assertEquals(1L, secondActive?.sequence)
-            assertEquals(CallDirection.OUTGOING, secondActive?.direction)
+            assertEquals(CallDirection.UNKNOWN, secondActive?.direction)
         } finally {
             coordinator.close()
         }

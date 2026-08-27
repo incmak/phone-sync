@@ -34,12 +34,16 @@ Automation is implemented and host-tested through commit `9c136cc`. The actual
 aggregate hardware execution is still pending physical two-phone run; host
 fixtures are not physical acceptance.
 
-## Focused synthetic call check
+## Real call release evidence
 
-The legacy `call-state` scenario drives `ringing -> active -> idle` and verifies
-content-free convergence. It is synthetic evidence only and does not claim a
-physical cellular call was observed.
+Call-sync acceptance uses the protected physical evidence pipeline, not the
+obsolete synthetic `call-state` scenario. Follow `PHY-CALL-01` in
+`docs/test-scenarios.md`, assemble the private release evidence directory, then
+run the fail-closed release audit:
 
 ```sh
-GOCACHE=/tmp/phone-sync-call-e2e-cache go run ./cmd/twinotify-e2e -scenario call-state
+make release-audit RELEASE_EVIDENCE_DIR=/private/path/twinotify-release
 ```
+
+The verifier requires an explicit `PHY-CALL-01: pass`. Host fixtures and the
+debug call-state injection path are regression aids only and cannot satisfy it.

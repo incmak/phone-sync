@@ -23,6 +23,8 @@ data class SyncHealth(
     val lastErrorCode: String?,
     val callCaptureEnabled: Boolean = false,
     val callCaptureHealthCode: String? = null,
+    val callCaptureDisabledReason: String? = "call_capture_disabled",
+    val callNotificationMode: String? = null,
     val lastCallEventAt: Long? = null,
 )
 
@@ -39,6 +41,8 @@ fun SyncHealth.toEventMap(): Map<String, Any?> = mapOf(
     "lastErrorCode" to lastErrorCode,
     "callCaptureEnabled" to callCaptureEnabled,
     "callCaptureHealthCode" to callCaptureHealthCode,
+    "callCaptureDisabledReason" to callCaptureDisabledReason,
+    "callNotificationMode" to callNotificationMode,
     "lastCallEventAt" to lastCallEventAt,
     // Keep the stable legacy key for existing JS consumers.
     "state" to when (service) {
@@ -192,10 +196,21 @@ object SyncServiceStatus {
         _health.value = _health.value.copy(lastErrorCode = code?.take(128))
     }
 
-    fun setCallCapture(enabled: Boolean, healthCode: String?) {
+    fun setCallCapture(
+        enabled: Boolean,
+        healthCode: String?,
+        notificationMode: String? = null,
+    ) {
+        val capabilityMode = notificationMode ?: healthCode
+            ?.takeIf { enabled && it == "call_style_deferred_no_controls" }
+        val boundedHealth = healthCode
+            ?.takeUnless { it == capabilityMode }
+            ?.take(64)
         _health.value = _health.value.copy(
             callCaptureEnabled = enabled,
-            callCaptureHealthCode = healthCode?.take(64),
+            callCaptureHealthCode = if (enabled) boundedHealth else null,
+            callCaptureDisabledReason = if (enabled) null else healthCode?.take(64),
+            callNotificationMode = if (enabled) capabilityMode?.take(64) else null,
         )
     }
 

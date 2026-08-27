@@ -1013,7 +1013,24 @@ class CallCaptureLifecycleTest {
         assertFalse(coordinator.status.enabled)
         assertEquals(emptyList(), events)
         assertFalse(SyncServiceStatus.health.value.callCaptureEnabled)
-        assertEquals("call_capture_disabled", SyncServiceStatus.health.value.callCaptureHealthCode)
+        assertEquals(null, SyncServiceStatus.health.value.callCaptureHealthCode)
+        assertEquals("call_capture_disabled", SyncServiceStatus.health.value.callCaptureDisabledReason)
+    }
+    @Test
+    fun healthyCallCaptureExposesCapabilitySeparatelyFromDisabledReason() {
+        SyncServiceStatus.setCallCapture(
+            enabled = true,
+            healthCode = null,
+            notificationMode = "call_style_deferred_no_controls",
+        )
+
+        val health = SyncServiceStatus.health.value
+        assertTrue(health.callCaptureEnabled)
+        assertNull(health.callCaptureDisabledReason)
+        assertNull(health.callCaptureHealthCode)
+        assertEquals("call_style_deferred_no_controls", health.callNotificationMode)
+        assertEquals(null, health.toEventMap()["callCaptureDisabledReason"])
+        assertEquals("call_style_deferred_no_controls", health.toEventMap()["callNotificationMode"])
     }
     @Test
     fun disabledSettingNeverStartsSource() {

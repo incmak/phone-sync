@@ -34,6 +34,14 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.startSyncService(relayUrl),
     stopSyncService: (): Promise<void> =>
       TwinotifyCoreModule.stopSyncService(),
+    getCallCaptureEnabled: (): Promise<boolean> =>
+      TwinotifyCoreModule.getCallCaptureEnabled(),
+    setCallCaptureEnabled: (enabled: boolean): Promise<boolean> =>
+      TwinotifyCoreModule.setCallCaptureEnabled(enabled),
+    getCallStatePermissionAsync: () =>
+      TwinotifyCoreModule.getCallStatePermissionAsync(),
+    requestCallStatePermissionAsync: () =>
+      TwinotifyCoreModule.requestCallStatePermissionAsync(),
     getSyncStatus: (): Promise<SyncStatus> =>
       TwinotifyCoreModule.getSyncStatus(),
     getPairStatus: (): Promise<PairStatus> =>

@@ -171,8 +171,6 @@ class CallStateCoordinator(
             }
             if (frameworkState == CallFrameworkState.RINGING) {
                 direction = CallDirection.INCOMING
-            } else if (frameworkState == CallFrameworkState.OFFHOOK && lastFrameworkState == null) {
-                direction = CallDirection.OUTGOING
             }
             lastFrameworkState = frameworkState
             sequence += 1L

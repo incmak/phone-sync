@@ -122,7 +122,7 @@ verify_manifest() {
   done
 
   local scenario
-  for scenario in PHY-PAIR-01 PHY-DOZE-01 PHY-OEM-01 PHY-NET-01 PHY-BATTERY-01 PHY-RELIABILITY-01; do
+  for scenario in PHY-PAIR-01 PHY-DOZE-01 PHY-OEM-01 PHY-NET-01 PHY-BATTERY-01 PHY-RELIABILITY-01 PHY-CALL-01; do
     jq -e --arg id "$scenario" '.scenarios[$id] == "pass"' "$MANIFEST" >/dev/null || die "$scenario must be pass"
   done
   [[ -s "$timeline_file" ]] || die "sanitized timeline is empty"
@@ -154,7 +154,13 @@ self_test() {
   openssl pkey -in "$tmp/attestation-key.pem" -pubout -out "$tmp/attestation-public.pem" >/dev/null 2>&1
   openssl dgst -sha256 -sign "$tmp/attestation-key.pem" -out "$base/artifacts/app-attestation.sig" "$base/artifacts/app-attestation.json"
   jq -n --arg app "$app_sha" --arg relay "$current" --arg result "$result_sha" --arg e2e "$current" \
-    '{app_sha256:$app,relay_git_commit:$relay,e2e_result_sha256:$result,e2e_git_commit:$e2e,app_git_commit:$e2e,tested_at:"2026-08-14T00:00:00Z",devices:[{role:"pixel",model:"fixture",android:14,build:"fixture"},{role:"samsung",model:"fixture",android:14,build:"fixture"}],scenarios:{"PHY-PAIR-01":"pass","PHY-DOZE-01":"pass","PHY-OEM-01":"pass","PHY-NET-01":"pass","PHY-BATTERY-01":"pass","PHY-RELIABILITY-01":"pass"},artifacts:{app:"artifacts/app.apk",app_provenance:"artifacts/app-provenance.json",app_attestation:"artifacts/app-attestation.json",app_attestation_signature:"artifacts/app-attestation.sig",e2e_result:"artifacts/e2e-result.json",timeline:"artifacts/timeline.json",operator_notes:"artifacts/operator-notes.md",batterystats:{pixel:"artifacts/batterystats/pixel.txt",samsung:"artifacts/batterystats/samsung.txt"}}}' > "$base/manifest.json"
+    '{app_sha256:$app,relay_git_commit:$relay,e2e_result_sha256:$result,e2e_git_commit:$e2e,app_git_commit:$e2e,tested_at:"2026-08-14T00:00:00Z",devices:[{role:"pixel",model:"fixture",android:14,build:"fixture"},{role:"samsung",model:"fixture",android:14,build:"fixture"}],scenarios:{"PHY-PAIR-01":"pass","PHY-DOZE-01":"pass","PHY-OEM-01":"pass","PHY-NET-01":"pass","PHY-BATTERY-01":"pass","PHY-RELIABILITY-01":"pass","PHY-CALL-01":"pass"},artifacts:{app:"artifacts/app.apk",app_provenance:"artifacts/app-provenance.json",app_attestation:"artifacts/app-attestation.json",app_attestation_signature:"artifacts/app-attestation.sig",e2e_result:"artifacts/e2e-result.json",timeline:"artifacts/timeline.json",operator_notes:"artifacts/operator-notes.md",batterystats:{pixel:"artifacts/batterystats/pixel.txt",samsung:"artifacts/batterystats/samsung.txt"}}}' > "$base/manifest.json"
+
+  jq 'del(.scenarios["PHY-CALL-01"])' "$base/manifest.json" > "$tmp/missing-call.json"
+  mv "$tmp/missing-call.json" "$base/manifest.json"
+  if "$ROOT_DIR/scripts/verify-release-evidence.sh" --self-test-key "$tmp/attestation-public.pem" "$base" 2>"$tmp/missing-call.err"; then die "self-test expected missing PHY-CALL-01 failure"; fi
+  jq '.scenarios["PHY-CALL-01"]="pass"' "$base/manifest.json" > "$tmp/restored-call.json"
+  mv "$tmp/restored-call.json" "$base/manifest.json"
 
   rm "$base/artifacts/batterystats/samsung.txt"
   if "$ROOT_DIR/scripts/verify-release-evidence.sh" --self-test-key "$tmp/attestation-public.pem" "$base" 2>"$tmp/missing.err"; then die "self-test expected missing Samsung battery failure"; fi

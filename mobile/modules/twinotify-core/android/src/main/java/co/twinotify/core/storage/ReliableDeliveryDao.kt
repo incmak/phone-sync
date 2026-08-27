@@ -7,6 +7,7 @@ import androidx.room.Query
 import androidx.room.Transaction
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
+import co.twinotify.core.service.CallRejectionCommitResult
 
 internal fun isNotificationSnapshotCanonical(canonId: String): Boolean = !canonId.startsWith("call:")
 
@@ -287,6 +288,31 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insertInbound(row: InboundMessage)
+
+    @Transaction
+    open suspend fun commitCallRejection(
+        row: InboundMessage,
+        receipt: OutboundMessage,
+    ): CallRejectionCommitResult {
+        require(row.eventType == "call.state" && row.outcome == "REJECTED")
+        require(row.receiptMsgId == receipt.msgId)
+        require(receipt.eventType == "peer.receipt" && !receipt.requiresPeerReceipt)
+        val existing = inbound(row.msgId)
+        if (existing != null) {
+            return if (existing.envelopeSha256 == row.envelopeSha256) {
+                CallRejectionCommitResult.Duplicate
+            } else {
+                CallRejectionCommitResult.IdConflict
+            }
+        }
+        val existingReceipt = outbound(receipt.msgId)
+        if (existingReceipt != null && existingReceipt.envelopeSha256 != receipt.envelopeSha256) {
+            return CallRejectionCommitResult.ReceiptConflict
+        }
+        if (existingReceipt == null) insertOutbound(receipt)
+        insertInbound(row)
+        return CallRejectionCommitResult.Committed
+    }
 
     @Query("SELECT * FROM canonical_notification_state WHERE canonId=:canonId")
     abstract suspend fun canonical(canonId: String): CanonicalNotificationState?

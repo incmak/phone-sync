@@ -16,6 +16,7 @@ interface TwSwitchProps {
   onChange?: (next: boolean) => void;
   size?: TwSwitchSize;
   disabled?: boolean;
+  touchTargetSize?: 44 | 48;
   /** Required whenever the adjacent text does not already name the control. */
   accessibilityLabel?: string;
 }
@@ -25,6 +26,7 @@ export function TwSwitch({
   onChange,
   size = 'md',
   disabled,
+  touchTargetSize = 44,
   accessibilityLabel,
 }: TwSwitchProps) {
   const theme = useTheme();
@@ -63,7 +65,10 @@ export function TwSwitch({
       accessibilityRole="switch"
       accessibilityLabel={accessibilityLabel}
       accessibilityState={{ checked, disabled: !!disabled }}
-      style={[styles.target, { opacity: disabled ? 0.5 : 1 }]}
+      style={[
+        styles.target,
+        { minWidth: touchTargetSize, minHeight: touchTargetSize, opacity: disabled ? 0.5 : 1 },
+      ]}
     >
       <Animated.View
         style={[

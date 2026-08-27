@@ -346,6 +346,37 @@ verify that accepted notifications are delivered exactly once, queued work is
 replayed after reconnect, and dismiss/update state does not resurrect. Record
 the round ID, injected fault, durable state, and cleanup result.
 
+### PHY-CALL-01 - real two-phone call-state product
+
+- [ ] Status - pending physical two-phone call run.
+
+Use two Android 14+ phones with cellular calling available and an approved,
+protected candidate installed. Run both directions, with each phone acting once
+as the phone receiving the cellular call and once as the remote mirror.
+
+1. From Settings, deny `READ_PHONE_STATE`; verify `Mirror call state` remains
+   off. Deny permanently, use the single Android-settings recovery action,
+   grant permission, enable capture, restart the process, and verify the durable
+   switch remains on. Revoke permission and verify capture is disabled until
+   the user explicitly recovers it. Never request this permission from
+   onboarding or before the Settings action.
+2. Complete one relay round and one authenticated direct-LAN round. Across the
+   rounds cover both call directions and a real incoming sequence of
+   `ringing -> active -> idle`, including one screen-off observation and one
+   process restart while the call is active.
+3. Verify one stable remote tag/id, channel `mirrored_call_state_v1` at actual
+   manager importance HIGH, private action-free presentation, terminal removal,
+   durable custody, a peer receipt, and no duplicate or resurrection.
+4. Explicitly disable call capture and separately stop the sync service. Verify
+   graceful terminalization and that no later callback recreates the mirror.
+
+Retain only state enums, bounded health codes, route (`lan` or `relay`),
+timestamps, counts, hashes, and pass/fail. Never retain phone numbers, contacts,
+SIM data, call audio, call-log rows, raw notification content, device IDs, IPs,
+SSIDs, keys, or tokens. If two suitable phones or the protected candidate is
+unavailable, leave this scenario pending. Synthetic injection and emulator runs
+must not be recorded as `PHY-CALL-01`.
+
 ### Release evidence layout and audit
 
 Place the APK, sanitized E2E result, sanitized timeline, operator notes, and

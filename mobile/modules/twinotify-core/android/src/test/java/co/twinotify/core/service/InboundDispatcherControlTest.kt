@@ -25,6 +25,58 @@ import kotlin.test.assertIs
 
 class InboundDispatcherControlTest {
     @Test
+    fun callSequenceRejectionCreatesDurableTerminalReceiptBeforeAcceptance() = runTest {
+        var inbound: InboundMessage? = null
+        var receipt: co.twinotify.core.storage.OutboundMessage? = null
+        val expectedReceipt = outboundPeerReceipt("receipt-1")
+
+        val result = dispatchAuthenticatedCallRejection(
+            msgId = "11111111-1111-4111-8111-111111111111",
+            originDevice = "peer-device",
+            envelopeSha256 = "a".repeat(64),
+            canonId = "call:22222222-2222-4222-8222-222222222222",
+            sequence = 1,
+            reason = "call_sequence_lower",
+            committedAt = 100,
+            createReceipt = { reason ->
+                assertEquals("call_sequence_lower", reason)
+                expectedReceipt
+            },
+            journal = CallRejectionJournal { row, terminalReceipt ->
+                inbound = row
+                receipt = terminalReceipt
+                CallRejectionCommitResult.Committed
+            },
+        )
+
+        assertEquals(
+            InboundDispatchResult.Accepted("11111111-1111-4111-8111-111111111111", "a".repeat(64)),
+            result,
+        )
+        assertEquals("REJECTED", inbound?.outcome)
+        assertEquals(expectedReceipt.msgId, inbound?.receiptMsgId)
+        assertEquals(expectedReceipt, receipt)
+        assertEquals("peer.receipt", receipt?.eventType)
+        assertEquals(false, receipt?.requiresPeerReceipt)
+    }
+
+    @Test
+    fun callSequenceRejectionCannotAcceptWithoutDurableReceipt() = runTest {
+        val result = dispatchAuthenticatedCallRejection(
+            msgId = "11111111-1111-4111-8111-111111111111",
+            originDevice = "peer-device",
+            envelopeSha256 = "a".repeat(64),
+            canonId = "call:22222222-2222-4222-8222-222222222222",
+            sequence = 1,
+            reason = "call_sequence_conflict",
+            committedAt = 100,
+            createReceipt = { null },
+            journal = CallRejectionJournal { _, _ -> error("journal must not run") },
+        )
+
+        assertEquals(InboundDispatchResult.Rejected("call_rejection_receipt_unavailable"), result)
+    }
+    @Test
     fun permanentControlValidationFailureBecomesBoundedRejection() = runTest {
         val result = processAuthenticatedControl("snapshot_invalid") {
             throw IllegalArgumentException("private snapshot ID")
@@ -367,3 +419,23 @@ class InboundDispatcherControlTest {
         )
     }
 }
+
+private fun outboundPeerReceipt(msgId: String) = co.twinotify.core.storage.OutboundMessage(
+    msgId = msgId,
+    canonId = null,
+    sequence = null,
+    eventType = "peer.receipt",
+    protocolVersion = 2,
+    envelopeJson = "{}",
+    envelopeSha256 = "b".repeat(64),
+    byteSize = 2,
+    createdAt = 100,
+    expiresAt = 200,
+    custodyAcceptedAt = null,
+    custodyRoute = null,
+    attempts = 0,
+    nextAttemptAt = 100,
+    state = "NEW",
+    lastError = null,
+    requiresPeerReceipt = false,
+)

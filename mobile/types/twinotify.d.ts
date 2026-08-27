@@ -17,6 +17,11 @@ export interface SyncStatus {
   postPermission?: boolean;
   lastReceiptAt?: number | null;
   lastErrorCode?: string | null;
+  callCaptureEnabled?: boolean;
+  callCaptureDisabledReason?: string | null;
+  callCaptureHealthCode?: string | null;
+  callNotificationMode?: 'call_style_deferred_no_controls' | null;
+  lastCallEventAt?: number | null;
 }
 
 export interface KeyPair {
@@ -74,6 +79,10 @@ export interface TwinotifyCoreAPI {
   startSyncService(relayUrl: string): Promise<void>;
   startLanOnlySyncService(): Promise<void>;
   stopSyncService(): Promise<void>;
+  getCallCaptureEnabled(): Promise<boolean>;
+  setCallCaptureEnabled(enabled: boolean): Promise<boolean>;
+  getCallStatePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
+  requestCallStatePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
   getSyncStatus(): Promise<SyncStatus>;
   getPairStatus(): Promise<PairStatus>;
   getPreferLan(): Promise<boolean>;

@@ -70,6 +70,55 @@ fun interface DirectControlJournal {
     ): DirectControlCommitResult
 }
 
+sealed interface CallRejectionCommitResult {
+    data object Committed : CallRejectionCommitResult
+    data object Duplicate : CallRejectionCommitResult
+    data object IdConflict : CallRejectionCommitResult
+    data object ReceiptConflict : CallRejectionCommitResult
+}
+
+fun interface CallRejectionJournal {
+    suspend fun commit(
+        row: InboundMessage,
+        receipt: co.twinotify.core.storage.OutboundMessage,
+    ): CallRejectionCommitResult
+}
+
+internal suspend fun dispatchAuthenticatedCallRejection(
+    msgId: String,
+    originDevice: String,
+    envelopeSha256: String,
+    canonId: String,
+    sequence: Long,
+    reason: String,
+    committedAt: Long,
+    createReceipt: suspend (String) -> co.twinotify.core.storage.OutboundMessage?,
+    journal: CallRejectionJournal,
+): InboundDispatchResult {
+    val receipt = createReceipt(reason)
+        ?: return InboundDispatchResult.Rejected("call_rejection_receipt_unavailable")
+    val row = InboundMessage(
+        msgId = msgId,
+        originDevice = originDevice,
+        envelopeSha256 = envelopeSha256,
+        eventType = "call.state",
+        canonId = canonId,
+        sequence = sequence,
+        outcome = "REJECTED",
+        committedAt = committedAt,
+        appliedAt = committedAt,
+        receiptMsgId = receipt.msgId,
+        relayAckState = "NONE",
+    )
+    return when (journal.commit(row, receipt)) {
+        CallRejectionCommitResult.Committed -> InboundDispatchResult.Accepted(msgId, envelopeSha256)
+        CallRejectionCommitResult.Duplicate -> InboundDispatchResult.Duplicate(msgId, envelopeSha256)
+        CallRejectionCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        CallRejectionCommitResult.ReceiptConflict ->
+            InboundDispatchResult.Rejected("call_rejection_receipt_conflict")
+    }
+}
+
 internal suspend fun dispatchAuthenticatedDirectControl(
     msgId: String,
     originDevice: String,
@@ -426,6 +475,13 @@ class InboundDispatcher internal constructor(
                 android.util.Log.w("Twinotify", "call state origin is not the paired peer")
                 return@withLock InboundDispatchResult.Rejected("unauthorized_call_origin")
             }
+            reliableDao.inbound(inner.msgId)?.let { existing ->
+                return@withLock if (existing.envelopeSha256 == envelopeSha256) {
+                    InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+                } else {
+                    InboundDispatchResult.Rejected("id_conflict")
+                }
+            }
             val payload = inner.payloadObject()
             val event = CallStateEvent(
                 callSessionId = payload.getString("call_session_id"),
@@ -453,6 +509,29 @@ class InboundDispatcher internal constructor(
                 android.util.Log.w("Twinotify", "call state rejected", it)
                 return@withLock InboundDispatchResult.Rejected("call_state_rejected")
             }
+            val rejectionCode = when (reduction) {
+                is co.twinotify.core.call.CallReduction.LowerSequence -> reduction.code
+                is co.twinotify.core.call.CallReduction.Conflict -> reduction.code
+                is co.twinotify.core.call.CallReduction.Duplicate ->
+                    return@withLock InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+                is co.twinotify.core.call.CallReduction.Apply -> null
+            }
+            if (rejectionCode != null) {
+                val receiptFactory = DurableReceiptFactory(ctx)
+                return@withLock dispatchAuthenticatedCallRejection(
+                    msgId = inner.msgId,
+                    originDevice = inner.originDevice,
+                    envelopeSha256 = envelopeSha256,
+                    canonId = requireNotNull(inner.canonId),
+                    sequence = requireNotNull(inner.sequence),
+                    reason = rejectionCode,
+                    committedAt = System.currentTimeMillis(),
+                    createReceipt = { reason ->
+                        receiptFactory.createRejected(inner.msgId, envelopeSha256, reason)
+                    },
+                    journal = CallRejectionJournal(reliableDao::commitCallRejection),
+                )
+            }
             val inbound = InboundMessage(
                 msgId = inner.msgId,
                 originDevice = inner.originDevice,
@@ -460,7 +539,7 @@ class InboundDispatcher internal constructor(
                 eventType = inner.type,
                 canonId = inner.canonId,
                 sequence = inner.sequence,
-                outcome = if (reduction is co.twinotify.core.call.CallReduction.Stale) "STALE" else "PENDING_PLATFORM",
+                outcome = "PENDING_PLATFORM",
                 committedAt = System.currentTimeMillis(),
                 appliedAt = null,
                 receiptMsgId = null,
@@ -468,7 +547,7 @@ class InboundDispatcher internal constructor(
             )
             val commit = reliableDao.commitInboundDesired(
                 inbound,
-                (reduction as? co.twinotify.core.call.CallReduction.Apply)?.state,
+                (reduction as co.twinotify.core.call.CallReduction.Apply).state,
             )
             if (commit is co.twinotify.core.storage.InboundDesiredCommitResult.Committed ||
                 commit is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate

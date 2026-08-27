@@ -1,6 +1,7 @@
 package co.twinotify.core
 
 import android.content.Context
+import android.Manifest
 import android.os.Handler
 import android.os.Looper
 import androidx.core.net.toUri
@@ -39,6 +40,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.text.Normalizer
 import java.util.concurrent.CancellationException
+import expo.modules.interfaces.permissions.Permissions
 
 internal suspend fun persistRoutePreferenceThenNotifyService(
     preferLan: Boolean,
@@ -55,6 +57,19 @@ internal suspend fun persistLanOnlyConfigThenStart(
 ) {
     persist()
     start()
+}
+
+internal suspend fun applyCallCapturePreference(
+    requestedEnabled: Boolean,
+    permissionGranted: Boolean,
+    disableGracefully: suspend () -> Unit,
+    enable: suspend () -> Boolean,
+): Boolean {
+    if (!requestedEnabled || !permissionGranted) {
+        disableGracefully()
+        return false
+    }
+    return enable()
 }
 
 internal suspend fun <T> settleTwinotifyPromise(
@@ -244,32 +259,81 @@ class TwinotifyCoreModule internal constructor(
                     },
                     operation = {
                         val ctx = requireContext()
-                        if (!enabled) {
-                            co.twinotify.core.service.SyncService.disableCallCaptureAndAwait(ctx)
-                            false
-                        } else {
-                            co.twinotify.core.service.SyncService.awaitCallShutdownRelease()
-                            val config = co.twinotify.core.service.ServiceConfigStore
-                                .setCallCaptureEnabled(ctx, true)
-                            if (config.enabled) {
-                                val intent = android.content.Intent(
-                                    ctx,
-                                    co.twinotify.core.service.SyncService::class.java,
-                                ).apply {
-                                    action = co.twinotify.core.service.SyncService.ACTION_START
-                                    config.relayUrl?.let {
-                                        putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, it)
+                        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                            ctx,
+                            Manifest.permission.READ_PHONE_STATE,
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        applyCallCapturePreference(
+                            requestedEnabled = enabled,
+                            permissionGranted = granted,
+                            disableGracefully = {
+                                co.twinotify.core.service.SyncService.disableCallCaptureAndAwait(ctx)
+                            },
+                            enable = {
+                                co.twinotify.core.service.SyncService.awaitCallShutdownRelease()
+                                val config = co.twinotify.core.service.ServiceConfigStore
+                                    .setCallCaptureEnabled(ctx, true)
+                                if (config.enabled) {
+                                    val intent = android.content.Intent(
+                                        ctx,
+                                        co.twinotify.core.service.SyncService::class.java,
+                                    ).apply {
+                                        action = co.twinotify.core.service.SyncService.ACTION_START
+                                        config.relayUrl?.let {
+                                            putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, it)
+                                        }
                                     }
+                                    ctx.startForegroundService(intent)
                                 }
-                                ctx.startForegroundService(intent)
-                            }
-                            config.callCaptureEnabled
-                        }
+                                config.callCaptureEnabled
+                            },
+                        )
                     },
                     resolve = promise::resolve,
                     reject = { code, message, cause -> promise.reject(code, message, cause) },
                 )
             }
+        }
+
+        AsyncFunction("getCallCaptureEnabled") { promise: Promise ->
+            moduleScope.launch {
+                settleTwinotifyPromise(
+                    code = "GET_CALL_CAPTURE",
+                    boundedMessage = "call_capture_preference_unavailable",
+                    operation = {
+                        val ctx = requireContext()
+                        val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
+                        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                            ctx,
+                            Manifest.permission.READ_PHONE_STATE,
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (config.callCaptureEnabled && !granted) {
+                            co.twinotify.core.service.SyncService.disableCallCaptureAndAwait(ctx)
+                            false
+                        } else {
+                            config.callCaptureEnabled
+                        }
+                    },
+                    resolve = promise::resolve,
+                    reject = promise::reject,
+                )
+            }
+        }
+
+        AsyncFunction("getCallStatePermissionAsync") { promise: Promise ->
+            Permissions.getPermissionsWithPermissionsManager(
+                appContext.permissions,
+                promise,
+                Manifest.permission.READ_PHONE_STATE,
+            )
+        }
+
+        AsyncFunction("requestCallStatePermissionAsync") { promise: Promise ->
+            Permissions.askForPermissionsWithPermissionsManager(
+                appContext.permissions,
+                promise,
+                Manifest.permission.READ_PHONE_STATE,
+            )
         }
 
         AsyncFunction("isNotificationListenerGranted") { promise: Promise ->

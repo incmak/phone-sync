@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Alert,
   ScrollView,
   StyleSheet,
   Text,
@@ -36,13 +37,17 @@ function connectionLabel(state: SyncState): string {
 
 export default function SettingsScreen() {
   const theme = useTheme();
-  const { state } = useSyncStatus();
+  const syncStatus = useSyncStatus();
+  const { state } = syncStatus;
   const { width } = useWindowDimensions();
   const horizontalGutter = width <= 360 ? 16 : 22;
 
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
   const [relayUrl, setRelayUrl] = useState<string | null | undefined>(undefined);
   const [preferLan, setPreferLan] = useState<boolean | null>(null);
+  const [callCaptureEnabled, setCallCaptureEnabled] = useState<boolean | null>(null);
+  const [callPermissionCanAskAgain, setCallPermissionCanAskAgain] = useState(true);
+  const [callCaptureBusy, setCallCaptureBusy] = useState(false);
 
   useEffect(() => {
     TwinotifyCoreModule.getPairStatus()
@@ -51,6 +56,13 @@ export default function SettingsScreen() {
     TwinotifyCoreModule.getPreferLan()
       .then(setPreferLan)
       .catch(() => {});
+    Promise.all([
+      TwinotifyCoreModule.getCallCaptureEnabled(),
+      TwinotifyCoreModule.getCallStatePermissionAsync(),
+    ]).then(([enabled, permission]) => {
+      setCallCaptureEnabled(enabled && permission.granted);
+      setCallPermissionCanAskAgain(permission.canAskAgain);
+    }).catch(() => setCallCaptureEnabled(false));
     OnboardingState.getRelayUrl()
       .then(setRelayUrl)
       .catch(() => {});
@@ -70,8 +82,50 @@ export default function SettingsScreen() {
     }
   }, []);
 
+  const persistCallCapture = useCallback(async (next: boolean) => {
+    const previous = callCaptureEnabled ?? false;
+    setCallCaptureBusy(true);
+    try {
+      if (next) {
+        const permission = await TwinotifyCoreModule.requestCallStatePermissionAsync();
+        setCallPermissionCanAskAgain(permission.canAskAgain);
+        if (!permission.granted) {
+          setCallCaptureEnabled(false);
+          return;
+        }
+      }
+      await TwinotifyCoreModule.setCallCaptureEnabled(next);
+      const durable = await TwinotifyCoreModule.getCallCaptureEnabled();
+      setCallCaptureEnabled(durable);
+    } catch {
+      setCallCaptureEnabled(previous);
+    } finally {
+      setCallCaptureBusy(false);
+    }
+  }, [callCaptureEnabled]);
+
+  const handleCallCaptureChange = useCallback((next: boolean) => {
+    if (!next) {
+      void persistCallCapture(false);
+      return;
+    }
+    Alert.alert(
+      'Mirror call state?',
+      'Twinotify shares only ringing, active, and ended states. It never shares phone numbers and adds no call controls.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Continue', onPress: () => { void persistCallCapture(true); } },
+      ],
+    );
+  }, [persistCallCapture]);
+
   const relayDisplay = relayUrl ?? (pairStatus.paired ? 'Direct Wi-Fi only' : 'Not configured');
   const version = Constants.expoConfig?.version ?? '1.0.0';
+  const callUnsupported = syncStatus.callCaptureDisabledReason === 'call_telephony_unsupported';
+  const callSubtitle = callUnsupported
+    ? 'Call state mirroring is unavailable on this device.'
+    : 'Shares only ringing, active, and ended states. No phone numbers or controls.';
+  const callStateLabel = callCaptureEnabled ? 'On' : 'Off';
 
   const sectionHeader = (label: string) => (
     <Text style={[styles.sectionHeader, { color: theme.ink2, fontFamily: theme.fonts.uiMedium }]}>
@@ -143,6 +197,37 @@ export default function SettingsScreen() {
 
         <View style={styles.group}>
           {sectionHeader('Privacy')}
+          <TwRow
+            title="Mirror call state"
+            subtitle={callCaptureEnabled === null ? 'Loading call state preference' : callSubtitle}
+            trailing={
+              <View style={styles.controlSlot}>
+                <TwSwitch
+                  checked={callCaptureEnabled ?? false}
+                  onChange={handleCallCaptureChange}
+                  size="md"
+                  disabled={callCaptureEnabled === null || callCaptureBusy || callUnsupported}
+                  touchTargetSize={48}
+                  accessibilityLabel={`Mirror call state, ${
+                    callCaptureEnabled === null
+                      ? 'Loading call state preference'
+                      : `${callSubtitle} ${callStateLabel}`
+                  }`}
+                />
+              </View>
+            }
+            style={styles.ledgerRow}
+          />
+          {!callPermissionCanAskAgain && !callCaptureEnabled ? (
+            <TwRow
+              title="Allow call state permission"
+              subtitle="Open Android settings"
+              onPress={() => TwinotifyCoreModule.openAppSettings().catch(() => {})}
+              accessibilityLabel="Open Android settings to allow call state permission"
+              trailing={disclosure('settings-call-permission-disclosure')}
+              style={styles.ledgerRow}
+            />
+          ) : null}
           <TwRow
             title="App filter"
             subtitle="Control which apps are mirrored"

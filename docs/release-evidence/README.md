@@ -193,6 +193,11 @@ cleanup result:
   notifications per day and retain final batterystats for both devices.
 - `PHY-RELIABILITY-01`: revoke/restore permissions, force-stop/restart, update,
   reboot, and verify no duplicate or lost state.
+- `PHY-CALL-01`: exercise call permission denial, grant, revocation, and
+  recovery plus real calls in both directions over direct LAN and relay. Verify
+  the HIGH action-free call channel, stable identity, terminal removal,
+  custody/receipt convergence, and no resurrection across screen-off and
+  process restart.
 
 The absence of a physical evidence directory is a pending release gate, not a
 pass. Never manufacture a manifest or mark a scenario `pass` without the

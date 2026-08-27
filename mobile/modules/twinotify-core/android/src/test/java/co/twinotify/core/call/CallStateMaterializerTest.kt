@@ -21,10 +21,34 @@ class CallStateMaterializerTest {
     }
 
     @Test
-    fun staleOrConflictingSequenceCannotChangeCallMirror() {
+    fun lowerSequenceIsExplicitlyRejectedWithoutChangingCallMirror() {
+        val first = assertIs<CallReduction.Apply>(CallStateReducer.reduce(null, event("ringing", 2), "dev-local", LocalIdAllocator { 41 }))
+        val lower = assertIs<CallReduction.LowerSequence>(CallStateReducer.reduce(first.state, event("active", 1), "dev-local", LocalIdAllocator { 99 }))
+        assertEquals(first.state, lower.state)
+        assertEquals("call_sequence_lower", lower.code)
+    }
+
+    @Test
+    fun sameSequenceWithDifferentAuthenticatedContentIsConflict() {
         val first = assertIs<CallReduction.Apply>(CallStateReducer.reduce(null, event("ringing", 1), "dev-local", LocalIdAllocator { 41 }))
-        val stale = assertIs<CallReduction.Stale>(CallStateReducer.reduce(first.state, event("active", 1), "dev-local", LocalIdAllocator { 99 }))
-        assertEquals(first.state, stale.state)
+        val conflict = assertIs<CallReduction.Conflict>(CallStateReducer.reduce(first.state, event("active", 1), "dev-local", LocalIdAllocator { 99 }))
+        assertEquals(first.state, conflict.state)
+        assertEquals("call_sequence_conflict", conflict.code)
+    }
+
+    @Test
+    fun exactDuplicateRequiresAuthenticatedJournalMatch() {
+        val first = assertIs<CallReduction.Apply>(CallStateReducer.reduce(null, event("ringing", 1), "dev-local", LocalIdAllocator { 41 }))
+        val duplicate = assertIs<CallReduction.Duplicate>(
+            CallStateReducer.reduce(
+                current = first.state,
+                event = event("ringing", 1),
+                localDeviceId = "dev-local",
+                allocator = LocalIdAllocator { 99 },
+                authenticatedDuplicate = true,
+            ),
+        )
+        assertEquals(first.state, duplicate.state)
     }
 
     @Test
@@ -43,6 +67,12 @@ class CallStateMaterializerTest {
         assertEquals(CallStateMaterializer.stableTag("call:$SESSION"), applied.state.mirrorLocalTag)
         assertEquals(CallNotificationMode.GENERIC_CATEGORY_CALL, CallStateMaterializer.mode)
         assertEquals("Incoming call", CallStateMaterializer.content(requireNotNull(applied.state.desiredPayloadJson)).title)
+    }
+
+    @Test
+    fun stableCallTagBytesRemainFrozen() {
+        assertEquals("call-a95b079d1d364881a4029f91", CallStateMaterializer.stableTag("call:$SESSION"))
+        assertEquals(CallStateMaterializer.stableTag("call:$SESSION"), CallStateReducer.stableMirrorTag("call:$SESSION"))
     }
 
     private fun event(state: String, sequence: Long) = CallStateEvent(

@@ -1,4 +1,5 @@
 import { NativeModule, requireNativeModule } from 'expo-modules-core';
+import type { PermissionResponse } from 'expo-modules-core';
 import type {
   OfflinePairingStatus,
   OfflinePairingStatusEvent,
@@ -27,6 +28,11 @@ export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'LEGACY_ON
 export interface SyncStatus {
   state: SyncState;
   queuedCount: number;
+  callCaptureEnabled?: boolean;
+  callCaptureDisabledReason?: string | null;
+  callCaptureHealthCode?: string | null;
+  callNotificationMode?: 'call_style_deferred_no_controls' | null;
+  lastCallEventAt?: number | null;
 }
 
 export interface PairStatus {
@@ -82,6 +88,10 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   /** Start a peer that pairs and delivers over the LAN and has no relay at all. */
   startLanOnlySyncService(): Promise<void>;
   stopSyncService(): Promise<void>;
+  getCallCaptureEnabled(): Promise<boolean>;
+  setCallCaptureEnabled(enabled: boolean): Promise<boolean>;
+  getCallStatePermissionAsync(): Promise<PermissionResponse>;
+  requestCallStatePermissionAsync(): Promise<PermissionResponse>;
   getSyncStatus(): Promise<SyncStatus>;
   getRouteStatus(): Promise<RouteStatus>;
   /** Try a direct LAN route before the relay. */

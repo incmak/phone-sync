@@ -10,7 +10,15 @@ import org.json.JSONObject
 sealed interface CallReduction {
     val state: CanonicalNotificationState
     data class Apply(override val state: CanonicalNotificationState) : CallReduction
-    data class Stale(override val state: CanonicalNotificationState) : CallReduction
+    data class Duplicate(override val state: CanonicalNotificationState) : CallReduction
+    data class LowerSequence(
+        override val state: CanonicalNotificationState,
+        val code: String = "call_sequence_lower",
+    ) : CallReduction
+    data class Conflict(
+        override val state: CanonicalNotificationState,
+        val code: String = "call_sequence_conflict",
+    ) : CallReduction
 }
 
 /** Pure inbound call-state reduction; it carries no answer/reject/hang-up capability. */
@@ -21,7 +29,10 @@ object CallStateReducer {
         localDeviceId: String,
         allocator: LocalIdAllocator,
         updatedAt: Long = System.currentTimeMillis(),
-    ): CallReduction = reduceInternal(current, localDeviceId, event, localDeviceId, allocator, updatedAt)
+        authenticatedDuplicate: Boolean = false,
+    ): CallReduction = reduceInternal(
+        current, localDeviceId, event, localDeviceId, allocator, updatedAt, authenticatedDuplicate,
+    )
 
     private fun reduceInternal(
         current: CanonicalNotificationState?,
@@ -30,6 +41,7 @@ object CallStateReducer {
         localDeviceId: String,
         allocator: LocalIdAllocator,
         updatedAt: Long,
+        authenticatedDuplicate: Boolean,
     ): CallReduction {
         require(event.callSessionId == UUID.fromString(event.callSessionId).toString()) {
             "call session id must be a lower-case canonical UUID"
@@ -40,7 +52,9 @@ object CallStateReducer {
         require(event.state in setOf("ringing", "active", "idle")) { "unsupported call state" }
         if (current != null) {
             require(current.originDevice.isNotEmpty()) { "call origin must not be empty" }
-            if (event.sequence <= current.latestSequence) return CallReduction.Stale(current)
+            if (authenticatedDuplicate) return CallReduction.Duplicate(current)
+            if (event.sequence < current.latestSequence) return CallReduction.LowerSequence(current)
+            if (event.sequence == current.latestSequence) return CallReduction.Conflict(current)
         }
         if (event.state == "idle") require(current != null) { "idle requires an existing call session" }
 
@@ -80,23 +94,29 @@ object CallStateReducer {
         localDeviceId: String,
         allocator: LocalIdAllocator,
         updatedAt: Long = System.currentTimeMillis(),
+        authenticatedDuplicate: Boolean = false,
     ): CallReduction {
         require(originDevice.isNotEmpty()) { "call origin must not be empty" }
-        val result = reduceInternal(current, originDevice, event, localDeviceId, allocator, updatedAt)
+        val result = reduceInternal(
+            current, originDevice, event, localDeviceId, allocator, updatedAt, authenticatedDuplicate,
+        )
         if (current != null && current.originDevice != originDevice) {
             require(originDevice == current.originDevice) { "call canonical origin cannot change" }
         }
-        return if (result is CallReduction.Apply) {
-            CallReduction.Apply(result.state.copy(originDevice = current?.originDevice ?: originDevice))
-        } else result
+        return when (result) {
+            is CallReduction.Apply -> CallReduction.Apply(
+                result.state.copy(originDevice = current?.originDevice ?: originDevice),
+            )
+            else -> result
+        }
     }
 
-    fun stableMirrorTag(canonId: String): String = "call-" + sha256(canonId).take(24)
-
-    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    fun stableMirrorTag(canonId: String): String = "call-" + callStateSha256(canonId).take(24)
 }
+
+internal fun callStateSha256(value: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(value.toByteArray(Charsets.UTF_8))
+    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
 private val CallDirection.wireValue: String
     get() = when (this) {

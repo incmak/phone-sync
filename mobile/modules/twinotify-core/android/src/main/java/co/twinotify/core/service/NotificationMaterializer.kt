@@ -296,15 +296,31 @@ class DurableReceiptFactory(private val context: Context) : ReceiptFactory {
         pendingInbound: List<InboundMessage>,
     ): OutboundMessage? {
         val inbound = pendingInbound.firstOrNull() ?: return null
+        return createReceipt(inbound.msgId, inbound.envelopeSha256, "applied", null)
+    }
+
+    suspend fun createRejected(
+        ackedMsgId: String,
+        envelopeSha256: String,
+        reason: String,
+    ): OutboundMessage? = createReceipt(ackedMsgId, envelopeSha256, "rejected", reason)
+
+    private suspend fun createReceipt(
+        ackedMsgId: String,
+        envelopeSha256: String,
+        status: String,
+        reason: String?,
+    ): OutboundMessage? {
         val peer = PeerStore.load(context) ?: return null
         val originDevice = DeviceIdentity.getOrCreate(context)
         val createdAt = System.currentTimeMillis().coerceAtLeast(0L)
         val expiresAt = createdAt + RETENTION_MS
         val msgId = UUID.randomUUID().toString()
         val payload = JSONObject()
-            .put("acked_msg_id", inbound.msgId)
-            .put("envelope_sha256", inbound.envelopeSha256)
-            .put("status", "applied")
+            .put("acked_msg_id", ackedMsgId)
+            .put("envelope_sha256", envelopeSha256)
+            .put("status", status)
+            .apply { if (reason != null) put("reason", reason) }
             .toString()
         val inner = InnerEventV2(
             msgId = msgId,
