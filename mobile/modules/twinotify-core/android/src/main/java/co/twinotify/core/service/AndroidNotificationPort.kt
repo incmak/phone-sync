@@ -23,6 +23,18 @@ internal fun effectivePostAvailability(
     notificationsEnabled: Boolean,
 ): Boolean = runtimePermissionGranted && notificationsEnabled
 
+/** Runtime permission and the system-wide notification switch must both allow posts. */
+internal fun effectivePostAvailability(context: Context): Boolean {
+    val appContext = context.applicationContext
+    return effectivePostAvailability(
+        runtimePermissionGranted = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED,
+        notificationsEnabled = NotificationManagerCompat.from(appContext).areNotificationsEnabled(),
+    )
+}
+
 interface AndroidNotificationPort {
     fun postMirror(state: CanonicalNotificationState): Boolean
     fun postMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome =
@@ -100,12 +112,6 @@ class DefaultAndroidNotificationPort(
     }
 
     private fun notificationsAvailable(): Boolean {
-        return effectivePostAvailability(
-            runtimePermissionGranted = ContextCompat.checkSelfPermission(
-                appContext,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED,
-            notificationsEnabled = NotificationManagerCompat.from(appContext).areNotificationsEnabled(),
-        )
+        return effectivePostAvailability(appContext)
     }
 }

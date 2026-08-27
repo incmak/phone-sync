@@ -26,44 +26,79 @@ class ServiceLifecycleTest {
     private val relayUrl = "wss://relay.example.test/ws"
 
     @Test
-    fun foregroundLifecycleUsesTheProductionPermissionResumeHookWithoutStartingAService() {
+    fun foregroundWithoutEffectivePostAvailabilityUpdatesHealthButDoesNotRequestMaterialization() {
+        var permission: Boolean? = null
+        var requests = 0
+
+        resumePermissionBlockedMaterializationOnForeground(
+            postPermissionGranted = false,
+            setPostPermission = { permission = it },
+            requestActiveMaterialization = { _ -> requests += 1 },
+        )
+
+        assertEquals(false, permission)
+        assertEquals(0, requests)
+    }
+
+    @Test
+    fun foregroundWithEffectivePostAvailabilityRequestsOneRestorationPass() {
+        val triggers = mutableListOf<MaterializationTrigger>()
+
+        resumePermissionBlockedMaterializationOnForeground(
+            postPermissionGranted = true,
+            setPostPermission = {},
+            requestActiveMaterialization = triggers::add,
+        )
+
+        assertEquals(listOf(MaterializationTrigger.POST_PERMISSION_AVAILABLE), triggers)
+    }
+
+    @Test
+    fun postAvailabilitySelectsTheClosedWorldMaterializationTrigger() {
+        assertEquals(MaterializationTrigger.ROUTINE, materializationTriggerForPostAvailability(false))
+        assertEquals(MaterializationTrigger.POST_PERMISSION_AVAILABLE, materializationTriggerForPostAvailability(true))
+    }
+
+    @Test
+    fun lifecycleCallsTheTestedForegroundAndStartupTriggerContractsWithoutAutoStarting() {
         val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
         val moduleSource = File(sourceRoot, "TwinotifyCoreModule.kt").readText()
         val foregroundBlock = moduleSource
             .substringAfter("OnActivityEntersForeground")
             .substringBefore("OnDestroy")
         assertTrue(foregroundBlock.contains("SyncService.onAppForeground(requireContext())"))
+        assertFalse(foregroundBlock.contains("startForegroundService"))
 
         val serviceSource = File(sourceRoot, "service/SyncService.kt").readText()
-        val hookBlock = serviceSource
+        val foregroundHook = serviceSource
             .substringAfter("fun onAppForeground")
             .substringBefore("private val scope")
         assertSourceOrder(
-            hookBlock,
-            "effectivePostAvailability(",
-            "NotificationManagerCompat.from(context).areNotificationsEnabled()",
+            foregroundHook,
+            "effectivePostAvailability(context)",
             "resumePermissionBlockedMaterializationOnForeground(",
-            "setPostPermission = SyncServiceStatus::setPostPermission",
-            "requestActiveMaterialization = activeInstance?.let",
-            "requestPendingMaterialization()",
         )
-        val requestBlock = serviceSource
-            .substringAfter("private fun requestPendingMaterialization")
-            .substringBefore("private fun updatePostPermissionStatus")
-        assertSourceOrder(
-            requestBlock,
-            "materializationRequestGate.claimInitialPass()",
-            "runMaterializationPassLoop(",
-            "NotificationMaterializer(",
-            "materializationRequestGate.cancel(lease)",
-        )
-        assertFalse(hookBlock.contains("startForegroundService"))
-        assertFalse(hookBlock.contains("setEnabled("))
-
-        val onCreateBlock = serviceSource
+        val serviceStartup = serviceSource
             .substringAfter("override fun onCreate()")
             .substringBefore("override fun onStartCommand")
-        assertSourceOrder(onCreateBlock, "activeInstance = this", "requestPendingMaterialization()")
+        assertTrue(serviceStartup.contains("materializationTriggerForPostAvailability(postAvailable)"))
+
+        val listenerSource = File(sourceRoot, "listener/TwinotifyNotificationListener.kt").readText()
+        val listenerStartup = listenerSource
+            .substringAfter("override fun onCreate()")
+            .substringBefore("override fun onDestroy")
+        assertTrue(listenerStartup.contains("materializationTriggerForPostAvailability(postAvailable)"))
+    }
+
+    @Test
+    fun listenerHealthPermissionRemainsIndependentFromPostAvailability() {
+        val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
+        val listenerSource = File(sourceRoot, "listener/TwinotifyNotificationListener.kt").readText()
+        val onCreateBlock = listenerSource
+            .substringAfter("override fun onCreate()")
+            .substringBefore("override fun onDestroy")
+
+        assertTrue(onCreateBlock.contains("permission = true"))
     }
 
     @Test

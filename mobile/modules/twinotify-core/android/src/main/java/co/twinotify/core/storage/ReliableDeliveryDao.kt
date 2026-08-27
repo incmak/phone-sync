@@ -382,10 +382,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
             "WHERE state.latestSequence > state.materializedSequence AND (" +
             "NOT EXISTS (SELECT 1 FROM materialization_retry AS retry WHERE retry.canonId=state.canonId) OR " +
             "EXISTS (SELECT 1 FROM materialization_retry AS retry WHERE retry.canonId=state.canonId AND (" +
-            "retry.sequence < state.latestSequence OR retry.disposition='PERMISSION_BLOCKED' OR retry.nextAttemptAt <= :now))) " +
+            "retry.sequence < state.latestSequence OR " +
+            "(:includePermissionBlocked AND retry.disposition='PERMISSION_BLOCKED') OR " +
+            "retry.nextAttemptAt <= :now))) " +
             "ORDER BY state.updatedAt",
     )
-    abstract suspend fun pendingMaterialization(now: Long): List<CanonicalNotificationState>
+    abstract suspend fun pendingMaterialization(
+        now: Long,
+        includePermissionBlocked: Boolean = false,
+    ): List<CanonicalNotificationState>
 
     @Query("SELECT * FROM materialization_retry WHERE canonId=:canonId")
     abstract suspend fun materializationRetry(canonId: String): MaterializationRetry?

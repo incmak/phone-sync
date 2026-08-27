@@ -19,10 +19,10 @@ class ReliableDeliveryDaoMaterializationTest {
                 MaterializationRetry(
                     canonId = "canon",
                     sequence = 1,
-                    nextAttemptAt = 10_000,
+                    nextAttemptAt = null,
                     attempts = 1,
-                    disposition = MaterializationRetryDisposition.RETRYABLE,
-                    lastError = "platform_retryable",
+                    disposition = MaterializationRetryDisposition.PERMISSION_BLOCKED,
+                    lastError = "post_permission_blocked",
                 ),
             )
 
@@ -33,7 +33,7 @@ class ReliableDeliveryDaoMaterializationTest {
     }
 
     @Test
-    fun permissionBlockedSameSequenceIsAdmittedWithoutADueTime() = kotlinx.coroutines.runBlocking {
+    fun routineQueryExcludesPermissionBlockedSameSequenceWithoutADueTime() = kotlinx.coroutines.runBlocking {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val db = Room.inMemoryDatabaseBuilder(context, NotificationDbImpl::class.java)
             .allowMainThreadQueries()
@@ -52,7 +52,11 @@ class ReliableDeliveryDaoMaterializationTest {
                 ),
             )
 
-            assertEquals(listOf(2L), dao.pendingMaterialization(now = 1_000).map { it.latestSequence })
+            assertEquals(emptyList(), dao.pendingMaterialization(now = 1_000).map { it.latestSequence })
+            assertEquals(
+                listOf(2L),
+                dao.pendingMaterialization(now = 1_000, includePermissionBlocked = true).map { it.latestSequence },
+            )
             assertEquals(null, dao.earliestRetryableMaterializationAt())
         } finally {
             db.close()

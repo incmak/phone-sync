@@ -28,6 +28,8 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 data class MaterializationSummary(
@@ -35,6 +37,27 @@ data class MaterializationSummary(
     val pending: Int,
     val skipped: Int,
 )
+
+/** Declares why a materialization pass is running so permission-held work is never polled. */
+enum class MaterializationTrigger {
+    ROUTINE,
+    POST_PERMISSION_AVAILABLE,
+}
+
+internal fun materializationTriggerForPostAvailability(
+    postAvailable: Boolean,
+): MaterializationTrigger = if (postAvailable) {
+    MaterializationTrigger.POST_PERMISSION_AVAILABLE
+} else {
+    MaterializationTrigger.ROUTINE
+}
+
+/** Every entry point shares this boundary so platform effects cannot overlap before Room fences. */
+private object ProcessMaterializationPassCoordinator {
+    private val mutex = Mutex()
+
+    suspend fun <T> serialize(block: suspend () -> T): T = mutex.withLock { block() }
+}
 
 fun interface MaterializationRetryScheduler {
     fun schedule(delayMs: Long, action: suspend () -> Unit)
@@ -136,7 +159,10 @@ class MaterializationRetryReceiver : android.content.BroadcastReceiver() {
 
 /** The small persistence surface needed by the materializer; production uses Room below. */
 interface MaterializationStore {
-    suspend fun pendingMaterialization(nowMs: Long = System.currentTimeMillis()): List<CanonicalNotificationState>
+    suspend fun pendingMaterialization(
+        trigger: MaterializationTrigger = MaterializationTrigger.ROUTINE,
+        nowMs: Long = System.currentTimeMillis(),
+    ): List<CanonicalNotificationState>
 
     suspend fun pendingInbound(canonId: String, sequence: Long): List<InboundMessage> = emptyList()
 
@@ -188,7 +214,13 @@ interface MaterializationStore {
 }
 
 class DaoMaterializationStore(internal val dao: ReliableDeliveryDao) : MaterializationStore {
-    override suspend fun pendingMaterialization(nowMs: Long): List<CanonicalNotificationState> = dao.pendingMaterialization(nowMs)
+    override suspend fun pendingMaterialization(
+        trigger: MaterializationTrigger,
+        nowMs: Long,
+    ): List<CanonicalNotificationState> = dao.pendingMaterialization(
+        now = nowMs,
+        includePermissionBlocked = trigger == MaterializationTrigger.POST_PERMISSION_AVAILABLE,
+    )
 
     override suspend fun pendingInbound(canonId: String, sequence: Long): List<InboundMessage> =
         dao.pendingInboundForMaterialization(canonId, sequence)
@@ -257,7 +289,17 @@ class NotificationMaterializer(
         retryScheduler: MaterializationRetryScheduler = NotificationMaterializationRetry.scheduler,
     ) : this(DaoMaterializationStore(dao), port, receiptFactory, localDeviceId, retryScheduler)
 
-    suspend fun materializePending(nowMs: Long = System.currentTimeMillis()): MaterializationSummary {
+    suspend fun materializePending(
+        trigger: MaterializationTrigger = MaterializationTrigger.ROUTINE,
+        nowMs: Long = System.currentTimeMillis(),
+    ): MaterializationSummary = ProcessMaterializationPassCoordinator.serialize {
+        materializePendingSerialized(trigger, nowMs)
+    }
+
+    private suspend fun materializePendingSerialized(
+        trigger: MaterializationTrigger,
+        nowMs: Long,
+    ): MaterializationSummary {
         var applied = 0
         var pending = 0
         var skipped = 0
@@ -283,7 +325,7 @@ class NotificationMaterializer(
                 -> Unit
             }
         }
-        for (state in store.pendingMaterialization(nowMs)) {
+        for (state in store.pendingMaterialization(trigger, nowMs)) {
             val inbound = store.pendingInbound(state.canonId, state.latestSequence)
             val candidate = try {
                 if (inbound.any { it.receiptMsgId == null }) {

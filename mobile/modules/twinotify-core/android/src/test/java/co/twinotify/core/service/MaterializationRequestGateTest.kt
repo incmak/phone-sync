@@ -39,7 +39,7 @@ class MaterializationRequestGateTest {
         val lease = requireNotNull(gate.claimInitialPass())
         var passes = 0
 
-        runMaterializationPassLoop(gate, lease, isShuttingDown = { false }) {
+        runMaterializationPassLoop(gate, lease, isShuttingDown = { false }) { _ ->
             passes += 1
             if (passes == 1) {
                 assertNull(gate.claimInitialPass())
@@ -48,5 +48,28 @@ class MaterializationRequestGateTest {
         }
 
         assertEquals(2, passes)
+    }
+
+    @Test
+    fun restorationRequestDuringRoutinePassRerunsOnceWithRestorationTrigger() = runBlocking {
+        val gate = MaterializationRequestGate()
+        val lease = requireNotNull(gate.claimInitialPass(MaterializationTrigger.ROUTINE))
+        val triggers = mutableListOf<MaterializationTrigger>()
+
+        runMaterializationPassLoop(
+            gate = gate,
+            lease = lease,
+            isShuttingDown = { false },
+        ) { trigger ->
+            triggers += trigger
+            if (triggers.size == 1) {
+                assertNull(gate.claimInitialPass(MaterializationTrigger.POST_PERMISSION_AVAILABLE))
+            }
+        }
+
+        assertEquals(
+            listOf(MaterializationTrigger.ROUTINE, MaterializationTrigger.POST_PERMISSION_AVAILABLE),
+            triggers,
+        )
     }
 }

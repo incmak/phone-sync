@@ -17,6 +17,9 @@
 - **Depends on**: none
 - **Category**: perf
 - **Planned at**: commit `f119224`, 2026-08-27
+- **Result**: DONE on 2026-08-27; deterministic REDs, native 562/562,
+  Android-test compilation, lint, debug assembly, and independent re-review
+  passed
 
 ## Why this matters
 
@@ -170,13 +173,13 @@ newer-sequence, alarm, exception, and cancellation paths before commit.
 
 ## Done criteria
 
-- [ ] Routine passes never select a same-sequence permission hold.
-- [ ] Verified permission restoration/startup selects every current hold once.
-- [ ] Newer canonical state bypasses an older hold.
-- [ ] Permission-held work schedules no alarm and no busy retry.
-- [ ] Full native gate, Android-test compilation, diff check, and independent
+- [x] Routine passes never select a same-sequence permission hold.
+- [x] Verified permission restoration/startup selects every current hold once.
+- [x] Newer canonical state bypasses an older hold.
+- [x] Permission-held work schedules no alarm and no busy retry.
+- [x] Full native gate, Android-test compilation, diff check, and independent
       review pass.
-- [ ] Only in-scope paths and `advisor-plans/README.md` change.
+- [x] Only in-scope paths and `advisor-plans/README.md` change.
 
 ## STOP conditions
 

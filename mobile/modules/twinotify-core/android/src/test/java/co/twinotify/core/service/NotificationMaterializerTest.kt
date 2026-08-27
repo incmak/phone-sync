@@ -7,8 +7,13 @@ import co.twinotify.core.storage.MaterializationRetryDisposition
 import co.twinotify.core.storage.MaterializationRetryWriteResult
 import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.protocol.InnerEventV2
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.CancellationException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -57,12 +62,110 @@ class NotificationMaterializerTest {
         }
 
         val first = NotificationMaterializer(store, port).materializePending(nowMs = 1_000L)
-        val second = NotificationMaterializer(store, port).materializePending(nowMs = 2_000L)
+        val second = NotificationMaterializer(store, port).materializePending(
+            trigger = MaterializationTrigger.POST_PERMISSION_AVAILABLE,
+            nowMs = 2_000L,
+        )
 
         assertEquals(MaterializationSummary(applied = 0, pending = 1, skipped = 0), first)
         assertEquals(MaterializationSummary(applied = 1, pending = 0, skipped = 0), second)
         assertEquals(2, store.state.materializedSequence)
         assertEquals(2, posts)
+    }
+
+    @Test
+    fun routinePassDoesNotRescanPermissionHeldMirrorsOrRewriteTheirRetries() = runBlocking {
+        val store = FakeStore(canonical(sequence = 2, materialized = 1)).apply {
+            retryDisposition = MaterializationRetryDisposition.PERMISSION_BLOCKED
+        }
+        var platformPosts = 0
+        val result = NotificationMaterializer(
+            store = store,
+            port = object : AndroidNotificationPort {
+                override fun postMirror(state: CanonicalNotificationState): Boolean = true
+                override fun postMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome {
+                    platformPosts += 1
+                    return NotificationPostOutcome.Applied
+                }
+                override fun cancelMirror(localTag: String, localId: Int): Boolean = true
+                override fun cancelSource(notificationKey: String): Boolean = true
+            },
+            retryScheduler = MaterializationRetryScheduler { _, _ -> },
+        ).materializePending(nowMs = 1_000L)
+
+        assertEquals(MaterializationSummary(applied = 0, pending = 0, skipped = 0), result)
+        assertEquals(0, platformPosts)
+        assertEquals(0, store.retryWrites)
+        assertEquals(MaterializationRetryDisposition.PERMISSION_BLOCKED, store.retryDisposition)
+    }
+
+    @Test
+    fun processWidePassOwnershipPreventsTwoRestorationInstancesFromDoubleApplying() = runBlocking {
+        val store = SharedStore(canonical(sequence = 2, materialized = 1))
+        val firstPlatformEntered = CountDownLatch(1)
+        val releaseFirstPlatform = CountDownLatch(1)
+        val activePlatformCalls = AtomicInteger()
+        val maxConcurrentPlatformCalls = AtomicInteger()
+        val platformPosts = AtomicInteger()
+
+        fun enterPlatform(block: (() -> Unit)? = null): NotificationPostOutcome {
+            val active = activePlatformCalls.incrementAndGet()
+            maxConcurrentPlatformCalls.accumulateAndGet(active, ::maxOf)
+            platformPosts.incrementAndGet()
+            try {
+                block?.invoke()
+                return NotificationPostOutcome.Applied
+            } finally {
+                activePlatformCalls.decrementAndGet()
+            }
+        }
+
+        val first = NotificationMaterializer(
+            store = store,
+            port = object : AndroidNotificationPort {
+                override fun postMirror(state: CanonicalNotificationState): Boolean = true
+                override fun postMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome =
+                    enterPlatform {
+                        firstPlatformEntered.countDown()
+                        releaseFirstPlatform.await()
+                    }
+                override fun cancelMirror(localTag: String, localId: Int): Boolean = true
+                override fun cancelSource(notificationKey: String): Boolean = true
+            },
+            retryScheduler = MaterializationRetryScheduler { _, _ -> },
+        )
+        val second = NotificationMaterializer(
+            store = store,
+            port = object : AndroidNotificationPort {
+                override fun postMirror(state: CanonicalNotificationState): Boolean = true
+                override fun postMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome = enterPlatform()
+                override fun cancelMirror(localTag: String, localId: Int): Boolean = true
+                override fun cancelSource(notificationKey: String): Boolean = true
+            },
+            retryScheduler = MaterializationRetryScheduler { _, _ -> },
+        )
+
+        val firstPass = async(Dispatchers.Default) {
+            first.materializePending(trigger = MaterializationTrigger.POST_PERMISSION_AVAILABLE, nowMs = 1_000L)
+        }
+        firstPlatformEntered.await()
+        val secondPass = async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+            second.materializePending(trigger = MaterializationTrigger.POST_PERMISSION_AVAILABLE, nowMs = 1_001L)
+        }
+
+        try {
+            assertTrue(secondPass.isActive)
+            assertEquals(1, platformPosts.get())
+            assertEquals(1, maxConcurrentPlatformCalls.get())
+        } finally {
+            releaseFirstPlatform.countDown()
+            firstPass.await()
+            secondPass.await()
+        }
+
+        assertEquals(1, platformPosts.get())
+        assertEquals(1, maxConcurrentPlatformCalls.get())
+        assertEquals(1, store.completions)
     }
 
     @Test
@@ -316,10 +419,15 @@ class NotificationMaterializerTest {
         var retryAt: Long? = null
         var lastRetryCode: String? = null
         var retryDisposition: MaterializationRetryDisposition? = null
-        override suspend fun pendingMaterialization(nowMs: Long): List<CanonicalNotificationState> =
+        var retryWrites = 0
+        override suspend fun pendingMaterialization(
+            trigger: MaterializationTrigger,
+            nowMs: Long,
+        ): List<CanonicalNotificationState> =
             if (state.latestSequence > state.materializedSequence && (
-                retryDisposition == MaterializationRetryDisposition.PERMISSION_BLOCKED ||
-                    retryAt == null || retryAt!! <= nowMs
+                (retryDisposition != MaterializationRetryDisposition.PERMISSION_BLOCKED ||
+                    trigger == MaterializationTrigger.POST_PERMISSION_AVAILABLE) &&
+                    (retryAt == null || retryAt!! <= nowMs)
                 )
             ) {
                 listOf(state)
@@ -337,6 +445,7 @@ class NotificationMaterializerTest {
             disposition: MaterializationRetryDisposition,
             lastError: String,
         ): MaterializationRetryWriteResult {
+            retryWrites += 1
             retryDisposition = disposition
             lastRetryCode = lastError
             return if (disposition == MaterializationRetryDisposition.PERMISSION_BLOCKED) {
@@ -400,6 +509,29 @@ class NotificationMaterializerTest {
             state = state.copy(materializedSequence = sequence)
             completed = true
             if (receipt != null) receipts += 1
+            return MaterializationResult.Completed
+        }
+    }
+
+    private class SharedStore(initial: CanonicalNotificationState) : MaterializationStore {
+        var state = initial
+        var completions = 0
+
+        override suspend fun pendingMaterialization(
+            trigger: MaterializationTrigger,
+            nowMs: Long,
+        ): List<CanonicalNotificationState> =
+            state.takeIf { it.latestSequence > it.materializedSequence }?.let(::listOf).orEmpty()
+
+        override suspend fun completeMaterialization(
+            canonId: String,
+            sequence: Long,
+            appliedAt: Long,
+            receipt: OutboundMessage?,
+        ): MaterializationResult {
+            if (sequence <= state.materializedSequence) return MaterializationResult.AlreadyCompleted
+            state = state.copy(materializedSequence = sequence)
+            completions += 1
             return MaterializationResult.Completed
         }
     }

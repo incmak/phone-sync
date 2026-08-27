@@ -272,7 +272,10 @@ class ReliablePipelineTest {
         override suspend fun markRelayAckSent(msgId: String, envelopeSha256: String): Int =
             if (readyAcks.remove(msgId)) 1 else 0
 
-        override suspend fun pendingMaterialization(nowMs: Long): List<CanonicalNotificationState> = states.values.filter {
+        override suspend fun pendingMaterialization(
+            trigger: MaterializationTrigger,
+            nowMs: Long,
+        ): List<CanonicalNotificationState> = states.values.filter {
             it.latestSequence > it.materializedSequence && (retries[it.canonId]?.nextAttemptAt ?: 0L) <= nowMs
         }
 

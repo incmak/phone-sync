@@ -643,10 +643,12 @@ internal class CallCaptureLifecycleFence {
 internal fun resumePermissionBlockedMaterializationOnForeground(
     postPermissionGranted: Boolean,
     setPostPermission: (Boolean) -> Unit,
-    requestActiveMaterialization: (() -> Unit)?,
+    requestActiveMaterialization: ((MaterializationTrigger) -> Unit)?,
 ) {
     setPostPermission(postPermissionGranted)
-    requestActiveMaterialization?.invoke()
+    if (postPermissionGranted) {
+        requestActiveMaterialization?.invoke(MaterializationTrigger.POST_PERMISSION_AVAILABLE)
+    }
 }
 
 /** One materializer owns the pass; requests arriving during it coalesce into one more pass. */
@@ -655,35 +657,54 @@ internal class MaterializationRequestGate {
     value class Lease internal constructor(val generation: Long)
 
     private var activeLease: Lease? = null
-    private var rerunRequested = false
+    private var activeTrigger: MaterializationTrigger? = null
+    private var rerunTrigger: MaterializationTrigger? = null
     private var nextGeneration = 0L
 
     @Synchronized
-    fun claimInitialPass(): Lease? {
+    fun claimInitialPass(
+        trigger: MaterializationTrigger = MaterializationTrigger.ROUTINE,
+    ): Lease? {
         if (activeLease != null) {
-            rerunRequested = true
+            rerunTrigger = when {
+                rerunTrigger == MaterializationTrigger.POST_PERMISSION_AVAILABLE ||
+                    trigger == MaterializationTrigger.POST_PERMISSION_AVAILABLE ->
+                    MaterializationTrigger.POST_PERMISSION_AVAILABLE
+                else -> MaterializationTrigger.ROUTINE
+            }
             return null
         }
         nextGeneration += 1L
-        return Lease(nextGeneration).also { activeLease = it }
+        return Lease(nextGeneration).also {
+            activeLease = it
+            activeTrigger = trigger
+        }
     }
 
     @Synchronized
     fun completePass(lease: Lease): Boolean {
         if (activeLease != lease) return false
-        if (rerunRequested) {
-            rerunRequested = false
+        val nextTrigger = rerunTrigger
+        if (nextTrigger != null) {
+            rerunTrigger = null
+            activeTrigger = nextTrigger
             return true
         }
         activeLease = null
+        activeTrigger = null
         return false
     }
+
+    @Synchronized
+    fun currentTrigger(lease: Lease): MaterializationTrigger? =
+        activeTrigger?.takeIf { activeLease == lease }
 
     @Synchronized
     fun cancel(lease: Lease) {
         if (activeLease != lease) return
         activeLease = null
-        rerunRequested = false
+        activeTrigger = null
+        rerunTrigger = null
     }
 }
 
@@ -692,17 +713,20 @@ internal suspend fun runMaterializationPassLoop(
     gate: MaterializationRequestGate,
     lease: MaterializationRequestGate.Lease,
     isShuttingDown: () -> Boolean,
-    runPass: suspend () -> Unit,
+    runPass: suspend (MaterializationTrigger) -> Unit,
 ) {
+    var trigger = requireNotNull(gate.currentTrigger(lease))
     do {
         try {
-            runPass()
+            runPass(trigger)
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Throwable) {
             // Durable pending work remains for a coalesced or future trigger.
         }
-    } while (!isShuttingDown() && gate.completePass(lease))
+        if (isShuttingDown() || !gate.completePass(lease)) return
+        trigger = requireNotNull(gate.currentTrigger(lease))
+    } while (true)
 }
 
 /** Lifecycle shell around the lifecycle-independent durable relay transport. */
@@ -885,18 +909,12 @@ class SyncService : Service() {
 
         /** Foregrounding retries permission-held work only in an already active service. */
         fun onAppForeground(context: android.content.Context) {
-            val granted = effectivePostAvailability(
-                runtimePermissionGranted = ContextCompat.checkSelfPermission(
-                    context.applicationContext,
-                    android.Manifest.permission.POST_NOTIFICATIONS,
-                ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
-                notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled(),
-            )
+            val granted = effectivePostAvailability(context)
             resumePermissionBlockedMaterializationOnForeground(
                 postPermissionGranted = granted,
                 setPostPermission = SyncServiceStatus::setPostPermission,
                 requestActiveMaterialization = activeInstance?.let { service ->
-                    { service.requestPendingMaterialization() }
+                    { trigger -> service.requestPendingMaterialization(trigger) }
                 },
             )
         }
@@ -979,7 +997,9 @@ class SyncService : Service() {
         // Publish only after every field needed by a concurrently reserved shutdown is ready.
         activeInstance = this
         // Resume Room commits that were left before an Android platform call completed.
-        requestPendingMaterialization()
+        val postAvailable = effectivePostAvailability(applicationContext)
+        SyncServiceStatus.setPostPermission(postAvailable)
+        requestPendingMaterialization(materializationTriggerForPostAvailability(postAvailable))
         routePreferenceJob = scope.launch { routePreferenceRestarter.run() }
     }
 
@@ -1082,8 +1102,10 @@ class SyncService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun requestPendingMaterialization() {
-        val lease = materializationRequestGate.claimInitialPass() ?: return
+    private fun requestPendingMaterialization(
+        trigger: MaterializationTrigger = MaterializationTrigger.ROUTINE,
+    ) {
+        val lease = materializationRequestGate.claimInitialPass(trigger) ?: return
         if (shuttingDown) {
             materializationRequestGate.cancel(lease)
             return
@@ -1094,7 +1116,7 @@ class SyncService : Service() {
                     gate = materializationRequestGate,
                     lease = lease,
                     isShuttingDown = { shuttingDown },
-                ) {
+                ) { passTrigger ->
                     val localDevice = DeviceIdentity.getOrCreate(applicationContext)
                     NotificationMaterializer(
                         dao = reliableDao,
@@ -1102,7 +1124,7 @@ class SyncService : Service() {
                         receiptFactory = DurableReceiptFactory(applicationContext),
                         localDeviceId = localDevice,
                         retryScheduler = materializationStartupScheduler(applicationContext),
-                    ).materializePending()
+                    ).materializePending(trigger = passTrigger)
                 }
             } finally {
                 materializationRequestGate.cancel(lease)
@@ -1111,13 +1133,7 @@ class SyncService : Service() {
     }
 
     private fun updatePostPermissionStatus() {
-        SyncServiceStatus.setPostPermission(effectivePostAvailability(
-            runtimePermissionGranted = ContextCompat.checkSelfPermission(
-                this,
-                android.Manifest.permission.POST_NOTIFICATIONS,
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
-            notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled(),
-        ))
+        SyncServiceStatus.setPostPermission(effectivePostAvailability(this))
     }
 
     private fun startForegroundCompat(health: SyncHealth) {

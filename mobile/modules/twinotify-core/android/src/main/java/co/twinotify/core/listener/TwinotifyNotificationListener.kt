@@ -60,6 +60,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         runBlocking { AppFilterStore.load(ctx) }
         originDevice = runBlocking { DeviceIdentity.getOrCreate(ctx) }
         coordinator = CaptureCoordinator.get(ctx)
+        val postAvailable = co.twinotify.core.service.effectivePostAvailability(ctx)
         co.twinotify.core.service.SyncServiceStatus.setListenerHealth(
             connected = false,
             permission = true,
@@ -72,7 +73,9 @@ class TwinotifyNotificationListener : NotificationListenerService() {
                 receiptFactory = co.twinotify.core.service.DurableReceiptFactory(ctx),
                 localDeviceId = originDevice,
                 retryScheduler = co.twinotify.core.service.materializationStartupScheduler(ctx),
-            ).materializePending()
+            ).materializePending(
+                trigger = co.twinotify.core.service.materializationTriggerForPostAvailability(postAvailable),
+            )
         }
     }
 
