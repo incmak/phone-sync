@@ -61,7 +61,9 @@ the attested commit. After the run:
 
 The protected build creates a candidate, not a physical test result. The audit
 still rejects absent `all-correctness`, stress, capacity, battery, OEM, network,
-or other physical evidence.
+or other physical evidence. The protected Android producer remains externally blocked
+until the intended EAS project link and owner-controlled signing, token,
+certificate, and attestation inputs are available.
 
 Host-only release contract checks are safe to run without credentials:
 
@@ -96,7 +98,7 @@ make release-audit RELEASE_EVIDENCE_DIR=/private/path/twinotify-release-2026-08-
 The gate is intentionally strict. It requires a manifest, an APK and a
 sanitized E2E result from the exact current commit. The result must record
 passing `all-correctness`, `burst-1000`, and `offline-capacity` runs. It also
-requires one Android 14+ Pixel and one Android 14+ Samsung device, all six
+requires one Android 14+ Pixel and one Android 14+ Samsung device, all seven
 physical scenario IDs, both batterystats captures, a sanitized timeline, and
 operator notes. The verifier compares the APK and E2E result SHA-256 values
 itself; hashes copied into a manifest are not trusted.
@@ -133,7 +135,8 @@ It is not physical-device evidence.
     "PHY-OEM-01":"pass",
     "PHY-NET-01":"pass",
     "PHY-BATTERY-01":"pass",
-    "PHY-RELIABILITY-01":"pass"
+    "PHY-RELIABILITY-01":"pass",
+    "PHY-CALL-01":"pass"
   },
   "artifacts": {
     "app":"artifacts/app-release.apk",

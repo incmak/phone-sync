@@ -482,10 +482,12 @@ require_host_verify_recipe() {
 	  expected[8] = "./e2e/scripts/preflight_test.sh"
 	  expected[9] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
 	  expected[10] = "./scripts/verify-release-evidence.sh --self-test"
-	  expected[11] = "./scripts/verify-android-release_test.sh"
-	  expected[12] = "./scripts/verify-host-workflows.sh"
-	  expected[13] = "./scripts/verify-host-workflows_test.sh"
-	  expected[14] = "./scripts/verify-generated-clean.sh"
+	  expected[11] = "./scripts/verify-project-docs.sh"
+	  expected[12] = "./scripts/verify-project-docs_test.sh"
+	  expected[13] = "./scripts/verify-android-release_test.sh"
+	  expected[14] = "./scripts/verify-host-workflows.sh"
+	  expected[15] = "./scripts/verify-host-workflows_test.sh"
+	  expected[16] = "./scripts/verify-generated-clean.sh"
     }
     $0 ~ /^host-verify:[ \t]*proto-test[ \t]*$/ {
       target_count++
@@ -501,11 +503,11 @@ require_host_verify_recipe() {
         recipe = trim($0)
         if (recipe == "" || recipe ~ /^#/) next
         observed++
-		if (observed > 14 || recipe != expected[observed]) invalid = 1
+		if (observed > 16 || recipe != expected[observed]) invalid = 1
       }
     }
     END {
-	  if (target_count != 1 || observed != 14) invalid = 1
+	  if (target_count != 1 || observed != 16) invalid = 1
       exit invalid ? 1 : 0
     }
   ' "$makefile" || {

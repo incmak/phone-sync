@@ -132,13 +132,19 @@ operator approves a required `npm ci`; never claim a sandbox DNS failure passed.
 
 ## Done criteria
 
-- [ ] Root and mobile quickstarts describe only supported Twinotify workflows.
-- [ ] Protocol README describes current v1+v2 Android/relay reality.
-- [ ] Release manifest example contains all seven required scenarios including
+- [x] Root and mobile quickstarts describe only supported Twinotify workflows.
+- [x] Protocol README describes current v1+v2 Android/relay reality.
+- [x] Release manifest example contains all seven required scenarios including
       `PHY-CALL-01`.
-- [ ] Physical and protected-release claims remain pending.
-- [ ] Docs checker, self-test, host workflow checks, `make host-verify`, and diff
+- [x] Physical and protected-release claims remain pending.
+- [x] Docs checker, self-test, host workflow checks, `make host-verify`, and diff
       check pass.
+
+## Completion
+
+Completed in the primary checkout on 2026-08-27. The fresh RED/GREEN and host
+gate artifacts are recorded in `.omo/evidence/plan-023/`; physical two-phone
+and protected-release evidence remains pending.
 
 ## STOP conditions
 

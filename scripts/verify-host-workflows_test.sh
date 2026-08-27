@@ -196,6 +196,15 @@ sed -i.bak '/verify-host-workflows_test\.sh/d' "$tmp/.github/workflows/e2e-host.
 expect_rejection 'E2E host workflow omits verifier self-test'
 
 copy_workflows
+sed -i.bak '/verify-project-docs\.sh/d' "$tmp/Makefile"
+expect_rejection 'host verification omits project documentation check'
+
+copy_workflows
+awk '/^[[:space:]]*\.\/scripts\/verify-project-docs_test\.sh$/ { print "\t# ./scripts/verify-project-docs_test.sh"; next } { print }' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'commented project documentation self-test cannot satisfy host gate'
+
+copy_workflows
 awk '/^[[:space:]]*\.\/scripts\/verify-host-workflows_test\.sh$/ { print "\t# ./scripts/verify-host-workflows_test.sh"; next } { print }' "$tmp/Makefile" > "$tmp/Makefile.mutated"
 mv "$tmp/Makefile.mutated" "$tmp/Makefile"
 expect_rejection 'tabbed Make comment cannot satisfy verifier self-test command'

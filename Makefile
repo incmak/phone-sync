@@ -50,6 +50,8 @@ host-verify: proto-test
 	./e2e/scripts/preflight_test.sh
 	./scripts/verify-offline-pairing-evidence.sh --self-test
 	./scripts/verify-release-evidence.sh --self-test
+	./scripts/verify-project-docs.sh
+	./scripts/verify-project-docs_test.sh
 	./scripts/verify-android-release_test.sh
 	./scripts/verify-host-workflows.sh
 	./scripts/verify-host-workflows_test.sh

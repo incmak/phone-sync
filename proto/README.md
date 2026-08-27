@@ -1,23 +1,26 @@
-# Phone-Sync Protocol (v1)
+# Twinotify protocol contracts
 
-Single source of truth for packet schemas. Each client parses in its native language:
+`proto/` is the committed single source of truth for Twinotify JSON Schema
+2020-12 packet contracts. The Android Kotlin client and Go relay are the
+current consumers.
 
-- Relay (Go) — hand-written structs validated against these schemas in tests
-- Mobile (Kotlin) — Moshi/Gson-generated types, schema-checked in CI
-- Desktop (Rust) — serde_json structs, schema-checked in CI
+## Versioned delivery
 
-## Envelope
+v1 remains an online-only compatibility path for legacy envelopes. Current
+reliable delivery uses v2: authenticated encrypted inner events with message and
+canonical IDs, sequence and expiry metadata, durable relay mailboxes, and
+end-to-end peer receipts. Android advertises v2 before v1 and the relay records
+a protocol floor once both peers support v2, preventing a forced v1 downgrade.
 
-See `packet.schema.json`. Every message carries `{v, type, msg_id, origin_device, ts, payload}`. Payload shape varies by `type` — see per-type schemas.
+The relay schemas are generated build input, not a second source of truth. Run:
 
-## Types (Phase 1 subset)
+```bash
+make sync-proto
+make proto-test
+```
 
-- `ping` / `pong` — liveness
-- `notif.post` / `notif.update` — mirror a notification (see `notif-post.schema.json`)
-- `notif.cancel` — dismiss mirror (see `notif-cancel.schema.json`)
-
-Later phases add `notif.reply`, `icon.request`, `icon.reply`, `reply.failed`, `ack`.
-
-## Validation
-
-Schemas are JSON Schema 2020-12. Use any compliant validator.
+`make sync-proto` copies the committed schemas and fixtures into
+`relay/internal/server/`, which is gitignored because the Go server embeds that
+copy at build time. Do not edit the generated directory. Every schema `$id`
+must retain the exact `https://twinotify.app/schemas/` prefix used by
+`relay/internal/server/validator.go`; a mismatch makes validation fail.
