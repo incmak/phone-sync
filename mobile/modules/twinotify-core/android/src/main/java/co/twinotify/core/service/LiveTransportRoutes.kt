@@ -134,7 +134,7 @@ class LiveLanRouteConfig(
 }
 
 class LiveRelayRouteHooks(
-    val dispatch: suspend (String) -> Unit,
+    val dispatch: suspend (String) -> InboundDispatchResult?,
     val onEvent: suspend (TransportEvent) -> Unit = {},
     val onAuthenticated: suspend (Int) -> Unit = {},
     val onExpired: suspend () -> Unit = {},
@@ -142,7 +142,7 @@ class LiveRelayRouteHooks(
 
 class LiveRelayRouteConfig(
     val events: () -> Flow<TransportEvent>,
-    val hooks: LiveRelayRouteHooks = LiveRelayRouteHooks(dispatch = {}),
+    val hooks: LiveRelayRouteHooks = LiveRelayRouteHooks(dispatch = { null }),
 )
 
 class LiveTransportRouteDependencies(
@@ -464,7 +464,12 @@ class LiveRelayTransportRoute(
             try {
                 events().collect { event ->
                     when (event) {
-                        is TransportEvent.Delivery -> hooks.dispatch(event.envelope)
+                        is TransportEvent.Delivery -> {
+                            if (hooks.dispatch(event.envelope) is InboundDispatchResult.Rejected) {
+                                closed.complete("inbound_rejected")
+                                throw IllegalStateException("inbound_rejected")
+                            }
+                        }
                         is TransportEvent.Authenticated -> {
                             hooks.onAuthenticated(event.floor)
                             authenticated.complete(Unit)

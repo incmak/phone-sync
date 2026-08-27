@@ -65,6 +65,32 @@ class LiveTransportRoutesTest {
         }
         assertEquals(listOf("dispatch", "finalize"), order)
     }
+
+    @Test
+    fun rejectedRelayDeliveryClosesTheRouteInsteadOfBecomingUnitSuccess() = runTest {
+        var dispatches = 0
+        val route = LiveRelayTransportRoute(
+            events = {
+                flow {
+                    emit(TransportEvent.Authenticated(2))
+                    emit(TransportEvent.Delivery(1, "conflict"))
+                    emit(TransportEvent.Delivery(2, "must-not-run"))
+                }
+            },
+            hooks = LiveRelayRouteHooks(
+                dispatch = {
+                    dispatches += 1
+                    InboundDispatchResult.Rejected("id_conflict")
+                },
+            ),
+        )
+
+        val session = route.open()
+
+        assertEquals("inbound_rejected", session.awaitClosed())
+        assertEquals(1, dispatches)
+    }
+
     @Test
     fun authenticatedRouteAcceptanceCompletesOnlyMatchingUnpairReservations() = runTest {
         val tracker = UnpairCustodyTracker()
@@ -305,7 +331,7 @@ class LiveTransportRoutesTest {
         val route = LiveRelayTransportRoute(
             events = { events },
             hooks = LiveRelayRouteHooks(
-                dispatch = { observed += it },
+                dispatch = { observed += it; null },
                 onAuthenticated = { authenticatedFloor = it },
                 onExpired = { expiries++ },
                 onEvent = { lifecycle += it.javaClass.simpleName },
@@ -349,7 +375,7 @@ class LiveTransportRoutesTest {
                     }
                 }
             },
-            hooks = LiveRelayRouteHooks(dispatch = {}),
+            hooks = LiveRelayRouteHooks(dispatch = { null }),
         )
         val generation = backgroundScope.launch {
             val session = route.open()

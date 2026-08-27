@@ -9,6 +9,7 @@ import co.twinotify.core.call.CallDirection
 import co.twinotify.core.call.CallStateEvent
 import co.twinotify.core.call.CallStateReducer
 import co.twinotify.core.listener.NotifPostJson
+import co.twinotify.core.protocol.AuthenticatedEnvelope
 import co.twinotify.core.protocol.EnvelopeAuthenticator
 import co.twinotify.core.protocol.PayloadDecryptor
 import co.twinotify.core.protocol.ProtocolJson
@@ -20,6 +21,7 @@ import co.twinotify.core.storage.ReplayGuard
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
@@ -48,6 +50,77 @@ sealed interface InboundDispatchResult {
     data class Rejected(val code: String) : InboundDispatchResult
 }
 
+sealed interface DirectControlProcessingResult {
+    data object Applied : DirectControlProcessingResult
+    data class Rejected(val code: String) : DirectControlProcessingResult
+}
+
+sealed interface DirectControlCommitResult {
+    data object Committed : DirectControlCommitResult
+    data object Duplicate : DirectControlCommitResult
+    data object IdConflict : DirectControlCommitResult
+    data object NotEligible : DirectControlCommitResult
+    data class Rejected(val code: String) : DirectControlCommitResult
+}
+
+fun interface DirectControlJournal {
+    suspend fun commit(
+        row: InboundMessage,
+        process: suspend () -> DirectControlProcessingResult,
+    ): DirectControlCommitResult
+}
+
+internal suspend fun dispatchAuthenticatedDirectControl(
+    msgId: String,
+    originDevice: String,
+    envelopeSha256: String,
+    eventType: String,
+    committedAt: Long,
+    journal: DirectControlJournal,
+    process: suspend () -> DirectControlProcessingResult,
+): InboundDispatchResult {
+    val row = InboundMessage(
+        msgId = msgId,
+        originDevice = originDevice,
+        envelopeSha256 = envelopeSha256,
+        eventType = eventType,
+        canonId = null,
+        sequence = null,
+        outcome = "APPLIED",
+        committedAt = committedAt,
+        appliedAt = committedAt,
+        receiptMsgId = null,
+        relayAckState = "READY",
+    )
+    return when (val result = journal.commit(row, process)) {
+        DirectControlCommitResult.Committed -> InboundDispatchResult.Accepted(msgId, envelopeSha256)
+        DirectControlCommitResult.Duplicate -> InboundDispatchResult.Duplicate(msgId, envelopeSha256)
+        DirectControlCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        DirectControlCommitResult.NotEligible -> InboundDispatchResult.Rejected("unsupported_control")
+        is DirectControlCommitResult.Rejected -> InboundDispatchResult.Rejected(result.code)
+    }
+}
+
+internal suspend fun processAuthenticatedControl(
+    rejectedCode: String,
+    process: suspend () -> DirectControlProcessingResult,
+): DirectControlProcessingResult = try {
+    process()
+} catch (cancellation: CancellationException) {
+    throw cancellation
+} catch (_: IllegalArgumentException) {
+    DirectControlProcessingResult.Rejected(rejectedCode)
+} catch (_: org.json.JSONException) {
+    DirectControlProcessingResult.Rejected(rejectedCode)
+}
+
+internal fun peerReceiptControlResult(transition: OutboxTransition): DirectControlProcessingResult =
+    if (transition is OutboxTransition.Conflict) {
+        DirectControlProcessingResult.Rejected("receipt_conflict")
+    } else {
+        DirectControlProcessingResult.Applied
+    }
+
 internal suspend fun executePeerUnpairAndRequestServiceStop(
     unpair: suspend () -> Unit,
     requestServiceStop: suspend () -> Unit,
@@ -73,13 +146,21 @@ internal suspend fun dispatchAuthenticatedV2Unpair(
     return InboundDispatchResult.AcceptedAfterCustody(msgId, envelopeSha256, finalizeServiceStop)
 }
 
-class InboundDispatcher(
+class InboundDispatcher internal constructor(
     private val ctx: Context,
-    private val snapshotCoordinator: SnapshotCoordinator = SnapshotCoordinator(
-        NotificationDb.get(ctx.applicationContext).reliableDeliveryDao(),
-    ),
-    private val onAuthenticatedEvent: (String) -> Unit = {},
+    private val snapshotCoordinator: SnapshotCoordinator,
+    private val onAuthenticatedEvent: (String) -> Unit,
+    private val authenticatedV2Opener: ((String) -> AuthenticatedEnvelope)?,
+    private val directControlJournal: DirectControlJournal?,
 ) {
+    constructor(
+        ctx: Context,
+        snapshotCoordinator: SnapshotCoordinator = SnapshotCoordinator(
+            NotificationDb.get(ctx.applicationContext).reliableDeliveryDao(),
+        ),
+        onAuthenticatedEvent: (String) -> Unit = {},
+    ) : this(ctx, snapshotCoordinator, onAuthenticatedEvent, null, null)
+
     private val reliableDao by lazy { NotificationDb.get(ctx.applicationContext).reliableDeliveryDao() }
     private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao)) }
     private val stateMutex = Mutex()
@@ -144,23 +225,30 @@ class InboundDispatcher(
     }
 
     private suspend fun dispatchV2(raw: String): InboundDispatchResult {
-        val peer = PeerStore.load(ctx) ?: run {
-            android.util.Log.w("Twinotify", "no peer paired; dropping v2 inbound")
-            return InboundDispatchResult.Rejected("no_peer")
+        val peer = if (authenticatedV2Opener == null) {
+            PeerStore.load(ctx) ?: run {
+                android.util.Log.w("Twinotify", "no peer paired; dropping v2 inbound")
+                return InboundDispatchResult.Rejected("no_peer")
+            }
+        } else {
+            null
         }
-        val (cryptoBox, _) = CryptoStore.loadOrGenerate(ctx)
         val opened = try {
-            EnvelopeAuthenticator(
-                decryptor = PayloadDecryptor { envelope ->
-                    Encrypter.decrypt(
-                        ct = Base64.decode(envelope.ciphertextB64, Base64.DEFAULT),
-                        nonce = Base64.decode(envelope.nonceB64, Base64.DEFAULT),
-                        peerPubkey = peer.encPubkey,
-                        ownSecret = cryptoBox.secretKey,
-                    )
-                },
-                peerDeviceId = peer.deviceId,
-            ).open(raw)
+            authenticatedV2Opener?.invoke(raw) ?: run {
+                val pairedPeer = requireNotNull(peer)
+                val (cryptoBox, _) = CryptoStore.loadOrGenerate(ctx)
+                EnvelopeAuthenticator(
+                    decryptor = PayloadDecryptor { envelope ->
+                        Encrypter.decrypt(
+                            ct = Base64.decode(envelope.ciphertextB64, Base64.DEFAULT),
+                            nonce = Base64.decode(envelope.nonceB64, Base64.DEFAULT),
+                            peerPubkey = pairedPeer.encPubkey,
+                            ownSecret = cryptoBox.secretKey,
+                        )
+                    },
+                    peerDeviceId = pairedPeer.deviceId,
+                ).open(raw)
+            }
         } catch (error: Throwable) {
             android.util.Log.w("Twinotify", "v2 authentication failed: ${error.message}")
             return InboundDispatchResult.Rejected("auth_failed")
@@ -176,44 +264,52 @@ class InboundDispatcher(
             onAuthenticatedEvent(inner.type)
             return it
         }
-        if (inner.type == "peer.receipt") {
-            val payload = inner.payloadObject()
-            val status = payload.getString("status")
-            val reason = payload.optString("reason").takeIf { it.isNotEmpty() }
-            outbox.onPeerReceipt(
-                ackedMsgId = payload.getString("acked_msg_id"),
-                envelopeSha256 = payload.getString("envelope_sha256"),
-                status = status,
-                reason = reason,
-            )
-            SyncServiceStatus.setLastReceiptAt(System.currentTimeMillis())
-            SyncServiceStatus.setQueueStats(reliableDao.activeOutboundCount(), reliableDao.activeOutboundBytes())
-            onAuthenticatedEvent(inner.type)
-            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
-        }
-        if (inner.type == "state.digest") {
-            runCatching { snapshots.onDigest(inner) }
-                .onFailure { android.util.Log.w("Twinotify", "snapshot digest rejected", it) }
-            onAuthenticatedEvent(inner.type)
-            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
-        }
-        if (inner.type == "state.snapshot.begin") {
-            runCatching { snapshots.onBegin(inner) }
-                .onFailure { android.util.Log.w("Twinotify", "snapshot begin rejected", it) }
-            onAuthenticatedEvent(inner.type)
-            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
-        }
-        if (inner.type == "state.snapshot.item") {
-            runCatching { snapshots.onItem(inner) }
-                .onFailure { android.util.Log.w("Twinotify", "snapshot item rejected", it) }
-            onAuthenticatedEvent(inner.type)
-            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
-        }
-        if (inner.type == "state.snapshot.end") {
-            val result = recordSnapshotCommitIfCommitted(runCatching { snapshots.onEnd(inner) }
-                .onFailure { android.util.Log.w("Twinotify", "snapshot end rejected", it) }
-            )
-            if (result is SnapshotConvergence.Committed) {
+        if (inner.type in DIRECT_ACK_CONTROL_TYPES) {
+            var snapshotCommitted = false
+            val result = dispatchAuthenticatedDirectControl(
+                msgId = inner.msgId,
+                originDevice = inner.originDevice,
+                envelopeSha256 = opened.envelopeSha256,
+                eventType = inner.type,
+                committedAt = System.currentTimeMillis(),
+                journal = directControlJournal ?: DirectControlJournal(reliableDao::commitDirectControl),
+            ) {
+                val rejectedCode = when (inner.type) {
+                    "peer.receipt" -> "receipt_invalid"
+                    "state.digest" -> "digest_rejected"
+                    "state.snapshot.begin" -> "snapshot_begin_rejected"
+                    "state.snapshot.item" -> "snapshot_item_rejected"
+                    "state.snapshot.end" -> "snapshot_end_rejected"
+                    else -> error("direct control allowlist drift")
+                }
+                processAuthenticatedControl(rejectedCode) { when (inner.type) {
+                    "peer.receipt" -> {
+                        val payload = inner.payloadObject()
+                        val transition = outbox.onPeerReceipt(
+                            ackedMsgId = payload.getString("acked_msg_id"),
+                            envelopeSha256 = payload.getString("envelope_sha256"),
+                            status = payload.getString("status"),
+                            reason = payload.optString("reason").takeIf { it.isNotEmpty() },
+                        )
+                        peerReceiptControlResult(transition)
+                    }
+                    "state.digest" -> snapshots.onDigest(inner).toDirectControlResult("digest_rejected")
+                    "state.snapshot.begin" -> snapshots.onBegin(inner).toDirectControlResult("snapshot_begin_rejected")
+                    "state.snapshot.item" -> snapshots.onItem(inner).toDirectControlResult("snapshot_item_rejected")
+                    "state.snapshot.end" -> {
+                        val convergence = snapshots.onEnd(inner)
+                        snapshotCommitted = convergence is SnapshotConvergence.Committed
+                        convergence.toDirectControlResult("snapshot_end_rejected", requireCommitted = true)
+                    }
+                    else -> error("direct control allowlist drift")
+                } }
+            }
+            if (inner.type == "peer.receipt" && result !is InboundDispatchResult.Rejected) {
+                SyncServiceStatus.setLastReceiptAt(System.currentTimeMillis())
+                SyncServiceStatus.setQueueStats(reliableDao.activeOutboundCount(), reliableDao.activeOutboundBytes())
+            }
+            if (snapshotCommitted) {
+                ProductObservationTracker.recordSnapshotCommit()
                 val localDeviceId = DeviceIdentity.getOrCreate(ctx)
                 NotificationMaterializer(
                     dao = reliableDao,
@@ -224,10 +320,10 @@ class InboundDispatcher(
                 ).materializePending()
             }
             onAuthenticatedEvent(inner.type)
-            return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
+            return result
         }
         if (inner.type == "call.state") {
-            return dispatchCallState(inner, opened.envelopeSha256, peer.deviceId)
+            return dispatchCallState(inner, opened.envelopeSha256, peer?.deviceId ?: inner.originDevice)
         }
         if (inner.type !in setOf("notif.post", "notif.update", "notif.cancel")) {
             // Receipt/control processing belongs to the transport task. Preserve the authenticated
@@ -243,7 +339,7 @@ class InboundDispatcher(
             val authorizedEvent = NotificationStateReducer.authorizePeerCancel(
                 current = current,
                 event = inner,
-                authenticatedPeerId = peer.deviceId,
+                authenticatedPeerId = peer?.deviceId ?: inner.originDevice,
             ) ?: run {
                 android.util.Log.w("Twinotify", "v2 cancel origin is not the paired peer")
                 return@withLock InboundDispatchResult.Rejected("unauthorized_cancel")
@@ -466,3 +562,24 @@ internal fun recordSnapshotCommitIfCommitted(result: Result<SnapshotConvergence>
     }
     return convergence
 }
+
+private fun SnapshotConvergence.toDirectControlResult(
+    rejectedCode: String,
+    requireCommitted: Boolean = false,
+): DirectControlProcessingResult = when {
+    this is SnapshotConvergence.Rejected ||
+        this is SnapshotConvergence.Incomplete ||
+        this is SnapshotConvergence.DigestMismatch ||
+        this is SnapshotConvergence.SourceUnavailable ||
+        (requireCommitted && this !is SnapshotConvergence.Committed) ->
+        DirectControlProcessingResult.Rejected(rejectedCode)
+    else -> DirectControlProcessingResult.Applied
+}
+
+private val DIRECT_ACK_CONTROL_TYPES = setOf(
+    "peer.receipt",
+    "state.digest",
+    "state.snapshot.begin",
+    "state.snapshot.item",
+    "state.snapshot.end",
+)

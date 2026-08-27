@@ -166,12 +166,25 @@ internal suspend fun runTransportSideEffect(
 
 internal suspend fun dispatchRelayDeliveryWithFinalization(
     dispatch: suspend () -> InboundDispatchResult?,
-) {
+): InboundDispatchResult? {
     val result = dispatch()
     if (result is InboundDispatchResult.AcceptedAfterCustody) {
         // The relay has already durably accepted the sender's row before delivery to this client.
         result.finalizeAfterCustody()
     }
+    return result
+}
+
+internal suspend fun dispatchRelayDeliveryFailClosed(
+    dispatch: suspend () -> InboundDispatchResult,
+    onFailure: (Throwable) -> Unit,
+): InboundDispatchResult = try {
+    dispatch()
+} catch (cancellation: CancellationException) {
+    throw cancellation
+} catch (error: Throwable) {
+    onFailure(error)
+    throw error
 }
 
 internal fun acceptRelayUnpairCustody(
@@ -962,14 +975,10 @@ class SyncService : Service() {
                     hooks = LiveRelayRouteHooks(
                         dispatch = { envelope ->
                             dispatchRelayDeliveryWithFinalization {
-                                try {
-                                    dispatcher.dispatch(envelope)
-                                } catch (cancellation: CancellationException) {
-                                    throw cancellation
-                                } catch (_: Throwable) {
-                                    SyncServiceStatus.setLastError("inbound_dispatch")
-                                    null
-                                }
+                                dispatchRelayDeliveryFailClosed(
+                                    dispatch = { dispatcher.dispatch(envelope) },
+                                    onFailure = { SyncServiceStatus.setLastError("inbound_dispatch") },
+                                )
                             }
                         },
                         onEvent = { event ->

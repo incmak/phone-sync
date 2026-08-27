@@ -19,6 +19,8 @@ import co.twinotify.core.call.CallSourceCapabilities
 import co.twinotify.core.call.CallStateSource
 import co.twinotify.core.call.gracefullyShutdownCallCapture
 import co.twinotify.core.service.CustodyRoute
+import co.twinotify.core.service.DirectControlCommitResult
+import co.twinotify.core.service.DirectControlProcessingResult
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -417,6 +419,147 @@ class ReliableDeliveryTransactionTest {
 
         assertNotNull(dao.outboundMessage(receipt.msgId))
         assertEquals("NONE", dao.inbound("source")!!.relayAckState)
+    }
+
+    @Test
+    fun directControlJournalIsReadyThenSentOnceAndDuplicateDoesNotReprocess() = runBlocking {
+        var processCount = 0
+        val row = inbound("direct-control", "a".repeat(64)).copy(
+            eventType = "state.digest",
+            canonId = null,
+            sequence = null,
+            outcome = "APPLIED",
+            appliedAt = 100,
+            relayAckState = "READY",
+        )
+
+        assertEquals(
+            DirectControlCommitResult.Committed,
+            dao.commitDirectControl(row) {
+                processCount += 1
+                DirectControlProcessingResult.Applied
+            },
+        )
+        assertEquals(listOf(co.twinotify.core.service.RelayAckRecord(row.msgId, row.envelopeSha256)), dao.readyRelayAcks(10))
+        assertEquals(1, dao.markRelayAckSent(row.msgId, row.envelopeSha256))
+        assertTrue(dao.readyRelayAcks(10).isEmpty())
+
+        assertEquals(
+            DirectControlCommitResult.Duplicate,
+            dao.commitDirectControl(row.copy(committedAt = 200, appliedAt = 200)) {
+                error("ACKed duplicate must not execute control again")
+            },
+        )
+        assertEquals(1, processCount)
+        assertEquals("SENT", dao.inbound(row.msgId)?.relayAckState)
+    }
+
+    @Test
+    fun everyNoReceiptControlTypeCreatesOneReadyAckRow() = runBlocking {
+        val types = listOf(
+            "peer.receipt",
+            "state.digest",
+            "state.snapshot.begin",
+            "state.snapshot.item",
+            "state.snapshot.end",
+        )
+        types.forEachIndexed { index, eventType ->
+            val row = inbound("control-$index", index.toString().repeat(64)).copy(
+                eventType = eventType,
+                canonId = null,
+                sequence = null,
+                outcome = "APPLIED",
+                appliedAt = 100L + index,
+                relayAckState = "READY",
+            )
+            assertEquals(
+                DirectControlCommitResult.Committed,
+                dao.commitDirectControl(row) { DirectControlProcessingResult.Applied },
+            )
+        }
+
+        assertEquals(types.indices.map { "control-$it" }, dao.readyRelayAcks(10).map { it.msgId })
+    }
+
+    @Test
+    fun directControlDigestConflictRejectsWithoutChangingReadySource() = runBlocking {
+        val original = inbound("control-conflict", "a".repeat(64)).copy(
+            eventType = "state.snapshot.item",
+            canonId = null,
+            sequence = null,
+            outcome = "APPLIED",
+            appliedAt = 100,
+            relayAckState = "READY",
+        )
+        assertEquals(
+            DirectControlCommitResult.Committed,
+            dao.commitDirectControl(original) { DirectControlProcessingResult.Applied },
+        )
+
+        assertEquals(
+            DirectControlCommitResult.IdConflict,
+            dao.commitDirectControl(original.copy(envelopeSha256 = "b".repeat(64))) {
+                error("conflict must not execute control")
+            },
+        )
+        assertEquals(original, dao.inbound(original.msgId))
+        assertEquals(listOf(original.msgId), dao.readyRelayAcks(10).map { it.msgId })
+    }
+
+    @Test
+    fun snapshotEndAndAckJournalRollbackTogetherWhenJournalInsertFails() = runBlocking {
+        dao.beginSnapshot("atomic-end", ORIGIN, expectedItemCount = 1, receivedAt = 100)
+        dao.stageSnapshotItem(
+            SnapshotStage("atomic-end", "snapshot-canon", 1, snapshotPayload("snapshot-canon"), 100),
+        )
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_control_journal BEFORE INSERT ON inbound_message " +
+                "BEGIN SELECT RAISE(ABORT, 'forced control journal failure'); END",
+        )
+        val row = inbound("snapshot-end-control", "c".repeat(64)).copy(
+            eventType = "state.snapshot.end",
+            canonId = null,
+            sequence = null,
+            outcome = "APPLIED",
+            appliedAt = 200,
+            relayAckState = "READY",
+        )
+
+        assertFailsWith<android.database.sqlite.SQLiteException> {
+            dao.commitDirectControl(row) {
+                assertIs<SnapshotCommitResult.Committed>(
+                    dao.commitSnapshot("atomic-end", snapshotDigest("snapshot-canon", 1), committedAt = 200),
+                )
+                DirectControlProcessingResult.Applied
+            }
+        }
+
+        assertNull(dao.inbound(row.msgId))
+        assertNull(dao.canonical("snapshot-canon"))
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_control_journal")
+        assertIs<SnapshotCommitResult.Committed>(
+            dao.commitSnapshot("atomic-end", snapshotDigest("snapshot-canon", 1), committedAt = 300),
+        )
+        Unit
+    }
+
+    @Test
+    fun unpairCannotEnterGenericDirectAckJournal() = runBlocking {
+        val row = inbound("unpair-control", "d".repeat(64)).copy(
+            eventType = "unpair",
+            canonId = null,
+            sequence = null,
+            outcome = "APPLIED",
+            appliedAt = 100,
+            relayAckState = "READY",
+        )
+
+        assertEquals(
+            DirectControlCommitResult.NotEligible,
+            dao.commitDirectControl(row) { error("unpair owns a dedicated finalizer path") },
+        )
+        assertNull(dao.inbound(row.msgId))
+        assertTrue(dao.readyRelayAcks(10).isEmpty())
     }
 
     @Test

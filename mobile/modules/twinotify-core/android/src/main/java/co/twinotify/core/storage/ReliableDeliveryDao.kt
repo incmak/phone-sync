@@ -5,6 +5,8 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import co.twinotify.core.service.DirectControlCommitResult
+import co.twinotify.core.service.DirectControlProcessingResult
 
 internal fun isNotificationSnapshotCanonical(canonId: String): Boolean = !canonId.startsWith("call:")
 
@@ -257,6 +259,31 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
 
     @Query("SELECT * FROM inbound_message WHERE msgId=:msgId")
     abstract suspend fun inbound(msgId: String): InboundMessage?
+
+    @Transaction
+    open suspend fun commitDirectControl(
+        row: InboundMessage,
+        process: suspend () -> DirectControlProcessingResult,
+    ): DirectControlCommitResult {
+        if (row.eventType !in DIRECT_ACK_CONTROL_TYPES) return DirectControlCommitResult.NotEligible
+        require(row.canonId == null && row.sequence == null)
+        require(row.outcome == "APPLIED" && row.appliedAt != null && row.relayAckState == "READY")
+        val existing = inbound(row.msgId)
+        if (existing != null) {
+            return if (existing.envelopeSha256 == row.envelopeSha256) {
+                DirectControlCommitResult.Duplicate
+            } else {
+                DirectControlCommitResult.IdConflict
+            }
+        }
+        return when (val processed = process()) {
+            DirectControlProcessingResult.Applied -> {
+                insertInbound(row)
+                DirectControlCommitResult.Committed
+            }
+            is DirectControlProcessingResult.Rejected -> DirectControlCommitResult.Rejected(processed.code)
+        }
+    }
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insertInbound(row: InboundMessage)
@@ -1059,6 +1086,13 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     }
 
     private companion object {
+        val DIRECT_ACK_CONTROL_TYPES = setOf(
+            "peer.receipt",
+            "state.digest",
+            "state.snapshot.begin",
+            "state.snapshot.item",
+            "state.snapshot.end",
+        )
         val POST_OR_UPDATE_EVENT_TYPES = setOf("notif.post", "notif.update")
         val STATE_EVENT_TYPES = POST_OR_UPDATE_EVENT_TYPES + setOf("notif.cancel", "call.state")
         const val SNAPSHOT_RESERVED_CANON_PREFIX = "\u0000"
