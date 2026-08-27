@@ -37,18 +37,17 @@ class CallStateMaterializerTest {
     }
 
     @Test
-    fun exactDuplicateRequiresAuthenticatedJournalMatch() {
+    fun reducerTreatsSameSequenceAsConflictBecauseDuplicateIdentityIsJournalOwned() {
         val first = assertIs<CallReduction.Apply>(CallStateReducer.reduce(null, event("ringing", 1), "dev-local", LocalIdAllocator { 41 }))
-        val duplicate = assertIs<CallReduction.Duplicate>(
+        val conflict = assertIs<CallReduction.Conflict>(
             CallStateReducer.reduce(
                 current = first.state,
                 event = event("ringing", 1),
                 localDeviceId = "dev-local",
                 allocator = LocalIdAllocator { 99 },
-                authenticatedDuplicate = true,
             ),
         )
-        assertEquals(first.state, duplicate.state)
+        assertEquals(first.state, conflict.state)
     }
 
     @Test

@@ -48,6 +48,7 @@ export default function SettingsScreen() {
   const [callCaptureEnabled, setCallCaptureEnabled] = useState<boolean | null>(null);
   const [callPermissionCanAskAgain, setCallPermissionCanAskAgain] = useState(true);
   const [callCaptureBusy, setCallCaptureBusy] = useState(false);
+  const [callEnablePending, setCallEnablePending] = useState(false);
 
   useEffect(() => {
     TwinotifyCoreModule.getPairStatus()
@@ -93,6 +94,7 @@ export default function SettingsScreen() {
           setCallCaptureEnabled(false);
           return;
         }
+        setCallEnablePending(true);
       }
       await TwinotifyCoreModule.setCallCaptureEnabled(next);
       const durable = await TwinotifyCoreModule.getCallCaptureEnabled();
@@ -100,6 +102,7 @@ export default function SettingsScreen() {
     } catch {
       setCallCaptureEnabled(previous);
     } finally {
+      setCallEnablePending(false);
       setCallCaptureBusy(false);
     }
   }, [callCaptureEnabled]);
@@ -122,10 +125,17 @@ export default function SettingsScreen() {
   const relayDisplay = relayUrl ?? (pairStatus.paired ? 'Direct Wi-Fi only' : 'Not configured');
   const version = Constants.expoConfig?.version ?? '1.0.0';
   const callUnsupported = syncStatus.callCaptureDisabledReason === 'call_telephony_unsupported';
+  const callPreferenceEnabled = callCaptureEnabled === true && !callUnsupported;
+  const callStarting = callEnablePending;
+  const callUnavailable = callPreferenceEnabled && syncStatus.callCaptureEnabled !== true;
   const callSubtitle = callUnsupported
     ? 'Call state mirroring is unavailable on this device.'
-    : 'Shares only ringing, active, and ended states. No phone numbers or controls.';
-  const callStateLabel = callCaptureEnabled ? 'On' : 'Off';
+    : callStarting
+      ? 'Enabled. Waiting for call capture to start. No phone numbers or controls.'
+      : callUnavailable
+        ? 'Enabled. Call capture is not active. No phone numbers or controls.'
+        : 'Shares only ringing, active, and ended states. No phone numbers or controls.';
+  const callStateLabel = callPreferenceEnabled ? 'On' : 'Off';
 
   const sectionHeader = (label: string) => (
     <Text style={[styles.sectionHeader, { color: theme.ink2, fontFamily: theme.fonts.uiMedium }]}>
@@ -203,7 +213,7 @@ export default function SettingsScreen() {
             trailing={
               <View style={styles.controlSlot}>
                 <TwSwitch
-                  checked={callCaptureEnabled ?? false}
+                  checked={callPreferenceEnabled}
                   onChange={handleCallCaptureChange}
                   size="md"
                   disabled={callCaptureEnabled === null || callCaptureBusy || callUnsupported}
@@ -218,7 +228,7 @@ export default function SettingsScreen() {
             }
             style={styles.ledgerRow}
           />
-          {!callPermissionCanAskAgain && !callCaptureEnabled ? (
+          {!callPermissionCanAskAgain && !callPreferenceEnabled ? (
             <TwRow
               title="Allow call state permission"
               subtitle="Open Android settings"

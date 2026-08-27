@@ -5,6 +5,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
@@ -23,6 +24,55 @@ import kotlin.test.assertTrue
 class ServiceLifecycleTest {
     private val paired = true
     private val relayUrl = "wss://relay.example.test/ws"
+
+    @Test
+    fun callCaptureAdmissionGenerationIsWiredFromModuleIntentThroughServiceRecovery() {
+        val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
+        val moduleSource = File(sourceRoot, "TwinotifyCoreModule.kt").readText()
+        val enableBlock = moduleSource
+            .substringAfter("AsyncFunction(\"setCallCaptureEnabled\")")
+            .substringBefore("AsyncFunction(\"getCallCaptureEnabled\")")
+        assertSourceOrder(
+            enableBlock,
+            "::beginCallCaptureAdmission",
+            "putExtra(\n                                                co.twinotify.core.service.SyncService.EXTRA_CALL_CAPTURE_ADMISSION_GENERATION",
+            "admissionTicket.generation",
+            "ctx.startForegroundService(intent)",
+            "::awaitCallCaptureAdmission",
+        )
+
+        val serviceSource = File(sourceRoot, "service/SyncService.kt").readText()
+        val onStartBlock = serviceSource
+            .substringAfter("override fun onStartCommand")
+            .substringBefore("override fun onDestroy")
+        assertSourceOrder(
+            onStartBlock,
+            "parseCallCaptureAdmissionGeneration(",
+            "callCaptureAdmissionGeneration",
+            "recoverCallsBeforeNormalCapture(callCaptureAdmissionGeneration)",
+        )
+
+        val recoveryBlock = serviceSource
+            .substringAfter("private fun recoverCallsBeforeNormalCapture")
+            .substringBefore("private fun configureCallCapture")
+        assertSourceOrder(
+            recoveryBlock,
+            "routeCallCaptureAdmissionForServiceStart(",
+            "generation = admissionGeneration",
+            "startRecovery =",
+            "completeCallCaptureAdmissionForServiceStart(",
+        )
+    }
+
+    private fun assertSourceOrder(source: String, vararg fragments: String) {
+        var cursor = -1
+        for (fragment in fragments) {
+            val next = source.indexOf(fragment, startIndex = cursor + 1)
+            assertTrue(next >= 0, "missing production wiring fragment: $fragment")
+            assertTrue(next > cursor, "production wiring fragment is out of order: $fragment")
+            cursor = next
+        }
+    }
 
     @Test
     fun foregroundRequestPromotesBeforeNoRoutePolicyReadsAndStop() {

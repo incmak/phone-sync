@@ -54,7 +54,10 @@ describe('call sync Settings product', () => {
 
   it('announces loading truthfully and gives the call switch a 48dp target', async () => {
     global.__RESET_OFFLINE_TEST_STATE__();
-    global.__TWINOTIFY_CORE__.getCallCaptureEnabled.mockReturnValue(new Promise(() => {}));
+    let resolveEnabled!: (enabled: boolean) => void;
+    global.__TWINOTIFY_CORE__.getCallCaptureEnabled.mockReturnValue(
+      new Promise<boolean>((resolve) => { resolveEnabled = resolve; }),
+    );
     const screen = render(<SettingsScreen />);
 
     const toggle = screen.getByRole('switch', { name: /Mirror call state.*Loading/ });
@@ -62,6 +65,10 @@ describe('call sync Settings product', () => {
     const style = StyleSheet.flatten(toggle.props.style);
     expect(style.minWidth).toBeGreaterThanOrEqual(48);
     expect(style.minHeight).toBeGreaterThanOrEqual(48);
+    await act(async () => { resolveEnabled(false); });
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state/ }).props.accessibilityState.disabled,
+    ).toBe(false));
   });
 
   it('requests permission only after rationale confirmation, then persists and reads back enablement', async () => {
@@ -83,6 +90,33 @@ describe('call sync Settings product', () => {
     await waitFor(() => expect(global.__TWINOTIFY_CORE__.setCallCaptureEnabled).toHaveBeenCalledWith(true));
     expect(global.__TWINOTIFY_CORE__.requestCallStatePermissionAsync).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.getByRole('switch', { name: /Mirror call state/ }).props.accessibilityState.checked).toBe(true));
+  });
+
+  it('waits only during bounded native admission then renders Off on failure', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert');
+    let resolveAdmission!: () => void;
+    global.__RESET_OFFLINE_TEST_STATE__();
+    global.__TWINOTIFY_CORE__.setCallCaptureEnabled.mockReturnValueOnce(
+      new Promise<void>((resolve) => { resolveAdmission = resolve; }),
+    );
+    const screen = render(<SettingsScreen />);
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state/ }).props.accessibilityState.disabled,
+    ).toBe(false));
+
+    fireEvent.press(screen.getByRole('switch', { name: /Mirror call state/ }));
+    acceptRationale(alertSpy);
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state.*Waiting for call capture to start/ })
+        .props.accessibilityState.disabled,
+    ).toBe(true));
+
+    global.__TWINOTIFY_CORE__.getCallCaptureEnabled.mockResolvedValueOnce(false);
+    await act(async () => { resolveAdmission(); });
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state.*Off/ }).props.accessibilityState.checked,
+    ).toBe(false));
+    expect(screen.queryByText(/Waiting for call capture to start/)).toBeNull();
   });
 
   it('keeps preference off on denial and offers one accessible permanent-denial recovery action', async () => {
@@ -161,6 +195,10 @@ describe('call sync Settings product', () => {
 
   it('truthfully disables capture on unsupported telephony hardware', async () => {
     global.__RESET_OFFLINE_TEST_STATE__();
+    global.__TWINOTIFY_CORE__.getCallCaptureEnabled.mockResolvedValue(true);
+    global.__TWINOTIFY_CORE__.getCallStatePermissionAsync.mockResolvedValue({
+      status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+    });
     global.__TWINOTIFY_CORE__.getSyncStatus.mockResolvedValue({
       ...baseStatus,
       callCaptureDisabledReason: 'call_telephony_unsupported',
@@ -169,6 +207,25 @@ describe('call sync Settings product', () => {
 
     const toggle = await screen.findByRole('switch', { name: /Mirror call state/ });
     expect(toggle.props.accessibilityState.disabled).toBe(true);
+    expect(toggle.props.accessibilityState.checked).toBe(false);
     expect(screen.getByText('Call state mirroring is unavailable on this device.')).toBeTruthy();
+  });
+
+  it('shows durable opt-in separately from unavailable capture health', async () => {
+    global.__RESET_OFFLINE_TEST_STATE__();
+    global.__TWINOTIFY_CORE__.getCallCaptureEnabled.mockResolvedValue(true);
+    global.__TWINOTIFY_CORE__.getCallStatePermissionAsync.mockResolvedValue({
+      status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+    });
+    global.__TWINOTIFY_CORE__.getSyncStatus.mockResolvedValue({
+      ...baseStatus,
+      callCaptureDisabledReason: 'call_capture_starting',
+    });
+    const screen = render(<SettingsScreen />);
+
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state.*Call capture is not active.*On/ })
+        .props.accessibilityState.checked,
+    ).toBe(true));
   });
 });

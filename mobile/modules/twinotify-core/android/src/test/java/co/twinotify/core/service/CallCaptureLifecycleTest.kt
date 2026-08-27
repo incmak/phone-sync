@@ -22,13 +22,18 @@ import kotlin.test.assertFailsWith
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -41,6 +46,222 @@ import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CallCaptureLifecycleTest {
+    @Test
+    fun admissionWaitsForDelayedServiceSuccess() = runTest {
+        val gate = CallCaptureAdmissionGate()
+        val ticket = gate.begin()
+        val result = async { gate.await(ticket, timeoutMillis = 1_000) }
+
+        runCurrent()
+        assertFalse(result.isCompleted)
+        assertTrue(gate.complete(ticket.generation, admitted = true))
+        assertTrue(result.await())
+    }
+
+    @Test
+    fun processStartCompletionAdmitsItsMatchingGeneration() = runTest {
+        val gate = CallCaptureAdmissionGate()
+        val ticket = gate.begin()
+
+        assertTrue(
+            completeCallCaptureAdmissionForServiceStart(
+                gate = gate,
+                generation = ticket.generation,
+                admitted = true,
+            ),
+        )
+        assertTrue(gate.await(ticket, timeoutMillis = 1_000))
+    }
+
+    @Test
+    fun alreadyEnabledCoordinatorCompletesMatchingGenerationWithoutRecovery() = runTest {
+        val gate = CallCaptureAdmissionGate()
+        val ticket = gate.begin()
+        val status = CallCaptureStatus(enabled = true)
+
+        val recovery = startCallCaptureRecoveryForServiceStart(status) {
+            error("enabled coordinator must not recover")
+        }
+        assertNull(recovery)
+        assertTrue(
+            completeCallCaptureAdmissionForServiceStart(
+                gate,
+                ticket.generation,
+                admitted = status.enabled,
+            ),
+        )
+        assertTrue(gate.await(ticket, timeoutMillis = 1_000))
+    }
+
+    @Test
+    fun admissionReturnsFalseForDelayedRegistrationFailure() = runTest {
+        val gate = CallCaptureAdmissionGate()
+        val ticket = gate.begin()
+        val result = async { gate.await(ticket, timeoutMillis = 1_000) }
+
+        runCurrent()
+        assertTrue(gate.complete(ticket.generation, admitted = false))
+        assertFalse(result.await())
+    }
+
+    @Test
+    fun concurrentAdmissionTicketsAreIndependent() = runTest {
+        val gate = CallCaptureAdmissionGate()
+        val first = gate.begin()
+        val second = gate.begin()
+
+        assertNotSame(first, second)
+        assertTrue(gate.complete(first.generation, admitted = false))
+        assertFalse(gate.await(first, timeoutMillis = 1_000))
+        assertFalse(second.result.isCompleted)
+        assertTrue(gate.complete(second.generation, admitted = true))
+        assertTrue(gate.await(second, timeoutMillis = 1_000))
+    }
+
+    @Test
+    fun generationArrivingDuringExistingRecoveryObservesItsActualResult() = runTest {
+        val recoveryRelease = CompletableDeferred<Unit>()
+        var enabled = false
+        val recovery = launch {
+            recoveryRelease.await()
+            enabled = true
+        }
+        val observed = CompletableDeferred<Boolean>()
+
+        observeCallCaptureAdmissionAfterRecovery(
+            scope = this,
+            recovery = recovery,
+            generation = 7L,
+            captureStatus = { CallCaptureStatus(enabled = enabled) },
+            complete = { generation, admitted ->
+                assertEquals(7L, generation)
+                observed.complete(admitted)
+            },
+        )
+
+        runCurrent()
+        assertFalse(observed.isCompleted)
+        recoveryRelease.complete(Unit)
+        runCurrent()
+        assertTrue(observed.await())
+    }
+
+    @Test
+    fun taggedRequestsRouteThroughSharedRecoveryToTheirMatchingTickets() = runTest {
+        val admissionGate = CallCaptureAdmissionGate()
+        val startupGate = CallCaptureStartupGate()
+        val recoveryRelease = CompletableDeferred<Unit>()
+        var captureStatus: CallCaptureStatus? = null
+
+        fun route(ticket: CallCaptureAdmissionTicket): Job? {
+            val generation = parseCallCaptureAdmissionGeneration(
+                action = SyncService.ACTION_START,
+                hasGenerationExtra = true,
+                readGeneration = { ticket.generation },
+            )
+            return routeCallCaptureAdmissionForServiceStart(
+                scope = this,
+                generation = generation,
+                captureStatus = { captureStatus },
+                startRecovery = {
+                    startupGate.start(
+                        scope = this,
+                        recover = { recoveryRelease.await() },
+                        startCapture = { captureStatus = CallCaptureStatus(enabled = true) },
+                        reportFailure = { error("unexpected recovery failure: $it") },
+                    )
+                },
+                complete = admissionGate::complete,
+            )
+        }
+
+        val firstTicket = admissionGate.begin()
+        val firstRecovery = assertNotNull(route(firstTicket))
+        runCurrent()
+        val secondTicket = admissionGate.begin()
+        val secondRecovery = assertNotNull(route(secondTicket))
+        assertSame(firstRecovery, secondRecovery)
+        assertFalse(firstTicket.result.isCompleted)
+        assertFalse(secondTicket.result.isCompleted)
+
+        recoveryRelease.complete(Unit)
+        runCurrent()
+        firstRecovery.join()
+        assertTrue(admissionGate.await(firstTicket, timeoutMillis = 1_000))
+        assertTrue(admissionGate.await(secondTicket, timeoutMillis = 1_000))
+    }
+
+    @Test
+    fun admissionGenerationParserRejectsUntaggedAndInvalidRequests() {
+        assertNull(
+            parseCallCaptureAdmissionGeneration(
+                action = SyncService.ACTION_STOP,
+                hasGenerationExtra = true,
+                readGeneration = { 4L },
+            ),
+        )
+        assertNull(
+            parseCallCaptureAdmissionGeneration(
+                action = SyncService.ACTION_START,
+                hasGenerationExtra = false,
+                readGeneration = { error("missing extras must not be read") },
+            ),
+        )
+        assertNull(
+            parseCallCaptureAdmissionGeneration(
+                action = SyncService.ACTION_START,
+                hasGenerationExtra = true,
+                readGeneration = { -1L },
+            ),
+        )
+    }
+
+    @Test
+    fun admissionTimesOutAndRejectsStalePriorGenerationSuccess() = runTest {
+        val gate = CallCaptureAdmissionGate()
+        val stale = gate.begin()
+        val timedOut = async { gate.await(stale, timeoutMillis = 10) }
+
+        advanceTimeBy(11)
+        runCurrent()
+        assertFalse(timedOut.await())
+
+        val current = gate.begin()
+        assertTrue(current.generation > stale.generation)
+        assertFalse(gate.complete(stale.generation, admitted = true))
+        assertTrue(gate.complete(current.generation, admitted = true))
+        assertTrue(gate.await(current, timeoutMillis = 10))
+    }
+
+    @Test
+    fun outerTimeoutIsNotConvertedIntoAdmissionFailure() = runTest {
+        val gate = CallCaptureAdmissionGate()
+        val ticket = gate.begin()
+        var resumedAfterAwait = false
+
+        assertFailsWith<TimeoutCancellationException> {
+            withTimeout(10) {
+                gate.await(ticket, timeoutMillis = 1_000)
+                resumedAfterAwait = true
+            }
+        }
+        assertFalse(resumedAfterAwait)
+    }
+
+    @Test
+    fun admissionCancellationPreservesExactIdentity() = runTest {
+        val gate = CallCaptureAdmissionGate()
+        val ticket = gate.begin()
+        val cancellation = CancellationException("cancel admission")
+        ticket.result.completeExceptionally(cancellation)
+
+        val actual = assertFailsWith<CancellationException> {
+            gate.await(ticket, timeoutMillis = 1_000)
+        }
+
+        assertSame(cancellation, actual)
+    }
+
     @Test
     fun normalRegistrationFailureClearsCoordinatorThenRetriesAndStartsOnce() = runTest {
         val source = FailsFirstRegistrationSource()
@@ -1055,6 +1276,35 @@ class CallCaptureLifecycleTest {
         )
         assertIs<CallCaptureDecision.Start>(
             CallCapturePolicy.decide(true, CallSourceCapabilities(supported = true, permissionGranted = true)),
+        )
+    }
+
+    @Test
+    fun effectivePreferenceRequiresEnabledRoutableServiceAndSupportedAdmission() {
+        val configured = ServiceConfig(enabled = true, callCaptureEnabled = true)
+
+        assertTrue(effectiveCallCaptureEnabled(configured, CallCaptureDecision.Start, serviceCanStart = true))
+        assertFalse(effectiveCallCaptureEnabled(configured.copy(enabled = false), CallCaptureDecision.Start, serviceCanStart = true))
+        assertFalse(
+            effectiveCallCaptureEnabled(
+                configured,
+                CallCaptureDecision.Disabled("call_telephony_unsupported"),
+                serviceCanStart = true,
+            ),
+        )
+        assertFalse(effectiveCallCaptureEnabled(configured, CallCaptureDecision.Start, serviceCanStart = false))
+    }
+
+    @Test
+    fun processRestartWithoutActiveInstancePreservesConfiguredPreference() {
+        val configured = ServiceConfig(enabled = true, callCaptureEnabled = true)
+
+        assertTrue(
+            effectiveCallCaptureEnabled(
+                config = configured,
+                admission = CallCaptureDecision.Start,
+                serviceCanStart = true,
+            ),
         )
     }
 

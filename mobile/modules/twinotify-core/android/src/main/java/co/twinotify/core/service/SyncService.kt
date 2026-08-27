@@ -49,6 +49,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -58,6 +59,104 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.coroutineScope
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+
+internal data class CallCaptureAdmissionTicket(
+    val generation: Long,
+    val result: CompletableDeferred<Boolean>,
+)
+
+/** Correlates one explicit Settings enable request with its service-owned registration result. */
+internal class CallCaptureAdmissionGate {
+    private val monitor = Any()
+    private var nextGeneration = 0L
+    private val pending = mutableMapOf<Long, CallCaptureAdmissionTicket>()
+
+    fun begin(): CallCaptureAdmissionTicket = synchronized(monitor) {
+        CallCaptureAdmissionTicket(
+            generation = ++nextGeneration,
+            result = CompletableDeferred(),
+        ).also { pending[it.generation] = it }
+    }
+
+    fun complete(generation: Long, admitted: Boolean): Boolean {
+        val ticket = synchronized(monitor) { pending.remove(generation) } ?: return false
+        return ticket.result.complete(admitted)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    suspend fun await(ticket: CallCaptureAdmissionTicket, timeoutMillis: Long): Boolean {
+        require(timeoutMillis > 0)
+        return try {
+            withTimeoutOrNull(timeoutMillis) { ticket.result.await() } ?: false
+        } catch (cancellation: CancellationException) {
+            val completedCancellation = if (ticket.result.isCompleted) {
+                ticket.result.getCompletionExceptionOrNull() as? CancellationException
+            } else {
+                null
+            }
+            throw (completedCancellation ?: cancellation)
+        } finally {
+            synchronized(monitor) {
+                if (pending[ticket.generation] === ticket) pending.remove(ticket.generation)
+            }
+        }
+    }
+}
+
+internal fun completeCallCaptureAdmissionForServiceStart(
+    gate: CallCaptureAdmissionGate,
+    generation: Long?,
+    admitted: Boolean,
+): Boolean = generation?.let { gate.complete(it, admitted) } ?: false
+
+internal fun parseCallCaptureAdmissionGeneration(
+    action: String?,
+    hasGenerationExtra: Boolean,
+    readGeneration: () -> Long,
+): Long? {
+    if (action != SyncService.ACTION_START || !hasGenerationExtra) return null
+    return readGeneration().takeIf { it >= 0L }
+}
+
+internal fun observeCallCaptureAdmissionAfterRecovery(
+    scope: CoroutineScope,
+    recovery: Job,
+    generation: Long?,
+    captureStatus: () -> CallCaptureStatus?,
+    complete: (Long, Boolean) -> Unit,
+): Job? = generation?.let { expectedGeneration ->
+    scope.launch {
+        try {
+            recovery.join()
+            complete(expectedGeneration, !recovery.isCancelled && captureStatus()?.enabled == true)
+        } finally {
+            if (!isActive) complete(expectedGeneration, false)
+        }
+    }
+}
+
+internal fun routeCallCaptureAdmissionForServiceStart(
+    scope: CoroutineScope,
+    generation: Long?,
+    captureStatus: () -> CallCaptureStatus?,
+    startRecovery: () -> Job,
+    complete: (Long, Boolean) -> Unit,
+): Job? {
+    val status = captureStatus()
+    val recovery = startCallCaptureRecoveryForServiceStart(status, startRecovery)
+    if (recovery == null) {
+        generation?.let { complete(it, status?.enabled == true) }
+    } else {
+        observeCallCaptureAdmissionAfterRecovery(
+            scope = scope,
+            recovery = recovery,
+            generation = generation,
+            captureStatus = captureStatus,
+            complete = complete,
+        )
+    }
+    return recovery
+}
 
 internal suspend fun forceRepairSnapshotForE2e(
     localDigest: suspend () -> StateDigest,
@@ -545,13 +644,26 @@ class SyncService : Service() {
     companion object {
         const val FGS_ID = 9_001
         const val EXTRA_RELAY_URL = "relay_url"
+        const val EXTRA_CALL_CAPTURE_ADMISSION_GENERATION = "call_capture_admission_generation"
         const val ACTION_START = "co.twinotify.service.START"
         const val ACTION_STOP = "co.twinotify.service.STOP"
+        private const val CALL_CAPTURE_ADMISSION_TIMEOUT_MILLIS = 10_000L
 
         @Volatile private var activeInstance: SyncService? = null
         private val callShutdownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val callShutdownGate = GracefulCallShutdownGate()
         private val callShutdownPhaseState = CallShutdownPhaseState()
+        private val callCaptureAdmissionGate = CallCaptureAdmissionGate()
+
+        internal fun beginCallCaptureAdmission(): CallCaptureAdmissionTicket =
+            callCaptureAdmissionGate.begin()
+
+        internal suspend fun awaitCallCaptureAdmission(ticket: CallCaptureAdmissionTicket): Boolean =
+            callCaptureAdmissionGate.await(ticket, CALL_CAPTURE_ADMISSION_TIMEOUT_MILLIS)
+
+        internal fun abandonCallCaptureAdmission(ticket: CallCaptureAdmissionTicket) {
+            callCaptureAdmissionGate.complete(ticket.generation, admitted = false)
+        }
 
         private fun requestCallShutdown(
             context: android.content.Context,
@@ -796,6 +908,13 @@ class SyncService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val callCaptureAdmissionGeneration = parseCallCaptureAdmissionGeneration(
+            action = intent?.action,
+            hasGenerationExtra = intent?.hasExtra(EXTRA_CALL_CAPTURE_ADMISSION_GENERATION) == true,
+            readGeneration = {
+                requireNotNull(intent).getLongExtra(EXTRA_CALL_CAPTURE_ADMISSION_GENERATION, -1L)
+            },
+        )
         return executeForegroundServiceRequest(
             action = intent?.action,
             promote = {
@@ -830,10 +949,20 @@ class SyncService : Service() {
                 )
             },
             onActionStop = {
+                completeCallCaptureAdmissionForServiceStart(
+                    callCaptureAdmissionGate,
+                    callCaptureAdmissionGeneration,
+                    admitted = false,
+                )
                 requestActionStop()
                 START_NOT_STICKY
             },
             onPolicyStop = { decision ->
+                completeCallCaptureAdmissionForServiceStart(
+                    callCaptureAdmissionGate,
+                    callCaptureAdmissionGeneration,
+                    admitted = false,
+                )
                 clearForegroundOwnership()
                 SyncServiceStatus.setLastError(decision.reason)
                 SyncServiceStatus.setState(SyncState.DISCONNECTED)
@@ -843,7 +972,7 @@ class SyncService : Service() {
                 START_NOT_STICKY
             },
             onStart = {
-                recoverCallsBeforeNormalCapture()
+                recoverCallsBeforeNormalCapture(callCaptureAdmissionGeneration)
                 scope.launch { runRetentionSweep() }
                 // Initial start and live preference changes share one serialized owner. It
                 // rereads the durable config, so a start racing a toggle cannot use stale order.
@@ -1093,9 +1222,13 @@ class SyncService : Service() {
         )
     }
 
-    private fun recoverCallsBeforeNormalCapture() {
-        startCallCaptureRecoveryForServiceStart(callCaptureLifecycle.status()) {
-            callCaptureStartupGate.start(
+    private fun recoverCallsBeforeNormalCapture(admissionGeneration: Long? = null) {
+        routeCallCaptureAdmissionForServiceStart(
+            scope = scope,
+            generation = admissionGeneration,
+            captureStatus = callCaptureLifecycle::status,
+            startRecovery = {
+                callCaptureStartupGate.start(
                 scope = scope,
                 recover = {
                     callShutdownGate.awaitRelease()
@@ -1109,13 +1242,31 @@ class SyncService : Service() {
                     // Read only after recovery. If this read fails, the helper
                     // reports a bounded failure and retries the full recovery.
                     val config = ServiceConfigStore.read(applicationContext)
-                    if (config.enabled) configureCallCapture(config.callCaptureEnabled)
+                    val admitted = config.enabled && configureCallCapture(config.callCaptureEnabled)
+                    completeCallCaptureAdmissionForServiceStart(
+                        callCaptureAdmissionGate,
+                        admissionGeneration,
+                        admitted,
+                    )
                 },
                 reportFailure = { code ->
+                    completeCallCaptureAdmissionForServiceStart(
+                        callCaptureAdmissionGate,
+                        admissionGeneration,
+                        admitted = false,
+                    )
                     SyncServiceStatus.setCallCapture(false, code)
                 },
-            )
-        }
+                )
+            },
+            complete = { generation, admitted ->
+                completeCallCaptureAdmissionForServiceStart(
+                    callCaptureAdmissionGate,
+                    generation,
+                    admitted,
+                )
+            },
+        )
     }
 
     private fun configureCallCapture(enabled: Boolean, debugSynthetic: Boolean = false): Boolean {
@@ -1305,3 +1456,9 @@ class SyncService : Service() {
     }
 
 }
+internal fun effectiveCallCaptureEnabled(
+    config: ServiceConfig,
+    admission: CallCaptureDecision,
+    serviceCanStart: Boolean,
+): Boolean = config.enabled && config.callCaptureEnabled &&
+    admission is CallCaptureDecision.Start && serviceCanStart

@@ -3,6 +3,7 @@ package co.twinotify.core
 import co.twinotify.core.call.ActiveCallRecoveryException
 import co.twinotify.core.call.CALL_SHUTDOWN_FAILED
 import co.twinotify.core.call.CallShutdownConfigIntent
+import co.twinotify.core.call.CallCaptureDecision
 import co.twinotify.core.call.GracefulCallShutdownGate
 import co.twinotify.core.call.GracefulCallShutdownResult
 import co.twinotify.core.service.executeCallCaptureStopRequest
@@ -26,12 +27,48 @@ import kotlin.test.assertSame
 @OptIn(ExperimentalCoroutinesApi::class)
 class TwinotifyCoreModuleWorkflowTest {
     @Test
+    fun durableFalseAbandonsAdmissionWithoutStartingService() = runTest {
+        val order = mutableListOf<String>()
+
+        val admitted = awaitPersistedCallCaptureAdmission(
+            begin = { "ticket" },
+            persist = { order += "persist"; false },
+            start = { order += "start" },
+            await = { order += "await"; true },
+            abandon = { order += "abandon:$it" },
+        )
+
+        assertFalse(admitted)
+        assertEquals(listOf("persist", "abandon:ticket"), order)
+    }
+
+    @Test
+    fun durableExceptionAbandonsAdmissionAndPreservesFailure() = runTest {
+        val order = mutableListOf<String>()
+        val failure = IllegalStateException("durable write failed")
+
+        val actual = assertFailsWith<IllegalStateException> {
+            awaitPersistedCallCaptureAdmission(
+                begin = { "ticket" },
+                persist = { throw failure },
+                start = { order += "start" },
+                await = { order += "await"; true },
+                abandon = { order += "abandon:$it" },
+            )
+        }
+
+        assertSame(failure, actual)
+        assertEquals(listOf("abandon:ticket"), order)
+    }
+
+    @Test
     fun permissionDenialCannotPersistEnabledAndUsesGracefulDisable() = runTest {
         val order = mutableListOf<String>()
 
         val enabled = applyCallCapturePreference(
             requestedEnabled = true,
-            permissionGranted = false,
+            admission = CallCaptureDecision.Disabled("call_permission_denied"),
+            serviceCanStart = true,
             disableGracefully = { order += "disable" },
             enable = { order += "enable"; true },
         )
@@ -46,13 +83,116 @@ class TwinotifyCoreModuleWorkflowTest {
 
         val enabled = applyCallCapturePreference(
             requestedEnabled = true,
-            permissionGranted = true,
+            admission = CallCaptureDecision.Start,
+            serviceCanStart = true,
             disableGracefully = { order += "disable" },
             enable = { order += "enable"; true },
         )
 
         assertEquals(true, enabled)
         assertEquals(listOf("enable"), order)
+    }
+
+    @Test
+    fun rejectedAsyncAdmissionRollsDurablePreferenceBackOff() = runTest {
+        val order = mutableListOf<String>()
+
+        val enabled = applyCallCapturePreference(
+            requestedEnabled = true,
+            admission = CallCaptureDecision.Start,
+            serviceCanStart = true,
+            disableGracefully = { order += "disable" },
+            enable = { order += "await-admission"; false },
+        )
+
+        assertFalse(enabled)
+        assertEquals(listOf("await-admission", "disable"), order)
+    }
+
+    @Test
+    fun serviceDisabledCannotPersistOrReportCallCaptureEnabled() = runTest {
+        val order = mutableListOf<String>()
+
+        val enabled = applyCallCapturePreference(
+            requestedEnabled = true,
+            admission = CallCaptureDecision.Start,
+            serviceCanStart = false,
+            disableGracefully = { order += "disable" },
+            enable = { order += "enable"; true },
+        )
+
+        assertFalse(enabled)
+        assertEquals(listOf("disable"), order)
+    }
+
+    @Test
+    fun unsupportedTelephonyCannotPersistOrReportCallCaptureEnabled() = runTest {
+        val order = mutableListOf<String>()
+
+        val enabled = applyCallCapturePreference(
+            requestedEnabled = true,
+            admission = CallCaptureDecision.Disabled("call_telephony_unsupported"),
+            serviceCanStart = true,
+            disableGracefully = { order += "disable" },
+            enable = { order += "enable"; true },
+        )
+
+        assertFalse(enabled)
+        assertEquals(listOf("disable"), order)
+    }
+
+    @Test
+    fun missingConfiguredRouteCannotPersistOrReportCallCaptureEnabled() = runTest {
+        val order = mutableListOf<String>()
+
+        val enabled = applyCallCapturePreference(
+            requestedEnabled = true,
+            admission = CallCaptureDecision.Start,
+            serviceCanStart = false,
+            disableGracefully = { order += "disable" },
+            enable = { order += "enable"; true },
+        )
+
+        assertFalse(enabled)
+        assertEquals(listOf("disable"), order)
+    }
+
+    @Test
+    fun failedServiceRestartSelfHealsPersistedCallPreferenceOff() = runTest {
+        val order = mutableListOf<String>()
+
+        assertFailsWith<IllegalStateException> {
+            applyCallCapturePreference(
+                requestedEnabled = true,
+                admission = CallCaptureDecision.Start,
+                serviceCanStart = true,
+                disableGracefully = { order += "disable" },
+                enable = {
+                    order += "enable"
+                    throw IllegalStateException("service start rejected")
+                },
+            )
+        }
+
+        assertEquals(listOf("enable", "disable"), order)
+    }
+
+    @Test
+    fun enableCancellationKeepsIdentityEvenWhenRollbackAlsoFails() = runTest {
+        val cancellation = CancellationException("cancel enable")
+
+        val actual = assertFailsWith<CancellationException> {
+            applyCallCapturePreference(
+                requestedEnabled = true,
+                admission = CallCaptureDecision.Start,
+                serviceCanStart = true,
+                disableGracefully = { throw IllegalStateException("rollback failed") },
+                enable = { throw cancellation },
+            )
+        }
+
+        assertSame(cancellation, actual)
+        assertEquals("rollback failed", actual.suppressed.single().message)
     }
     @Test
     fun lanOnlyConfigIsPersistedBeforeServiceAdmission() = runTest {

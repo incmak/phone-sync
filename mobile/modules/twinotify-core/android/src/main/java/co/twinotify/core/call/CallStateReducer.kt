@@ -10,7 +10,6 @@ import org.json.JSONObject
 sealed interface CallReduction {
     val state: CanonicalNotificationState
     data class Apply(override val state: CanonicalNotificationState) : CallReduction
-    data class Duplicate(override val state: CanonicalNotificationState) : CallReduction
     data class LowerSequence(
         override val state: CanonicalNotificationState,
         val code: String = "call_sequence_lower",
@@ -29,9 +28,8 @@ object CallStateReducer {
         localDeviceId: String,
         allocator: LocalIdAllocator,
         updatedAt: Long = System.currentTimeMillis(),
-        authenticatedDuplicate: Boolean = false,
     ): CallReduction = reduceInternal(
-        current, localDeviceId, event, localDeviceId, allocator, updatedAt, authenticatedDuplicate,
+        current, localDeviceId, event, localDeviceId, allocator, updatedAt,
     )
 
     private fun reduceInternal(
@@ -41,7 +39,6 @@ object CallStateReducer {
         localDeviceId: String,
         allocator: LocalIdAllocator,
         updatedAt: Long,
-        authenticatedDuplicate: Boolean,
     ): CallReduction {
         require(event.callSessionId == UUID.fromString(event.callSessionId).toString()) {
             "call session id must be a lower-case canonical UUID"
@@ -52,7 +49,6 @@ object CallStateReducer {
         require(event.state in setOf("ringing", "active", "idle")) { "unsupported call state" }
         if (current != null) {
             require(current.originDevice.isNotEmpty()) { "call origin must not be empty" }
-            if (authenticatedDuplicate) return CallReduction.Duplicate(current)
             if (event.sequence < current.latestSequence) return CallReduction.LowerSequence(current)
             if (event.sequence == current.latestSequence) return CallReduction.Conflict(current)
         }
@@ -94,11 +90,10 @@ object CallStateReducer {
         localDeviceId: String,
         allocator: LocalIdAllocator,
         updatedAt: Long = System.currentTimeMillis(),
-        authenticatedDuplicate: Boolean = false,
     ): CallReduction {
         require(originDevice.isNotEmpty()) { "call origin must not be empty" }
         val result = reduceInternal(
-            current, originDevice, event, localDeviceId, allocator, updatedAt, authenticatedDuplicate,
+            current, originDevice, event, localDeviceId, allocator, updatedAt,
         )
         if (current != null && current.originDevice != originDevice) {
             require(originDevice == current.originDevice) { "call canonical origin cannot change" }

@@ -512,8 +512,6 @@ class InboundDispatcher internal constructor(
             val rejectionCode = when (reduction) {
                 is co.twinotify.core.call.CallReduction.LowerSequence -> reduction.code
                 is co.twinotify.core.call.CallReduction.Conflict -> reduction.code
-                is co.twinotify.core.call.CallReduction.Duplicate ->
-                    return@withLock InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
                 is co.twinotify.core.call.CallReduction.Apply -> null
             }
             if (rejectionCode != null) {
