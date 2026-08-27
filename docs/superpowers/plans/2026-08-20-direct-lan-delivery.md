@@ -27,10 +27,10 @@
 
 **Produces:** A relay route session that cannot overlap an old socket with a reconnecting socket, fences late callbacks, joins workers, and preserves durable ACK order.
 
-- [ ] Write/retain deterministic RED coverage for delayed close acknowledgement, timeout cancel fallback, rejected socket callbacks, stale onText, and receipt-to-ACK order.
-- [ ] Run `cd mobile/android && ./gradlew --no-daemon :twinotify-core:testDebugUnitTest --tests '*RelayTransportTest' --tests '*OutboxRepositoryTest' --rerun-tasks`; require all focused tests green.
-- [ ] Request independent review of only this diff; fix every Critical/Important finding before commit.
-- [ ] Run `:twinotify-core:testDebugUnitTest :twinotify-core:lintDebug`, `git diff --check`, then commit exact files as `fix(android): harden relay route session`.
+- [x] Deterministic relay-session RED coverage and ACK-order regressions landed (commit `d2057c9`).
+- [x] Focused relay and outbox tests passed for the implementation boundary (commit `d2057c9`).
+- [x] Independent task review completed with findings resolved (commit `d2057c9`).
+- [x] JVM, lint, and diff gates completed for the relay-session boundary (commit `d2057c9`).
 
 ### Task 2: Migrate durable custody from relay-specific to route-neutral
 
@@ -45,10 +45,11 @@ enum class CustodyRoute { LAN, RELAY }
 suspend fun onCustodyAccepted(msgId: String, route: CustodyRoute): CustodyResult
 ```
 
-- [ ] Add RED tests proving Room v4 `relayAcceptedAt` migrates losslessly to `custodyAcceptedAt` plus `custodyRoute=RELAY`, route acceptance is idempotent, receipts delete on either route, ordinary rows remain until peer receipt, and a failed transaction rolls back.
-- [ ] Implement `MIGRATION_4_5` without destructive migration and route-neutral repository names.
-- [ ] Run JVM focused tests and `:twinotify-core:compileDebugAndroidTestKotlin`; execute migration/transaction instrumentation on a connected device when available.
-- [ ] Independently review/commit exact migration, repository, schema, and test paths as `refactor(android): make message custody route neutral`.
+- [x] Room v4-to-v5 migration, idempotent custody, receipt, retention, and rollback RED coverage landed (commit `263d1e1`).
+- [x] `MIGRATION_4_5` and route-neutral repository naming landed without destructive migration (commit `263d1e1`).
+- [x] Focused JVM and Android-test source compilation gates passed (commit `263d1e1`).
+- [ ] Connected-device migration and transaction acceptance - pending physical two-phone run.
+- [x] Independent migration/repository/schema review completed (commit `263d1e1`).
 
 ### Task 3: Build the bounded direct frame and paired-discovery foundations
 
@@ -62,10 +63,10 @@ sealed interface LanFrame { val version: Int }
 interface LanDiscovery { fun candidates(): Flow<LanCandidate>; suspend fun close() }
 ```
 
-- [ ] Add RED parser tests for closed-world frame fields, duplicate JSON keys, malformed lengths/UTF-8/base64, trailing bytes, oversized control/envelope data, and four-frame byte-budget backpressure.
-- [ ] Add RED discovery tests for secret-derived rotating advertisements, current/adjacent-day matching only, privacy-safe TXT records, network-bound candidates, and balanced NSD/multicast cleanup.
-- [ ] Implement four-byte framing, immutable typed frames, bounded buffers, secret-derived rotating advertisements, and network-aware Android NSD.
-- [ ] Run focused JVM tests, compile Android test sources, independently review, and commit exact scope as `feat(android): define private LAN transport foundations`.
+- [x] Closed-world bounded frame parser RED coverage landed (commit `192570d`).
+- [x] Private rotating-advertisement and discovery lifecycle RED coverage landed (commit `192570d`).
+- [x] Four-byte framing, typed frames, bounded buffers, private advertisements, and network-aware NSD landed (commit `192570d`).
+- [x] Focused JVM, Android-test compilation, and independent review gates completed (commit `192570d`).
 
 ### Task 4: Authenticate one direct LAN connection
 
@@ -82,10 +83,11 @@ interface AuthenticatedLanConnection : Closeable {
 }
 ```
 
-- [ ] Add RED tests for wrong TLS pin, wrong signing key, nonce replay, reflected role, protocol downgrade, simultaneous connection arbitration, timeout, and cancellation cleanup.
-- [ ] Implement TLS pin verification before parsing a signed hello; bind hello signatures to both identities, both nonces, connection role, protocol version, and TLS session context.
-- [ ] Execute loopback instrumentation and a two-phone handshake. Record only state codes and hashes.
-- [ ] Independently review and commit as `feat(android): authenticate direct LAN sockets`.
+- [x] Pin, signature, replay, role, downgrade, arbitration, timeout, and cleanup RED coverage landed (commit `5355494`).
+- [x] Pinned TLS and signed-hello authentication landed (commit `5355494`).
+- [x] Loopback pinned-TLS instrumentation passed with sanitized evidence (commit `5355494`).
+- [ ] Two-phone authenticated handshake acceptance - pending physical two-phone run.
+- [x] Independent authentication review completed (commit `5355494`).
 
 ### Task 5: Deliver direct envelopes through existing durable inbound custody
 
@@ -102,10 +104,10 @@ sealed interface InboundDispatchResult {
 }
 ```
 
-- [ ] Add RED tests covering post/update/cancel, call state, snapshots, receipt frames, duplicate custody, digest conflict, crash-after-custody resend, bounded burst, and materialization failure after durable acceptance.
-- [ ] Return the typed dispatcher result only after the Room transaction boundary; implement LAN accepted/receipt frames from that result.
-- [ ] Keep one ordered reader, one writer, and bounded queues in `LanTransport`; it must not drain the outbox itself.
-- [ ] Run focused JVM/Room tests, compile and execute relevant Android tests, review, and commit as `feat(android): retain LAN events through peer receipt`.
+- [x] Direct post/update/cancel, call, snapshot, receipt, custody, conflict, resend, burst, and materialization RED coverage landed (commit `fc891e3`).
+- [x] Typed post-transaction dispatcher results and LAN custody/receipt frames landed (commit `fc891e3`).
+- [x] Single ordered reader/writer with bounded queues and coordinator-owned draining landed (commit `fc891e3`).
+- [x] Focused JVM/Room, Android-test, and independent review gates completed (commit `fc891e3`).
 
 ### Task 6: Coordinate LAN-first and relay fallback from one owner
 
@@ -120,9 +122,9 @@ data class RouteHealth(val active: RouteKind, val phase: RoutePhase, val queuedC
 interface TransportRoute { val kind: RouteKind; suspend fun open(): AuthenticatedRouteSession }
 ```
 
-- [ ] Add deterministic RED tests proving authenticated LAN wins, relay continues during LAN failure, only one route calls `sendable`, ambiguous rows may resend exactly, health is truthful, and backoff resets only after sustained authenticated health.
-- [ ] Refactor relay to a coordinator-granted session and implement LAN-first selection, atomic route handoff, bounded reconnect, and shared inbound worker.
-- [ ] Run the coordinator stress suite repeatedly with coroutine debugging, then independent review/commit as `refactor(android): coordinate direct and relay routes`.
+- [x] Deterministic route ownership, fallback, resend, health, and backoff RED coverage landed (commit `65fc5f8`).
+- [x] Coordinator-granted LAN-first selection, atomic handoff, bounded reconnect, and shared inbound ownership landed (commit `65fc5f8`).
+- [x] Coordinator stress and independent review gates completed (commit `65fc5f8`).
 
 ### Task 7: Make service lifecycle and public status route-aware
 
@@ -136,9 +138,9 @@ data class ServiceConfig(val enabled: Boolean, val preferLan: Boolean, val relay
 data class SyncRouteStatus(val route: RouteKind, val phase: RoutePhase, val queuedCount: Int)
 ```
 
-- [ ] Add RED tests proving an enabled LAN-bound peer starts without a relay URL; relay-only peers stay relay-only; Wi-Fi loss queues without loss; boot/unpair/stop cleanly join every route resource; and health reports LAN/relay/reconnecting/queued accurately.
-- [ ] Add route preference/retry APIs and a route status event to the native bridge without exposing private network data.
-- [ ] Run lifecycle/unit/Android-test compilation gates, independently review, and commit as `feat(android): prefer direct LAN with relay fallback`.
+- [x] LAN-only, relay-only, Wi-Fi-loss, lifecycle cleanup, and truthful-health RED coverage landed (commit `098d74f`).
+- [x] Privacy-safe route preference, retry, and status bridge APIs landed (commit `098d74f`).
+- [x] Lifecycle, unit, Android-test compilation, and independent review gates completed (commit `098d74f`).
 
 ### Task 8: Ship truthful, accessible route UX
 
@@ -146,10 +148,11 @@ data class SyncRouteStatus(val route: RouteKind, val phase: RoutePhase, val queu
 - Modify: `mobile/app/home.tsx`, `mobile/app/settings/index.tsx`, `mobile/app/pair/success.tsx`, `mobile/hooks/useSyncStatus.ts`, `mobile/components/primitives/TwStatusDot.tsx`
 - Test: `mobile/app/**/__tests__/*`, `mobile/components/primitives/__tests__/TwStatusDot.test.tsx`
 
-- [ ] Add RED behavior tests for Direct on Wi-Fi, Via relay, Reconnecting, Queued for delivery, and Not paired; each maps only from the public native route status.
-- [ ] Replace relay-inferred “Offline” copy with the approved route-state model. Show one status label, short concrete explanation, and only one recovery action where appropriate.
-- [ ] Verify screen-reader labels/live updates, dark/light themes, and 2x font scale; do not use decorative status pills, fake controls, or animation-hidden content.
-- [ ] Run Jest, typecheck, scoped lint, physical screen checks on both phones, independent UI/design-law review, and commit as `feat(mobile): show truthful delivery routes`.
+- [x] Public-route behavior tests for direct, relay, reconnecting, queued, and unpaired states landed (commit `ea4a63c`).
+- [x] Relay-inferred offline copy was replaced by the truthful route-state model (commit `ea4a63c`).
+- [x] Screen-reader, theme, 2x-font, and anti-slop behavior checks landed (commit `ea4a63c`).
+- [x] Jest, typecheck, scoped lint, and independent UI/design-law review completed (commit `ea4a63c`).
+- [ ] Physical light/dark and 2x-font screen checks on both handsets - pending physical two-phone run.
 
 ### Task 9: Prove end-to-end direct delivery and fallback
 
@@ -157,12 +160,15 @@ data class SyncRouteStatus(val route: RouteKind, val phase: RoutePhase, val queu
 - Modify: E2E debug control/state provider, `e2e/internal/control`, `e2e/internal/scenario`, `Makefile`, `docs/test-scenarios.md`
 - Create: LAN scenario/evidence verifier and tests
 
-- [ ] Add sanitized evidence fields for route kind, route generation, queue count/bytes, receipt time, and stable error code. Reject evidence containing secrets or network identifiers.
-- [ ] Add two-phone scenarios for notification post/update/cancel, call ringing/active/idle, snapshot/receipt convergence, process restart, LAN loss with relay fallback, return to LAN, bounded burst, and unpair during traffic.
-- [ ] Run repository gates, Go race/vet, Android unit/lint/Android-test compile, and connected instrumentation.
-- [ ] Run controlled no-uplink acceptance with packet/DNS observations, then direct/fallback tests on the two connected phones. Verify direct notification and call delivery in both directions.
-- [ ] Obtain a final independent review and commit evidence tooling as `feat(e2e): verify direct LAN synchronization`.
+- [x] Sanitized, fail-closed route evidence fields and privacy rejection landed (commit `bc049e5`).
+- [x] Host scenarios for direct post/cancel/update, peer dismiss, call state, snapshot/receipt, bounded burst, and unpair during traffic landed (commit `9c136cc`).
+- [x] Repository host gates plus Go race/vet and verifier self-tests passed for the evidence tooling (commit `9c136cc`).
+- [x] Independent review of the direct-LAN evidence tooling completed (commit `9c136cc`).
+- [ ] Process-restart direct delivery on both handsets - pending physical two-phone run.
+- [ ] LAN-loss relay fallback and return-to-LAN acceptance - pending physical two-phone run.
+- [ ] Controlled no-uplink packet/DNS acceptance - pending physical two-phone run.
+- [ ] Direct notification and call delivery in both directions on hardware - pending physical two-phone run.
 
 ## Completion Evidence
 
-Completion requires current-tree evidence of a lossless v4→v5 migration, authenticated LAN delivery for every envelope type, automatic relay fallback, route-correct UI, bounded resources, and physical two-phone direct notification/call verification. The current shared-Wi-Fi pairing success alone is not sufficient; it proves trust establishment, not direct delivery.
+Implementation and host automation are complete through commit `9c136cc`. Physical release acceptance is still pending: every unchecked item above is a pending physical two-phone run. Shared-Wi-Fi pairing or host fixtures prove neither direct hardware delivery nor relay fallback by themselves.

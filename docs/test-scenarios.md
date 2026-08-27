@@ -86,9 +86,11 @@ async function smokePhase2() {
 
 ## Phase 3 — Listener + First Mirror + Tier-1 UI
 
+- [ ] Legacy Phase 3 handset smoke suite - pending physical two-phone run.
+
 **Setup:**
 
-- Two physical Android phones running API 26+ (Android 8+). API 33+ (Android 13+) recommended.
+- Two physical Android phones running API 34+.
 - Both phones have Expo dev client installed with Phase 3 build: `npx expo prebuild --clean && npx expo run:android` on each phone (or distribute via EAS Build dev profile).
 - Relay running — either `cd relay && go run ./cmd/relay` on a laptop on the same LAN with firewall open to 8080, or `docker compose -f deploy/docker-compose.yml up relay` + access via host IP from phones (e.g. `ws://192.168.1.10:8080/ws`).
 - Both phones uninstalled + reinstalled clean to clear Phase 2 paired state (Task 0 renamed DataStore keys).
@@ -109,9 +111,9 @@ async function smokePhase2() {
 9. Repeat steps 1–6 on Phone B; at ScreenRole tap **"I have a code already"** (role B) → Relay → Perms → OEM → Ready → **Scan code**.
 10. `/pair/scan` requests camera permission → Grant → scan QR from Phone A.
 11. Both phones route to `/pair/fingerprint` with matching fingerprints.
-12. Phone A: tap **They match** → sig displayed as a long base-64 code (Phase 3 interim UX).
-13. Phone A: long-press the code and copy it (use system share/copy). Transport to Phone B (type, or use a shared clipboard app during smoke test).
-14. Phone B: paste the code into the text input → **They match**.
+12. Phone A: tap **They match**. The pairing protocol sends the signed confirmation through the pairing channel.
+13. Phone B: tap **They match** after independently comparing the fingerprint.
+14. Wait for the two-sided pairing flow to complete without copying keys, signatures, or tokens between apps.
 15. Phone B: sees "Twinned." success screen, then routes to `/home` (CONNECTED state).
 16. Phone A: tap **Finish** on its success screen → `/home`.
 
@@ -186,9 +188,9 @@ async function smokePhase2() {
 
 1. On Phone A, navigate Settings → Paired device → **Unpair** → confirm.
 2. App routes to `/onboarding/role`.
-3. Phone B also detects a broken pair (its connection drops to `OFFLINE_QUEUED` indefinitely — this is expected; Phase 3 doesn't push an explicit unpair signal to the peer yet).
-4. On Phone B, also manually Settings → Paired device → **Unpair**.
-5. Re-run Scenario 1 to re-pair.
+3. Phone A persists exactly one durable v2 `unpair` event and gives the authenticated LAN or relay route a bounded custody window before secure local teardown.
+4. Phone B receives the peer unpair, stops its service, wipes the paired state, and returns to onboarding without emitting a second unpair.
+5. Re-run Scenario 1 to re-pair. Re-pairing is always an explicit operator action.
 
 **Pass criteria:** Unpair rotates keys on both devices; re-pair works cleanly from scratch.
 
@@ -211,18 +213,15 @@ async function smokePhase2() {
 
 ---
 
-### Known gaps (Phase 3 documented limitations)
+### Current implementation notes
 
-- **Manual sig copy-paste during pairing.** Device A displays the confirmation_sig as a long base-64 string. Device B pastes it manually. Phase 4 automates this via the existing `/pair/notify` relay WebSocket (Task 7 plumbing) plus a second WS leg to Device B.
+- **Pairing confirmation is transported by the pairing protocol.** Operators compare the fingerprint on both phones; they never copy a signing payload manually.
+- **Authenticated direct LAN is live.** The running service selects authenticated LAN first, falls back to relay when configured, and reports direct, relay, reconnecting, or queued state from the public route status.
+- **Local unpair notifies the peer.** One durable v2 unpair row gets a bounded LAN-or-relay custody attempt before local teardown. Peer-initiated teardown does not echo a second unpair.
 - **Always-Connected FGS only.** No lazy-FGS / Doze-aware wake. Phase 9 adds this (requires FCM from Phase 5).
-- **No LAN transport.** All traffic goes through the relay. Phase 4 adds NSD + TLS-pinned LAN direct with daily-rotated ad-ids.
 - **No icon cache / hash-elide.** Every mirror inlines full PNG bytes (base64). Phase 7 adds hash-elide.
 - **No reply bridge.** Typing a reply on the mirror doesn't reach the origin. Phase 6 adds this.
 - **No MessagingStyle reconstruction.** Mirrors show only title + text. BigTextStyle + MessagingStyle land in Phase 18.
-- **App filter toggle is cosmetic.** The UI stores allow/deny per-package, but `NotifPostBuilder` only enforces the compiled-in hardcoded denylist. Phase 4 adds user-override enforcement.
-- **No peer display name.** Only device UUID (first 8 chars shown in mono). Human-readable names require a separate handshake field; deferred.
-- **Metrics on home screen (Today / Latency / Blocked) are placeholders.** Phase 3 doesn't instrument these counters.
-- **Unpair doesn't notify peer.** Peer's connection just drops; user on the other phone must manually unpair.
 
 ---
 
@@ -233,6 +232,8 @@ async function smokePhase2() {
 ## Physical release evidence protocol
 
 ### OFFLINE-PAIR-01 - two-phone pairing with no relay or uplink
+
+- [ ] Status - pending physical two-phone run.
 
 This acceptance run requires two explicit, distinct, unlocked Android hardware
 serials and an operator-controlled Wi-Fi network whose local client traffic
@@ -286,6 +287,8 @@ For every scenario, capture:
 
 ### PHY-PAIR-01 - pairing and restart recovery
 
+- [ ] Status - pending physical two-phone run.
+
 On both fresh phones, grant notification and notification-listener access,
 pair using the real QR/fingerprint flow, and verify reciprocal device IDs and
 protocol floor 2. Post one test notification from a separate source app,
@@ -295,6 +298,8 @@ restart result, and sanitized timeline.
 
 ### PHY-DOZE-01 - locked-screen delivery
 
+- [ ] Status - pending physical two-phone run.
+
 With both phones paired, lock the screens and leave each phone idle long enough
 for Doze to engage. Introduce a post and an update on the Pixel, then wake the
 Samsung. Verify durable sequence/order, one final mirror, and no duplicate
@@ -302,6 +307,8 @@ delivery after the wake/reconnect. Record the Doze/awake timestamps and the
 sanitized notification-state assertions only.
 
 ### PHY-OEM-01 - Samsung background restrictions
+
+- [ ] Status - pending physical two-phone run.
 
 On Samsung, record the selected battery/background policy (without account or
 device identifiers), apply the documented unrestricted/optimized states in
@@ -311,12 +318,16 @@ resume. Capture the policy result, reboot/rebind state, and timeline.
 
 ### PHY-NET-01 - network handoff and relay restart
 
+- [ ] Status - pending physical two-phone run.
+
 Move the pair between Wi-Fi and mobile data (or a controlled equivalent), then
 restart the relay using the same durable database. Post during the outage and
 after reconnect. Verify outbox/inbound/materialization counters converge to
 zero, sequence numbers do not regress, and no duplicate mirror remains.
 
 ### PHY-BATTERY-01 - 24-hour battery protocol
+
+- [ ] Status - pending physical two-phone run.
 
 Reset batterystats, start both services, and run for 24 hours at approximately
 100 notifications per day (including updates and dismissals). Record start/end
@@ -326,6 +337,8 @@ only the two batterystats files and aggregate measurements; redact unrelated
 package and account data.
 
 ### PHY-RELIABILITY-01 - recovery matrix
+
+- [ ] Status - pending physical two-phone run.
 
 Run permission revoke/restore, app update, explicit user stop, process
 force-stop/restart, and reboot in separate bounded rounds. For each round,
@@ -358,15 +371,38 @@ each one asserts the observed route as well.
 
 | Scenario | Proves |
 | --- | --- |
-| `lan-direct-delivery` | A post crosses an authenticated direct session, the receiver mirrors it, the outbox drains, and both devices still report the direct route |
-| `lan-direct-dismiss` | A cancel converges over the direct route without resurrection |
-| `lan-restart-persistence` | A row survives the sender's process death and still converges |
+| `lan-direct-delivery` | A post crosses authenticated LAN, mirrors once, reaches LAN custody and peer receipt, and drains |
+| `lan-direct-dismiss` | A cancel converges over authenticated LAN without resurrection |
+| `lan-direct-update` | Three semantic versions converge to sequence 3 with two update custody transitions |
+| `lan-direct-peer-dismiss` | A user dismissal on the mirror returns one cancel without resurrection |
+| `lan-direct-call-state` | Synthetic ringing, active, and idle states converge with LAN custody and receipts |
+| `lan-direct-snapshot-receipt` | Digest, begin, item, end, commit, and receipt evidence converge |
+| `lan-direct-burst-backpressure` | A bounded unique burst stays below 2,000 rows and 128 MiB, then reaches terminal zero |
+| `lan-direct-unpair-during-traffic` | A nonzero producer is joined, one unpair reaches LAN custody, both peers wipe, and state does not recreate |
+| `lan-product-correctness` | Runs the eight scenarios above in order, fails fast, and retains each child's evidence independently |
+
+Automation is implemented and host-tested through commit `9c136cc`. The requested hardware execution remains pending:
+
+- [ ] Aggregate direct-LAN product acceptance - pending physical two-phone run.
+
+Prerequisites and safety rules:
+
+1. Use two explicit, distinct unlocked hardware serials already paired with the same current debug build on the same operator-controlled Wi-Fi.
+2. Keep the private evidence directory outside the repository. The verifier retains only sanitized route, counter, timestamp, stable-code, and hashed state evidence.
+3. Do not clear package data, uninstall, toggle Wi-Fi or mobile data, use airplane mode, or run any radio/network mutation. The target contains no such commands.
+4. Do not auto-pair or auto-re-pair. The aggregate intentionally runs unpair last, so both phones finish unpaired and any later pairing is a manual operator action.
+5. Use the default burst count of 256, or set `E2E_LAN_BURST_COUNT` to an integer from 2 through 1,000.
+
+Run the exact aggregate target from the repository root:
 
 ```bash
-cd e2e && go run ./cmd/twinotify-e2e -scenario lan-direct-delivery \
-  -serial-a "$E2E_DEVICE_A" -serial-b "$E2E_DEVICE_B" \
-  -evidence-dir /private/path/lan-evidence
+E2E_DEVICE_A='<serial-a>' \
+E2E_DEVICE_B='<serial-b>' \
+E2E_LAN_PRODUCT_EVIDENCE_DIR='/private/path/lan-product' \
+make e2e-lan-product
 ```
+
+The target invokes `e2e/cmd/twinotify-e2e` with `-scenario lan-product-correctness`, writes the aggregate artifacts under the supplied directory, and then runs `scripts/verify-lan-product-evidence.sh`. The root and each `children/NN-<scenario>/` directory must contain `scenario-result.json`, `state.json`, `timeline.json`, and `metrics.json`. A missing, failed, unsafe, secret-bearing, or semantically incomplete artifact fails the run.
 
 The route predicates (`A.route.lan`, `B.route.relay`, `A.route.queued`) read the
 device's public route status only. They require `phase == authenticated`, so a
@@ -395,15 +431,19 @@ one.
 
 ### Still operator-driven
 
-Three parts of the direct-LAN matrix cannot be automated from the host as it
-stands and remain manual:
+The host harness implements bounded burst and unpair-during-traffic scenarios,
+but their physical handset execution remains pending. These additional topology
+and lifecycle checks also remain operator-driven:
 
 - **LAN loss with relay fallback, and the return to LAN.** Turning a device's
   network off removes the direct route and the relay together, so it cannot
   isolate the two. A device control that disables only the direct route is
   needed before this can be a host scenario.
-- **Bounded burst and unpair during traffic** on two physical handsets.
+- **Process restart while direct traffic is pending.** This needs two live
+  handsets and operator observation of the restarted app and notification tray.
 - **The controlled no-uplink run.** This needs a network with no internet path
   plus packet and DNS observation, per
   [`scripts/verify-offline-pairing-evidence.sh`](../scripts/verify-offline-pairing-evidence.sh).
   Nothing in the automated suite may be presented as this evidence.
+
+- [ ] LAN-loss, restart, burst, unpair, and no-uplink operator matrix - pending physical two-phone run.

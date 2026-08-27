@@ -231,6 +231,79 @@ verify() {
   echo "direct LAN product evidence passed: $evidence_dir"
 }
 
+check_doc_status() {
+  (($# >= 1)) || die "--check-doc-status requires at least one document"
+  local repo_root doc line commit ref link link_path target targets checked_count scenario
+  repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+  for doc in "$@"; do
+    [[ -f "$doc" && ! -L "$doc" ]] || die "documentation input missing or unsafe: $doc"
+    [[ $(wc -c <"$doc") -le 1048576 ]] || die "documentation input exceeds size bound: $doc"
+    grep -Fqi 'pending physical two-phone run' "$doc" || die "missing pending physical two-phone run status: $doc"
+  done
+
+  if grep -Ein "Unpair doesn't notify peer|doesn't push an explicit unpair|LAN transport does not|Phase 3 doesn't|No LAN transport" "$@" >/dev/null; then
+    die "stale live-state claim remains in documentation"
+  fi
+
+  checked_count=$(grep -Eh '^[[:space:]]*- \[[xX]\]' "$@" | wc -l | tr -d ' ' || true)
+  (( checked_count >= 1 )) || die "no checked implementation status is documented"
+  while IFS= read -r line; do
+    [[ "$line" =~ commit[[:space:]]+\`([0-9a-f]{7,40})\` ]] || die "checked task lacks a commit citation: $line"
+    commit=${BASH_REMATCH[1]}
+    git -C "$repo_root" cat-file -e "$commit^{commit}" 2>/dev/null || die "checked task cites unreachable commit $commit"
+    git -C "$repo_root" merge-base --is-ancestor "$commit" HEAD || die "checked task cites non-ancestor commit $commit"
+  done < <(grep -Eh '^[[:space:]]*- \[[xX]\]' "$@" || true)
+
+  if grep -Ein '^[[:space:]]*- \[[xX]\].*(physical|two-phone|handset|operator|no-uplink|packet|dns|connected device)' "$@" >/dev/null; then
+    die "physical acceptance is checked without audited evidence"
+  fi
+  while IFS= read -r line; do
+    grep -Fqi 'pending physical two-phone run' <<<"$line" || die "physical acceptance lacks explicit pending status: $line"
+  done < <(grep -Ehi '^[[:space:]]*- \[ \].*(physical|two-phone|handset|operator|no-uplink|packet|dns|connected device)' "$@" || true)
+
+  while IFS= read -r ref; do
+    ref=${ref#\`}; ref=${ref%\`}
+    if [[ "$ref" == *'*'* || "$ref" == *'?'* || "$ref" == *'['* ]]; then
+      compgen -G "$repo_root/$ref" >/dev/null || die "documented repository path does not resolve: $ref"
+    else
+      [[ -e "$repo_root/$ref" ]] || die "documented repository path does not exist: $ref"
+    fi
+  done < <(grep -Eho '\`(scripts|e2e|docs|mobile)/[^`[:space:]]+\`' "$@" | sort -u || true)
+
+  for doc in "$@"; do
+    while IFS= read -r link; do
+      link=${link#']('}; link=${link%')'}
+      case "$link" in
+        http://*|https://*|mailto:*|'#'*) continue ;;
+      esac
+      link_path=${link%%#*}
+      [[ -n "$link_path" ]] || continue
+      [[ -e "$(dirname "$doc")/$link_path" ]] || die "documented Markdown link does not resolve: $link"
+    done < <(grep -Eo '\]\([^)]+\)' "$doc" || true)
+  done
+
+  targets=$(make -C "$repo_root" -qp 2>/dev/null | awk -F: '/^[A-Za-z0-9_.-]+:([^=]|$)/ {print $1}' | sort -u || true)
+  while IFS= read -r target; do
+    target=${target#make }
+    grep -Fxq "$target" <<<"$targets" || die "documented make target does not exist: $target"
+  done < <(grep -Eho 'make[[:space:]]+[A-Za-z0-9_.-]+' "$@" | sort -u || true)
+
+  grep -Fq 'make e2e-lan-product' "$@" || die "aggregate Make invocation is undocumented"
+  grep -Fq 'scripts/verify-lan-product-evidence.sh' "$@" || die "LAN evidence verifier path is undocumented"
+  grep -Fq 'e2e/cmd/twinotify-e2e' "$@" || die "two-device CLI path is undocumented"
+  for scenario in "${required_children[@]}" lan-product-correctness; do
+    grep -Fq "\`$scenario\`" "$@" || die "required direct-LAN scenario is undocumented: $scenario"
+  done
+  while IFS= read -r scenario; do
+    scenario=${scenario#\`}; scenario=${scenario%\`}
+    case " ${required_children[*]} lan-product-correctness " in
+      *" $scenario "*) ;;
+      *) die "unknown direct-LAN scenario is documented: $scenario" ;;
+    esac
+  done < <(grep -Eho '\`lan-(direct-[a-z0-9-]+|product-[a-z0-9-]+)\`' "$@" | sort -u || true)
+  echo "direct LAN documentation status passed"
+}
+
 write_derived_fixture() {
   local dir=$1
   jq '{scenario,status,before,after}' "$dir/scenario-result.json" >"$dir/state.json"
@@ -332,5 +405,6 @@ self_test() {
 }
 
 if [[ ${1:-} == --self-test && $# -eq 1 ]]; then self_test; exit 0; fi
-[[ $# -eq 1 ]] || { echo "usage: $0 <evidence-dir> | --self-test" >&2; exit 2; }
+if [[ ${1:-} == --check-doc-status ]]; then shift; check_doc_status "$@"; exit 0; fi
+[[ $# -eq 1 ]] || { echo "usage: $0 <evidence-dir> | --self-test | --check-doc-status <docs...>" >&2; exit 2; }
 verify "$1"

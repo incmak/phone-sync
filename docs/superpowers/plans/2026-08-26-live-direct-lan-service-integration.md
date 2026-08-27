@@ -23,10 +23,10 @@
 - Test: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/LiveTransportRoutesTest.kt`
 - Modify only if required for a narrow reusable seam: `lan/AndroidLanDiscovery.kt`, `lan/LanSession.kt`, focused tests
 
-- [ ] Add RED tests for validated-binding load, corrupt/missing binding fallback, Wi-Fi lease loss, advertisement current/adjacent day derivation, listener port publication, initiator/acceptor role agreement, peer signing key use, and exactly-once cleanup.
-- [ ] Construct a LAN route from the stored peer, sealed binding, local identity/signing key, selected Wi-Fi network, pinned mutual TLS contexts, private NSD discovery, `DirectLanConnector`, `LanRoute`, and existing dispatcher/outbox.
-- [ ] Construct a relay route adapter that preserves current relay capabilities, inbound delivery ordering, snapshot hooks, and self-draining ownership.
-- [ ] Run focused JVM tests, Android-test source compilation, lint, and independent review.
+- [x] Validated-binding, fallback, Wi-Fi lease, advertisement, listener, role, signing-key, and cleanup RED coverage landed (commit `967d119`).
+- [x] The production LAN route factory now uses stored peer trust, sealed bindings, the selected Wi-Fi network, pinned mutual TLS, private discovery, and the existing dispatcher/outbox (commit `967d119`).
+- [x] The relay adapter preserves capabilities, inbound ordering, snapshot hooks, and route ownership (commit `967d119`).
+- [x] Focused JVM, Android-test compilation, lint, and independent review gates completed (commit `967d119`).
 
 ### Task 2: Replace the relay-only service loop with one coordinator
 
@@ -34,23 +34,25 @@
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/SyncService.kt`, `SyncServiceStatus.kt`
 - Test: `ServiceLifecycleTest.kt`, `TransportCoordinatorTest.kt`, new focused integration tests as needed
 
-- [ ] Add RED tests proving `SyncService` starts the coordinator for LAN-bound peers, uses relay fallback when configured, runs LAN-only without a relay URL, publishes authenticated LAN/relay/reconnecting/queued truth, and never starts parallel outbox drains.
-- [ ] Route explicit retry and preference changes into the live coordinator. Preserve legacy migration, materialization, retention, call capture, snapshot, and unpair ordering.
-- [ ] Join coordinator and all route resources on stop/unpair/destroy; do not leak NSD, multicast, network callbacks, sockets, or jobs.
-- [ ] Run focused tests twice, full JVM + Android-test compile + lint, and independent review.
+- [x] Live coordinator startup, relay fallback, LAN-only operation, truthful status, and single-drain RED coverage landed (commit `949b284`).
+- [x] Retry and route preference now use the live coordinator while preserving migration, materialization, retention, call, snapshot, and unpair ordering (commit `949b284`).
+- [x] Stop, unpair, and destroy join coordinator and route resources exactly once (commit `949b284`).
+- [x] Focused repeated tests, full JVM, Android-test compilation, lint, and independent review completed (commit `949b284`).
 
 ### Task 3: Prove product behavior and close UX/evidence gaps
 
 **Files:**
 - Modify only test/evidence/UI files required by findings from real execution.
 
-- [ ] Build and install the current debug app on both connected phones without clearing app data unless the user explicitly authorizes it.
-- [ ] Verify the running service authenticates LAN and delivers notification post/update/cancel, call ringing/active/idle, snapshots, and receipts in both directions.
-- [ ] Verify LAN failure falls back to relay using a route-specific debug control; verify return to LAN, bounded burst, process restart, and unpair during traffic.
-- [ ] Run host verification, full native gates, TypeScript/Jest/lint/Expo Doctor, Go race/vet, E2E verifiers, and generated-clean/diff checks.
-- [ ] Perform the complete anti-slop UI review in light/dark and 2x font, fix every defect, then obtain a final independent whole-range review.
-- [ ] Record honestly any no-uplink packet/DNS proof that still requires an external network topology.
+- [x] Production-backed, content-free direct update, peer-dismiss, call, snapshot, receipt, burst, and unpair controls and observations landed (commit `ac7a5f3`).
+- [x] The aggregate `lan-product-correctness` host gate and fail-closed evidence verifier landed (commit `9c136cc`).
+- [x] Host verification, Go race/vet, E2E verifier, and Make safety gates passed for the aggregate tooling (commit `9c136cc`).
+- [ ] Install the current debug app on both connected handsets without clearing app data - pending physical two-phone run.
+- [ ] Verify direct post/update/cancel, calls, snapshots, and receipts in both directions - pending physical two-phone run.
+- [ ] Verify LAN loss, relay fallback, return to LAN, restart, burst, and unpair during traffic - pending physical two-phone run.
+- [ ] Perform light/dark, 2x-font, and final whole-range UI inspection on both handsets - pending physical two-phone run.
+- [ ] Capture controlled no-uplink packet and DNS observations - pending physical two-phone run.
 
 ## Completion evidence
 
-Completion requires production-source proof that `SyncService` starts `TransportCoordinator` with a validated LAN route and optional relay route, plus physical evidence from two phones showing the installed app itself delivers directly and falls back correctly. Loopback-only instrumentation is insufficient.
+Production integration and host automation are complete through commit `9c136cc`: `SyncService` starts `TransportCoordinator` with a validated LAN route and an optional relay route. Product acceptance remains pending physical two-phone run for every unchecked item above. Loopback instrumentation and host fixtures are not physical delivery or fallback evidence.
