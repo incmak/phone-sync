@@ -69,11 +69,9 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 15,
-    lineHeight: 20,
   },
   subtitle: {
     fontSize: 13,
     marginTop: 2,
-    lineHeight: 18,
   },
 });

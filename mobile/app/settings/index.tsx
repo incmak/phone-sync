@@ -274,11 +274,10 @@ const styles = StyleSheet.create({
     paddingTop: 18,
     paddingBottom: 10,
   },
-  title: { fontSize: 34, lineHeight: 40, letterSpacing: -0.4 },
+  title: { fontSize: 34, letterSpacing: -0.4 },
   scroll: { paddingTop: 8, paddingBottom: 48, gap: 32 },
   sectionHeader: {
     fontSize: 16,
-    lineHeight: 22,
     letterSpacing: 0,
     marginBottom: 6,
   },

@@ -77,12 +77,14 @@ describe('Settings handoff ledger', () => {
 
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' })).toBeTruthy());
     for (const text of [
+      screen.getByText('Settings'),
+      screen.getByText('Pairing'),
       screen.getByText('Prefer direct Wi-Fi'),
       screen.getByText('Uses the relay first, with direct Wi-Fi as backup'),
     ]) {
       const style = StyleSheet.flatten(text.props.style);
       expect(text.props.allowFontScaling).not.toBe(false);
-      expect(style.lineHeight).toBeGreaterThan(style.fontSize);
+      expect(style.lineHeight).toBeUndefined();
     }
     expect(StyleSheet.flatten(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' }).props.style).minWidth).toBeGreaterThanOrEqual(44);
     expect(StyleSheet.flatten(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' }).props.style).minHeight).toBeGreaterThanOrEqual(44);
