@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var scenarioEvidenceNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
 // ScenarioResult is safe to persist: it contains only scenario/action IDs and
 // summary observations, never notification bodies, tokens, or packet data.
@@ -20,6 +23,9 @@ type ScenarioResult struct {
 	ErrorCode string                 `json:"error_code,omitempty"`
 	// Route records which path actually carried the scenario.
 	Route RouteEvidence `json:"route,omitzero"`
+	// Children are persisted as independent artifact subtrees rather than nested
+	// into the aggregate JSON, keeping the closed-world evidence schema stable.
+	Children []ScenarioResult `json:"-"`
 }
 
 func ErrorCode(err error) string {
@@ -45,8 +51,18 @@ func WriteEvidenceArtifacts(dir string, result ScenarioResult) error {
 	if strings.TrimSpace(dir) == "" {
 		return errors.New("evidence directory is required")
 	}
+	if err := validateEvidenceResult(result); err != nil {
+		return err
+	}
+	return writeEvidenceArtifacts(dir, result)
+}
+
+func validateEvidenceResult(result ScenarioResult) error {
 	if result.Scenario == "" || (result.Status != "passed" && result.Status != "failed") {
 		return errors.New("invalid scenario result")
+	}
+	if !scenarioEvidenceNamePattern.MatchString(result.Scenario) {
+		return errors.New("invalid scenario evidence name")
 	}
 	// A route record that names an endpoint, or evidence carrying secret material,
 	// must fail the write rather than reach an uploaded artifact.
@@ -56,8 +72,35 @@ func WriteEvidenceArtifacts(dir string, result ScenarioResult) error {
 	if err := RejectSensitiveEvidence(result); err != nil {
 		return fmt.Errorf("refusing to persist evidence: %w", err)
 	}
+	for _, child := range result.Children {
+		if err := validateEvidenceResult(child); err != nil {
+			return fmt.Errorf("invalid child evidence %s: %w", child.Scenario, err)
+		}
+	}
+	return nil
+}
+
+func writeEvidenceArtifacts(dir string, result ScenarioResult) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	if len(result.Children) != 0 {
+		childrenDir := filepath.Join(dir, "children")
+		if err := os.RemoveAll(childrenDir); err != nil {
+			return err
+		}
+		if err := os.Mkdir(childrenDir, 0o700); err != nil {
+			return err
+		}
+		for index, child := range result.Children {
+			name := fmt.Sprintf("%02d-%s", index+1, child.Scenario)
+			if err := writeEvidenceArtifacts(filepath.Join(childrenDir, name), child); err != nil {
+				return fmt.Errorf("write child evidence %s: %w", child.Scenario, err)
+			}
+		}
 	}
 	state := struct {
 		Scenario  string                 `json:"scenario"`

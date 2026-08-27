@@ -23,6 +23,12 @@ type ScenarioPlan struct {
 	Children []ScenarioPlan
 }
 
+const (
+	DefaultBurstCount = 256
+	MinBurstCount     = 2
+	MaxBurstCount     = 1000
+)
+
 func (p ScenarioPlan) Actions() []string {
 	result := make([]string, 0, len(p.Steps))
 	for _, child := range p.Children {
@@ -175,6 +181,14 @@ var plans = map[string][]Step{
 }
 
 func Plan(name string) (ScenarioPlan, error) {
+	return PlanWithBurstCount(name, DefaultBurstCount)
+}
+
+func PlanWithBurstCount(name string, burstCount int) (ScenarioPlan, error) {
+	if (name == "lan-direct-burst-backpressure" || name == "lan-direct-unpair-during-traffic" || name == "lan-product-correctness") &&
+		(burstCount < MinBurstCount || burstCount > MaxBurstCount) {
+		return ScenarioPlan{}, fmt.Errorf("burst count must be within %d..%d", MinBurstCount, MaxBurstCount)
+	}
 	if name == "all-correctness" {
 		var steps []Step
 		for _, child := range []string{"post", "update", "dismiss-origin", "offline", "ack-loss", "sender-offline-after-acceptance", "relay-restart", "sender-kill", "receiver-kill", "reboot", "expiry-snapshot"} {
@@ -186,6 +200,48 @@ func Plan(name string) (ScenarioPlan, error) {
 		children := make([]ScenarioPlan, 0, 5)
 		for _, child := range []string{"post", "update", "dismiss-origin", "rapid-post-update-cancel", "offline"} {
 			children = append(children, ScenarioPlan{Name: child, Steps: stepsWithTag(plans[child], "n-core-"+child)})
+		}
+		return ScenarioPlan{Name: name, Children: children}, nil
+	}
+	if name == "lan-direct-burst-backpressure" {
+		steps := []Step{{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"}}
+		for index := 0; index < burstCount; index++ {
+			steps = append(steps, Step{Action: fmt.Sprintf("A.shell.post:burst-%04d", index+1)})
+		}
+		steps = append(steps,
+			Step{Predicate: fmt.Sprintf("B.burst.unique:%d", burstCount)},
+			Step{Predicate: fmt.Sprintf("A.custody.lan:notif_post:%d", burstCount)},
+			Step{Predicate: fmt.Sprintf("A.peer-receipt.delta:%d", burstCount)},
+			Step{Predicate: "A.queue.peak-bounded"},
+			Step{Predicate: "direct.terminal"},
+		)
+		return ScenarioPlan{Name: name, Steps: steps}, nil
+	}
+	if name == "lan-direct-unpair-during-traffic" {
+		steps := []Step{{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"}, {Action: fmt.Sprintf("A.burst.start:%d", burstCount)}}
+		steps = append(steps,
+			Step{Predicate: "A.active-queue.nonzero"},
+			Step{Action: "A.control.local-unpair"},
+			Step{Predicate: "A.unpair.custody"},
+			Step{Predicate: "B.unpair.inbound.delta:1"},
+			Step{Predicate: "both.unpaired.stable"},
+		)
+		return ScenarioPlan{Name: name, Steps: steps}, nil
+	}
+	if name == "lan-product-correctness" {
+		names := []string{
+			"lan-direct-delivery", "lan-direct-dismiss", "lan-direct-update",
+			"lan-direct-peer-dismiss", "lan-direct-call-state", "lan-direct-snapshot-receipt",
+			"lan-direct-burst-backpressure", "lan-direct-unpair-during-traffic",
+		}
+		children := make([]ScenarioPlan, 0, len(names))
+		for _, childName := range names {
+			child, err := PlanWithBurstCount(childName, burstCount)
+			if err != nil {
+				return ScenarioPlan{}, err
+			}
+			child.Steps = stepsWithTag(child.Steps, "n-"+childName)
+			children = append(children, child)
 		}
 		return ScenarioPlan{Name: name, Children: children}, nil
 	}

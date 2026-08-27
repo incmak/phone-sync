@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -397,6 +398,219 @@ func TestCoreCorrectnessRunsIndependentTaggedScenarios(t *testing.T) {
 	}
 	if !contains(bridge.events, "A.shell.post:n-core-update:v1") {
 		t.Fatalf("core scenario did not isolate update tag: %v", bridge.events)
+	}
+}
+
+func TestLanDirectBurstCountIsBounded(t *testing.T) {
+	for _, count := range []int{2, 256, 1000} {
+		plan, err := scenario.PlanWithBurstCount("lan-direct-burst-backpressure", count)
+		if err != nil {
+			t.Fatalf("count %d: %v", count, err)
+		}
+		posts := 0
+		for _, action := range plan.Actions() {
+			if strings.HasPrefix(action, "A.shell.post:") {
+				posts++
+			}
+		}
+		if posts != count {
+			t.Fatalf("count %d produced %d posts", count, posts)
+		}
+	}
+	for _, count := range []int{-1, 0, 1, 1001, 2000} {
+		if _, err := scenario.PlanWithBurstCount("lan-direct-burst-backpressure", count); err == nil {
+			t.Fatalf("count %d passed", count)
+		}
+	}
+}
+
+func TestLanProductCorrectnessHasUniqueChildrenAndUnpairLast(t *testing.T) {
+	plan, err := scenario.PlanWithBurstCount("lan-product-correctness", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"lan-direct-delivery", "lan-direct-dismiss", "lan-direct-update",
+		"lan-direct-peer-dismiss", "lan-direct-call-state", "lan-direct-snapshot-receipt",
+		"lan-direct-burst-backpressure", "lan-direct-unpair-during-traffic",
+	}
+	if len(plan.Children) != len(want) {
+		t.Fatalf("children=%v", plan.Children)
+	}
+	seenNames, seenTags := map[string]bool{}, map[string]string{}
+	for index, child := range plan.Children {
+		if child.Name != want[index] || seenNames[child.Name] {
+			t.Fatalf("child %d=%q seen=%v", index, child.Name, seenNames)
+		}
+		seenNames[child.Name] = true
+		for _, action := range child.Actions() {
+			if !strings.HasPrefix(action, "A.shell.post:") {
+				continue
+			}
+			tag := strings.Split(action, ":")[1]
+			if owner := seenTags[tag]; owner != "" && owner != child.Name {
+				t.Fatalf("tag %q reused by %s and %s", tag, owner, child.Name)
+			}
+			seenTags[tag] = child.Name
+		}
+	}
+}
+
+type task5Bridge struct {
+	*directSemanticBridge
+	mu               sync.Mutex
+	failTag          string
+	postsAfterUnpair int
+	unpaired         bool
+	expectedBurst    int
+	burstPosts       int
+	burstSnapshots   int
+	pendingOutbox    bool
+}
+
+func newTask5Bridge(omit string) *task5Bridge {
+	return &task5Bridge{directSemanticBridge: newDirectSemanticBridge(omit)}
+}
+
+func (b *task5Bridge) Post(ctx context.Context, device, tag, text string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.unpaired {
+		b.postsAfterUnpair++
+	}
+	if tag == b.failTag {
+		return errors.New("fixture child failed")
+	}
+	if !strings.HasPrefix(tag, "burst-") && !strings.HasPrefix(tag, "unpair-") {
+		b.pendingOutbox = true
+		return b.directSemanticBridge.Post(ctx, device, tag, text)
+	}
+	b.burstPosts++
+	remote := b.states["B"]
+	remote.Canonical[tag] = "ACTIVE"
+	remote.CanonicalSequences[tag] = 1
+	remote.CanonicalMaterializedSequences[tag] = 1
+	b.states["B"] = remote
+	local := b.states["A"]
+	local.CustodyCounts["lan"]["notif_post"]++
+	local.PeerReceiptCount++
+	local.ActiveQueueCount++
+	local.ActiveQueueBytes += 256
+	if local.ActiveQueueCount > local.PeakQueueCount {
+		local.PeakQueueCount = local.ActiveQueueCount
+		local.PeakQueueBytes = local.ActiveQueueBytes
+	}
+	b.states["A"] = local
+	return nil
+}
+
+func (b *task5Bridge) Control(ctx context.Context, device, name string, params map[string]string) (control.Result, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if name != "LOCAL_UNPAIR" {
+		return b.directSemanticBridge.Control(ctx, device, name, params)
+	}
+	b.unpaired = true
+	a := b.states["A"]
+	a.UnpairOutcome = "lan"
+	a.Paired, a.Health, a.Terminal = false, "stopped", false
+	a.ActiveQueueCount, a.ActiveQueueBytes, a.Outbox, a.ActiveInbound, a.PendingMaterialization = 0, 0, 0, 0, 0
+	a.Canonical, a.CanonicalSequences, a.CanonicalMaterializedSequences = map[string]string{}, map[string]int{}, map[string]int{}
+	b.states["A"] = a
+	remote := b.states["B"]
+	remote.UnpairInboundCount++
+	remote.Paired, remote.Health, remote.Terminal = false, "stopped", false
+	remote.ActiveQueueCount, remote.ActiveQueueBytes, remote.Outbox, remote.ActiveInbound, remote.PendingMaterialization = 0, 0, 0, 0, 0
+	remote.Canonical, remote.CanonicalSequences, remote.CanonicalMaterializedSequences = map[string]string{}, map[string]int{}, map[string]int{}
+	b.states["B"] = remote
+	return control.Result{Code: "ok"}, nil
+}
+
+func (b *task5Bridge) Snapshot(ctx context.Context, device string) (scenario.Observation, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	state, err := b.directSemanticBridge.Snapshot(ctx, device)
+	if err != nil {
+		return state, err
+	}
+	if !b.unpaired && device == "A" && b.pendingOutbox {
+		state.Outbox = 1
+		b.pendingOutbox = false
+	}
+	if !b.unpaired && device == "A" && state.ActiveQueueCount > 0 {
+		if b.expectedBurst > 0 && b.burstPosts == b.expectedBurst {
+			b.burstSnapshots++
+			if b.burstSnapshots >= 5 {
+				stored := b.states["A"]
+				stored.ActiveQueueCount, stored.ActiveQueueBytes = 0, 0
+				b.states["A"] = stored
+				state.ActiveQueueCount, state.ActiveQueueBytes = 0, 0
+			}
+		}
+		state.Outbox = state.ActiveQueueCount
+	}
+	return state, nil
+}
+
+func TestLanDirectBurstObservesUniqueResultsBoundsAndTerminalZero(t *testing.T) {
+	bridge := newTask5Bridge("")
+	bridge.expectedBurst = 8
+	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResultWithBurstCount(context.Background(), "lan-direct-burst-backpressure", 8)
+	if err != nil || result.Status != "passed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	a := result.After["A"]
+	if a.PeakQueueCount == 0 || a.PeakQueueCount > 2_000 || a.PeakQueueBytes > 128<<20 || a.ActiveQueueCount != 0 || a.ActiveQueueBytes != 0 {
+		t.Fatalf("queue evidence=%+v", a)
+	}
+	if got := result.After["A"].PeerReceiptCount - result.Before["A"].PeerReceiptCount; got != 8 {
+		t.Fatalf("terminal receipts=%d", got)
+	}
+}
+
+func TestLanDirectUnpairDuringTrafficOrdersCustodyBeforeStableWipe(t *testing.T) {
+	bridge := newTask5Bridge("")
+	bridge.expectedBurst = 8
+	result, err := scenario.NewExecutor(bridge, 700*time.Millisecond).RunResultWithBurstCount(context.Background(), "lan-direct-unpair-during-traffic", 8)
+	if err != nil || result.Status != "passed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	events := strings.Join(result.Events, "\n")
+	if strings.Index(events, "predicate:A.active-queue.nonzero") > strings.Index(events, "control:A:local-unpair") ||
+		strings.Index(events, "predicate:A.unpair.custody") > strings.Index(events, "predicate:both.unpaired.stable") {
+		t.Fatalf("ordering=%v", result.Events)
+	}
+	for _, device := range []string{"A", "B"} {
+		state := result.After[device]
+		if state.Paired || state.Health != "stopped" || state.ActiveQueueCount != 0 || state.Outbox != 0 || len(state.Canonical) != 0 {
+			t.Fatalf("%s recreated state: %+v", device, state)
+		}
+	}
+	if bridge.postsAfterUnpair != 0 {
+		t.Fatalf("posts after wipe=%d", bridge.postsAfterUnpair)
+	}
+}
+
+func TestLanDirectUnpairUsesOneBoundedProducerBeforeUnpair(t *testing.T) {
+	plan, err := scenario.PlanWithBurstCount("lan-direct-unpair-during-traffic", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := plan.Actions()
+	if len(actions) != 2 || actions[0] != "A.burst.start:8" || actions[1] != "A.control.local-unpair" {
+		t.Fatalf("actions=%v", actions)
+	}
+}
+
+func TestLanProductAggregateStopsAtFailureAndRetainsCompletedChildren(t *testing.T) {
+	bridge := newTask5Bridge("")
+	bridge.failTag = "n-lan-direct-delivery"
+	result, err := scenario.NewExecutor(bridge, 20*time.Millisecond).RunResultWithBurstCount(context.Background(), "lan-product-correctness", 8)
+	if err == nil || result.Status != "failed" || len(result.Children) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if result.Children[0].Status != "failed" {
+		t.Fatalf("children=%+v", result.Children)
 	}
 }
 

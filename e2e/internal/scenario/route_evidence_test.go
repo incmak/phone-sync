@@ -1,6 +1,10 @@
 package scenario
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func validRoute() RouteEvidence {
 	return RouteEvidence{
@@ -199,6 +203,62 @@ func TestRejectSensitiveEvidenceIsClosedWorld(t *testing.T) {
 	if err := RejectSensitiveEvidence(encoded); err == nil {
 		t.Fatal("unknown evidence field must fail closed")
 	}
+}
+
+func TestAggregateEvidenceWritesEachCompletedChildSeparately(t *testing.T) {
+	result := ScenarioResult{
+		Scenario: "lan-product-correctness", Status: "failed", ErrorCode: "fixture_failure",
+		Before: map[string]Observation{}, After: map[string]Observation{},
+		Children: []ScenarioResult{
+			{Scenario: "lan-direct-delivery", Status: "passed", Events: []string{"predicate:direct.terminal"}, Route: validRoute(), Before: terminalPair(), After: terminalPair()},
+			{Scenario: "lan-direct-update", Status: "failed", ErrorCode: "missing_sequence_transition", Before: terminalPair(), After: terminalPair()},
+		},
+	}
+	dir := t.TempDir()
+	if err := WriteEvidenceArtifacts(dir, result); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{"children/01-lan-direct-delivery/scenario-result.json", "children/02-lan-direct-update/scenario-result.json"} {
+		if info, err := os.Stat(filepath.Join(dir, relative)); err != nil || info.Size() == 0 {
+			t.Fatalf("%s missing: %v", relative, err)
+		}
+	}
+}
+
+func TestInvalidAggregateChildCannotPartiallyReplaceExistingEvidence(t *testing.T) {
+	dir := t.TempDir()
+	validChild := ScenarioResult{Scenario: "lan-direct-delivery", Status: "passed", Events: []string{"original"}, Route: validRoute(), Before: terminalPair(), After: terminalPair()}
+	valid := ScenarioResult{Scenario: "lan-product-correctness", Status: "passed", Events: []string{}, Route: validRoute(), Before: terminalPair(), After: terminalPair(), Children: []ScenarioResult{validChild}}
+	if err := WriteEvidenceArtifacts(dir, valid); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "children/01-lan-direct-delivery/scenario-result.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badRoute := validRoute()
+	badRoute.Route = "raw-endpoint"
+	invalid := valid
+	invalid.Children = []ScenarioResult{
+		{Scenario: "lan-direct-delivery", Status: "passed", Events: []string{"replacement"}, Route: validRoute(), Before: terminalPair(), After: terminalPair()},
+		{Scenario: "lan-direct-update", Status: "passed", Route: badRoute, Before: terminalPair(), After: terminalPair()},
+	}
+	if err := WriteEvidenceArtifacts(dir, invalid); err == nil {
+		t.Fatal("invalid child passed")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("existing child evidence was partially replaced: %s", after)
+	}
+}
+
+func terminalPair() map[string]Observation {
+	state := Observation{Health: "connected", Terminal: true, Route: "lan", RoutePhase: "authenticated", Paired: true}
+	return map[string]Observation{"A": state, "B": state}
 }
 
 func TestRejectSensitiveEvidenceRejectsWrongShapesAndMissingRequiredFields(t *testing.T) {

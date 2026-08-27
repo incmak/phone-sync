@@ -110,6 +110,8 @@ func TestLanDirectSemanticScenariosPassPreflightBeforeADB(t *testing.T) {
 	for _, name := range []string{
 		"lan-direct-update", "lan-direct-peer-dismiss",
 		"lan-direct-call-state", "lan-direct-snapshot-receipt",
+		"lan-direct-burst-backpressure", "lan-direct-unpair-during-traffic",
+		"lan-product-correctness",
 	} {
 		if err := validateScenarioBeforeADB(name); err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -117,6 +119,18 @@ func TestLanDirectSemanticScenariosPassPreflightBeforeADB(t *testing.T) {
 	}
 	if err := validateScenarioBeforeADB("call-state"); err == nil {
 		t.Fatal("legacy call-state bypass must not remain executable")
+	}
+}
+
+func TestCLIBurstCountValidationRunsBeforeADB(t *testing.T) {
+	for _, count := range []int{1, 1001} {
+		err := runWithOptions(context.Background(), options{
+			scenario: "lan-direct-burst-backpressure", burstCount: count,
+			serialA: "phone-a", serialB: "phone-b", packageName: "com.twinotify.app", timeout: time.Second,
+		})
+		if err == nil || !strings.Contains(err.Error(), "burst count") {
+			t.Fatalf("count=%d error=%v", count, err)
+		}
 	}
 }
 

@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	scenario := flag.String("scenario", "status", "scenario identifier (status or pair)")
+	scenarioFlag := flag.String("scenario", "status", "scenario identifier (status or pair)")
 	serialA := flag.String("serial-a", "emulator-5554", "ADB serial for device A")
 	serialB := flag.String("serial-b", "emulator-5556", "ADB serial for device B")
 	packageName := flag.String("package", "com.twinotify.app", "Android application package")
@@ -33,12 +33,13 @@ func main() {
 	packetEvidenceHash := flag.String("packet-evidence-sha256", "", "SHA-256 of operator-captured internet-block packet evidence")
 	dnsEvidenceHash := flag.String("dns-evidence-sha256", "", "SHA-256 of operator-captured DNS evidence")
 	internetBlocked := flag.Bool("internet-blocked", false, "assert operator-controlled internet isolation is active")
+	burstCount := flag.Int("burst-count", scenario.DefaultBurstCount, "bounded item count for direct LAN stress scenarios (2..1000)")
 	flag.Parse()
-	if *scenario == "" {
+	if *scenarioFlag == "" {
 		fmt.Fprintln(os.Stderr, "-scenario must not be empty")
 		os.Exit(2)
 	}
-	options := options{scenario: *scenario, serialA: *serialA, serialB: *serialB,
+	options := options{scenario: *scenarioFlag, serialA: *serialA, serialB: *serialB,
 		packageName: *packageName,
 		relayURL:    *relayURL, relayPort: *relayPort, timeout: *timeout}
 	options.evidenceDir = *evidenceDir
@@ -46,6 +47,7 @@ func main() {
 	options.packetEvidenceHash = *packetEvidenceHash
 	options.dnsEvidenceHash = *dnsEvidenceHash
 	options.internetBlocked = *internetBlocked
+	options.burstCount = *burstCount
 	if err := runWithOptions(context.Background(), options); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -58,18 +60,22 @@ type options struct {
 	internetBlocked                                                       bool
 	relayPort                                                             int
 	timeout                                                               time.Duration
+	burstCount                                                            int
 }
 
 // run is kept small for callers that only need CLI argument validation.
-func run(ctx context.Context, scenario string) error {
-	return runWithOptions(ctx, options{scenario: scenario, serialA: "emulator-5554", serialB: "emulator-5556", packageName: "com.twinotify.app", timeout: 30 * time.Second})
+func run(ctx context.Context, scenarioName string) error {
+	return runWithOptions(ctx, options{scenario: scenarioName, serialA: "emulator-5554", serialB: "emulator-5556", packageName: "com.twinotify.app", timeout: 30 * time.Second, burstCount: scenario.DefaultBurstCount})
 }
 
 func runWithOptions(ctx context.Context, cfg options) error {
 	if err := adb.ValidateComponentName(cfg.packageName); err != nil {
 		return fmt.Errorf("invalid Android package: %w", err)
 	}
-	if err := validateScenarioBeforeADB(cfg.scenario); err != nil {
+	if cfg.burstCount == 0 {
+		cfg.burstCount = scenario.DefaultBurstCount
+	}
+	if err := validateScenarioBeforeADBWithBurstCount(cfg.scenario, cfg.burstCount); err != nil {
 		if cfg.scenarioEvidenceDir != "" {
 			result := scenario.ScenarioResult{Scenario: cfg.scenario, Status: "failed", Before: map[string]scenario.Observation{}, After: map[string]scenario.Observation{}, ErrorCode: scenario.ErrorCode(err)}
 			if evidenceErr := scenario.WriteEvidenceArtifacts(cfg.scenarioEvidenceDir, result); evidenceErr != nil {
@@ -126,7 +132,7 @@ func runWithOptions(ctx context.Context, cfg options) error {
 	}
 	if cfg.scenario != "status" {
 		bridge := scenario.ADBBridge{A: a, B: b, ADBA: adbA, ADBB: adbB, Package: cfg.packageName}
-		result, runErr := scenario.NewExecutor(bridge, cfg.timeout).RunResult(ctx, cfg.scenario)
+		result, runErr := scenario.NewExecutor(bridge, cfg.timeout).RunResultWithBurstCount(ctx, cfg.scenario, cfg.burstCount)
 		if cfg.scenarioEvidenceDir != "" {
 			if evidenceErr := scenario.WriteEvidenceArtifacts(cfg.scenarioEvidenceDir, result); evidenceErr != nil {
 				return fmt.Errorf("write scenario evidence: %w", evidenceErr)
@@ -149,13 +155,17 @@ func runWithOptions(ctx context.Context, cfg options) error {
 }
 
 func validateScenarioBeforeADB(name string) error {
+	return validateScenarioBeforeADBWithBurstCount(name, scenario.DefaultBurstCount)
+}
+
+func validateScenarioBeforeADBWithBurstCount(name string, burstCount int) error {
 	if name == "status" || name == "pair" || name == "offline-pairing" {
 		return nil
 	}
 	if err := metrics.ValidateScenarioID(name); err == nil {
 		return scenario.ErrUnsupportedEnvironment
 	}
-	plan, err := scenario.Plan(name)
+	plan, err := scenario.PlanWithBurstCount(name, burstCount)
 	if err != nil {
 		return err
 	}

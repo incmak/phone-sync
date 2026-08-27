@@ -24,6 +24,7 @@ const (
 	actionReconcile
 	actionLanAvailability
 	actionControl
+	actionBurstStart
 	actionUnsupported
 )
 
@@ -37,6 +38,7 @@ type action struct {
 	command  string
 	params   map[string]string
 	delivery bool
+	count    int
 }
 
 func (a action) eventID() string {
@@ -59,12 +61,21 @@ func (a action) eventID() string {
 		return "lan-available:" + a.device + ":" + fmt.Sprint(a.enabled)
 	case actionControl:
 		return "control:" + a.device + ":" + strings.ToLower(strings.ReplaceAll(a.command, "_", "-"))
+	case actionBurstStart:
+		return fmt.Sprintf("burst-start:%s:%d", a.device, a.count)
 	default:
 		return "unsupported"
 	}
 }
 
 func parseAction(raw string) (action, error) {
+	if strings.HasPrefix(raw, "A.burst.start:") {
+		count, err := strconv.Atoi(strings.TrimPrefix(raw, "A.burst.start:"))
+		if err != nil || count < MinBurstCount || count > MaxBurstCount {
+			return action{}, fmt.Errorf("invalid scenario action %q", raw)
+		}
+		return action{kind: actionBurstStart, device: "A", count: count, delivery: true, original: raw}, nil
+	}
 	switch raw {
 	case "A.control.call-capture-enable":
 		return action{kind: actionControl, device: "A", command: "CALL_CAPTURE_ENABLE", original: raw}, nil
@@ -74,6 +85,8 @@ func parseAction(raw string) (action, error) {
 		return action{kind: actionControl, device: "A", command: "EMIT_SNAPSHOT", delivery: true, original: raw}, nil
 	case "A.control.force-repair-snapshot":
 		return action{kind: actionControl, device: "A", command: "FORCE_REPAIR_SNAPSHOT", delivery: true, original: raw}, nil
+	case "A.control.local-unpair":
+		return action{kind: actionControl, device: "A", command: "LOCAL_UNPAIR", delivery: true, original: raw}, nil
 	}
 	if strings.HasPrefix(raw, "A.control.call-state:") {
 		state := strings.TrimPrefix(raw, "A.control.call-state:")
@@ -151,7 +164,7 @@ func knownPredicate(predicate string) bool {
 		"A.peer-receipt.delta:", "B.peer-receipt.delta:",
 		"B.user-dismiss.delta:", "B.call.semantic:",
 		"B.snapshot.digest.delta:", "B.snapshot.begin.delta:", "B.snapshot.end.delta:",
-		"B.snapshot.commit.delta:",
+		"B.snapshot.commit.delta:", "B.burst.unique:", "B.unpair.inbound.delta:",
 	} {
 		if strings.HasPrefix(predicate, prefix) {
 			return strings.TrimPrefix(predicate, prefix) != ""
@@ -162,7 +175,8 @@ func knownPredicate(predicate string) bool {
 		return true
 	case "A.route.lan", "B.route.lan", "A.route.relay", "B.route.relay", "A.route.queued", "B.route.queued":
 		return true
-	case "A.call-capture.enabled", "A.tracked.cancelled", "B.tracked.cancelled", "B.tracked.no-resurrection", "direct.terminal":
+	case "A.call-capture.enabled", "A.tracked.cancelled", "B.tracked.cancelled", "B.tracked.no-resurrection", "direct.terminal",
+		"A.queue.peak-bounded", "A.active-queue.nonzero", "A.unpair.custody", "both.unpaired.stable":
 		return true
 	default:
 		return false
@@ -216,14 +230,17 @@ type Bridge interface {
 }
 
 type Executor struct {
-	bridge        Bridge
-	stepTimeout   time.Duration
-	baseline      map[string]map[string]string
-	baselineState map[string]Observation
-	lanFaulted    map[string]bool
-	deliveryRoute *RouteEvidence
-	trackedHash   string
-	direct        bool
+	bridge                Bridge
+	stepTimeout           time.Duration
+	baseline              map[string]map[string]string
+	baselineState         map[string]Observation
+	lanFaulted            map[string]bool
+	deliveryRoute         *RouteEvidence
+	trackedHash           string
+	direct                bool
+	unpairedStableSamples int
+	burstCancel           context.CancelFunc
+	burstDone             <-chan error
 }
 
 func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
@@ -241,7 +258,11 @@ func (e *Executor) Run(ctx context.Context, name string) error {
 // RunResult records only action identifiers and provider snapshots. Notification
 // text is intentionally absent from the result so it can be retained as evidence.
 func (e *Executor) RunResult(ctx context.Context, name string) (result ScenarioResult, runErr error) {
-	plan, err := Plan(name)
+	return e.RunResultWithBurstCount(ctx, name, DefaultBurstCount)
+}
+
+func (e *Executor) RunResultWithBurstCount(ctx context.Context, name string, burstCount int) (result ScenarioResult, runErr error) {
+	plan, err := PlanWithBurstCount(name, burstCount)
 	if err != nil {
 		result = failedResult(name, err)
 		return result, err
@@ -263,6 +284,9 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.lanFaulted = map[string]bool{}
 		e.deliveryRoute = nil
 		e.trackedHash = ""
+		e.unpairedStableSamples = 0
+		e.burstCancel = nil
+		e.burstDone = nil
 		e.direct = strings.HasPrefix(plan.Name, "lan-direct-")
 	}
 	if err := ValidateExecutablePlan(plan); err != nil {
@@ -273,6 +297,9 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		return e.runAggregate(ctx, plan)
 	}
 	defer func() {
+		if err := e.stopActiveBurst(ctx); runErr == nil && err != nil {
+			runErr = err
+		}
 		for device, faulted := range e.lanFaulted {
 			if faulted {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
@@ -415,6 +442,10 @@ func (e *Executor) runAggregate(ctx context.Context, plan ScenarioPlan) (Scenari
 		result.After = childResult.After
 		result.Events = append(result.Events, "scenario:"+child.Name)
 		result.Events = append(result.Events, childResult.Events...)
+		result.Children = append(result.Children, childResult)
+		if !childResult.Route.IsZero() {
+			result.Route = childResult.Route
+		}
 		if err != nil {
 			result.ErrorCode = childResult.ErrorCode
 			return result, err
@@ -458,6 +489,11 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 		}
 		return "", err
 	case actionControl:
+		if a.command == "LOCAL_UNPAIR" {
+			if err := e.stopActiveBurst(ctx); err != nil {
+				return "", err
+			}
+		}
 		routeEvent := ""
 		if a.delivery {
 			var routeErr error
@@ -486,10 +522,90 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 			}
 		}
 		return routeEvent, nil
+	case actionBurstStart:
+		routeEvent, err := e.observeDeliveryRoute(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return routeEvent, e.startActiveBurst(ctx, a)
 	case actionUnsupported:
 		return "", fmt.Errorf("%w: %s", ErrUnsupportedEnvironment, raw)
 	default:
 		return "", fmt.Errorf("unknown scenario action %q", raw)
+	}
+}
+
+func (e *Executor) startActiveBurst(ctx context.Context, a action) error {
+	if e.burstCancel != nil || e.burstDone != nil {
+		return errors.New("burst producer is already active")
+	}
+	producerCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	e.burstCancel, e.burstDone = cancel, done
+	go func() {
+		for index := 0; index < a.count; index++ {
+			tag := fmt.Sprintf("unpair-%04d", index+1)
+			if err := e.bridge.Post(producerCtx, a.device, tag, tag); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(producerCtx.Err(), context.Canceled) {
+					done <- nil
+					return
+				}
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	err := Eventually(ctx, 10*time.Millisecond, e.stepTimeout, func() (bool, error) {
+		state, snapshotErr := e.bridge.Snapshot(ctx, a.device)
+		if snapshotErr != nil {
+			return false, snapshotErr
+		}
+		if state.ActiveQueueCount > 0 && state.ActiveQueueBytes > 0 {
+			return true, nil
+		}
+		select {
+		case workerErr := <-done:
+			e.burstCancel, e.burstDone = nil, nil
+			cancel()
+			if workerErr != nil {
+				return false, workerErr
+			}
+			return false, oracleFailure("missing_nonzero_traffic")
+		default:
+			return false, nil
+		}
+	})
+	if err != nil {
+		if cleanupErr := e.stopActiveBurst(ctx); cleanupErr != nil {
+			return fmt.Errorf("%w; burst cleanup: %v", err, cleanupErr)
+		}
+	}
+	return err
+}
+
+func (e *Executor) stopActiveBurst(ctx context.Context) error {
+	if e.burstCancel == nil && e.burstDone == nil {
+		return nil
+	}
+	cancel, done := e.burstCancel, e.burstDone
+	e.burstCancel, e.burstDone = nil, nil
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return nil
+	}
+	waitCtx, waitCancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
+	defer waitCancel()
+	select {
+	case err := <-done:
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	case <-waitCtx.Done():
+		return errors.New("burst producer cleanup timed out")
 	}
 }
 
@@ -553,6 +669,23 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 		return b.Canonical[e.trackedHash] == "ACTIVE" && b.CanonicalSequences[e.trackedHash] == want &&
 			b.CanonicalMaterializedSequences[e.trackedHash] == want
 	}
+	if strings.HasPrefix(predicate, "B.burst.unique:") {
+		want, err := strconv.Atoi(strings.TrimPrefix(predicate, "B.burst.unique:"))
+		if err != nil || want < MinBurstCount || want > MaxBurstCount {
+			return false
+		}
+		unique := 0
+		for hash, state := range b.Canonical {
+			if e.baselineState["B"].Canonical[hash] == state || state != "ACTIVE" {
+				continue
+			}
+			if b.CanonicalSequences[hash] != 1 || b.CanonicalMaterializedSequences[hash] != 1 {
+				return false
+			}
+			unique++
+		}
+		return unique == want
+	}
 	if strings.HasPrefix(predicate, "B.call.semantic:") {
 		want := strings.TrimPrefix(predicate, "B.call.semantic:")
 		sequence := map[string]int{"RINGING": 1, "ACTIVE": 2, "IDLE": 3}[want]
@@ -601,6 +734,10 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 		want, err := strconv.ParseInt(strings.TrimPrefix(predicate, "B.user-dismiss.delta:"), 10, 64)
 		return err == nil && b.UserDismissCount-e.baselineState["B"].UserDismissCount >= want
 	}
+	if strings.HasPrefix(predicate, "B.unpair.inbound.delta:") {
+		want, err := strconv.ParseInt(strings.TrimPrefix(predicate, "B.unpair.inbound.delta:"), 10, 64)
+		return err == nil && want > 0 && b.UnpairInboundCount-e.baselineState["B"].UnpairInboundCount >= want
+	}
 	if strings.HasPrefix(predicate, "B.snapshot.") {
 		parts := strings.Split(predicate, ":")
 		if len(parts) != 2 {
@@ -629,7 +766,32 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 		return a.Terminal && b.Terminal && a.Outbox == 0 && b.Outbox == 0 &&
 			a.ActiveInbound == 0 && b.ActiveInbound == 0 &&
 			a.PendingMaterialization == 0 && b.PendingMaterialization == 0 &&
+			a.ActiveQueueCount == 0 && b.ActiveQueueCount == 0 &&
+			a.ActiveQueueBytes == 0 && b.ActiveQueueBytes == 0 &&
 			a.LoopEvents == 0 && b.LoopEvents == 0
+	}
+	if predicate == "A.queue.peak-bounded" {
+		return a.PeakQueueCount > 0 && a.PeakQueueCount <= 2_000 &&
+			a.PeakQueueBytes > 0 && a.PeakQueueBytes <= 128<<20
+	}
+	if predicate == "A.active-queue.nonzero" {
+		return a.ActiveQueueCount > 0 && a.ActiveQueueBytes > 0
+	}
+	if predicate == "A.unpair.custody" {
+		return a.UnpairOutcome == "lan"
+	}
+	if predicate == "both.unpaired.stable" {
+		clean := func(state Observation) bool {
+			return !state.Paired && state.Health == "stopped" && state.Outbox == 0 &&
+				state.ActiveInbound == 0 && state.PendingMaterialization == 0 &&
+				state.ActiveQueueCount == 0 && state.ActiveQueueBytes == 0 && len(state.Canonical) == 0
+		}
+		if !clean(a) || !clean(b) {
+			e.unpairedStableSamples = 0
+			return false
+		}
+		e.unpairedStableSamples++
+		return e.unpairedStableSamples >= 3
 	}
 	if strings.HasPrefix(predicate, "B.mirror.active:") {
 		return hasNewActive(e.baseline["B"], b.Canonical)
@@ -685,6 +847,18 @@ func oracleCode(predicate string) string {
 		return "missing_lan_custody"
 	case strings.Contains(predicate, "peer-receipt"):
 		return "missing_peer_receipt"
+	case strings.Contains(predicate, "burst.unique"):
+		return "missing_unique_burst_results"
+	case strings.Contains(predicate, "queue.peak"):
+		return "missing_bounded_queue_peak"
+	case strings.Contains(predicate, "active-queue"):
+		return "missing_nonzero_traffic"
+	case strings.Contains(predicate, "unpair.custody"):
+		return "missing_unpair_custody"
+	case strings.Contains(predicate, "unpair.inbound"):
+		return "missing_inbound_unpair"
+	case strings.Contains(predicate, "unpaired.stable"):
+		return "missing_stable_unpaired_terminal"
 	case predicate == "direct.terminal":
 		return "missing_terminal_convergence"
 	default:
