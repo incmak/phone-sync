@@ -2,47 +2,41 @@ import React from 'react';
 import { View, Text, Pressable, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import Svg, { Circle } from 'react-native-svg';
 import { useTheme, TwWordmark, TwButton } from '../../components';
-
-function HeroRings({ accent, border }: { accent: string; border: string }) {
-  return (
-    <Svg width={200} height={200} viewBox="0 0 200 200">
-      <Circle cx={100} cy={100} r={90} stroke={border} strokeWidth={1.5} fill="none" />
-      <Circle cx={100} cy={100} r={60} stroke={accent} strokeWidth={2.5} fill="none" opacity={0.7} />
-      <Circle cx={100} cy={100} r={30} fill={accent} opacity={0.15} />
-      <Circle cx={100} cy={100} r={12} fill={accent} opacity={0.8} />
-    </Svg>
-  );
-}
+import { HandoffTrace } from '../../components/HandoffTrace';
 
 export default function WelcomeScreen() {
   const theme = useTheme();
-  const { fontScale } = useWindowDimensions();
+  const { width, fontScale } = useWindowDimensions();
+  const gutter = width <= 360 ? 16 : 24;
+  const traceWidth = Math.min(Math.max(64, width - gutter * 2), 560);
+  const traceStageHeight = Math.min(272, Math.max(184, width * 0.58));
 
   return (
     <SafeAreaView
       edges={['top', 'bottom']}
       style={[styles.safe, { backgroundColor: theme.bg }]}
     >
-      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
-        <View style={styles.header}>
+      <ScrollView
+        contentContainerStyle={[styles.container, { paddingHorizontal: gutter }]}
+        showsVerticalScrollIndicator={false}
+      >
+        <View testID="welcome-header" style={styles.header}>
           <TwWordmark size={22} />
         </View>
 
-        <View style={styles.hero}>
-          <HeroRings accent={theme.accent} border={theme.border} />
+        <View style={[styles.traceStage, { width: traceWidth, minHeight: traceStageHeight }]}>
+          <HandoffTrace state="unpaired" width={traceWidth} height={132} testID="welcome-handoff-trace" />
         </View>
 
-        <View style={styles.copy}>
+        <View testID="welcome-copy" style={styles.copy}>
           <Text
             style={[
               theme.type.display,
               styles.headline,
               {
                 color: theme.ink,
-                fontFamily: theme.fonts.uiBold,
-                fontWeight: '700',
+                fontFamily: theme.fonts.display,
                 lineHeight: theme.type.display.lineHeight * fontScale,
               },
             ]}
@@ -52,6 +46,7 @@ export default function WelcomeScreen() {
           <Text
             style={[
               theme.type.body,
+              styles.body,
               {
                 color: theme.ink3,
                 fontFamily: theme.fonts.ui,
@@ -64,7 +59,7 @@ export default function WelcomeScreen() {
           </Text>
         </View>
 
-        <View style={styles.actions}>
+        <View testID="welcome-actions" style={styles.actions}>
           <TwButton
             variant="primary"
             size="lg"
@@ -75,6 +70,7 @@ export default function WelcomeScreen() {
           </TwButton>
 
           <Pressable
+            testID="welcome-secondary-action"
             style={styles.secondaryLink}
             onPress={() => router.replace('/onboarding/role')}
             accessibilityRole="button"
@@ -101,11 +97,12 @@ export default function WelcomeScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 12, paddingBottom: 8 },
-  header: { alignItems: 'center', marginBottom: 8 },
-  hero: { minHeight: 360, alignItems: 'center', justifyContent: 'center' },
-  copy: { marginBottom: 32, flexShrink: 0 },
-  headline: { marginBottom: 12 },
-  actions: { gap: 16, paddingBottom: 8, flexShrink: 0 },
-  secondaryLink: { alignItems: 'center', justifyContent: 'center', minHeight: 44, paddingVertical: 8 },
+  container: { flexGrow: 1, paddingTop: 16, paddingBottom: 16 },
+  header: { alignItems: 'flex-start', marginBottom: 4 },
+  traceStage: { alignItems: 'flex-start', justifyContent: 'center', alignSelf: 'flex-start' },
+  copy: { alignItems: 'flex-start', marginBottom: 32, flexShrink: 0 },
+  headline: { marginBottom: 12, fontWeight: '600' },
+  body: { maxWidth: 520 },
+  actions: { gap: 12, paddingBottom: 8, flexShrink: 0 },
+  secondaryLink: { alignItems: 'flex-start', justifyContent: 'center', minHeight: 44, paddingVertical: 8 },
 });
