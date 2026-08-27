@@ -1,6 +1,8 @@
 package scenario
 
-import "testing"
+import (
+	"testing"
+)
 
 func lanObservation() Observation {
 	return Observation{Health: "connected", Route: "lan", RoutePhase: "authenticated"}
@@ -103,5 +105,67 @@ func TestLanDirectSemanticPlansAreExecutableAndRouteBound(t *testing.T) {
 		if len(plan.Steps) == 0 {
 			t.Fatalf("%s has no executor steps", name)
 		}
+	}
+}
+
+func TestDirectionalActionParserAcceptsOnlyNamedNotificationOperations(t *testing.T) {
+	for _, raw := range []string{"A.shell.post:n1", "A.shell.post:n1:v1", "B.shell.post:n2", "B.shell.post:n2:v2", "A.shell.cancel:n1", "B.shell.cancel:n2"} {
+		a, err := parseAction(raw)
+		if err != nil || (a.device != "A" && a.device != "B") {
+			t.Fatalf("%s parsed as %+v err=%v", raw, a, err)
+		}
+	}
+	for _, raw := range []string{"C.shell.post:n1", "B.shell.post:", "B.shell.cancel:n1:extra", "B.shell.delete:n1", "B.shell.post:n1:v1:extra"} {
+		if _, err := parseAction(raw); err == nil {
+			t.Fatalf("invalid action %q passed", raw)
+		}
+	}
+}
+
+func TestDirectionalTrackedSequenceReadsNamedRecipientOnly(t *testing.T) {
+	hash := "hash"
+	executor := &Executor{baselineState: map[string]Observation{
+		"A": {CanonicalSequences: map[string]int{}},
+		"B": {CanonicalSequences: map[string]int{}},
+	}}
+	active := func(sequence int) Observation {
+		return Observation{
+			Canonical:                      map[string]string{hash: "ACTIVE"},
+			CanonicalSequences:             map[string]int{hash: sequence},
+			CanonicalMaterializedSequences: map[string]int{hash: sequence},
+		}
+	}
+	if executor.predicateSatisfied("reverse", "A.tracked.sequence:1", Observation{}, active(1)) {
+		t.Fatal("A predicate passed from B state")
+	}
+	if !executor.predicateSatisfied("reverse", "A.tracked.sequence:1", active(1), Observation{}) {
+		t.Fatal("A predicate rejected exact materialization on A")
+	}
+	executor.trackedHash = ""
+	executor.trackedHashes = map[string]bool{}
+	if executor.predicateSatisfied("forward", "B.tracked.sequence:1", active(1), Observation{}) {
+		t.Fatal("B predicate passed from A state")
+	}
+	if !executor.predicateSatisfied("forward", "B.tracked.sequence:1", Observation{}, active(1)) {
+		t.Fatal("B predicate rejected exact materialization on B")
+	}
+}
+
+func TestDirectionalCustodyGrammarIsClosedAndRouteSpecific(t *testing.T) {
+	for _, predicate := range []string{"A.custody.lan:notif_post:1", "B.custody.relay:notif_post:2"} {
+		if !knownPredicate(predicate) {
+			t.Fatalf("known predicate rejected: %s", predicate)
+		}
+	}
+	for _, predicate := range []string{
+		"C.custody.lan:notif_post:1", "A.custody.wifi:notif_post:1", "A.custody.lan:unknown:1",
+		"A.custody.lan:notif_post:0", "A.custody.relay:notif_post:-1", "A.custody.relay:notif_post:x",
+	} {
+		if knownPredicate(predicate) {
+			t.Fatalf("invalid custody predicate passed: %s", predicate)
+		}
+	}
+	if got := oracleCode("A.custody.relay:notif_post:1"); got != "missing_relay_custody" {
+		t.Fatalf("relay oracle code=%q", got)
 	}
 }

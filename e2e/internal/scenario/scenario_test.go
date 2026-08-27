@@ -242,18 +242,56 @@ func (f *fakeBridge) Post(_ context.Context, device, tag, text string) error {
 	stateA.Outbox = 1
 	stateA.ReceiptAtMs++
 	stateA.Canonical[tag] = "ACTIVE"
+	if stateA.CanonicalSequences == nil {
+		stateA.CanonicalSequences = map[string]int{}
+	}
+	stateA.CanonicalSequences[tag] = f.sequences[tag]
+	if stateA.CanonicalMaterializedSequences == nil {
+		stateA.CanonicalMaterializedSequences = map[string]int{}
+	}
+	stateA.CanonicalMaterializedSequences[tag] = f.sequences[tag]
+	if stateA.CustodyCounts == nil {
+		stateA.CustodyCounts = completeCustodyCounts()
+	}
+	event := "notif_post"
+	if f.sequences[tag] > 1 {
+		event = "notif_update"
+	}
+	if stateA.Route == "lan" || stateA.Route == "relay" {
+		stateA.CustodyCounts[stateA.Route][event]++
+	}
+	stateA.PeerReceiptCount++
 	f.states[device] = stateA
-	if device == "A" {
-		stateB := f.states["B"]
+	recipient := map[string]string{"A": "B", "B": "A"}[device]
+	if recipient != "" {
+		stateB := f.states[recipient]
 		if stateB.Canonical == nil {
 			stateB.Canonical = map[string]string{}
 		}
+		if stateB.CanonicalSequences == nil {
+			stateB.CanonicalSequences = map[string]int{}
+		}
+		if stateB.CanonicalMaterializedSequences == nil {
+			stateB.CanonicalMaterializedSequences = map[string]int{}
+		}
 		stateB.Canonical[tag] = "ACTIVE"
+		stateB.CanonicalSequences[tag] = f.sequences[tag]
+		stateB.CanonicalMaterializedSequences[tag] = f.sequences[tag]
 		stateB.Mirror = true
 		stateB.Sequence = highestSequence(f.sequences)
-		f.states["B"] = stateB
+		f.states[recipient] = stateB
 	}
 	return nil
+}
+
+func completeCustodyCounts() map[string]map[string]int64 {
+	result := map[string]map[string]int64{"lan": {}, "relay": {}}
+	for route := range result {
+		for _, event := range []string{"notif_post", "notif_update", "notif_cancel", "call_state", "state_digest", "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair", "peer_receipt"} {
+			result[route][event] = 0
+		}
+	}
+	return result
 }
 func (f *fakeBridge) Cancel(_ context.Context, device, tag string) error {
 	f.calls++
@@ -292,6 +330,11 @@ func highestSequence(values map[string]int) int {
 func (f *fakeBridge) ForceStop(_ context.Context, device string) error {
 	f.calls++
 	f.events = append(f.events, device+".force-stop")
+	return nil
+}
+func (f *fakeBridge) Restart(_ context.Context, device string) error {
+	f.calls++
+	f.events = append(f.events, device+".restart")
 	return nil
 }
 func (f *fakeBridge) Reconcile(_ context.Context, device string) error {
@@ -373,6 +416,51 @@ func TestExecutablePlanRejectsAssertionLikeAction(t *testing.T) {
 	}
 }
 
+func TestExecutablePlanAcceptsOnlyPairedForceStopRestartSequences(t *testing.T) {
+	for _, device := range []string{"A", "B"} {
+		plan := scenario.ScenarioPlan{Name: "restart", Steps: []scenario.Step{{Action: device + ".force-stop"}, {Action: device + ".restart"}}}
+		if err := scenario.ValidateExecutablePlan(plan); err != nil {
+			t.Fatalf("%s valid restart: %v", device, err)
+		}
+		for name, steps := range map[string][]scenario.Step{
+			"restart-before-force-stop": {{Action: device + ".restart"}, {Action: device + ".force-stop"}},
+			"duplicate-restart":         {{Action: device + ".force-stop"}, {Action: device + ".restart"}, {Action: device + ".restart"}},
+		} {
+			t.Run(device+"/"+name, func(t *testing.T) {
+				if err := scenario.ValidateExecutablePlan(scenario.ScenarioPlan{Name: name, Steps: steps}); err == nil {
+					t.Fatal("unordered restart passed preflight")
+				}
+			})
+		}
+	}
+	for _, token := range []string{"B.reboot", "relay.sigterm", "relay.restart.same-db", "B.ui.xml.find-mirror:n1"} {
+		if err := scenario.ValidateExecutablePlan(scenario.ScenarioPlan{Name: "unsupported", Steps: []scenario.Step{{Action: token}}}); !errors.Is(err, scenario.ErrUnsupportedEnvironment) {
+			t.Fatalf("%s error=%v", token, err)
+		}
+	}
+}
+
+type blockingRestartBridge struct{ *fakeBridge }
+
+func (b *blockingRestartBridge) Restart(ctx context.Context, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRestartActionTimeoutIsBounded(t *testing.T) {
+	lan := scenario.Observation{Health: "connected", Route: "lan", RoutePhase: "authenticated", Terminal: true}
+	bridge := &blockingRestartBridge{fakeBridge: &fakeBridge{states: map[string]scenario.Observation{"A": lan, "B": lan}}}
+	executor := scenario.NewExecutor(bridge, 20*time.Millisecond)
+	started := time.Now()
+	result, err := executor.RunResult(context.Background(), "lan-restart-persistence")
+	if err == nil || result.ErrorCode != "execution_failed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > 270*time.Millisecond {
+		t.Fatalf("restart action exceeded bound: %s", elapsed)
+	}
+}
+
 func TestCoreCorrectnessContainsOnlyExecutableActions(t *testing.T) {
 	plan, err := scenario.Plan("core-correctness")
 	if err != nil {
@@ -430,8 +518,9 @@ func TestLanProductCorrectnessHasUniqueChildrenAndUnpairLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"lan-direct-delivery", "lan-direct-dismiss", "lan-direct-update",
+		"lan-direct-delivery", "lan-direct-reverse-delivery", "lan-direct-dismiss", "lan-direct-update",
 		"lan-direct-peer-dismiss", "lan-direct-call-state", "lan-direct-snapshot-receipt",
+		"lan-relay-fallback-return", "lan-restart-persistence",
 		"lan-direct-burst-backpressure", "lan-direct-unpair-during-traffic",
 	}
 	if len(plan.Children) != len(want) {
@@ -444,7 +533,7 @@ func TestLanProductCorrectnessHasUniqueChildrenAndUnpairLast(t *testing.T) {
 		}
 		seenNames[child.Name] = true
 		for _, action := range child.Actions() {
-			if !strings.HasPrefix(action, "A.shell.post:") {
+			if !strings.HasPrefix(action, "A.shell.post:") && !strings.HasPrefix(action, "B.shell.post:") {
 				continue
 			}
 			tag := strings.Split(action, ":")[1]
@@ -452,6 +541,46 @@ func TestLanProductCorrectnessHasUniqueChildrenAndUnpairLast(t *testing.T) {
 				t.Fatalf("tag %q reused by %s and %s", tag, owner, child.Name)
 			}
 			seenTags[tag] = child.Name
+		}
+	}
+}
+
+func TestLanProductNewScenarioPlansCarryRequiredDirectionalRouteAndRestartProof(t *testing.T) {
+	planText := func(plan scenario.ScenarioPlan) string {
+		var values []string
+		for _, step := range plan.Steps {
+			values = append(values, step.Action, step.Predicate)
+		}
+		return strings.Join(values, "|")
+	}
+	reverse, err := scenario.Plan("lan-direct-reverse-delivery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverseActions := planText(reverse)
+	for _, required := range []string{"B.shell.post:n1", "A.tracked.sequence:1", "B.custody.lan:notif_post:1", "B.peer-receipt.delta:1", "direct.terminal"} {
+		if !strings.Contains(reverseActions, required) {
+			t.Fatalf("reverse plan missing %q: %s", required, reverseActions)
+		}
+	}
+	fallback, err := scenario.Plan("lan-relay-fallback-return")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackText := planText(fallback)
+	for _, required := range []string{"A.custody.relay:notif_post:1", "A.custody.lan:notif_post:1", "A.peer-receipt.delta:2", "direct.terminal"} {
+		if !strings.Contains(fallbackText, required) {
+			t.Fatalf("fallback plan missing %q: %s", required, fallbackText)
+		}
+	}
+	restart, err := scenario.Plan("lan-restart-persistence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartText := planText(restart)
+	for _, required := range []string{"A.outbox.nonzero", "A.force-stop", "A.restart", "B.force-stop", "B.restart", "A.custody.lan:notif_post:2", "A.peer-receipt.delta:2", "direct.terminal"} {
+		if !strings.Contains(restartText, required) {
+			t.Fatalf("restart plan missing %q: %s", required, restartText)
 		}
 	}
 }
@@ -666,16 +795,19 @@ func TestLanFallbackAndReturnUsesRoutePreferenceWithoutChangingRadios(t *testing
 }
 
 func TestFallbackEvidenceRecordsRelayDeliveryThenLanReturn(t *testing.T) {
-	bridge := &fakeBridge{states: map[string]scenario.Observation{
-		"A": {Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 1},
-		"B": {Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 1},
-	}}
+	bridge := newDirectSemanticBridge("")
 	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "lan-relay-fallback-return")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if result.Route.Route != "relay" || result.After["A"].Route != "lan" || result.After["B"].Route != "lan" {
+	if result.Route.Route != "lan" || result.After["A"].Route != "lan" || result.After["B"].Route != "lan" {
 		t.Fatalf("delivery and return evidence disagree: route=%+v after=%+v", result.Route, result.After)
+	}
+	events := strings.Join(result.Events, "\n")
+	relayEvent := strings.Index(events, "route:post:A:n1-relay:relay:")
+	lanEvent := strings.Index(events, "route:post:A:n1-lan:lan:")
+	if relayEvent < 0 || lanEvent < 0 || relayEvent >= lanEvent {
+		t.Fatalf("ordered route events absent: %v", result.Events)
 	}
 }
 
@@ -920,6 +1052,7 @@ type directSemanticBridge struct {
 	delivered              int
 	dismissed              bool
 	bSnapshotsAfterDismiss int
+	notificationSequences  map[string]int
 }
 
 func newDirectSemanticBridge(omit string) *directSemanticBridge {
@@ -944,6 +1077,7 @@ func newDirectSemanticBridge(omit string) *directSemanticBridge {
 	bridge := &directSemanticBridge{
 		states: map[string]scenario.Observation{"A": state(), "B": state()}, omit: omit,
 		hash: strings.Repeat("a", 64), session: "11111111-1111-4111-8111-111111111111",
+		notificationSequences: map[string]int{},
 	}
 	if omit == "route" {
 		a := bridge.states["A"]
@@ -955,6 +1089,13 @@ func newDirectSemanticBridge(omit string) *directSemanticBridge {
 
 func (b *directSemanticBridge) Control(_ context.Context, device, name string, params map[string]string) (control.Result, error) {
 	switch name {
+	case "SET_LAN_AVAILABLE":
+		state := b.states[device]
+		state.Route = map[bool]string{true: "lan", false: "relay"}[params["available"] == "true"]
+		state.RoutePhase = "authenticated"
+		state.RouteGeneration++
+		b.states[device] = state
+		return control.Result{Code: "ok"}, nil
 	case "CALL_CAPTURE_ENABLE":
 		state := b.states["A"]
 		state.CallCaptureEnabled = true
@@ -1040,7 +1181,8 @@ func (b *directSemanticBridge) recordCustody(device, event string) {
 		return
 	}
 	state := b.states[device]
-	state.CustodyCounts["lan"][event]++
+	route := state.Route
+	state.CustodyCounts[route][event]++
 	b.states[device] = state
 }
 
@@ -1066,16 +1208,19 @@ func (b *directSemanticBridge) afterDelivery() {
 	}
 }
 
-func (b *directSemanticBridge) Post(_ context.Context, device, _, _ string) error {
-	b.sequence++
+func (b *directSemanticBridge) Post(_ context.Context, device, tag, _ string) error {
+	b.notificationSequences[tag]++
+	b.sequence = b.notificationSequences[tag]
+	b.hash = fmt.Sprintf("%x", sha256.Sum256([]byte("notification:"+tag)))
+	recipient := map[string]string{"A": "B", "B": "A"}[device]
 	if b.omit != fmt.Sprintf("sequence-%d", b.sequence) {
-		remote := b.states["B"]
+		remote := b.states[recipient]
 		remote.Canonical[b.hash] = "ACTIVE"
 		remote.CanonicalSequences[b.hash] = b.sequence
 		if b.omit != fmt.Sprintf("stale-sequence-%d", b.sequence) {
 			remote.CanonicalMaterializedSequences[b.hash] = b.sequence
 		}
-		b.states["B"] = remote
+		b.states[recipient] = remote
 	}
 	event := "notif_post"
 	if b.sequence > 1 {
@@ -1083,13 +1228,23 @@ func (b *directSemanticBridge) Post(_ context.Context, device, _, _ string) erro
 	}
 	b.recordCustody(device, event)
 	b.recordReceipt(device)
+	origin := b.states[device]
+	origin.Outbox = 1
+	b.states[device] = origin
 	b.afterDelivery()
 	return nil
 }
 
-func (b *directSemanticBridge) Cancel(context.Context, string, string) error   { return nil }
+func (b *directSemanticBridge) Cancel(_ context.Context, device, _ string) error {
+	recipient := map[string]string{"A": "B", "B": "A"}[device]
+	remote := b.states[recipient]
+	remote.Canonical[b.hash] = "CANCELLED"
+	b.states[recipient] = remote
+	return nil
+}
 func (b *directSemanticBridge) SetNetwork(context.Context, string, bool) error { return nil }
 func (b *directSemanticBridge) ForceStop(context.Context, string) error        { return nil }
+func (b *directSemanticBridge) Restart(context.Context, string) error          { return nil }
 func (b *directSemanticBridge) Reconcile(context.Context, string) error        { return nil }
 func (b *directSemanticBridge) Snapshot(_ context.Context, device string) (scenario.Observation, error) {
 	if device == "B" && b.dismissed {
@@ -1103,6 +1258,11 @@ func (b *directSemanticBridge) Snapshot(_ context.Context, device string) (scena
 		}
 	}
 	state := b.states[device]
+	if state.Outbox > 0 {
+		stored := state
+		stored.Outbox = 0
+		b.states[device] = stored
+	}
 	if b.omit == "terminal" {
 		state.Terminal = false
 	}
@@ -1123,6 +1283,24 @@ func TestLanDirectUpdate(t *testing.T) {
 	if err != nil || result.Status != "passed" || result.Route.Route != "lan" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+}
+
+func TestLanDirectReverseDelivery(t *testing.T) {
+	result, err := runDirectSemantic(t, "lan-direct-reverse-delivery", "")
+	if err != nil || result.Status != "passed" || result.Route.Route != "lan" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if !contains(result.Events, "post:B:n1") || !contains(result.Events, "predicate:A.tracked.sequence:1") {
+		t.Fatalf("missing reverse evidence: %v", result.Events)
+	}
+}
+
+func TestLanDirectReverseDeliveryRejectsMissingObservations(t *testing.T) {
+	assertDirectMissing(t, "lan-direct-reverse-delivery", map[string]string{
+		"route": "missing_authenticated_lan", "sequence-1": "missing_sequence_transition",
+		"stale-sequence-1": "missing_sequence_transition", "custody-notif_post": "missing_lan_custody",
+		"receipt": "missing_peer_receipt", "terminal": "missing_terminal_convergence",
+	})
 }
 
 func TestLanDirectPeerDismiss(t *testing.T) {

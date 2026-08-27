@@ -164,6 +164,16 @@ data class SyncRouteStatus(val route: RouteKind, val phase: RoutePhase, val queu
 - [x] Host scenarios for direct post/cancel/update, peer dismiss, call state, snapshot/receipt, bounded burst, and unpair during traffic landed (commit `9c136cc`).
 - [x] Repository host gates plus Go race/vet and verifier self-tests passed for the evidence tooling (commit `9c136cc`).
 - [x] Independent review of the direct-LAN evidence tooling completed (commit `9c136cc`).
+
+The current host expansion runs eleven children in exact order:
+`lan-direct-delivery`, `lan-direct-reverse-delivery`, `lan-direct-dismiss`,
+`lan-direct-update`, `lan-direct-peer-dismiss`, `lan-direct-call-state`,
+`lan-direct-snapshot-receipt`, `lan-relay-fallback-return`,
+`lan-restart-persistence`, `lan-direct-burst-backpressure`, and
+`lan-direct-unpair-during-traffic`. Reverse delivery is B-to-A. Fallback uses
+app-internal LAN availability, not OS radio mutation. Restart uses bounded
+force-stop plus the typed package launcher on both phones without clearing
+data. Every completed child plus a failed child keeps independent artifacts.
 - [ ] Process-restart direct delivery on both handsets - pending physical two-phone run.
 - [ ] LAN-loss relay fallback and return-to-LAN acceptance - pending physical two-phone run.
 - [ ] Controlled no-uplink packet/DNS acceptance - pending physical two-phone run.

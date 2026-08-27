@@ -27,6 +27,9 @@ for forbidden in 'svc wifi' 'svc data' 'cmd wifi' 'settings put' 'pm clear' 'rm 
 done
 grep -Fq -- '-scenario lan-product-correctness' <<<"$recipe" || { echo "aggregate CLI invocation missing" >&2; exit 1; }
 grep -Fq 'verify-lan-product-evidence.sh' <<<"$recipe" || { echo "evidence verifier invocation missing" >&2; exit 1; }
+cli_line=$(grep -n -- '-scenario lan-product-correctness' <<<"$recipe" | cut -d: -f1)
+verifier_line=$(grep -n 'verify-lan-product-evidence.sh' <<<"$recipe" | cut -d: -f1)
+[[ "$cli_line" =~ ^[0-9]+$ && "$verifier_line" =~ ^[0-9]+$ && "$cli_line" -lt "$verifier_line" ]] || { echo "aggregate CLI must precede verifier" >&2; exit 1; }
 
 "$repo_root/scripts/verify-lan-product-evidence.sh" --self-test
 
@@ -36,22 +39,28 @@ head_commit=$(git -C "$repo_root" rev-parse --short HEAD)
 write_doc_fixture() {
   printf '%s\n' \
     '# Direct LAN plan' \
+    'The eleven-child aggregate is host-verified.' \
     "- [x] Implementation complete (commit \`$head_commit\`)." \
     '- [ ] Physical acceptance - pending physical two-phone run.' >"$doc_dir/plan-a.md"
   printf '%s\n' \
     '# Live service plan' \
+    'The eleven-child aggregate remains pending on hardware.' \
     "- [x] Implementation complete (commit \`$head_commit\`)." \
     '- [ ] Operator handset acceptance - pending physical two-phone run.' >"$doc_dir/plan-b.md"
   printf '%s\n' \
     '# Direct LAN scenarios' \
+    'The gate runs eleven scenarios in order.' \
     '- Run `make e2e-lan-product` through `e2e/cmd/twinotify-e2e`.' \
     '- Verify with `scripts/verify-lan-product-evidence.sh`.' \
     '- `lan-direct-delivery`' \
+    '- `lan-direct-reverse-delivery`' \
     '- `lan-direct-dismiss`' \
     '- `lan-direct-update`' \
     '- `lan-direct-peer-dismiss`' \
     '- `lan-direct-call-state`' \
     '- `lan-direct-snapshot-receipt`' \
+    '- `lan-relay-fallback-return`' \
+    '- `lan-restart-persistence`' \
     '- `lan-direct-burst-backpressure`' \
     '- `lan-direct-unpair-during-traffic`' \
     '- `lan-product-correctness`' \
@@ -105,5 +114,13 @@ write_doc_fixture
 sed -i.bak 's/lan-direct-update/lan-direct-unknown/' "$doc_dir/scenarios.md"
 rm "$doc_dir/scenarios.md.bak"
 expect_doc_failure unknown-scenario
+write_doc_fixture
+sed -i.bak '/lan-direct-reverse-delivery/d' "$doc_dir/scenarios.md"
+rm "$doc_dir/scenarios.md.bak"
+expect_doc_failure missing-reverse-scenario
+write_doc_fixture
+sed -i.bak 's/runs eleven scenarios/runs eight scenarios/' "$doc_dir/scenarios.md"
+rm "$doc_dir/scenarios.md.bak"
+expect_doc_failure stale-eight-count
 
 echo "lan product Make target self-test passed"

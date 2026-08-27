@@ -47,6 +47,17 @@
 - [x] Production-backed, content-free direct update, peer-dismiss, call, snapshot, receipt, burst, and unpair controls and observations landed (commit `ac7a5f3`).
 - [x] The aggregate `lan-product-correctness` host gate and fail-closed evidence verifier landed (commit `9c136cc`).
 - [x] Host verification, Go race/vet, E2E verifier, and Make safety gates passed for the aggregate tooling (commit `9c136cc`).
+
+The current host gate expands `lan-product-correctness` to eleven ordered
+children: `lan-direct-delivery`, `lan-direct-reverse-delivery`,
+`lan-direct-dismiss`, `lan-direct-update`, `lan-direct-peer-dismiss`,
+`lan-direct-call-state`, `lan-direct-snapshot-receipt`,
+`lan-relay-fallback-return`, `lan-restart-persistence`,
+`lan-direct-burst-backpressure`, and `lan-direct-unpair-during-traffic`.
+Reverse delivery proves B-to-A materialization. Fallback uses app-internal route
+availability rather than OS radios. Restart uses bounded force-stop and typed
+package launch on both phones without clearing data. Completed and failed
+children retain separate evidence artifacts.
 - [ ] Install the current debug app on both connected handsets without clearing app data - pending physical two-phone run.
 - [ ] Verify direct post/update/cancel, calls, snapshots, and receipts in both directions - pending physical two-phone run.
 - [ ] Verify LAN loss, relay fallback, return to LAN, restart, burst, and unpair during traffic - pending physical two-phone run.

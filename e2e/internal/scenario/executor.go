@@ -21,6 +21,7 @@ const (
 	actionCancel
 	actionNetwork
 	actionForceStop
+	actionRestart
 	actionReconcile
 	actionLanAvailability
 	actionControl
@@ -55,6 +56,8 @@ func (a action) eventID() string {
 		return "network:" + a.device + ":" + state
 	case actionForceStop:
 		return "force-stop:" + a.device
+	case actionRestart:
+		return "restart:" + a.device
 	case actionReconcile:
 		return "reconcile:" + a.device
 	case actionLanAvailability:
@@ -114,18 +117,20 @@ func parseAction(raw string) (action, error) {
 		return action{kind: actionReconcile, device: "B", original: raw}, nil
 	case "A.lan.fail", "B.lan.fail", "A.lan.restore", "B.lan.restore":
 		return action{kind: actionLanAvailability, device: raw[:1], enabled: strings.HasSuffix(raw, ".restore"), original: raw}, nil
-	case "A.restart", "B.restart", "B.reboot", "relay.sigterm", "relay.restart.same-db", "B.ui.xml.find-mirror:n1", "B.ui.swipe-dismiss:n1", "relay.drop.receipt:n1", "relay.accepted:n1", "relay.expire.mailbox", "relay.snapshot", "B.listener.rebind":
+	case "A.restart", "B.restart":
+		return action{kind: actionRestart, device: raw[:1], original: raw}, nil
+	case "B.reboot", "relay.sigterm", "relay.restart.same-db", "B.ui.xml.find-mirror:n1", "B.ui.swipe-dismiss:n1", "relay.drop.receipt:n1", "relay.accepted:n1", "relay.expire.mailbox", "relay.snapshot", "B.listener.rebind":
 		return action{kind: actionUnsupported, original: raw}, nil
 	}
 	parts := splitAction(raw)
-	if len(parts) >= 2 && (parts[0] == "A.shell.post" || parts[0] == "A.shell.cancel") {
+	if len(parts) >= 2 && (parts[0] == "A.shell.post" || parts[0] == "A.shell.cancel" || parts[0] == "B.shell.post" || parts[0] == "B.shell.cancel") {
 		device := string(parts[0][0])
 		operation := parts[0]
 		tag := parts[1]
 		if tag == "" {
 			return action{}, fmt.Errorf("invalid scenario action %q", raw)
 		}
-		if operation == "A.shell.post" {
+		if operation == "A.shell.post" || operation == "B.shell.post" {
 			if len(parts) == 2 {
 				return action{kind: actionPost, device: device, tag: tag, text: tag, original: raw}, nil
 			}
@@ -133,7 +138,7 @@ func parseAction(raw string) (action, error) {
 				return action{kind: actionPost, device: device, tag: tag, text: parts[2], original: raw}, nil
 			}
 		}
-		if operation == "A.shell.cancel" && len(parts) == 2 {
+		if (operation == "A.shell.cancel" || operation == "B.shell.cancel") && len(parts) == 2 {
 			return action{kind: actionCancel, device: device, tag: tag, original: raw}, nil
 		}
 		return action{}, fmt.Errorf("invalid scenario action %q", raw)
@@ -154,13 +159,18 @@ func splitAction(raw string) []string {
 }
 
 func knownPredicate(predicate string) bool {
+	if _, _, ok := parseTrackedSequencePredicate(predicate); ok {
+		return true
+	}
+	if _, _, _, _, ok := parseCustodyPredicate(predicate); ok {
+		return true
+	}
 	for _, prefix := range []string{"B.mirror.active:", "B.mirror.absent:", "B.no-resurrection:", "A.source.absent:"} {
 		if strings.HasPrefix(predicate, prefix) {
 			return strings.TrimPrefix(predicate, prefix) != ""
 		}
 	}
 	for _, prefix := range []string{
-		"B.tracked.sequence:", "A.custody.lan:", "B.custody.lan:",
 		"A.peer-receipt.delta:", "B.peer-receipt.delta:",
 		"B.user-dismiss.delta:", "B.call.semantic:",
 		"B.snapshot.digest.delta:", "B.snapshot.begin.delta:", "B.snapshot.end.delta:",
@@ -183,6 +193,42 @@ func knownPredicate(predicate string) bool {
 	}
 }
 
+func parseTrackedSequencePredicate(predicate string) (device string, want int, ok bool) {
+	parts := strings.Split(predicate, ":")
+	if len(parts) != 2 || (parts[0] != "A.tracked.sequence" && parts[0] != "B.tracked.sequence") {
+		return "", 0, false
+	}
+	want, err := strconv.Atoi(parts[1])
+	if err != nil || want <= 0 || want > MaxBurstCount {
+		return "", 0, false
+	}
+	return parts[0][:1], want, true
+}
+
+func parseCustodyPredicate(predicate string) (device, route, event string, want int64, ok bool) {
+	parts := strings.Split(predicate, ":")
+	if len(parts) != 3 {
+		return "", "", "", 0, false
+	}
+	head := strings.Split(parts[0], ".")
+	if len(head) != 3 || (head[0] != "A" && head[0] != "B") || head[1] != "custody" || (head[2] != "lan" && head[2] != "relay") {
+		return "", "", "", 0, false
+	}
+	allowed := map[string]bool{
+		"notif_post": true, "notif_update": true, "notif_cancel": true, "call_state": true,
+		"state_digest": true, "state_snapshot_begin": true, "state_snapshot_item": true,
+		"state_snapshot_end": true, "unpair": true, "peer_receipt": true,
+	}
+	if !allowed[parts[1]] {
+		return "", "", "", 0, false
+	}
+	want, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || want <= 0 || want > MaxBurstCount {
+		return "", "", "", 0, false
+	}
+	return head[0], head[2], parts[1], want, true
+}
+
 // ValidateExecutablePlan performs all plan parsing before a bridge is created or
 // contacted. It is intentionally shared by the CLI and Executor.
 func ValidateExecutablePlan(plan ScenarioPlan) error {
@@ -197,6 +243,7 @@ func ValidateExecutablePlan(plan ScenarioPlan) error {
 		}
 		return nil
 	}
+	forceStopped := map[string]bool{"A": false, "B": false}
 	for _, step := range plan.Steps {
 		if step.Action != "" {
 			a, err := parseAction(step.Action)
@@ -205,6 +252,15 @@ func ValidateExecutablePlan(plan ScenarioPlan) error {
 			}
 			if a.kind == actionUnsupported {
 				return fmt.Errorf("%w: %s", ErrUnsupportedEnvironment, step.Action)
+			}
+			if a.kind == actionForceStop {
+				forceStopped[a.device] = true
+			}
+			if a.kind == actionRestart {
+				if !forceStopped[a.device] {
+					return fmt.Errorf("restart %s requires a preceding force-stop", a.device)
+				}
+				forceStopped[a.device] = false
 			}
 		}
 		if step.Predicate != "" && !knownPredicate(step.Predicate) {
@@ -225,6 +281,7 @@ type Bridge interface {
 	Cancel(context.Context, string, string) error
 	SetNetwork(context.Context, string, bool) error
 	ForceStop(context.Context, string) error
+	Restart(context.Context, string) error
 	Reconcile(context.Context, string) error
 	Snapshot(context.Context, string) (Observation, error)
 }
@@ -237,6 +294,8 @@ type Executor struct {
 	lanFaulted            map[string]bool
 	deliveryRoute         *RouteEvidence
 	trackedHash           string
+	trackedTag            string
+	trackedHashes         map[string]bool
 	direct                bool
 	unpairedStableSamples int
 	burstCancel           context.CancelFunc
@@ -284,10 +343,12 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.lanFaulted = map[string]bool{}
 		e.deliveryRoute = nil
 		e.trackedHash = ""
+		e.trackedTag = ""
+		e.trackedHashes = map[string]bool{}
 		e.unpairedStableSamples = 0
 		e.burstCancel = nil
 		e.burstDone = nil
-		e.direct = strings.HasPrefix(plan.Name, "lan-direct-")
+		e.direct = strings.HasPrefix(plan.Name, "lan-direct-") || plan.Name == "lan-restart-persistence"
 	}
 	if err := ValidateExecutablePlan(plan); err != nil {
 		result.ErrorCode = errorCode(err)
@@ -353,8 +414,13 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 				return result, err
 			}
 			result.Events = append(result.Events, a.eventID())
-			routeEvent, err := e.action(ctx, step.Action)
+			actionCtx, cancel := context.WithTimeout(ctx, e.stepTimeout)
+			routeEvent, err := e.action(actionCtx, step.Action)
+			cancel()
 			if err != nil {
+				if cause := context.Cause(ctx); cause != nil {
+					err = cause
+				}
 				return result, fmt.Errorf("%s action %s: %w", plan.Name, step.Action, err)
 			}
 			if routeEvent != "" {
@@ -462,6 +528,10 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 	}
 	switch a.kind {
 	case actionPost:
+		if e.trackedTag != a.tag {
+			e.trackedHash = ""
+			e.trackedTag = a.tag
+		}
 		routeEvent, err := e.observeDeliveryRoute(ctx, a)
 		if err != nil {
 			return "", err
@@ -477,6 +547,8 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 		return "", e.bridge.SetNetwork(ctx, a.device, a.enabled)
 	case actionForceStop:
 		return "", e.bridge.ForceStop(ctx, a.device)
+	case actionRestart:
+		return "", e.bridge.Restart(ctx, a.device)
 	case actionReconcile:
 		return "", e.bridge.Reconcile(ctx, a.device)
 	case actionLanAvailability:
@@ -646,15 +718,15 @@ func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) er
 }
 
 func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) bool {
-	if strings.HasPrefix(predicate, "B.tracked.sequence:") {
-		want, err := strconv.Atoi(strings.TrimPrefix(predicate, "B.tracked.sequence:"))
-		if err != nil {
+	if device, want, ok := parseTrackedSequencePredicate(predicate); ok {
+		state, stateOK := namedObservation(device, a, b)
+		if !stateOK {
 			return false
 		}
 		if e.trackedHash == "" {
 			candidate := ""
-			for hash, sequence := range b.CanonicalSequences {
-				if sequence == want && e.baselineState["B"].CanonicalSequences[hash] != sequence {
+			for hash, sequence := range state.CanonicalSequences {
+				if sequence == want && e.baselineState[device].CanonicalSequences[hash] != sequence && !e.trackedHashes[hash] {
 					if candidate != "" {
 						return false
 					}
@@ -665,9 +737,13 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 				return false
 			}
 			e.trackedHash = candidate
+			if e.trackedHashes == nil {
+				e.trackedHashes = map[string]bool{}
+			}
+			e.trackedHashes[candidate] = true
 		}
-		return b.Canonical[e.trackedHash] == "ACTIVE" && b.CanonicalSequences[e.trackedHash] == want &&
-			b.CanonicalMaterializedSequences[e.trackedHash] == want
+		return state.Canonical[e.trackedHash] == "ACTIVE" && state.CanonicalSequences[e.trackedHash] == want &&
+			state.CanonicalMaterializedSequences[e.trackedHash] == want
 	}
 	if strings.HasPrefix(predicate, "B.burst.unique:") {
 		want, err := strconv.Atoi(strings.TrimPrefix(predicate, "B.burst.unique:"))
@@ -702,21 +778,12 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 	if predicate == "B.tracked.no-resurrection" {
 		return e.trackedHash != "" && b.Canonical[e.trackedHash] == "CANCELLED"
 	}
-	if strings.HasPrefix(predicate, "A.custody.lan:") || strings.HasPrefix(predicate, "B.custody.lan:") {
-		parts := strings.Split(predicate, ":")
-		if len(parts) != 3 {
+	if device, route, event, want, ok := parseCustodyPredicate(predicate); ok {
+		state, stateOK := namedObservation(device, a, b)
+		if !stateOK {
 			return false
 		}
-		want, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil || want <= 0 {
-			return false
-		}
-		device := predicate[:1]
-		state, before := a, e.baselineState[device]
-		if device == "B" {
-			state = b
-		}
-		return custodyCount(state, "lan", parts[1])-custodyCount(before, "lan", parts[1]) >= want
+		return custodyCount(state, route, event)-custodyCount(e.baselineState[device], route, event) >= want
 	}
 	if strings.HasPrefix(predicate, "A.peer-receipt.delta:") || strings.HasPrefix(predicate, "B.peer-receipt.delta:") {
 		want, err := strconv.ParseInt(predicate[strings.LastIndex(predicate, ":")+1:], 10, 64)
@@ -802,6 +869,17 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 	return predicateSatisfied(name, predicate, a, b)
 }
 
+func namedObservation(device string, a, b Observation) (Observation, bool) {
+	switch device {
+	case "A":
+		return a, true
+	case "B":
+		return b, true
+	default:
+		return Observation{}, false
+	}
+}
+
 func custodyCount(state Observation, route, event string) int64 {
 	if state.CustodyCounts == nil || state.CustodyCounts[route] == nil {
 		return 0
@@ -843,6 +921,8 @@ func oracleCode(predicate string) string {
 		return "missing_snapshot_end"
 	case strings.Contains(predicate, "snapshot.commit"):
 		return "missing_snapshot_commit"
+	case strings.Contains(predicate, ".custody.relay:"):
+		return "missing_relay_custody"
 	case strings.Contains(predicate, "custody"):
 		return "missing_lan_custody"
 	case strings.Contains(predicate, "peer-receipt"):
@@ -971,6 +1051,13 @@ func (b ADBBridge) ForceStop(ctx context.Context, device string) error {
 		return err
 	}
 	return a.ForceStop(ctx, b.Package)
+}
+func (b ADBBridge) Restart(ctx context.Context, device string) error {
+	_, a, err := b.client(device)
+	if err != nil {
+		return err
+	}
+	return a.StartPackage(ctx, b.Package)
 }
 func (b ADBBridge) Reconcile(ctx context.Context, device string) error {
 	_, err := b.Control(ctx, device, "RECONCILE", nil)

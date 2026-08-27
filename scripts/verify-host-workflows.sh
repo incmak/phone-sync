@@ -408,6 +408,7 @@ require_approved_run_commands() {
     BEGIN {
       approved["cd e2e && go test ./... -race -count=1"] = 1
       approved["cd e2e && go vet ./..."] = 1
+      approved["./e2e/scripts/lan_product_target_test.sh"] = 1
       approved["./e2e/scripts/validate-workflow.sh"] = 1
       approved["./e2e/scripts/preflight_test.sh"] = 1
       approved["./scripts/verify-offline-pairing-evidence.sh --self-test"] = 1
@@ -476,14 +477,15 @@ require_host_verify_recipe() {
       expected[3] = "cd mobile && npm test -- --runInBand"
       expected[4] = "cd e2e && go test ./... -race -count=1"
       expected[5] = "cd e2e && go vet ./..."
-      expected[6] = "./e2e/scripts/validate-workflow.sh"
-      expected[7] = "./e2e/scripts/preflight_test.sh"
-      expected[8] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
-      expected[9] = "./scripts/verify-release-evidence.sh --self-test"
-      expected[10] = "./scripts/verify-android-release_test.sh"
-      expected[11] = "./scripts/verify-host-workflows.sh"
-      expected[12] = "./scripts/verify-host-workflows_test.sh"
-      expected[13] = "./scripts/verify-generated-clean.sh"
+	  expected[6] = "./e2e/scripts/lan_product_target_test.sh"
+	  expected[7] = "./e2e/scripts/validate-workflow.sh"
+	  expected[8] = "./e2e/scripts/preflight_test.sh"
+	  expected[9] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
+	  expected[10] = "./scripts/verify-release-evidence.sh --self-test"
+	  expected[11] = "./scripts/verify-android-release_test.sh"
+	  expected[12] = "./scripts/verify-host-workflows.sh"
+	  expected[13] = "./scripts/verify-host-workflows_test.sh"
+	  expected[14] = "./scripts/verify-generated-clean.sh"
     }
     $0 ~ /^host-verify:[ \t]*proto-test[ \t]*$/ {
       target_count++
@@ -499,11 +501,11 @@ require_host_verify_recipe() {
         recipe = trim($0)
         if (recipe == "" || recipe ~ /^#/) next
         observed++
-        if (observed > 13 || recipe != expected[observed]) invalid = 1
+		if (observed > 14 || recipe != expected[observed]) invalid = 1
       }
     }
     END {
-      if (target_count != 1 || observed != 13) invalid = 1
+	  if (target_count != 1 || observed != 14) invalid = 1
       exit invalid ? 1 : 0
     }
   ' "$makefile" || {
@@ -577,6 +579,7 @@ for release_path in \
   'scripts/verify-android-release_test.sh' \
   'scripts/verify-host-workflows.sh' \
   'scripts/verify-host-workflows_test.sh' \
+  'scripts/verify-lan-product-evidence.sh' \
   '.github/workflows/e2e-host.yml' \
   '.github/workflows/mobile.yml' \
   '.github/workflows/android-release.yml'; do
@@ -587,6 +590,7 @@ require_pinned_actions "$E2E_WORKFLOW"
 for command in \
   'cd e2e && go test ./... -race -count=1' \
   'cd e2e && go vet ./...' \
+  './e2e/scripts/lan_product_target_test.sh' \
   './e2e/scripts/validate-workflow.sh' \
   './e2e/scripts/preflight_test.sh' \
   './scripts/verify-offline-pairing-evidence.sh --self-test' \

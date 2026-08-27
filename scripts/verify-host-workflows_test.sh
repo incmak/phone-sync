@@ -174,6 +174,24 @@ sed -i.bak '/verify-host-workflows_test\.sh/d' "$tmp/Makefile"
 expect_rejection 'host Make target omits verifier self-test'
 
 copy_workflows
+sed -i.bak '/lan_product_target_test\.sh/d' "$tmp/Makefile"
+expect_rejection 'host Make target omits LAN product contract test'
+
+copy_workflows
+sed -i.bak '/lan_product_target_test\.sh/d' "$tmp/.github/workflows/e2e-host.yml"
+expect_rejection 'E2E host workflow omits LAN product contract test'
+
+copy_workflows
+awk '/^[[:space:]]*\.\/e2e\/scripts\/lan_product_target_test\.sh$/ { print; print; next } { print }' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'host LAN product contract test must not be duplicated'
+
+copy_workflows
+awk '/^[[:space:]]*\.\/e2e\/scripts\/lan_product_target_test\.sh$/ { print "\t# ./e2e/scripts/lan_product_target_test.sh"; next } { print }' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'commented LAN product contract test cannot satisfy host gate'
+
+copy_workflows
 sed -i.bak '/verify-host-workflows_test\.sh/d' "$tmp/.github/workflows/e2e-host.yml"
 expect_rejection 'E2E host workflow omits verifier self-test'
 

@@ -110,6 +110,13 @@ var plans = map[string][]Step{
 		{Predicate: "B.route.lan"},
 		{Predicate: "terminal.converged"},
 	},
+	"lan-direct-reverse-delivery": {
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "B.shell.post:n1", Predicate: "A.tracked.sequence:1"},
+		{Predicate: "B.custody.lan:notif_post:1"},
+		{Predicate: "B.peer-receipt.delta:1"},
+		{Predicate: "direct.terminal"},
+	},
 	"lan-direct-dismiss": {
 		{Predicate: "A.route.lan"},
 		{Action: "A.shell.post:n1"}, {Predicate: "B.mirror.active:n1"},
@@ -164,15 +171,26 @@ var plans = map[string][]Step{
 		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
 		{Action: "A.lan.fail"}, {Action: "B.lan.fail"},
 		{Predicate: "A.route.relay"}, {Predicate: "B.route.relay"},
-		{Action: "A.shell.post:n1"}, {Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"},
+		{Action: "A.shell.post:n1-relay", Predicate: "B.tracked.sequence:1"},
+		{Predicate: "A.custody.relay:notif_post:1"}, {Predicate: "A.peer-receipt.delta:1"},
 		{Action: "A.lan.restore"}, {Action: "B.lan.restore"},
-		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"}, {Predicate: "terminal.converged"},
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.shell.post:n1-lan", Predicate: "B.tracked.sequence:1"},
+		{Predicate: "A.custody.lan:notif_post:1"}, {Predicate: "A.peer-receipt.delta:2"},
+		{Predicate: "direct.terminal"},
 	},
 	"lan-restart-persistence": {
-		{Predicate: "A.route.lan"},
-		{Action: "A.shell.post:n1"}, {Action: "A.force-stop"}, {Action: "A.restart"},
-		{Predicate: "B.mirror.active:n1"}, {Predicate: "A.outbox.zero"},
-		{Predicate: "terminal.converged"},
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.shell.post:n1-before-a-restart", Predicate: "A.outbox.nonzero"},
+		{Action: "A.force-stop"}, {Action: "A.restart"},
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Predicate: "B.tracked.sequence:1"},
+		{Predicate: "A.custody.lan:notif_post:1"}, {Predicate: "A.peer-receipt.delta:1"},
+		{Action: "B.force-stop"}, {Action: "B.restart"},
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.shell.post:n1-after-b-restart", Predicate: "B.tracked.sequence:1"},
+		{Predicate: "A.custody.lan:notif_post:2"}, {Predicate: "A.peer-receipt.delta:2"},
+		{Predicate: "direct.terminal"},
 	},
 	"expiry-snapshot": {
 		{Action: "A.shell.post:n1"}, {Action: "relay.expire.mailbox"}, {Action: "relay.snapshot"},
@@ -230,8 +248,9 @@ func PlanWithBurstCount(name string, burstCount int) (ScenarioPlan, error) {
 	}
 	if name == "lan-product-correctness" {
 		names := []string{
-			"lan-direct-delivery", "lan-direct-dismiss", "lan-direct-update",
+			"lan-direct-delivery", "lan-direct-reverse-delivery", "lan-direct-dismiss", "lan-direct-update",
 			"lan-direct-peer-dismiss", "lan-direct-call-state", "lan-direct-snapshot-receipt",
+			"lan-relay-fallback-return", "lan-restart-persistence",
 			"lan-direct-burst-backpressure", "lan-direct-unpair-during-traffic",
 		}
 		children := make([]ScenarioPlan, 0, len(names))

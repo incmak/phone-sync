@@ -163,6 +163,7 @@ func TestEveryPackageShellBoundaryRejectsMetacharactersWithoutInvokingADB(t *tes
 			return err
 		}},
 		{"force-stop", func(c *adb.Client) error { return c.ForceStop(context.Background(), "com.twinotify.app$(id)") }},
+		{"start-package", func(c *adb.Client) error { return c.StartPackage(context.Background(), "com.twinotify.app;id") }},
 		{"whitespace", func(c *adb.Client) error { return c.ForceStop(context.Background(), " com.twinotify.app") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,6 +175,18 @@ func TestEveryPackageShellBoundaryRejectsMetacharactersWithoutInvokingADB(t *tes
 				t.Fatalf("adb invoked: %q", runner.args)
 			}
 		})
+	}
+}
+
+func TestStartPackageUsesFixedValidatedLauncherArguments(t *testing.T) {
+	runner := &fakeRunner{}
+	client := adb.New(runner, "physical-a")
+	if err := client.StartPackage(context.Background(), "com.twinotify.app"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-s", "physical-a", "shell", "monkey", "-p", "com.twinotify.app", "-c", "android.intent.category.LAUNCHER", "1"}
+	if len(runner.args) != 1 || !reflect.DeepEqual(runner.args[0], want) {
+		t.Fatalf("args=%q want=%q", runner.args, want)
 	}
 }
 

@@ -45,6 +45,7 @@ host-verify: proto-test
 	cd mobile && npm test -- --runInBand
 	cd e2e && go test ./... -race -count=1
 	cd e2e && go vet ./...
+	./e2e/scripts/lan_product_target_test.sh
 	./e2e/scripts/validate-workflow.sh
 	./e2e/scripts/preflight_test.sh
 	./scripts/verify-offline-pairing-evidence.sh --self-test

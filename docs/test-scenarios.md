@@ -348,7 +348,7 @@ the round ID, injected fault, durable state, and cleanup result.
 
 ### PHY-CALL-01 - real two-phone call-state product
 
-- [ ] Status - pending physical two-phone call run.
+- [ ] Status - pending physical two-phone run.
 
 Use two Android 14+ phones with cellular calling available and an approved,
 protected candidate installed. Run both directions, with each phone acting once
@@ -403,14 +403,17 @@ each one asserts the observed route as well.
 | Scenario | Proves |
 | --- | --- |
 | `lan-direct-delivery` | A post crosses authenticated LAN, mirrors once, reaches LAN custody and peer receipt, and drains |
+| `lan-direct-reverse-delivery` | B post crosses authenticated LAN, materializes exactly once on A, reaches B-side LAN custody and peer receipt, and drains |
 | `lan-direct-dismiss` | A cancel converges over authenticated LAN without resurrection |
 | `lan-direct-update` | Three semantic versions converge to sequence 3 with two update custody transitions |
 | `lan-direct-peer-dismiss` | A user dismissal on the mirror returns one cancel without resurrection |
 | `lan-direct-call-state` | Synthetic ringing, active, and idle states converge with LAN custody and receipts |
 | `lan-direct-snapshot-receipt` | Digest, begin, item, end, commit, and receipt evidence converge |
+| `lan-relay-fallback-return` | App-internal LAN availability is disabled on both peers, one tagged delivery proves relay custody, LAN is restored, and a second tagged delivery proves LAN custody |
+| `lan-restart-persistence` | Durable work survives A force-stop and typed-launcher restart, then B is restarted the same way and a second LAN delivery converges without clearing data |
 | `lan-direct-burst-backpressure` | A bounded unique burst stays below 2,000 rows and 128 MiB, then reaches terminal zero |
 | `lan-direct-unpair-during-traffic` | A nonzero producer is joined, one unpair reaches LAN custody, both peers wipe, and state does not recreate |
-| `lan-product-correctness` | Runs the eight scenarios above in order, fails fast, and retains each child's evidence independently |
+| `lan-product-correctness` | Runs the eleven scenarios above in order, fails fast, and retains every completed child plus the failed child's evidence independently |
 
 Automation is implemented and host-tested through commit `9c136cc`. The requested hardware execution remains pending:
 
@@ -434,6 +437,12 @@ make e2e-lan-product
 ```
 
 The target invokes `e2e/cmd/twinotify-e2e` with `-scenario lan-product-correctness`, writes the aggregate artifacts under the supplied directory, and then runs `scripts/verify-lan-product-evidence.sh`. The root and each `children/NN-<scenario>/` directory must contain `scenario-result.json`, `state.json`, `timeline.json`, and `metrics.json`. A missing, failed, unsafe, secret-bearing, or semantically incomplete artifact fails the run.
+
+The fallback child changes only the app-internal route availability preference;
+it never mutates an OS radio. The restart child issues separate, bounded
+force-stop and typed-launcher actions for each package and never clears app
+data. Ordered content-free route events retain both fallback deliveries, while
+the final route block describes the last delivery only.
 
 The route predicates (`A.route.lan`, `B.route.relay`, `A.route.queued`) read the
 device's public route status only. They require `phase == authenticated`, so a

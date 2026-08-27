@@ -5,11 +5,14 @@ die() { echo "lan-product-evidence: $*" >&2; exit 1; }
 
 required_children=(
   lan-direct-delivery
+  lan-direct-reverse-delivery
   lan-direct-dismiss
   lan-direct-update
   lan-direct-peer-dismiss
   lan-direct-call-state
   lan-direct-snapshot-receipt
+  lan-relay-fallback-return
+  lan-restart-persistence
   lan-direct-burst-backpressure
   lan-direct-unpair-during-traffic
 )
@@ -116,6 +119,18 @@ verify_child() {
       require_event "$file" "predicate:terminal.converged"
       jq -e '(.after.A.custody_counts.lan.notif_post - .before.A.custody_counts.lan.notif_post) >= 1 and (.after.A.peer_receipt_count - .before.A.peer_receipt_count) >= 1' "$file" >/dev/null || die "$name observed custody/receipt deltas are incomplete"
       ;;
+    lan-direct-reverse-delivery)
+      require_event "$file" "post:B:n-lan-direct-reverse-delivery"
+      require_event "$file" "predicate:A.tracked.sequence:1"
+      require_event "$file" "predicate:B.custody.lan:notif_post:1"
+      require_event "$file" "predicate:B.peer-receipt.delta:1"
+      require_event "$file" "predicate:direct.terminal"
+      jq -e '
+        ([.events[] | select(startswith("route:post:B:n-lan-direct-reverse-delivery:lan:g"))] | length) == 1 and
+        (.after.B.custody_counts.lan.notif_post - .before.B.custody_counts.lan.notif_post) >= 1 and
+        (.after.B.peer_receipt_count - .before.B.peer_receipt_count) >= 1
+      ' "$file" >/dev/null || die "$name observed reverse route/custody/receipt deltas are incomplete"
+      ;;
     lan-direct-dismiss)
       require_event "$file" "predicate:B.mirror.absent:n-lan-direct-dismiss"
       require_event "$file" "predicate:terminal.converged"
@@ -165,6 +180,47 @@ verify_child() {
         (.after.A.custody_counts.lan.state_snapshot_item - .before.A.custody_counts.lan.state_snapshot_item) >= 1 and
         (.after.A.custody_counts.lan.state_snapshot_end - .before.A.custody_counts.lan.state_snapshot_end) >= 1
       ' "$file" >/dev/null || die "$name observed snapshot/custody deltas are incomplete"
+      ;;
+    lan-relay-fallback-return)
+      require_event "$file" "predicate:A.route.relay"
+      require_event "$file" "predicate:B.route.relay"
+      require_event "$file" "predicate:A.custody.relay:notif_post:1"
+      require_event "$file" "predicate:A.custody.lan:notif_post:1"
+      require_event "$file" "predicate:A.peer-receipt.delta:2"
+      require_event "$file" "predicate:direct.terminal"
+      jq -e '
+        ([.events[] | select(startswith("route:post:A:n-lan-relay-fallback-return-relay:relay:g"))] | length) == 1 and
+        ([.events[] | select(startswith("route:post:A:n-lan-relay-fallback-return-lan:lan:g"))] | length) == 1 and
+        ([.events[] | select(startswith("route:post:A:n-lan-relay-fallback-return-relay:relay:g"))][0] as $relay |
+          [.events[] | select(startswith("route:post:A:n-lan-relay-fallback-return-lan:lan:g"))][0] as $lan |
+          (.events | index($relay)) < (.events | index($lan))) and
+        (.after.A.custody_counts.relay.notif_post - .before.A.custody_counts.relay.notif_post) >= 1 and
+        (.after.A.custody_counts.lan.notif_post - .before.A.custody_counts.lan.notif_post) >= 1 and
+        (.after.A.peer_receipt_count - .before.A.peer_receipt_count) >= 2 and
+        ([.after.A,.after.B] | all(.[]; .route == "lan" and .route_phase == "authenticated" and .terminal == true))
+      ' "$file" >/dev/null || die "$name ordered relay-return evidence is incomplete"
+      ;;
+    lan-restart-persistence)
+      for event in \
+        'predicate:A.outbox.nonzero' \
+        'force-stop:A' 'restart:A' \
+        'force-stop:B' 'restart:B' \
+        'predicate:A.custody.lan:notif_post:2' \
+        'predicate:A.peer-receipt.delta:2' \
+        'predicate:direct.terminal'; do require_event "$file" "$event"; done
+      jq -e '
+        (.events | index("predicate:A.outbox.nonzero")) < (.events | index("force-stop:A")) and
+        (.events | index("force-stop:A")) < (.events | index("restart:A")) and
+        (.events | index("restart:A")) < (.events | index("force-stop:B")) and
+        (.events | index("force-stop:B")) < (.events | index("restart:B")) and
+        ([.events[] | select(startswith("route:post:A:n-lan-restart-persistence-before-a-restart:lan:g"))] | length) == 1 and
+        ([.events[] | select(startswith("route:post:A:n-lan-restart-persistence-after-b-restart:lan:g"))] | length) == 1 and
+        ([.events[] | select(. == "predicate:A.route.lan")] | length) >= 3 and
+        ([.events[] | select(. == "predicate:B.route.lan")] | length) >= 3 and
+        (.after.A.custody_counts.lan.notif_post - .before.A.custody_counts.lan.notif_post) >= 2 and
+        (.after.A.peer_receipt_count - .before.A.peer_receipt_count) >= 2 and
+        ([.after.A,.after.B] | all(.[]; .route == "lan" and .route_phase == "authenticated" and .terminal == true))
+      ' "$file" >/dev/null || die "$name restart ordering/persistence evidence is incomplete"
       ;;
     lan-direct-burst-backpressure)
       local burst_event burst_count post_count unique_posts
@@ -239,7 +295,12 @@ check_doc_status() {
     [[ -f "$doc" && ! -L "$doc" ]] || die "documentation input missing or unsafe: $doc"
     [[ $(wc -c <"$doc") -le 1048576 ]] || die "documentation input exceeds size bound: $doc"
     grep -Fqi 'pending physical two-phone run' "$doc" || die "missing pending physical two-phone run status: $doc"
+    grep -Eqi 'eleven([ -]child|[ -]scenario|[ -]ordered)|eleven children|eleven scenarios' "$doc" || die "missing eleven-child aggregate status: $doc"
   done
+
+  if grep -Ein 'runs? (the )?eight|eight[- ]child|eight scenarios' "$@" >/dev/null; then
+    die "stale eight-child aggregate claim remains in documentation"
+  fi
 
   if grep -Ein "Unpair doesn't notify peer|doesn't push an explicit unpair|LAN transport does not|Phase 3 doesn't|No LAN transport" "$@" >/dev/null; then
     die "stale live-state claim remains in documentation"
@@ -300,7 +361,7 @@ check_doc_status() {
       *" $scenario "*) ;;
       *) die "unknown direct-LAN scenario is documented: $scenario" ;;
     esac
-  done < <(grep -Eho '\`lan-(direct-[a-z0-9-]+|product-[a-z0-9-]+)\`' "$@" | sort -u || true)
+  done < <(grep -Eho '\`lan-[a-z0-9-]+\`' "$@" | sort -u || true)
   echo "direct LAN documentation status passed"
 }
 
@@ -332,6 +393,9 @@ write_fixture() {
       lan-direct-delivery)
         events='["predicate:A.route.lan","predicate:B.route.lan","post:A:n-lan-direct-delivery","predicate:terminal.converged"]'
         after_a=$(jq -cn --argjson v "$base_obs" '$v | .custody_counts.lan.notif_post=1 | .peer_receipt_count=1') ;;
+      lan-direct-reverse-delivery)
+        events='["predicate:A.route.lan","predicate:B.route.lan","post:B:n-lan-direct-reverse-delivery","route:post:B:n-lan-direct-reverse-delivery:lan:g1","predicate:A.tracked.sequence:1","predicate:B.custody.lan:notif_post:1","predicate:B.peer-receipt.delta:1","predicate:direct.terminal"]'
+        after_b=$(jq -cn --argjson v "$base_obs" '$v | .custody_counts.lan.notif_post=1 | .peer_receipt_count=1') ;;
       lan-direct-dismiss)
         events='["predicate:A.route.lan","predicate:B.route.lan","predicate:B.mirror.absent:n-lan-direct-dismiss","predicate:terminal.converged"]'
         after_a=$(jq -cn --argjson v "$base_obs" '$v | .custody_counts.lan.notif_post=1 | .custody_counts.lan.notif_cancel=1 | .peer_receipt_count=2') ;;
@@ -348,6 +412,12 @@ write_fixture() {
         events='["predicate:A.route.lan","predicate:B.route.lan","predicate:B.snapshot.digest.delta:1","predicate:B.snapshot.begin.delta:1","predicate:B.snapshot.end.delta:1","predicate:B.snapshot.commit.delta:1","predicate:A.custody.lan:state_digest:1","predicate:A.custody.lan:state_snapshot_begin:1","predicate:A.custody.lan:state_snapshot_item:1","predicate:A.custody.lan:state_snapshot_end:1","predicate:direct.terminal"]'
         after_a=$(jq -cn --argjson v "$base_obs" '$v | .custody_counts.lan.state_digest=1 | .custody_counts.lan.state_snapshot_begin=1 | .custody_counts.lan.state_snapshot_item=1 | .custody_counts.lan.state_snapshot_end=1')
         after_b=$(jq -cn --argjson v "$base_obs" '$v | .snapshot_digest_count=1 | .snapshot_begin_count=1 | .snapshot_end_count=1 | .snapshot_commit_count=1') ;;
+      lan-relay-fallback-return)
+        events='["predicate:A.route.lan","predicate:B.route.lan","lan-available:A:false","lan-available:B:false","predicate:A.route.relay","predicate:B.route.relay","post:A:n-lan-relay-fallback-return-relay","route:post:A:n-lan-relay-fallback-return-relay:relay:g2","predicate:B.tracked.sequence:1","predicate:A.custody.relay:notif_post:1","predicate:A.peer-receipt.delta:1","lan-available:A:true","lan-available:B:true","predicate:A.route.lan","predicate:B.route.lan","post:A:n-lan-relay-fallback-return-lan","route:post:A:n-lan-relay-fallback-return-lan:lan:g3","predicate:B.tracked.sequence:1","predicate:A.custody.lan:notif_post:1","predicate:A.peer-receipt.delta:2","predicate:direct.terminal"]'
+        after_a=$(jq -cn --argjson v "$base_obs" '$v | .custody_counts.relay.notif_post=1 | .custody_counts.lan.notif_post=1 | .peer_receipt_count=2') ;;
+      lan-restart-persistence)
+        events='["predicate:A.route.lan","predicate:B.route.lan","post:A:n-lan-restart-persistence-before-a-restart","route:post:A:n-lan-restart-persistence-before-a-restart:lan:g1","predicate:A.outbox.nonzero","force-stop:A","restart:A","predicate:A.route.lan","predicate:B.route.lan","predicate:B.tracked.sequence:1","predicate:A.custody.lan:notif_post:1","predicate:A.peer-receipt.delta:1","force-stop:B","restart:B","predicate:A.route.lan","predicate:B.route.lan","post:A:n-lan-restart-persistence-after-b-restart","route:post:A:n-lan-restart-persistence-after-b-restart:lan:g2","predicate:B.tracked.sequence:1","predicate:A.custody.lan:notif_post:2","predicate:A.peer-receipt.delta:2","predicate:direct.terminal"]'
+        after_a=$(jq -cn --argjson v "$base_obs" '$v | .custody_counts.lan.notif_post=2 | .peer_receipt_count=2') ;;
       lan-direct-burst-backpressure)
         events=$(jq -cn '["predicate:A.route.lan","predicate:B.route.lan"] + [range(1;9) | "post:A:burst-" + (tostring)] + ["predicate:B.burst.unique:8","predicate:A.custody.lan:notif_post:8","predicate:A.peer-receipt.delta:8","predicate:A.queue.peak-bounded","predicate:direct.terminal"]')
         after_a=$(jq -cn --argjson v "$base_obs" '$v + {peak_queue_count:8,peak_queue_bytes:2048,peer_receipt_count:8} | .custody_counts.lan.notif_post=8')
@@ -367,21 +437,23 @@ write_fixture() {
 
 self_test() {
   local tmp base
+
+  [[ ${#required_children[@]} == 11 ]] || die "self-test requires the complete eleven-child contract"
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/twinotify-lan-product-evidence.XXXXXX")
   trap 'rm -rf -- "$tmp"' EXIT
   base="$tmp/evidence"
   if "$0" "$base" >/dev/null 2>"$tmp/missing.err"; then die "self-test expected missing evidence failure"; fi
   write_fixture "$base"
   verify "$base" >/dev/null
-  rm -rf -- "$base/children/04-lan-direct-peer-dismiss"
+  rm -rf -- "$base/children/05-lan-direct-peer-dismiss"
   if "$0" "$base" >/dev/null 2>"$tmp/child.err"; then die "self-test expected missing child failure"; fi
   write_fixture "$base"
-  jq '.status="failed" | .error_code="fixture_failure"' "$base/children/03-lan-direct-update/scenario-result.json" >"$tmp/failed.json"
-  mv "$tmp/failed.json" "$base/children/03-lan-direct-update/scenario-result.json"; chmod 600 "$base/children/03-lan-direct-update/scenario-result.json"
+  jq '.status="failed" | .error_code="fixture_failure"' "$base/children/04-lan-direct-update/scenario-result.json" >"$tmp/failed.json"
+  mv "$tmp/failed.json" "$base/children/04-lan-direct-update/scenario-result.json"; chmod 600 "$base/children/04-lan-direct-update/scenario-result.json"
   if "$0" "$base" >/dev/null 2>"$tmp/failed.err"; then die "self-test expected failed child failure"; fi
   write_fixture "$base"
-  jq 'del(.after.A.peak_queue_count)' "$base/children/07-lan-direct-burst-backpressure/scenario-result.json" >"$tmp/missing-observation.json"
-  mv "$tmp/missing-observation.json" "$base/children/07-lan-direct-burst-backpressure/scenario-result.json"; chmod 600 "$base/children/07-lan-direct-burst-backpressure/scenario-result.json"
+  jq 'del(.after.A.peak_queue_count)' "$base/children/10-lan-direct-burst-backpressure/scenario-result.json" >"$tmp/missing-observation.json"
+  mv "$tmp/missing-observation.json" "$base/children/10-lan-direct-burst-backpressure/scenario-result.json"; chmod 600 "$base/children/10-lan-direct-burst-backpressure/scenario-result.json"
   if "$0" "$base" >/dev/null 2>"$tmp/observation.err"; then die "self-test expected missing observation failure"; fi
   write_fixture "$base"
   verify "$base" >/dev/null
@@ -389,9 +461,24 @@ self_test() {
   chmod 600 "$base/metrics.json"
   if "$0" "$base" >/dev/null 2>"$tmp/retained-secret.err"; then die "self-test expected retained secret artifact failure"; fi
   write_fixture "$base"
-  jq 'del(.after.A.custody_counts)' "$base/children/03-lan-direct-update/scenario-result.json" >"$tmp/missing-custody.json"
-  mv "$tmp/missing-custody.json" "$base/children/03-lan-direct-update/scenario-result.json"; chmod 600 "$base/children/03-lan-direct-update/scenario-result.json"
+  jq 'del(.after.A.custody_counts)' "$base/children/04-lan-direct-update/scenario-result.json" >"$tmp/missing-custody.json"
+  mv "$tmp/missing-custody.json" "$base/children/04-lan-direct-update/scenario-result.json"; chmod 600 "$base/children/04-lan-direct-update/scenario-result.json"
   if "$0" "$base" >/dev/null 2>"$tmp/missing-custody.err"; then die "self-test expected missing custody evidence failure"; fi
+  write_fixture "$base"
+  jq '.events |= map(select(startswith("route:post:B:n-lan-direct-reverse-delivery:lan:g") | not))' "$base/children/02-lan-direct-reverse-delivery/scenario-result.json" >"$tmp/reverse-route.json"
+  mv "$tmp/reverse-route.json" "$base/children/02-lan-direct-reverse-delivery/scenario-result.json"; chmod 600 "$base/children/02-lan-direct-reverse-delivery/scenario-result.json"
+  write_derived_fixture "$base/children/02-lan-direct-reverse-delivery"
+  if "$0" "$base" >/dev/null 2>"$tmp/reverse-route.err"; then die "self-test expected hollow reverse evidence failure"; fi
+  write_fixture "$base"
+  jq '.events |= map(select(. != "predicate:A.custody.relay:notif_post:1"))' "$base/children/08-lan-relay-fallback-return/scenario-result.json" >"$tmp/fallback-custody.json"
+  mv "$tmp/fallback-custody.json" "$base/children/08-lan-relay-fallback-return/scenario-result.json"; chmod 600 "$base/children/08-lan-relay-fallback-return/scenario-result.json"
+  write_derived_fixture "$base/children/08-lan-relay-fallback-return"
+  if "$0" "$base" >/dev/null 2>"$tmp/fallback-custody.err"; then die "self-test expected hollow fallback evidence failure"; fi
+  write_fixture "$base"
+  jq '.events |= map(select(. != "restart:B"))' "$base/children/09-lan-restart-persistence/scenario-result.json" >"$tmp/restart-order.json"
+  mv "$tmp/restart-order.json" "$base/children/09-lan-restart-persistence/scenario-result.json"; chmod 600 "$base/children/09-lan-restart-persistence/scenario-result.json"
+  write_derived_fixture "$base/children/09-lan-restart-persistence"
+  if "$0" "$base" >/dev/null 2>"$tmp/restart-order.err"; then die "self-test expected hollow restart evidence failure"; fi
   write_fixture "$base"
   jq '.before.A.device_id="raw-device-id"' "$base/scenario-result.json" >"$tmp/root-unknown-observation.json"
   mv "$tmp/root-unknown-observation.json" "$base/scenario-result.json"; chmod 600 "$base/scenario-result.json"

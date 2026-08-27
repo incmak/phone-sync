@@ -16,6 +16,7 @@ on:
       - 'scripts/verify-android-release_test.sh'
       - 'scripts/verify-host-workflows.sh'
       - 'scripts/verify-host-workflows_test.sh'
+      - 'scripts/verify-lan-product-evidence.sh'
       - '.github/workflows/e2e-host.yml'
       - '.github/workflows/e2e-android.yml'
       - '.github/workflows/mobile.yml'
@@ -37,6 +38,8 @@ jobs:
         run: cd e2e && go test ./... -race -count=1
       - name: Vet E2E Go code
         run: cd e2e && go vet ./...
+      - name: Verify direct LAN product host contract
+        run: ./e2e/scripts/lan_product_target_test.sh
       - name: Validate emulator workflow contract
         run: ./e2e/scripts/validate-workflow.sh
       - name: Run emulator preflight self-test
