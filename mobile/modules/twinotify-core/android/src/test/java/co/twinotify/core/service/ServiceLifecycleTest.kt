@@ -26,6 +26,47 @@ class ServiceLifecycleTest {
     private val relayUrl = "wss://relay.example.test/ws"
 
     @Test
+    fun foregroundLifecycleUsesTheProductionPermissionResumeHookWithoutStartingAService() {
+        val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
+        val moduleSource = File(sourceRoot, "TwinotifyCoreModule.kt").readText()
+        val foregroundBlock = moduleSource
+            .substringAfter("OnActivityEntersForeground")
+            .substringBefore("OnDestroy")
+        assertTrue(foregroundBlock.contains("SyncService.onAppForeground(requireContext())"))
+
+        val serviceSource = File(sourceRoot, "service/SyncService.kt").readText()
+        val hookBlock = serviceSource
+            .substringAfter("fun onAppForeground")
+            .substringBefore("private val scope")
+        assertSourceOrder(
+            hookBlock,
+            "effectivePostAvailability(",
+            "NotificationManagerCompat.from(context).areNotificationsEnabled()",
+            "resumePermissionBlockedMaterializationOnForeground(",
+            "setPostPermission = SyncServiceStatus::setPostPermission",
+            "requestActiveMaterialization = activeInstance?.let",
+            "requestPendingMaterialization()",
+        )
+        val requestBlock = serviceSource
+            .substringAfter("private fun requestPendingMaterialization")
+            .substringBefore("private fun updatePostPermissionStatus")
+        assertSourceOrder(
+            requestBlock,
+            "materializationRequestGate.claimInitialPass()",
+            "runMaterializationPassLoop(",
+            "NotificationMaterializer(",
+            "materializationRequestGate.cancel(lease)",
+        )
+        assertFalse(hookBlock.contains("startForegroundService"))
+        assertFalse(hookBlock.contains("setEnabled("))
+
+        val onCreateBlock = serviceSource
+            .substringAfter("override fun onCreate()")
+            .substringBefore("override fun onStartCommand")
+        assertSourceOrder(onCreateBlock, "activeInstance = this", "requestPendingMaterialization()")
+    }
+
+    @Test
     fun callCaptureAdmissionGenerationIsWiredFromModuleIntentThroughServiceRecovery() {
         val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
         val moduleSource = File(sourceRoot, "TwinotifyCoreModule.kt").readText()

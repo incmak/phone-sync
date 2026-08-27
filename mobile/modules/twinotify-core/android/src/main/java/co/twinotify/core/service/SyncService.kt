@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import co.twinotify.core.auth.JwtMinter
 import co.twinotify.core.crypto.CryptoStore
@@ -639,6 +640,71 @@ internal class CallCaptureLifecycleFence {
     }
 }
 
+internal fun resumePermissionBlockedMaterializationOnForeground(
+    postPermissionGranted: Boolean,
+    setPostPermission: (Boolean) -> Unit,
+    requestActiveMaterialization: (() -> Unit)?,
+) {
+    setPostPermission(postPermissionGranted)
+    requestActiveMaterialization?.invoke()
+}
+
+/** One materializer owns the pass; requests arriving during it coalesce into one more pass. */
+internal class MaterializationRequestGate {
+    @JvmInline
+    value class Lease internal constructor(val generation: Long)
+
+    private var activeLease: Lease? = null
+    private var rerunRequested = false
+    private var nextGeneration = 0L
+
+    @Synchronized
+    fun claimInitialPass(): Lease? {
+        if (activeLease != null) {
+            rerunRequested = true
+            return null
+        }
+        nextGeneration += 1L
+        return Lease(nextGeneration).also { activeLease = it }
+    }
+
+    @Synchronized
+    fun completePass(lease: Lease): Boolean {
+        if (activeLease != lease) return false
+        if (rerunRequested) {
+            rerunRequested = false
+            return true
+        }
+        activeLease = null
+        return false
+    }
+
+    @Synchronized
+    fun cancel(lease: Lease) {
+        if (activeLease != lease) return
+        activeLease = null
+        rerunRequested = false
+    }
+}
+
+/** A recoverable pass failure must not discard a request coalesced while it was active. */
+internal suspend fun runMaterializationPassLoop(
+    gate: MaterializationRequestGate,
+    lease: MaterializationRequestGate.Lease,
+    isShuttingDown: () -> Boolean,
+    runPass: suspend () -> Unit,
+) {
+    do {
+        try {
+            runPass()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Durable pending work remains for a coalesced or future trigger.
+        }
+    } while (!isShuttingDown() && gate.completePass(lease))
+}
+
 /** Lifecycle shell around the lifecycle-independent durable relay transport. */
 class SyncService : Service() {
     companion object {
@@ -816,6 +882,24 @@ class SyncService : Service() {
         internal fun clearProductObservationsForE2e() {
             ProductObservationTracker.clear()
         }
+
+        /** Foregrounding retries permission-held work only in an already active service. */
+        fun onAppForeground(context: android.content.Context) {
+            val granted = effectivePostAvailability(
+                runtimePermissionGranted = ContextCompat.checkSelfPermission(
+                    context.applicationContext,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
+                notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled(),
+            )
+            resumePermissionBlockedMaterializationOnForeground(
+                postPermissionGranted = granted,
+                setPostPermission = SyncServiceStatus::setPostPermission,
+                requestActiveMaterialization = activeInstance?.let { service ->
+                    { service.requestPendingMaterialization() }
+                },
+            )
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -824,6 +908,7 @@ class SyncService : Service() {
     private var retentionJob: Job? = null
     private var healthJob: Job? = null
     private var materializerJob: Job? = null
+    private val materializationRequestGate = MaterializationRequestGate()
     private var callCaptureReservationWaiter: Job? = null
     private val actionStopGate = CallCaptureStopRequestGate()
     private val unpairCustodyTracker = UnpairCustodyTracker()
@@ -891,20 +976,11 @@ class SyncService : Service() {
         legacyMigration = scope.async {
             migrateLegacyOutboxBeforeRelay(legacyStore, DeviceIdentity.getOrCreate(applicationContext))
         }
-        // Resume Room commits that were left before an Android platform call completed.
-        materializerJob = scope.launch {
-            val localDevice = DeviceIdentity.getOrCreate(applicationContext)
-            NotificationMaterializer(
-                dao = dao,
-                port = DefaultAndroidNotificationPort(applicationContext, localDevice, dao),
-                receiptFactory = DurableReceiptFactory(applicationContext),
-                localDeviceId = localDevice,
-                retryScheduler = materializationStartupScheduler(applicationContext),
-            ).materializePending()
-        }
-        routePreferenceJob = scope.launch { routePreferenceRestarter.run() }
         // Publish only after every field needed by a concurrently reserved shutdown is ready.
         activeInstance = this
+        // Resume Room commits that were left before an Android platform call completed.
+        requestPendingMaterialization()
+        routePreferenceJob = scope.launch { routePreferenceRestarter.run() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -1006,13 +1082,42 @@ class SyncService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun requestPendingMaterialization() {
+        val lease = materializationRequestGate.claimInitialPass() ?: return
+        if (shuttingDown) {
+            materializationRequestGate.cancel(lease)
+            return
+        }
+        materializerJob = scope.launch {
+            try {
+                runMaterializationPassLoop(
+                    gate = materializationRequestGate,
+                    lease = lease,
+                    isShuttingDown = { shuttingDown },
+                ) {
+                    val localDevice = DeviceIdentity.getOrCreate(applicationContext)
+                    NotificationMaterializer(
+                        dao = reliableDao,
+                        port = DefaultAndroidNotificationPort(applicationContext, localDevice, reliableDao),
+                        receiptFactory = DurableReceiptFactory(applicationContext),
+                        localDeviceId = localDevice,
+                        retryScheduler = materializationStartupScheduler(applicationContext),
+                    ).materializePending()
+                }
+            } finally {
+                materializationRequestGate.cancel(lease)
+            }
+        }
+    }
+
     private fun updatePostPermissionStatus() {
-        SyncServiceStatus.setPostPermission(
-            ContextCompat.checkSelfPermission(
+        SyncServiceStatus.setPostPermission(effectivePostAvailability(
+            runtimePermissionGranted = ContextCompat.checkSelfPermission(
                 this,
                 android.Manifest.permission.POST_NOTIFICATIONS,
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED,
-        )
+            notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled(),
+        ))
     }
 
     private fun startForegroundCompat(health: SyncHealth) {

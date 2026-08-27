@@ -201,10 +201,39 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate6To7_preservesRetryAndBackfillsItsCanonicalSequence() {
+        helper.createDatabase(TEST_DB_V7, 6).apply {
+            execSQL(
+                "INSERT INTO canonical_notification_state(" +
+                    "canonId,originDevice,latestSequence,state,desiredPayloadJson,materializedSequence," +
+                    "sourceNotificationKey,mirrorLocalId,mirrorLocalTag,peerCancelPending,updatedAt) VALUES(" +
+                    "'canon','peer',9,'ACTIVE','{}',8,NULL,41,'tag',0,1000)",
+            )
+            execSQL(
+                "INSERT INTO materialization_retry(canonId,nextAttemptAt,attempts,lastError) " +
+                    "VALUES('canon',5000,3,'platform_retryable')",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB_V7, 7, true, MIGRATION_6_7)
+        db.query("SELECT canonId,sequence,nextAttemptAt,attempts,lastError FROM materialization_retry").use { row ->
+            assertTrue(row.moveToFirst())
+            assertEquals("canon", row.getString(0))
+            assertEquals(9L, row.getLong(1))
+            assertEquals(5_000L, row.getLong(2))
+            assertEquals(3, row.getInt(3))
+            assertEquals("platform_retryable", row.getString(4))
+        }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
         const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"
         const val TEST_DB_V5 = "reliable-delivery-migration-v5-test"
         const val TEST_DB_V6 = "reliable-delivery-migration-v6-test"
+        const val TEST_DB_V7 = "reliable-delivery-migration-v7-test"
     }
 }

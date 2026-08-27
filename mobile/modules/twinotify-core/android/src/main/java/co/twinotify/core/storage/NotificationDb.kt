@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
@@ -137,6 +138,35 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
     }
 }
 
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS materialization_retry_v7 (
+                canonId TEXT NOT NULL PRIMARY KEY,
+                sequence INTEGER NOT NULL,
+                nextAttemptAt INTEGER,
+                attempts INTEGER NOT NULL,
+                disposition TEXT NOT NULL,
+                lastError TEXT)""",
+        )
+        db.execSQL(
+            """INSERT INTO materialization_retry_v7(
+                canonId, sequence, nextAttemptAt, attempts, disposition, lastError)
+                SELECT retry.canonId,
+                    COALESCE(state.latestSequence, 0),
+                    retry.nextAttemptAt,
+                    retry.attempts,
+                    'RETRYABLE',
+                    retry.lastError
+                FROM materialization_retry AS retry
+                LEFT JOIN canonical_notification_state AS state ON state.canonId = retry.canonId""",
+        )
+        db.execSQL("DROP TABLE materialization_retry")
+        db.execSQL("ALTER TABLE materialization_retry_v7 RENAME TO materialization_retry")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_materialization_retry_nextAttemptAt ON materialization_retry(nextAttemptAt)")
+    }
+}
+
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
 
@@ -156,10 +186,12 @@ object NotificationDb {
             MIGRATION_3_4,
             MIGRATION_4_5,
             MIGRATION_5_6,
+            MIGRATION_6_7,
         ).build().also { instance = it }
     }
 }
 
+@TypeConverters(ReliableDeliveryTypeConverters::class)
 @Database(
     entities = [
         MirroredFromPeer::class,
@@ -173,7 +205,7 @@ object NotificationDb {
         SnapshotStage::class,
         MaterializationRetry::class,
     ],
-    version = 6,
+    version = 7,
 )
 abstract class NotificationDbImpl : RoomDatabase() {
     abstract fun notificationMapDao(): NotificationMapDao

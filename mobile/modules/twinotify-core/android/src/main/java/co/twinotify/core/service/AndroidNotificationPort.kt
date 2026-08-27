@@ -12,11 +12,26 @@ import co.twinotify.core.call.CallStateMaterializer
 import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.ReliableDeliveryDao
 
+sealed interface NotificationPostOutcome {
+    data object Applied : NotificationPostOutcome
+    data object PermissionBlocked : NotificationPostOutcome
+    data object RetryableFailure : NotificationPostOutcome
+}
+
+internal fun effectivePostAvailability(
+    runtimePermissionGranted: Boolean,
+    notificationsEnabled: Boolean,
+): Boolean = runtimePermissionGranted && notificationsEnabled
+
 interface AndroidNotificationPort {
     fun postMirror(state: CanonicalNotificationState): Boolean
+    fun postMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome =
+        if (postMirror(state)) NotificationPostOutcome.Applied else NotificationPostOutcome.RetryableFailure
     fun cancelMirror(localTag: String, localId: Int): Boolean
     fun cancelSource(notificationKey: String): Boolean
     fun postCallMirror(state: CanonicalNotificationState): Boolean = postMirror(state)
+    fun postCallMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome =
+        if (postCallMirror(state)) NotificationPostOutcome.Applied else NotificationPostOutcome.RetryableFailure
     fun cancelCallMirror(localTag: String, localId: Int): Boolean = cancelMirror(localTag, localId)
 }
 
@@ -30,13 +45,19 @@ class DefaultAndroidNotificationPort(
 
     @SuppressLint("MissingPermission")
     override fun postMirror(state: CanonicalNotificationState): Boolean {
-        if (state.originDevice == localDeviceId || state.state != "ACTIVE") return false
-        val id = state.mirrorLocalId ?: return false
-        val tag = state.mirrorLocalTag ?: return false
-        val payload = state.desiredPayloadJson ?: return false
-        if (!notificationsAvailable()) return false
-        val post = runCatching { NotifPostJson.fromPayloadJson(payload) }.getOrNull() ?: return false
-        if (post.canon_id != state.canonId) return false
+        return postMirrorOutcome(state) == NotificationPostOutcome.Applied
+    }
+
+    @SuppressLint("MissingPermission")
+    override fun postMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome {
+        if (state.originDevice == localDeviceId || state.state != "ACTIVE") return NotificationPostOutcome.RetryableFailure
+        val id = state.mirrorLocalId ?: return NotificationPostOutcome.RetryableFailure
+        val tag = state.mirrorLocalTag ?: return NotificationPostOutcome.RetryableFailure
+        val payload = state.desiredPayloadJson ?: return NotificationPostOutcome.RetryableFailure
+        if (!notificationsAvailable()) return NotificationPostOutcome.PermissionBlocked
+        val post = runCatching { NotifPostJson.fromPayloadJson(payload) }.getOrNull()
+            ?: return NotificationPostOutcome.RetryableFailure
+        if (post.canon_id != state.canonId) return NotificationPostOutcome.RetryableFailure
         return runCatching {
             NotifChannelSetup.ensureChannels(appContext)
             NotificationManagerCompat.from(appContext).notify(
@@ -44,21 +65,26 @@ class DefaultAndroidNotificationPort(
                 id,
                 MirrorPoster.buildNotification(appContext, post, id),
             )
-            true
-        }.getOrDefault(false)
+            NotificationPostOutcome.Applied
+        }.getOrDefault(NotificationPostOutcome.RetryableFailure)
     }
 
     @SuppressLint("MissingPermission")
     override fun postCallMirror(state: CanonicalNotificationState): Boolean {
-        if (state.originDevice == localDeviceId || state.state != "ACTIVE") return false
-        val id = state.mirrorLocalId ?: return false
-        val tag = state.mirrorLocalTag ?: return false
-        if (!notificationsAvailable()) return false
+        return postCallMirrorOutcome(state) == NotificationPostOutcome.Applied
+    }
+
+    @SuppressLint("MissingPermission")
+    override fun postCallMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome {
+        if (state.originDevice == localDeviceId || state.state != "ACTIVE") return NotificationPostOutcome.RetryableFailure
+        val id = state.mirrorLocalId ?: return NotificationPostOutcome.RetryableFailure
+        val tag = state.mirrorLocalTag ?: return NotificationPostOutcome.RetryableFailure
+        if (!notificationsAvailable()) return NotificationPostOutcome.PermissionBlocked
         return runCatching {
             NotifChannelSetup.ensureChannels(appContext)
             NotificationManagerCompat.from(appContext).notify(tag, id, CallStateMaterializer.build(appContext, state, id))
-            true
-        }.getOrDefault(false)
+            NotificationPostOutcome.Applied
+        }.getOrDefault(NotificationPostOutcome.RetryableFailure)
     }
 
     override fun cancelMirror(localTag: String, localId: Int): Boolean {
@@ -74,10 +100,12 @@ class DefaultAndroidNotificationPort(
     }
 
     private fun notificationsAvailable(): Boolean {
-        if (!NotificationManagerCompat.from(appContext).areNotificationsEnabled()) return false
-        return ContextCompat.checkSelfPermission(
-            appContext,
-            Manifest.permission.POST_NOTIFICATIONS,
-        ) == PackageManager.PERMISSION_GRANTED
+        return effectivePostAvailability(
+            runtimePermissionGranted = ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED,
+            notificationsEnabled = NotificationManagerCompat.from(appContext).areNotificationsEnabled(),
+        )
     }
 }

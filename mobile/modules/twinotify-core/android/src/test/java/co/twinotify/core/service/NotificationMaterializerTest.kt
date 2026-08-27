@@ -3,9 +3,12 @@ package co.twinotify.core.service
 import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.InboundMessage
 import co.twinotify.core.storage.MaterializationResult
+import co.twinotify.core.storage.MaterializationRetryDisposition
+import co.twinotify.core.storage.MaterializationRetryWriteResult
 import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.protocol.InnerEventV2
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.CancellationException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -13,6 +16,96 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class NotificationMaterializerTest {
+    @Test
+    fun permissionBlockedPostStaysPendingWithoutSchedulingRetryWake() = runBlocking {
+        val store = FakeStore(canonical(sequence = 2, materialized = 1))
+        val scheduled = mutableListOf<Long>()
+        val port = object : AndroidNotificationPort {
+            override fun postMirror(state: CanonicalNotificationState): Boolean = false
+            override fun postMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome =
+                NotificationPostOutcome.PermissionBlocked
+            override fun cancelMirror(localTag: String, localId: Int): Boolean = true
+            override fun cancelSource(notificationKey: String): Boolean = true
+        }
+
+        val result = NotificationMaterializer(
+            store = store,
+            port = port,
+            retryScheduler = MaterializationRetryScheduler { delayMs, _ -> scheduled += delayMs },
+        ).materializePending(nowMs = 1_000L)
+
+        assertEquals(MaterializationSummary(applied = 0, pending = 1, skipped = 0), result)
+        assertEquals(1, store.state.materializedSequence)
+        assertEquals("post_permission_blocked", store.lastRetryCode)
+        assertEquals(MaterializationRetryDisposition.PERMISSION_BLOCKED, store.retryDisposition)
+        assertEquals(null, store.retryAt)
+        assertTrue(scheduled.isEmpty())
+    }
+
+    @Test
+    fun permissionBlockedSameSequenceReattemptsOnNextStartupMaterialization() = runBlocking {
+        val store = FakeStore(canonical(sequence = 2, materialized = 1))
+        var posts = 0
+        val port = object : AndroidNotificationPort {
+            override fun postMirror(state: CanonicalNotificationState): Boolean = false
+            override fun postMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome {
+                posts += 1
+                return if (posts == 1) NotificationPostOutcome.PermissionBlocked else NotificationPostOutcome.Applied
+            }
+            override fun cancelMirror(localTag: String, localId: Int): Boolean = true
+            override fun cancelSource(notificationKey: String): Boolean = true
+        }
+
+        val first = NotificationMaterializer(store, port).materializePending(nowMs = 1_000L)
+        val second = NotificationMaterializer(store, port).materializePending(nowMs = 2_000L)
+
+        assertEquals(MaterializationSummary(applied = 0, pending = 1, skipped = 0), first)
+        assertEquals(MaterializationSummary(applied = 1, pending = 0, skipped = 0), second)
+        assertEquals(2, store.state.materializedSequence)
+        assertEquals(2, posts)
+    }
+
+    @Test
+    fun startupSchedulesTheEarliestDurableRetryableDueTime() = runBlocking {
+        val store = FakeStore(canonical(sequence = 2, materialized = 2)).apply {
+            retryDisposition = MaterializationRetryDisposition.RETRYABLE
+            retryAt = 9_000L
+        }
+        val scheduled = mutableListOf<Long>()
+
+        NotificationMaterializer(
+            store = store,
+            port = noOpPort(),
+            retryScheduler = MaterializationRetryScheduler { delayMs, _ -> scheduled += delayMs },
+        ).materializePending(nowMs = 1_000L)
+
+        assertEquals(listOf(8_000L), scheduled)
+    }
+
+    @Test
+    fun receiptCancellationKeepsIdentityAndDoesNotScheduleRetry() = runBlocking {
+        val expected = CancellationException("receipt cancelled")
+        val store = FakeStore(canonical(sequence = 2, materialized = 1))
+        val scheduled = mutableListOf<Long>()
+        val materializer = NotificationMaterializer(
+            store = store,
+            port = object : AndroidNotificationPort {
+                override fun postMirror(state: CanonicalNotificationState): Boolean = true
+                override fun cancelMirror(localTag: String, localId: Int): Boolean = true
+                override fun cancelSource(notificationKey: String): Boolean = true
+            },
+            receiptFactory = { _, _ -> throw expected },
+            retryScheduler = MaterializationRetryScheduler { delayMs, _ -> scheduled += delayMs },
+        )
+
+        val actual = kotlin.test.assertFailsWith<CancellationException> {
+            materializer.materializePending(nowMs = 1_000L)
+        }
+
+        kotlin.test.assertSame(expected, actual)
+        assertTrue(scheduled.isEmpty())
+        assertEquals(null, store.retryAt)
+    }
     @Test
     fun failedPlatformOperationRemainsPendingAndRestartRetriesSameIdentity() = runBlocking {
         val state = canonical(sequence = 3, materialized = 2)
@@ -221,17 +314,47 @@ class NotificationMaterializerTest {
         var receipts = 0
         var preparedReceipt: OutboundMessage? = null
         var retryAt: Long? = null
+        var lastRetryCode: String? = null
+        var retryDisposition: MaterializationRetryDisposition? = null
         override suspend fun pendingMaterialization(nowMs: Long): List<CanonicalNotificationState> =
-            if (state.latestSequence > state.materializedSequence && (retryAt == null || retryAt!! <= nowMs)) {
+            if (state.latestSequence > state.materializedSequence && (
+                retryDisposition == MaterializationRetryDisposition.PERMISSION_BLOCKED ||
+                    retryAt == null || retryAt!! <= nowMs
+                )
+            ) {
                 listOf(state)
             } else emptyList()
 
         override suspend fun recordRetry(canonId: String, nextAttemptAt: Long, lastError: String?) {
             retryAt = nextAttemptAt
+            lastRetryCode = lastError
         }
+
+        override suspend fun recordMaterializationRetry(
+            canonId: String,
+            sequence: Long,
+            nowMs: Long,
+            disposition: MaterializationRetryDisposition,
+            lastError: String,
+        ): MaterializationRetryWriteResult {
+            retryDisposition = disposition
+            lastRetryCode = lastError
+            return if (disposition == MaterializationRetryDisposition.PERMISSION_BLOCKED) {
+                retryAt = null
+                MaterializationRetryWriteResult.PermissionBlocked
+            } else {
+                val dueAt = nowMs + 5_000L
+                retryAt = dueAt
+                MaterializationRetryWriteResult.RetryableScheduled(dueAt)
+            }
+        }
+
+        override suspend fun earliestRetryableMaterializationAt(): Long? =
+            if (retryDisposition == MaterializationRetryDisposition.RETRYABLE) retryAt else null
 
         override suspend fun clearRetry(canonId: String) {
             retryAt = null
+            retryDisposition = null
         }
 
         override suspend fun pendingInbound(canonId: String, sequence: Long): List<InboundMessage> =
@@ -322,5 +445,11 @@ class NotificationMaterializerTest {
         lastError = null,
         requiresPeerReceipt = false,
     )
+
+    private fun noOpPort() = object : AndroidNotificationPort {
+        override fun postMirror(state: CanonicalNotificationState): Boolean = true
+        override fun cancelMirror(localTag: String, localId: Int): Boolean = true
+        override fun cancelSource(notificationKey: String): Boolean = true
+    }
 
 }

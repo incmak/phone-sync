@@ -3,6 +3,7 @@ package co.twinotify.core.storage
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.room.TypeConverter
 import androidx.room.ColumnInfo
 
 @Entity(
@@ -70,11 +71,27 @@ data class CanonicalNotificationState(
     val updatedAt: Long,
 )
 
+enum class MaterializationRetryDisposition {
+    RETRYABLE,
+    PERMISSION_BLOCKED,
+}
+
+class ReliableDeliveryTypeConverters {
+    @TypeConverter
+    fun retryDispositionToString(value: MaterializationRetryDisposition): String = value.name
+
+    @TypeConverter
+    fun retryDispositionFromString(value: String): MaterializationRetryDisposition =
+        MaterializationRetryDisposition.valueOf(value)
+}
+
 @Entity(tableName = "materialization_retry", indices = [Index("nextAttemptAt")])
 data class MaterializationRetry(
     @PrimaryKey val canonId: String,
-    val nextAttemptAt: Long,
+    val sequence: Long,
+    val nextAttemptAt: Long?,
     val attempts: Int,
+    val disposition: MaterializationRetryDisposition,
     val lastError: String?,
 )
 

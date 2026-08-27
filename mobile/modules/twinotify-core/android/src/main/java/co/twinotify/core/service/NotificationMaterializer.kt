@@ -17,6 +17,8 @@ import co.twinotify.core.storage.InboundMessage
 import co.twinotify.core.storage.MaterializationResult
 import co.twinotify.core.storage.MaterializationReceiptResult
 import co.twinotify.core.storage.MaterializationRetry
+import co.twinotify.core.storage.MaterializationRetryDisposition
+import co.twinotify.core.storage.MaterializationRetryWriteResult
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.ReliableDeliveryDao
@@ -24,6 +26,7 @@ import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.call.CallStateMaterializer
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.CancellationException
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -37,20 +40,44 @@ fun interface MaterializationRetryScheduler {
     fun schedule(delayMs: Long, action: suspend () -> Unit)
 }
 
+/** Keeps one process wake and replaces it only when durable work becomes due sooner. */
+internal class EarliestMaterializationWake {
+    private var dueAt: Long? = null
+
+    @Synchronized
+    fun claim(nowMs: Long, delayMs: Long): Boolean {
+        val candidate = if (nowMs > Long.MAX_VALUE - delayMs) Long.MAX_VALUE else nowMs + delayMs
+        if (dueAt?.let { it <= candidate } == true) return false
+        dueAt = candidate
+        return true
+    }
+
+    @Synchronized
+    fun consume(dueMs: Long): Boolean {
+        if (dueAt != dueMs) return false
+        dueAt = null
+        return true
+    }
+}
+
 /** Process-scoped wakeup coordinator; duplicate materializers share one retry timer. */
 object NotificationMaterializationRetry {
     private val scope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
     )
-    private val scheduled = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val wake = EarliestMaterializationWake()
+    private val schedulingLock = Any()
+    private var scheduledJob: kotlinx.coroutines.Job? = null
     val scheduler = MaterializationRetryScheduler { delayMs, action ->
-        if (scheduled.compareAndSet(false, true)) {
-            scope.launch {
-                try {
-                    kotlinx.coroutines.delay(delayMs)
-                    action()
-                } finally {
-                    scheduled.set(false)
+        val safeDelay = delayMs.coerceAtLeast(0L)
+        val now = System.nanoTime() / 1_000_000L
+        val dueAt = if (now > Long.MAX_VALUE - safeDelay) Long.MAX_VALUE else now + safeDelay
+        synchronized(schedulingLock) {
+            if (wake.claim(now, safeDelay)) {
+                scheduledJob?.cancel()
+                scheduledJob = scope.launch {
+                    kotlinx.coroutines.delay(safeDelay)
+                    if (wake.consume(dueAt)) action()
                 }
             }
         }
@@ -73,12 +100,21 @@ class AlarmManagerMaterializationScheduler(private val context: Context) : Mater
                 intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + delayMs, pending)
+            alarm.setAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                saturatingAlarmTriggerAt(System.currentTimeMillis(), delayMs),
+                pending,
+            )
         } catch (_: SecurityException) {
             // Alarm policy restrictions must not strand work while this process is alive.
             NotificationMaterializationRetry.scheduler.schedule(delayMs, action)
         }
     }
+}
+
+internal fun saturatingAlarmTriggerAt(nowMs: Long, delayMs: Long): Long {
+    val safeDelay = delayMs.coerceAtLeast(0L)
+    return if (nowMs > Long.MAX_VALUE - safeDelay) Long.MAX_VALUE else nowMs + safeDelay
 }
 
 /** Single production startup seam used by services/listeners and covered by instrumentation. */
@@ -108,7 +144,30 @@ interface MaterializationStore {
 
     suspend fun recordRetry(canonId: String, nextAttemptAt: Long, lastError: String?) = Unit
 
+    suspend fun recordMaterializationRetry(
+        canonId: String,
+        sequence: Long,
+        nowMs: Long,
+        disposition: MaterializationRetryDisposition,
+        lastError: String,
+    ): MaterializationRetryWriteResult {
+        return if (disposition == MaterializationRetryDisposition.PERMISSION_BLOCKED) {
+            recordRetry(canonId, Long.MAX_VALUE, lastError)
+            MaterializationRetryWriteResult.PermissionBlocked
+        } else {
+            val dueAt = nowMs + 5_000L
+            recordRetry(canonId, dueAt, lastError)
+            MaterializationRetryWriteResult.RetryableScheduled(dueAt)
+        }
+    }
+
+    suspend fun earliestRetryableMaterializationAt(): Long? = null
+
     suspend fun clearRetry(canonId: String) = Unit
+
+    suspend fun clearRetry(canonId: String, sequence: Long) {
+        clearRetry(canonId)
+    }
 
     suspend fun prepareReceipt(
         canonId: String,
@@ -138,20 +197,25 @@ class DaoMaterializationStore(private val dao: ReliableDeliveryDao) : Materializ
         dao.markPeerCancelPending(canonId)
     }
 
-    override suspend fun recordRetry(canonId: String, nextAttemptAt: Long, lastError: String?) {
-        val previous = dao.materializationRetry(canonId)
-        dao.putMaterializationRetry(
-            MaterializationRetry(
-                canonId = canonId,
-                nextAttemptAt = nextAttemptAt,
-                attempts = (previous?.attempts ?: 0) + 1,
-                lastError = lastError,
-            ),
-        )
-    }
+    override suspend fun recordMaterializationRetry(
+        canonId: String,
+        sequence: Long,
+        nowMs: Long,
+        disposition: MaterializationRetryDisposition,
+        lastError: String,
+    ): MaterializationRetryWriteResult = dao.recordMaterializationRetry(
+        canonId,
+        sequence,
+        nowMs,
+        disposition,
+        lastError,
+    )
 
-    override suspend fun clearRetry(canonId: String) {
-        dao.clearMaterializationRetry(canonId)
+    override suspend fun earliestRetryableMaterializationAt(): Long? =
+        dao.earliestRetryableMaterializationAt()
+
+    override suspend fun clearRetry(canonId: String, sequence: Long) {
+        dao.clearMaterializationRetriesThrough(canonId, sequence)
     }
 
     override suspend fun completeMaterialization(
@@ -182,7 +246,6 @@ class NotificationMaterializer(
     private val receiptFactory: ReceiptFactory? = null,
     private val localDeviceId: String? = null,
     private val retryScheduler: MaterializationRetryScheduler = NotificationMaterializationRetry.scheduler,
-    private val retryDelayMs: Long = RETRY_DELAY_MS,
 ) {
     constructor(
         dao: ReliableDeliveryDao,
@@ -190,13 +253,33 @@ class NotificationMaterializer(
         receiptFactory: ReceiptFactory? = null,
         localDeviceId: String? = null,
         retryScheduler: MaterializationRetryScheduler = NotificationMaterializationRetry.scheduler,
-        retryDelayMs: Long = RETRY_DELAY_MS,
-    ) : this(DaoMaterializationStore(dao), port, receiptFactory, localDeviceId, retryScheduler, retryDelayMs)
+    ) : this(DaoMaterializationStore(dao), port, receiptFactory, localDeviceId, retryScheduler)
 
     suspend fun materializePending(nowMs: Long = System.currentTimeMillis()): MaterializationSummary {
         var applied = 0
         var pending = 0
         var skipped = 0
+        var observedRetryDue: Long? = null
+        suspend fun recordRetry(
+            state: CanonicalNotificationState,
+            disposition: MaterializationRetryDisposition,
+            code: String,
+        ) {
+            when (val result = store.recordMaterializationRetry(
+                canonId = state.canonId,
+                sequence = state.latestSequence,
+                nowMs = nowMs,
+                disposition = disposition,
+                lastError = code,
+            )) {
+                is MaterializationRetryWriteResult.RetryableScheduled -> {
+                    observedRetryDue = minOf(observedRetryDue ?: result.dueAt, result.dueAt)
+                }
+                MaterializationRetryWriteResult.PermissionBlocked,
+                MaterializationRetryWriteResult.Superseded,
+                -> Unit
+            }
+        }
         for (state in store.pendingMaterialization(nowMs)) {
             val inbound = store.pendingInbound(state.canonId, state.latestSequence)
             val candidate = try {
@@ -205,8 +288,10 @@ class NotificationMaterializer(
                 } else {
                     null
                 }
-            } catch (error: Throwable) {
-                store.recordRetry(state.canonId, nowMs + retryDelayMs, "receipt_creation_failed")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                recordRetry(state, MaterializationRetryDisposition.RETRYABLE, "receipt_creation_failed")
                 pending += 1
                 continue
             }
@@ -215,7 +300,7 @@ class NotificationMaterializer(
             ) {
                 MaterializationReceiptResult.NotNeeded -> null
                 MaterializationReceiptResult.Unavailable -> {
-                    store.recordRetry(state.canonId, nowMs + retryDelayMs, "receipt_unavailable")
+                    recordRetry(state, MaterializationRetryDisposition.RETRYABLE, "receipt_unavailable")
                     pending += 1
                     continue
                 }
@@ -225,17 +310,24 @@ class NotificationMaterializer(
                     continue
                 }
             }
-            val successful = applyPlatform(state)
-            if (!successful) {
-                store.recordRetry(state.canonId, nowMs + retryDelayMs, "platform_effect_failed")
-                pending += 1
-                continue
+            when (applyPlatform(state)) {
+                NotificationPostOutcome.Applied -> Unit
+                NotificationPostOutcome.PermissionBlocked -> {
+                    recordRetry(state, MaterializationRetryDisposition.PERMISSION_BLOCKED, "post_permission_blocked")
+                    pending += 1
+                    continue
+                }
+                NotificationPostOutcome.RetryableFailure -> {
+                    recordRetry(state, MaterializationRetryDisposition.RETRYABLE, "platform_retryable")
+                    pending += 1
+                    continue
+                }
             }
             when (store.completeMaterialization(state.canonId, state.latestSequence, nowMs, preparedReceipt)) {
                 MaterializationResult.Completed,
                 MaterializationResult.AlreadyCompleted,
                 -> {
-                    store.clearRetry(state.canonId)
+                    store.clearRetry(state.canonId, state.latestSequence)
                     applied += 1
                 }
                 MaterializationResult.Superseded,
@@ -244,48 +336,50 @@ class NotificationMaterializer(
                 -> skipped += 1
             }
         }
-        if (pending > 0) {
-            retryScheduler.schedule(retryDelayMs) { materializePending() }
+        val nextRetryAt = store.earliestRetryableMaterializationAt() ?: observedRetryDue
+        if (nextRetryAt != null) {
+            retryScheduler.schedule((nextRetryAt - nowMs).coerceAtLeast(0L)) { materializePending() }
         }
         return MaterializationSummary(applied = applied, pending = pending, skipped = skipped)
     }
 
-    private suspend fun applyPlatform(state: CanonicalNotificationState): Boolean {
+    private suspend fun applyPlatform(state: CanonicalNotificationState): NotificationPostOutcome {
         val isSource = localDeviceId != null && state.originDevice == localDeviceId
         return if (isSource) {
             when (state.state) {
-                "ACTIVE" -> true // The listener already owns the source notification.
-                "CANCELLED" -> state.sourceNotificationKey?.let(port::cancelSource) ?: false
-                else -> false
+                "ACTIVE" -> NotificationPostOutcome.Applied // The listener already owns the source notification.
+                "CANCELLED" -> if (state.sourceNotificationKey?.let(port::cancelSource) == true) {
+                    NotificationPostOutcome.Applied
+                } else {
+                    NotificationPostOutcome.RetryableFailure
+                }
+                else -> NotificationPostOutcome.RetryableFailure
             }
         } else {
             when (state.state) {
                 "ACTIVE" -> if (CallStateMaterializer.isCall(state.canonId)) {
-                    port.postCallMirror(state)
+                    port.postCallMirrorOutcome(state)
                 } else {
-                    port.postMirror(state)
+                    port.postMirrorOutcome(state)
                 }
                 "CANCELLED" -> {
                     val localId = state.mirrorLocalId
                     val localTag = state.mirrorLocalTag
                     if (localId == null || localTag == null) {
-                        true // Nothing was materialized on this device.
+                        NotificationPostOutcome.Applied // Nothing was materialized on this device.
                     } else {
                         store.markPeerCancelPending(state.canonId)
-                        if (CallStateMaterializer.isCall(state.canonId)) {
+                        val cancelled = if (CallStateMaterializer.isCall(state.canonId)) {
                             port.cancelCallMirror(localTag, localId)
                         } else {
                             port.cancelMirror(localTag, localId)
                         }
+                        if (cancelled) NotificationPostOutcome.Applied else NotificationPostOutcome.RetryableFailure
                     }
                 }
-                else -> false
+                else -> NotificationPostOutcome.RetryableFailure
             }
         }
-    }
-
-    private companion object {
-        const val RETRY_DELAY_MS = 5_000L
     }
 }
 

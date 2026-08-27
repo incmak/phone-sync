@@ -38,6 +38,25 @@ sealed interface MaterializationReceiptResult {
     data class Conflict(val existingSha256: String) : MaterializationReceiptResult
 }
 
+sealed interface MaterializationRetryWriteResult {
+    data class RetryableScheduled(val dueAt: Long) : MaterializationRetryWriteResult
+    data object PermissionBlocked : MaterializationRetryWriteResult
+    data object Superseded : MaterializationRetryWriteResult
+}
+
+internal fun boundedMaterializationRetryDelay(attempt: Int): Long {
+    require(attempt > 0)
+    var delay = 5_000L
+    repeat(attempt - 1) {
+        if (delay >= 300_000L / 2L) return 300_000L
+        delay *= 2L
+    }
+    return minOf(delay, 300_000L)
+}
+
+internal fun saturatingMaterializationRetryDue(nowMs: Long, delayMs: Long): Long =
+    if (nowMs > Long.MAX_VALUE - delayMs) Long.MAX_VALUE else nowMs + delayMs
+
 sealed interface ReceiptTransitionResult {
     data object ReadyForRelayAck : ReceiptTransitionResult
     data object AlreadyTransitioned : ReceiptTransitionResult
@@ -337,11 +356,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     abstract suspend fun putCanonical(row: CanonicalNotificationState)
 
     @Query(
-        "SELECT * FROM canonical_notification_state " +
-            "WHERE latestSequence > materializedSequence AND " +
-            "(canonId NOT IN (SELECT canonId FROM materialization_retry) OR " +
-            "canonId IN (SELECT canonId FROM materialization_retry WHERE nextAttemptAt <= :now)) " +
-            "ORDER BY updatedAt",
+        "SELECT state.* FROM canonical_notification_state AS state " +
+            "WHERE state.latestSequence > state.materializedSequence AND (" +
+            "NOT EXISTS (SELECT 1 FROM materialization_retry AS retry WHERE retry.canonId=state.canonId) OR " +
+            "EXISTS (SELECT 1 FROM materialization_retry AS retry WHERE retry.canonId=state.canonId AND (" +
+            "retry.sequence < state.latestSequence OR retry.disposition='PERMISSION_BLOCKED' OR retry.nextAttemptAt <= :now))) " +
+            "ORDER BY state.updatedAt",
     )
     abstract suspend fun pendingMaterialization(now: Long): List<CanonicalNotificationState>
 
@@ -351,8 +371,75 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun putMaterializationRetry(row: MaterializationRetry)
 
+    @Query(
+        "INSERT OR REPLACE INTO materialization_retry(canonId,sequence,nextAttemptAt,attempts,disposition,lastError) " +
+            "SELECT :canonId,:sequence,:nextAttemptAt,:attempts,:disposition,:lastError " +
+            "WHERE EXISTS (SELECT 1 FROM canonical_notification_state " +
+            "WHERE canonId=:canonId AND latestSequence=:sequence)",
+    )
+    protected abstract suspend fun putMaterializationRetryIfCurrent(
+        canonId: String,
+        sequence: Long,
+        nextAttemptAt: Long?,
+        attempts: Int,
+        disposition: MaterializationRetryDisposition,
+        lastError: String,
+    ): Long
+
     @Query("DELETE FROM materialization_retry WHERE canonId=:canonId")
     abstract suspend fun clearMaterializationRetry(canonId: String)
+
+    @Query("DELETE FROM materialization_retry WHERE canonId=:canonId AND sequence=:sequence")
+    abstract suspend fun clearMaterializationRetry(canonId: String, sequence: Long): Int
+
+    @Query("DELETE FROM materialization_retry WHERE canonId=:canonId AND sequence <= :sequence")
+    abstract suspend fun clearMaterializationRetriesThrough(canonId: String, sequence: Long): Int
+
+    @Query(
+        "SELECT MIN(retry.nextAttemptAt) FROM materialization_retry AS retry " +
+            "INNER JOIN canonical_notification_state AS state ON state.canonId=retry.canonId " +
+            "AND state.latestSequence=retry.sequence " +
+            "WHERE retry.disposition='RETRYABLE' AND retry.nextAttemptAt IS NOT NULL " +
+            "AND state.latestSequence > state.materializedSequence",
+    )
+    abstract suspend fun earliestRetryableMaterializationAt(): Long?
+
+    @Transaction
+    open suspend fun recordMaterializationRetry(
+        canonId: String,
+        sequence: Long,
+        nowMs: Long,
+        disposition: MaterializationRetryDisposition,
+        lastError: String,
+    ): MaterializationRetryWriteResult {
+        val current = canonical(canonId) ?: return MaterializationRetryWriteResult.Superseded
+        if (current.latestSequence != sequence) return MaterializationRetryWriteResult.Superseded
+        val previous = materializationRetry(canonId)
+        val attempts = if (previous?.sequence == sequence && previous.disposition == disposition) {
+            previous.attempts.coerceAtMost(Int.MAX_VALUE - 1) + 1
+        } else {
+            1
+        }
+        val dueAt = if (disposition == MaterializationRetryDisposition.RETRYABLE) {
+            saturatingMaterializationRetryDue(nowMs, boundedMaterializationRetryDelay(attempts))
+        } else {
+            null
+        }
+        val written = putMaterializationRetryIfCurrent(
+            canonId = canonId,
+            sequence = sequence,
+            nextAttemptAt = dueAt,
+            attempts = attempts,
+            disposition = disposition,
+            lastError = lastError,
+        )
+        if (written == -1L) return MaterializationRetryWriteResult.Superseded
+        return if (dueAt == null) {
+            MaterializationRetryWriteResult.PermissionBlocked
+        } else {
+            MaterializationRetryWriteResult.RetryableScheduled(dueAt)
+        }
+    }
 
     @Query(
         "SELECT * FROM inbound_message WHERE canonId=:canonId AND sequence=:sequence " +

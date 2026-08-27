@@ -190,6 +190,10 @@ class TwinotifyCoreModule internal constructor(
             }
         }
 
+        OnActivityEntersForeground {
+            co.twinotify.core.service.SyncService.onAppForeground(requireContext())
+        }
+
         OnDestroy {
             offlinePairing.destroy()
             moduleScope.cancel()

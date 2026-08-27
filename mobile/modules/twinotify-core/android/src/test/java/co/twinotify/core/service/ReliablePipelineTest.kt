@@ -281,7 +281,14 @@ class ReliablePipelineTest {
         }
 
         override suspend fun recordRetry(canonId: String, nextAttemptAt: Long, lastError: String?) {
-            retries[canonId] = MaterializationRetry(canonId, nextAttemptAt, (retries[canonId]?.attempts ?: 0) + 1, lastError)
+            retries[canonId] = MaterializationRetry(
+                canonId = canonId,
+                sequence = states[canonId]?.latestSequence ?: 0L,
+                nextAttemptAt = nextAttemptAt,
+                attempts = (retries[canonId]?.attempts ?: 0) + 1,
+                disposition = co.twinotify.core.storage.MaterializationRetryDisposition.RETRYABLE,
+                lastError = lastError,
+            )
         }
 
         override suspend fun clearRetry(canonId: String) {
