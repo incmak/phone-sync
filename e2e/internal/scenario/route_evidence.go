@@ -136,7 +136,7 @@ func inspectClosedWorldScenario(root map[string]any) error {
 		"receipt_at_ms": true, "error_code": true,
 		"paired": true, "custody_counts": true, "peer_receipt_count": true,
 		"snapshot_digest_count": true, "snapshot_begin_count": true,
-		"snapshot_end_count": true, "user_dismiss_count": true,
+		"snapshot_end_count": true, "snapshot_commit_count": true, "user_dismiss_count": true,
 		"unpair_inbound_count": true, "unpair_outcome": true,
 		"active_queue_count": true, "active_queue_bytes": true,
 		"peak_queue_count": true, "peak_queue_bytes": true,
@@ -249,7 +249,7 @@ func validateObservationShape(value map[string]any) error {
 	}
 	for _, key := range []string{
 		"peer_receipt_count", "snapshot_digest_count", "snapshot_begin_count",
-		"snapshot_end_count", "user_dismiss_count", "unpair_inbound_count",
+		"snapshot_end_count", "snapshot_commit_count", "user_dismiss_count", "unpair_inbound_count",
 	} {
 		if raw, present := value[key]; present {
 			number, ok := raw.(float64)

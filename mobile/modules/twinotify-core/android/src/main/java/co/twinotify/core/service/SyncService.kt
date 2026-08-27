@@ -59,12 +59,24 @@ import kotlinx.coroutines.coroutineScope
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+internal suspend fun forceRepairSnapshotForE2e(
+    localDigest: suspend () -> StateDigest,
+    onDigest: suspend (StateDigest, Boolean) -> SnapshotConvergence,
+): Boolean {
+    val current = localDigest()
+    require(current.digest.matches(Regex("[0-9a-f]{64}"))) { "invalid production digest" }
+    val replacement = if (current.digest[0] == '0') '1' else '0'
+    val mismatch = current.copy(digest = replacement + current.digest.substring(1))
+    return onDigest(mismatch, true) is SnapshotConvergence.RepairStarted
+}
+
 internal data class ProductObservationSnapshot(
     val custodyCounts: Map<String, Map<String, Long>>,
     val peerReceiptCount: Long,
     val snapshotDigestCount: Long,
     val snapshotBeginCount: Long,
     val snapshotEndCount: Long,
+    val snapshotCommitCount: Long,
     val userDismissCount: Long,
     val unpairInboundCount: Long,
     val peakQueueCount: Int,
@@ -87,6 +99,7 @@ internal object ProductObservationTracker {
     private val peakCount = AtomicLong()
     private val peakBytes = AtomicLong()
     private val userDismiss = AtomicLong()
+    private val snapshotCommit = AtomicLong()
 
     fun recordCustody(route: String, eventType: String?) {
         val key = eventType?.replace('.', '_') ?: return
@@ -101,6 +114,10 @@ internal object ProductObservationTracker {
         userDismiss.boundedIncrement()
     }
 
+    fun recordSnapshotCommit() {
+        snapshotCommit.boundedIncrement()
+    }
+
     fun recordQueue(count: Int, bytes: Long) {
         if (count !in 0..2_000 || bytes !in 0..134_217_728L) return
         peakCount.accumulateAndGet(count.toLong(), ::maxOf)
@@ -113,6 +130,7 @@ internal object ProductObservationTracker {
         snapshotDigestCount = authenticatedInbound.getValue("state_digest").get(),
         snapshotBeginCount = authenticatedInbound.getValue("state_snapshot_begin").get(),
         snapshotEndCount = authenticatedInbound.getValue("state_snapshot_end").get(),
+        snapshotCommitCount = snapshotCommit.get(),
         userDismissCount = userDismiss.get(),
         unpairInboundCount = authenticatedInbound.getValue("unpair").get(),
         peakQueueCount = peakCount.get().toInt(),
@@ -125,6 +143,7 @@ internal object ProductObservationTracker {
         peakCount.set(0)
         peakBytes.set(0)
         userDismiss.set(0)
+        snapshotCommit.set(0)
     }
 
     private fun AtomicLong.boundedIncrement() {
@@ -613,6 +632,16 @@ class SyncService : Service() {
             val service = activeInstance ?: return false
             service.snapshotCoordinator.emitLocalDigest(DeviceIdentity.getOrCreate(service.applicationContext))
             return true
+        }
+
+        /** Debug bridge into the production mismatch-repair path; it authors no protocol rows. */
+        internal suspend fun forceProductionRepairSnapshotForE2e(): Boolean {
+            val service = activeInstance ?: return false
+            val localDevice = DeviceIdentity.getOrCreate(service.applicationContext)
+            return forceRepairSnapshotForE2e(
+                localDigest = { service.snapshotCoordinator.localDigest(localDevice) },
+                onDigest = { digest, force -> service.snapshotCoordinator.onDigest(digest, force = force) },
+            )
         }
 
         internal fun clearProductObservationsForE2e() {

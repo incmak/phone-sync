@@ -87,3 +87,21 @@ func TestLanDirectDeliveryScenarioIsExecutable(t *testing.T) {
 		t.Fatal("a direct delivery scenario must assert the receiver is on the direct route")
 	}
 }
+
+func TestLanDirectSemanticPlansAreExecutableAndRouteBound(t *testing.T) {
+	for _, name := range []string{
+		"lan-direct-update", "lan-direct-peer-dismiss",
+		"lan-direct-call-state", "lan-direct-snapshot-receipt",
+	} {
+		plan, err := Plan(name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := ValidateExecutablePlan(plan); err != nil {
+			t.Fatalf("%s is not executable: %v", name, err)
+		}
+		if len(plan.Steps) == 0 {
+			t.Fatalf("%s has no executor steps", name)
+		}
+	}
+}

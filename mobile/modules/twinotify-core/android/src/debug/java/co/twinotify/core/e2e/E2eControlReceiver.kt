@@ -87,6 +87,7 @@ internal data class E2eControlOutcome(val code: String, val outcome: String)
 internal interface E2eProductionControls {
     suspend fun dismissNewestMirror(context: Context): E2eControlOutcome
     suspend fun emitSnapshot(context: Context): E2eControlOutcome
+    suspend fun forceRepairSnapshot(context: Context): E2eControlOutcome
     suspend fun localUnpair(context: Context): E2eControlOutcome
 }
 
@@ -123,6 +124,13 @@ private object DefaultE2eProductionControls : E2eProductionControls {
             E2eControlOutcome("unavailable", "service_inactive")
         }
 
+    override suspend fun forceRepairSnapshot(context: Context): E2eControlOutcome =
+        if (SyncService.forceProductionRepairSnapshotForE2e()) {
+            E2eControlOutcome("ok", "repair_started")
+        } else {
+            E2eControlOutcome("unavailable", "repair_unavailable")
+        }
+
     override suspend fun localUnpair(context: Context): E2eControlOutcome {
         val result = awaitLocalUnpairResultAndRecord(
             ProductionLocalUnpairEntryPoint.start(
@@ -153,7 +161,7 @@ class E2eControlReceiver internal constructor(
             "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
             "SET_LAN_AVAILABLE",
-            "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "LOCAL_UNPAIR",
+            "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR",
             "OFFLINE_PAIR_START", "OFFLINE_PAIR_JOIN", "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL", "OFFLINE_PAIR_QUERY",
         )
 
@@ -420,6 +428,7 @@ class E2eControlReceiver internal constructor(
         }
         "DISMISS_NEWEST_MIRROR" -> controls.dismissNewestMirror(context).toResult(requestId)
         "EMIT_SNAPSHOT" -> controls.emitSnapshot(context).toResult(requestId)
+        "FORCE_REPAIR_SNAPSHOT" -> controls.forceRepairSnapshot(context).toResult(requestId)
         "LOCAL_UNPAIR" -> controls.localUnpair(context).toResult(requestId)
         "OFFLINE_PAIR_START" -> {
             val displayName = command.param("display_name")
@@ -499,7 +508,7 @@ class E2eControlReceiver internal constructor(
             "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL" -> setOf("secret_input_id")
             "OFFLINE_PAIR_QUERY" -> emptySet()
             "SET_LAN_AVAILABLE" -> setOf("available")
-            "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "LOCAL_UNPAIR" -> emptySet()
+            "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR" -> emptySet()
             else -> return null
         }
         if (command.params.keys.any { it !in allowed }) return "unexpected parameter"

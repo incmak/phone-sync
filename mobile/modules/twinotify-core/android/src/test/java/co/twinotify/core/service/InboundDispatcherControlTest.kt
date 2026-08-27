@@ -10,6 +10,42 @@ import kotlin.test.assertSame
 
 class InboundDispatcherControlTest {
     @Test
+    fun committedSnapshotIncrementsCommitObservationOnce() {
+        ProductObservationTracker.clear()
+
+        recordSnapshotCommitIfCommitted(Result.success(SnapshotConvergence.Committed(1, 0)))
+
+        assertEquals(1L, ProductObservationTracker.snapshot().snapshotCommitCount)
+    }
+
+    @Test
+    fun digestMismatchDoesNotIncrementSnapshotCommitObservation() {
+        ProductObservationTracker.clear()
+
+        recordSnapshotCommitIfCommitted(Result.success(SnapshotConvergence.DigestMismatch("a", "b")))
+
+        assertEquals(0L, ProductObservationTracker.snapshot().snapshotCommitCount)
+    }
+
+    @Test
+    fun rejectedSnapshotDoesNotIncrementSnapshotCommitObservation() {
+        ProductObservationTracker.clear()
+
+        recordSnapshotCommitIfCommitted(Result.success(SnapshotConvergence.Rejected("fixture")))
+
+        assertEquals(0L, ProductObservationTracker.snapshot().snapshotCommitCount)
+    }
+
+    @Test
+    fun exceptionalSnapshotEndDoesNotIncrementSnapshotCommitObservation() {
+        ProductObservationTracker.clear()
+
+        recordSnapshotCommitIfCommitted(Result.failure(IllegalStateException("fixture")))
+
+        assertEquals(0L, ProductObservationTracker.snapshot().snapshotCommitCount)
+    }
+
+    @Test
     fun authenticatedV2UnpairCompletesProductionHandlerBeforeAcceptance() = runTest {
         val order = mutableListOf<String>()
         val result = dispatchAuthenticatedV2Unpair(

@@ -2,8 +2,10 @@ package scenario_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +19,11 @@ import (
 func TestParseObservationRejectsMissingUnknownNullAndMalformedProductObservations(t *testing.T) {
 	base := validObservationPayloadForTest()
 	mutations := map[string]func(map[string]any){
-		"missing":   func(v map[string]any) { delete(v["product_observations"].(map[string]any), "paired") },
-		"unknown":   func(v map[string]any) { v["product_observations"].(map[string]any)["peer_id"] = "hidden" },
-		"null":      func(v map[string]any) { v["product_observations"].(map[string]any)["peer_receipt_count"] = nil },
-		"malformed": func(v map[string]any) { v["product_observations"].(map[string]any)["active_queue_count"] = -1 },
+		"missing":                   func(v map[string]any) { delete(v["product_observations"].(map[string]any), "paired") },
+		"unknown":                   func(v map[string]any) { v["product_observations"].(map[string]any)["peer_id"] = "hidden" },
+		"null":                      func(v map[string]any) { v["product_observations"].(map[string]any)["peer_receipt_count"] = nil },
+		"malformed":                 func(v map[string]any) { v["product_observations"].(map[string]any)["active_queue_count"] = -1 },
+		"malformed snapshot commit": func(v map[string]any) { v["product_observations"].(map[string]any)["snapshot_commit_count"] = -1 },
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -32,6 +35,50 @@ func TestParseObservationRejectsMissingUnknownNullAndMalformedProductObservation
 			}
 			if _, err := scenario.ParseObservation(payload); err == nil {
 				t.Fatal("malformed observation passed")
+			}
+		})
+	}
+}
+
+func TestParseObservationReadsClosedWorldCallSemanticState(t *testing.T) {
+	payload := validObservationPayloadForTest()
+	hash := strings.Repeat("a", 64)
+	payload["canonical"] = []any{map[string]any{
+		"canon_id_hash": hash, "state": "ACTIVE", "sequence": 1.0,
+		"materialized_sequence": 1.0, "semantic_state": "RINGING",
+	}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := scenario.ParseObservation(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.CanonicalSemanticStates[hash] != "RINGING" {
+		t.Fatalf("semantic states=%v", state.CanonicalSemanticStates)
+	}
+}
+
+func TestParseObservationRejectsMalformedCallSemanticState(t *testing.T) {
+	base := validObservationPayloadForTest()
+	hash := strings.Repeat("a", 64)
+	mutations := map[string]map[string]any{
+		"unknown semantic":          {"canon_id_hash": hash, "state": "ACTIVE", "sequence": 1.0, "materialized_sequence": 1.0, "semantic_state": "DIALING"},
+		"semantic durable mismatch": {"canon_id_hash": hash, "state": "CANCELLED", "sequence": 1.0, "materialized_sequence": 1.0, "semantic_state": "ACTIVE"},
+		"unknown field":             {"canon_id_hash": hash, "state": "ACTIVE", "sequence": 1.0, "materialized_sequence": 1.0, "semantic_state": "ACTIVE", "title": "forbidden"},
+		"invalid hash":              {"canon_id_hash": "raw-call-id", "state": "ACTIVE", "sequence": 1.0, "materialized_sequence": 1.0, "semantic_state": "ACTIVE"},
+	}
+	for name, canonical := range mutations {
+		t.Run(name, func(t *testing.T) {
+			payload := cloneJSONMap(t, base)
+			payload["canonical"] = []any{canonical}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := scenario.ParseObservation(encoded); err == nil {
+				t.Fatal("malformed semantic state passed")
 			}
 		})
 	}
@@ -50,7 +97,7 @@ func validObservationPayloadForTest() map[string]any {
 			"paired":             true,
 			"custody_counts":     map[string]any{"lan": counts, "relay": cloneMap(counts)},
 			"peer_receipt_count": 0.0, "snapshot_digest_count": 0.0, "snapshot_begin_count": 0.0,
-			"snapshot_end_count": 0.0, "user_dismiss_count": 0.0, "unpair_inbound_count": 0.0,
+			"snapshot_end_count": 0.0, "snapshot_commit_count": 0.0, "user_dismiss_count": 0.0, "unpair_inbound_count": 0.0,
 			"unpair_outcome": "none", "active_queue_count": 0.0, "active_queue_bytes": 0.0,
 			"peak_queue_count": 0.0, "peak_queue_bytes": 0.0,
 		},
@@ -600,7 +647,7 @@ func TestUnknownScenarioRejected(t *testing.T) {
 
 func TestParseObservationUsesProviderSchema(t *testing.T) {
 	payload := validObservationPayloadForTest()
-	payload["canonical"] = []any{map[string]any{"canon_id_hash": "new-hash", "state": "ACTIVE", "sequence": 3}}
+	payload["canonical"] = []any{map[string]any{"canon_id_hash": strings.Repeat("a", 64), "state": "ACTIVE", "sequence": 3, "materialized_sequence": 3}}
 	payload["activity"] = []any{map[string]any{"event_type": "delivery_loop"}}
 	encoded, marshalErr := json.Marshal(payload)
 	if marshalErr != nil {
@@ -647,6 +694,298 @@ func TestFailureArtifactRedactsSecretsAndWritesTimeline(t *testing.T) {
 	}
 	if string(content) == "" || strings.Contains(string(content), "Private title") || strings.Contains(string(content), "Private body") || strings.Contains(string(content), "key=value") {
 		t.Fatalf("artifact was not sanitized: %q", content)
+	}
+}
+
+type directSemanticBridge struct {
+	states                 map[string]scenario.Observation
+	omit                   string
+	sequence               int
+	hash                   string
+	session                string
+	delivered              int
+	dismissed              bool
+	bSnapshotsAfterDismiss int
+}
+
+func newDirectSemanticBridge(omit string) *directSemanticBridge {
+	counts := func() map[string]map[string]int64 {
+		keys := []string{"notif_post", "notif_update", "notif_cancel", "call_state", "state_digest", "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair", "peer_receipt"}
+		result := map[string]map[string]int64{"lan": {}, "relay": {}}
+		for route := range result {
+			for _, key := range keys {
+				result[route][key] = 0
+			}
+		}
+		return result
+	}
+	state := func() scenario.Observation {
+		return scenario.Observation{
+			Health: "connected", Route: "lan", RoutePhase: "authenticated", RouteGeneration: 7,
+			Terminal: true, Paired: true, CustodyCounts: counts(), Canonical: map[string]string{},
+			CanonicalSequences: map[string]int{}, CanonicalSemanticStates: map[string]string{},
+			CanonicalMaterializedSequences: map[string]int{},
+		}
+	}
+	bridge := &directSemanticBridge{
+		states: map[string]scenario.Observation{"A": state(), "B": state()}, omit: omit,
+		hash: strings.Repeat("a", 64), session: "11111111-1111-4111-8111-111111111111",
+	}
+	if omit == "route" {
+		a := bridge.states["A"]
+		a.Route = "relay"
+		bridge.states["A"] = a
+	}
+	return bridge
+}
+
+func (b *directSemanticBridge) Control(_ context.Context, device, name string, params map[string]string) (control.Result, error) {
+	switch name {
+	case "CALL_CAPTURE_ENABLE":
+		state := b.states["A"]
+		state.CallCaptureEnabled = true
+		b.states["A"] = state
+		return control.Result{Code: "ok"}, nil
+	case "CALL_STATE":
+		b.sequence++
+		semantic := strings.ToUpper(params["state"])
+		hash := callHashForTest(b.session)
+		if b.omit != "call-"+strings.ToLower(semantic) {
+			remote := b.states["B"]
+			remote.Canonical[hash] = map[bool]string{true: "CANCELLED", false: "ACTIVE"}[semantic == "IDLE"]
+			remote.CanonicalSequences[hash] = b.sequence
+			remote.CanonicalSemanticStates[hash] = semantic
+			if b.omit != "stale-call-"+strings.ToLower(semantic) {
+				remote.CanonicalMaterializedSequences[hash] = b.sequence
+			}
+			b.states["B"] = remote
+		}
+		b.recordCustody("A", "call_state")
+		b.recordReceipt("A")
+		b.afterDelivery()
+		payload, _ := json.Marshal(map[string]any{"call_session_id": b.session, "state": params["state"], "sequence": b.sequence})
+		return control.Result{Code: "ok", Payload: payload}, nil
+	case "DISMISS_NEWEST_MIRROR":
+		b.dismissed = true
+		if b.omit != "dismissal" {
+			remote := b.states["B"]
+			remote.UserDismissCount++
+			b.states["B"] = remote
+		}
+		if b.omit != "exact-cancel" {
+			origin := b.states["A"]
+			origin.Canonical[b.hash] = "CANCELLED"
+			origin.CanonicalSequences[b.hash] = 2
+			origin.CanonicalMaterializedSequences[b.hash] = 2
+			b.states["A"] = origin
+		}
+		if b.omit != "no-resurrection" {
+			remote := b.states["B"]
+			remote.Canonical[b.hash] = "CANCELLED"
+			remote.CanonicalSequences[b.hash] = 2
+			remote.CanonicalMaterializedSequences[b.hash] = 2
+			b.states["B"] = remote
+		}
+		b.recordCustody("B", "notif_cancel")
+		b.recordReceipt("B")
+		b.afterDelivery()
+		return control.Result{Code: "ok"}, nil
+	case "EMIT_SNAPSHOT":
+		if b.omit != "snapshot-digest" {
+			remote := b.states["B"]
+			remote.SnapshotDigestCount++
+			b.states["B"] = remote
+		}
+		b.recordCustody("A", "state_digest")
+		b.afterDelivery()
+		return control.Result{Code: "ok"}, nil
+	case "FORCE_REPAIR_SNAPSHOT":
+		remote := b.states["B"]
+		if b.omit != "snapshot-begin" {
+			remote.SnapshotBeginCount++
+		}
+		if b.omit != "snapshot-end" {
+			remote.SnapshotEndCount++
+		}
+		if b.omit != "snapshot-commit" {
+			remote.SnapshotCommitCount++
+		}
+		b.states["B"] = remote
+		for _, event := range []string{"state_snapshot_begin", "state_snapshot_item", "state_snapshot_end"} {
+			b.recordCustody("A", event)
+		}
+		b.afterDelivery()
+		return control.Result{Code: "ok"}, nil
+	default:
+		return control.Result{Code: "ok"}, nil
+	}
+}
+
+func (b *directSemanticBridge) recordCustody(device, event string) {
+	if b.omit == "custody-"+event {
+		return
+	}
+	state := b.states[device]
+	state.CustodyCounts["lan"][event]++
+	b.states[device] = state
+}
+
+func (b *directSemanticBridge) recordReceipt(device string) {
+	if b.omit == "receipt" {
+		return
+	}
+	state := b.states[device]
+	state.PeerReceiptCount++
+	b.states[device] = state
+}
+
+func (b *directSemanticBridge) afterDelivery() {
+	b.delivered++
+	if b.omit != "route-after-first" || b.delivered != 1 {
+		return
+	}
+	for _, device := range []string{"A", "B"} {
+		state := b.states[device]
+		state.Route = "relay"
+		state.RouteGeneration++
+		b.states[device] = state
+	}
+}
+
+func (b *directSemanticBridge) Post(_ context.Context, device, _, _ string) error {
+	b.sequence++
+	if b.omit != fmt.Sprintf("sequence-%d", b.sequence) {
+		remote := b.states["B"]
+		remote.Canonical[b.hash] = "ACTIVE"
+		remote.CanonicalSequences[b.hash] = b.sequence
+		if b.omit != fmt.Sprintf("stale-sequence-%d", b.sequence) {
+			remote.CanonicalMaterializedSequences[b.hash] = b.sequence
+		}
+		b.states["B"] = remote
+	}
+	event := "notif_post"
+	if b.sequence > 1 {
+		event = "notif_update"
+	}
+	b.recordCustody(device, event)
+	b.recordReceipt(device)
+	b.afterDelivery()
+	return nil
+}
+
+func (b *directSemanticBridge) Cancel(context.Context, string, string) error   { return nil }
+func (b *directSemanticBridge) SetNetwork(context.Context, string, bool) error { return nil }
+func (b *directSemanticBridge) ForceStop(context.Context, string) error        { return nil }
+func (b *directSemanticBridge) Reconcile(context.Context, string) error        { return nil }
+func (b *directSemanticBridge) Snapshot(_ context.Context, device string) (scenario.Observation, error) {
+	if device == "B" && b.dismissed {
+		b.bSnapshotsAfterDismiss++
+		if b.omit == "cancel-then-resurrect" && b.bSnapshotsAfterDismiss == 6 {
+			state := b.states["B"]
+			state.Canonical[b.hash] = "ACTIVE"
+			state.CanonicalSequences[b.hash] = 3
+			state.CanonicalMaterializedSequences[b.hash] = 3
+			b.states["B"] = state
+		}
+	}
+	state := b.states[device]
+	if b.omit == "terminal" {
+		state.Terminal = false
+	}
+	return state, nil
+}
+
+func callHashForTest(session string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte("call:"+session)))
+}
+
+func runDirectSemantic(t *testing.T, name, omit string) (scenario.ScenarioResult, error) {
+	t.Helper()
+	return scenario.NewExecutor(newDirectSemanticBridge(omit), 20*time.Millisecond).RunResult(context.Background(), name)
+}
+
+func TestLanDirectUpdate(t *testing.T) {
+	result, err := runDirectSemantic(t, "lan-direct-update", "")
+	if err != nil || result.Status != "passed" || result.Route.Route != "lan" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestLanDirectPeerDismiss(t *testing.T) {
+	result, err := runDirectSemantic(t, "lan-direct-peer-dismiss", "")
+	if err != nil || result.Status != "passed" || result.Route.Route != "lan" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestLanDirectCallState(t *testing.T) {
+	result, err := runDirectSemantic(t, "lan-direct-call-state", "")
+	if err != nil || result.Status != "passed" || result.Route.Route != "lan" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for _, state := range []string{"RINGING", "ACTIVE", "IDLE"} {
+		if !contains(result.Events, "predicate:B.call.semantic:"+state) {
+			t.Fatalf("missing %s evidence: %v", state, result.Events)
+		}
+	}
+}
+
+func TestLanDirectSnapshotReceipt(t *testing.T) {
+	result, err := runDirectSemantic(t, "lan-direct-snapshot-receipt", "")
+	if err != nil || result.Status != "passed" || result.Route.Route != "lan" || result.After["B"].SnapshotCommitCount != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestLanDirectUpdateRejectsMissingObservations(t *testing.T) {
+	assertDirectMissing(t, "lan-direct-update", map[string]string{
+		"route": "missing_authenticated_lan", "route-after-first": "missing_authenticated_lan",
+		"sequence-1": "missing_sequence_transition", "sequence-2": "missing_sequence_transition", "sequence-3": "missing_sequence_transition",
+		"stale-sequence-1": "missing_sequence_transition", "stale-sequence-2": "missing_sequence_transition", "stale-sequence-3": "missing_sequence_transition",
+		"custody-notif_update": "missing_lan_custody", "receipt": "missing_peer_receipt", "terminal": "missing_terminal_convergence",
+	})
+}
+
+func TestLanDirectPeerDismissRejectsMissingObservations(t *testing.T) {
+	assertDirectMissing(t, "lan-direct-peer-dismiss", map[string]string{
+		"route": "missing_authenticated_lan", "route-after-first": "missing_authenticated_lan",
+		"dismissal": "missing_user_dismissal", "exact-cancel": "missing_exact_cancellation",
+		"no-resurrection": "missing_exact_cancellation", "custody-notif_cancel": "missing_lan_custody",
+		"cancel-then-resurrect": "missing_no_resurrection",
+		"receipt":               "missing_peer_receipt", "terminal": "missing_terminal_convergence",
+	})
+}
+
+func TestLanDirectCallStateRejectsMissingObservations(t *testing.T) {
+	assertDirectMissing(t, "lan-direct-call-state", map[string]string{
+		"route": "missing_authenticated_lan", "route-after-first": "missing_authenticated_lan",
+		"call-ringing": "missing_call_state_transition", "call-active": "missing_call_state_transition", "call-idle": "missing_call_state_transition",
+		"stale-call-ringing": "missing_call_state_transition", "stale-call-active": "missing_call_state_transition", "stale-call-idle": "missing_call_state_transition",
+		"custody-call_state": "missing_lan_custody", "receipt": "missing_peer_receipt", "terminal": "missing_terminal_convergence",
+	})
+}
+
+func TestLanDirectSnapshotReceiptRejectsMissingObservations(t *testing.T) {
+	assertDirectMissing(t, "lan-direct-snapshot-receipt", map[string]string{
+		"route": "missing_authenticated_lan", "route-after-first": "missing_authenticated_lan",
+		"snapshot-digest": "missing_snapshot_digest", "snapshot-begin": "missing_snapshot_begin",
+		"snapshot-end":         "missing_snapshot_end",
+		"snapshot-commit":      "missing_snapshot_commit",
+		"custody-state_digest": "missing_lan_custody", "custody-state_snapshot_begin": "missing_lan_custody",
+		"custody-state_snapshot_item": "missing_lan_custody", "custody-state_snapshot_end": "missing_lan_custody",
+		"terminal": "missing_terminal_convergence",
+	})
+}
+
+func assertDirectMissing(t *testing.T, name string, omissions map[string]string) {
+	t.Helper()
+	for omission, wantCode := range omissions {
+		t.Run(omission, func(t *testing.T) {
+			result, err := runDirectSemantic(t, name, omission)
+			if err == nil || result.Status == "passed" || result.ErrorCode != wantCode || strings.Contains(result.ErrorCode, "n1") {
+				t.Fatalf("omission=%s result=%+v err=%v", omission, result, err)
+			}
+		})
 	}
 }
 

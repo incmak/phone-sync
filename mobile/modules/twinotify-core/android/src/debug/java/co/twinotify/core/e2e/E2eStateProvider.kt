@@ -19,6 +19,7 @@ import co.twinotify.core.storage.LanPairStore
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.PeerStore
 import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -98,19 +99,54 @@ class E2eStateProvider : ContentProvider() {
         private fun canonical(database: androidx.sqlite.db.SupportSQLiteDatabase): JSONArray {
             val result = JSONArray()
             database.query(
-                "SELECT canonId, latestSequence, state, materializedSequence " +
+                "SELECT canonId, latestSequence, state, materializedSequence, desiredPayloadJson " +
                     "FROM canonical_notification_state ORDER BY updatedAt LIMIT 200",
             ).use { cursor ->
                 while (cursor.moveToNext()) {
-                    result.put(JSONObject()
+                    val canonId = cursor.getString(0)
+                    val row = JSONObject()
                         .put("canon_id_hash", sha256Hex(cursor.getString(0)))
                         .put("sequence", cursor.getLong(1))
                         .put("state", cursor.getString(2))
-                        .put("materialized_sequence", cursor.getLong(3)))
+                        .put("materialized_sequence", cursor.getLong(3))
+                    callSemanticState(canonId, cursor.getString(2), cursor.getString(4))?.let {
+                        row.put("semantic_state", it)
+                    }
+                    result.put(row)
                 }
             }
             return result
         }
+
+        internal fun callSemanticState(canonId: String, durableState: String, payloadJson: String?): String? {
+            if (!canonId.startsWith("call:")) return null
+            val sessionId = canonId.removePrefix("call:")
+            require(runCatching { UUID.fromString(sessionId).toString() }.getOrNull() == sessionId) {
+                "invalid call canonical identifier"
+            }
+            if (durableState == "CANCELLED") {
+                require(payloadJson == null) { "cancelled call retained a payload" }
+                return "IDLE"
+            }
+            require(durableState == "ACTIVE") { "invalid durable call state" }
+            require(payloadJson != null && payloadJson.toByteArray().size <= MAX_CALL_PAYLOAD_BYTES) {
+                "invalid call payload size"
+            }
+            val payload = runCatching { JSONObject(payloadJson) }
+                .getOrElse { throw IllegalArgumentException("malformed call payload") }
+            require(payload.keys().asSequence().toSet() == CALL_PAYLOAD_KEYS) { "unknown call payload field" }
+            require(payload.optString("call_session_id") == sessionId) { "call session mismatch" }
+            require(payload.optString("direction") in CALL_DIRECTIONS) { "invalid call direction" }
+            return when (payload.optString("state")) {
+                "ringing" -> "RINGING"
+                "active" -> "ACTIVE"
+                else -> throw IllegalArgumentException("invalid call semantic state")
+            }
+        }
+
+        private const val MAX_CALL_PAYLOAD_BYTES = 4_096
+        private val CALL_PAYLOAD_KEYS = setOf("call_session_id", "state", "direction")
+        private val CALL_DIRECTIONS = setOf("incoming", "outgoing", "unknown")
 
         private fun activity(database: androidx.sqlite.db.SupportSQLiteDatabase): JSONArray {
             val result = JSONArray()
@@ -168,6 +204,7 @@ class E2eStateProvider : ContentProvider() {
                 .put("snapshot_digest_count", tracked.snapshotDigestCount)
                 .put("snapshot_begin_count", tracked.snapshotBeginCount)
                 .put("snapshot_end_count", tracked.snapshotEndCount)
+                .put("snapshot_commit_count", tracked.snapshotCommitCount)
                 .put("user_dismiss_count", tracked.userDismissCount)
                 .put("unpair_inbound_count", tracked.unpairInboundCount)
                 .put("unpair_outcome", LocalUnpairStatus.lastOutcome.value ?: "none")

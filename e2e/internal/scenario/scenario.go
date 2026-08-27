@@ -112,6 +112,48 @@ var plans = map[string][]Step{
 		{Predicate: "B.route.lan"},
 		{Predicate: "terminal.converged"},
 	},
+	"lan-direct-update": {
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.shell.post:n1:v1", Predicate: "B.tracked.sequence:1"},
+		{Action: "A.shell.post:n1:v2", Predicate: "B.tracked.sequence:2"},
+		{Action: "A.shell.post:n1:v3", Predicate: "B.tracked.sequence:3"},
+		{Predicate: "A.custody.lan:notif_post:1"},
+		{Predicate: "A.custody.lan:notif_update:2"},
+		{Predicate: "A.peer-receipt.delta:3"},
+		{Predicate: "direct.terminal"},
+	},
+	"lan-direct-peer-dismiss": {
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.shell.post:n1:v1", Predicate: "B.tracked.sequence:1"},
+		{Action: "B.control.dismiss-newest-mirror", Predicate: "B.user-dismiss.delta:1"},
+		{Predicate: "A.tracked.cancelled"}, {Predicate: "B.tracked.cancelled"},
+		{Predicate: "B.custody.lan:notif_cancel:1"},
+		{Predicate: "B.peer-receipt.delta:1"},
+		{Predicate: "direct.terminal"},
+		{Predicate: "B.tracked.no-resurrection"},
+	},
+	"lan-direct-call-state": {
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.control.call-capture-enable", Predicate: "A.call-capture.enabled"},
+		{Action: "A.control.call-state:ringing", Predicate: "B.call.semantic:RINGING"},
+		{Action: "A.control.call-state:active", Predicate: "B.call.semantic:ACTIVE"},
+		{Action: "A.control.call-state:idle", Predicate: "B.call.semantic:IDLE"},
+		{Predicate: "A.custody.lan:call_state:3"},
+		{Predicate: "A.peer-receipt.delta:3"},
+		{Predicate: "direct.terminal"},
+	},
+	"lan-direct-snapshot-receipt": {
+		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
+		{Action: "A.shell.post:n1:v1", Predicate: "B.tracked.sequence:1"},
+		{Action: "A.control.emit-snapshot", Predicate: "B.snapshot.digest.delta:1"},
+		{Action: "A.control.force-repair-snapshot", Predicate: "B.snapshot.begin.delta:1"},
+		{Predicate: "B.snapshot.end.delta:1"}, {Predicate: "B.snapshot.commit.delta:1"},
+		{Predicate: "A.custody.lan:state_digest:1"},
+		{Predicate: "A.custody.lan:state_snapshot_begin:1"},
+		{Predicate: "A.custody.lan:state_snapshot_item:1"},
+		{Predicate: "A.custody.lan:state_snapshot_end:1"},
+		{Predicate: "direct.terminal"},
+	},
 	"lan-relay-fallback-return": {
 		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
 		{Action: "A.lan.fail"}, {Action: "B.lan.fail"},
@@ -133,11 +175,6 @@ var plans = map[string][]Step{
 }
 
 func Plan(name string) (ScenarioPlan, error) {
-	if name == "call-state" {
-		// This scenario uses the typed synthetic control flow in call_state.go rather than
-		// the notification shell plans below.
-		return ScenarioPlan{Name: name}, nil
-	}
 	if name == "all-correctness" {
 		var steps []Step
 		for _, child := range []string{"post", "update", "dismiss-origin", "offline", "ack-loss", "sender-offline-after-acceptance", "relay-restart", "sender-kill", "receiver-kill", "reboot", "expiry-snapshot"} {
@@ -172,37 +209,40 @@ func stepsWithTag(steps []Step, tag string) []Step {
 }
 
 type Observation struct {
-	Health                 string                      `json:"health"`
-	CallCaptureEnabled     bool                        `json:"call_capture_enabled"`
-	CallCaptureHealthCode  string                      `json:"call_capture_health_code,omitempty"`
-	Outbox                 int                         `json:"outbox"`
-	ActiveInbound          int                         `json:"active_inbound"`
-	PendingMaterialization int                         `json:"pending_materialization"`
-	Mirror                 bool                        `json:"mirror"`
-	Sequence               int                         `json:"sequence"`
-	Terminal               bool                        `json:"terminal"`
-	LoopEvents             int                         `json:"loop_events"`
-	Route                  string                      `json:"route"`
-	RoutePhase             string                      `json:"route_phase"`
-	QueuedBytes            int64                       `json:"queued_bytes"`
-	RouteGeneration        int                         `json:"route_generation"`
-	ReceiptAtMs            int64                       `json:"receipt_at_ms,omitempty"`
-	ErrorCode              string                      `json:"error_code,omitempty"`
-	Paired                 bool                        `json:"paired"`
-	CustodyCounts          map[string]map[string]int64 `json:"custody_counts,omitempty"`
-	PeerReceiptCount       int64                       `json:"peer_receipt_count"`
-	SnapshotDigestCount    int64                       `json:"snapshot_digest_count"`
-	SnapshotBeginCount     int64                       `json:"snapshot_begin_count"`
-	SnapshotEndCount       int64                       `json:"snapshot_end_count"`
-	UserDismissCount       int64                       `json:"user_dismiss_count"`
-	UnpairInboundCount     int64                       `json:"unpair_inbound_count"`
-	UnpairOutcome          string                      `json:"unpair_outcome,omitempty"`
-	ActiveQueueCount       int                         `json:"active_queue_count"`
-	ActiveQueueBytes       int64                       `json:"active_queue_bytes"`
-	PeakQueueCount         int                         `json:"peak_queue_count"`
-	PeakQueueBytes         int64                       `json:"peak_queue_bytes"`
-	Canonical              map[string]string           `json:"-"`
-	CanonicalSequences     map[string]int              `json:"-"`
+	Health                         string                      `json:"health"`
+	CallCaptureEnabled             bool                        `json:"call_capture_enabled"`
+	CallCaptureHealthCode          string                      `json:"call_capture_health_code,omitempty"`
+	Outbox                         int                         `json:"outbox"`
+	ActiveInbound                  int                         `json:"active_inbound"`
+	PendingMaterialization         int                         `json:"pending_materialization"`
+	Mirror                         bool                        `json:"mirror"`
+	Sequence                       int                         `json:"sequence"`
+	Terminal                       bool                        `json:"terminal"`
+	LoopEvents                     int                         `json:"loop_events"`
+	Route                          string                      `json:"route"`
+	RoutePhase                     string                      `json:"route_phase"`
+	QueuedBytes                    int64                       `json:"queued_bytes"`
+	RouteGeneration                int                         `json:"route_generation"`
+	ReceiptAtMs                    int64                       `json:"receipt_at_ms,omitempty"`
+	ErrorCode                      string                      `json:"error_code,omitempty"`
+	Paired                         bool                        `json:"paired"`
+	CustodyCounts                  map[string]map[string]int64 `json:"custody_counts,omitempty"`
+	PeerReceiptCount               int64                       `json:"peer_receipt_count"`
+	SnapshotDigestCount            int64                       `json:"snapshot_digest_count"`
+	SnapshotBeginCount             int64                       `json:"snapshot_begin_count"`
+	SnapshotEndCount               int64                       `json:"snapshot_end_count"`
+	SnapshotCommitCount            int64                       `json:"snapshot_commit_count"`
+	UserDismissCount               int64                       `json:"user_dismiss_count"`
+	UnpairInboundCount             int64                       `json:"unpair_inbound_count"`
+	UnpairOutcome                  string                      `json:"unpair_outcome,omitempty"`
+	ActiveQueueCount               int                         `json:"active_queue_count"`
+	ActiveQueueBytes               int64                       `json:"active_queue_bytes"`
+	PeakQueueCount                 int                         `json:"peak_queue_count"`
+	PeakQueueBytes                 int64                       `json:"peak_queue_bytes"`
+	Canonical                      map[string]string           `json:"-"`
+	CanonicalSequences             map[string]int              `json:"-"`
+	CanonicalSemanticStates        map[string]string           `json:"-"`
+	CanonicalMaterializedSequences map[string]int              `json:"-"`
 }
 
 func ParseObservation(payload []byte) (Observation, error) {
@@ -245,16 +285,12 @@ func ParseObservation(payload []byte) (Observation, error) {
 			ReceiptAtMs int64  `json:"receipt_at_ms"`
 			ErrorCode   string `json:"error_code"`
 		} `json:"route_evidence"`
-		OutboxBytes            int64 `json:"outbox_bytes"`
-		ActiveOutbox           int   `json:"active_outbox"`
-		ActiveInbound          int   `json:"active_inbound"`
-		PendingMaterialization int   `json:"pending_materialization"`
-		Canonical              []struct {
-			CanonIDHash string `json:"canon_id_hash"`
-			State       string `json:"state"`
-			Sequence    int    `json:"sequence"`
-		} `json:"canonical"`
-		Activity []struct {
+		OutboxBytes            int64             `json:"outbox_bytes"`
+		ActiveOutbox           int               `json:"active_outbox"`
+		ActiveInbound          int               `json:"active_inbound"`
+		PendingMaterialization int               `json:"pending_materialization"`
+		Canonical              []json.RawMessage `json:"canonical"`
+		Activity               []struct {
 			EventType string `json:"event_type"`
 		} `json:"activity"`
 		Product json.RawMessage `json:"product_observations"`
@@ -270,38 +306,49 @@ func ParseObservation(payload []byte) (Observation, error) {
 		return Observation{}, err
 	}
 	state := Observation{
-		Health:                 raw.Health.Service,
-		CallCaptureEnabled:     raw.Health.CallCaptureEnabled,
-		CallCaptureHealthCode:  raw.Health.CallCaptureHealthCode,
-		Outbox:                 raw.ActiveOutbox,
-		ActiveInbound:          raw.ActiveInbound,
-		PendingMaterialization: raw.PendingMaterialization,
-		Route:                  raw.RouteEvidence.Route,
-		RoutePhase:             raw.RouteEvidence.Phase,
-		QueuedBytes:            raw.RouteEvidence.QueuedBytes,
-		RouteGeneration:        raw.RouteEvidence.Generation,
-		ReceiptAtMs:            raw.RouteEvidence.ReceiptAtMs,
-		ErrorCode:              raw.RouteEvidence.ErrorCode,
-		Paired:                 product.Paired,
-		CustodyCounts:          product.CustodyCounts,
-		PeerReceiptCount:       product.PeerReceiptCount,
-		SnapshotDigestCount:    product.SnapshotDigestCount,
-		SnapshotBeginCount:     product.SnapshotBeginCount,
-		SnapshotEndCount:       product.SnapshotEndCount,
-		UserDismissCount:       product.UserDismissCount,
-		UnpairInboundCount:     product.UnpairInboundCount,
-		UnpairOutcome:          product.UnpairOutcome,
-		ActiveQueueCount:       product.ActiveQueueCount,
-		ActiveQueueBytes:       product.ActiveQueueBytes,
-		PeakQueueCount:         product.PeakQueueCount,
-		PeakQueueBytes:         product.PeakQueueBytes,
-		Terminal:               raw.Health.Service == "connected" && raw.ActiveOutbox == 0 && raw.ActiveInbound == 0 && raw.PendingMaterialization == 0,
-		Canonical:              map[string]string{},
-		CanonicalSequences:     map[string]int{},
+		Health:                         raw.Health.Service,
+		CallCaptureEnabled:             raw.Health.CallCaptureEnabled,
+		CallCaptureHealthCode:          raw.Health.CallCaptureHealthCode,
+		Outbox:                         raw.ActiveOutbox,
+		ActiveInbound:                  raw.ActiveInbound,
+		PendingMaterialization:         raw.PendingMaterialization,
+		Route:                          raw.RouteEvidence.Route,
+		RoutePhase:                     raw.RouteEvidence.Phase,
+		QueuedBytes:                    raw.RouteEvidence.QueuedBytes,
+		RouteGeneration:                raw.RouteEvidence.Generation,
+		ReceiptAtMs:                    raw.RouteEvidence.ReceiptAtMs,
+		ErrorCode:                      raw.RouteEvidence.ErrorCode,
+		Paired:                         product.Paired,
+		CustodyCounts:                  product.CustodyCounts,
+		PeerReceiptCount:               product.PeerReceiptCount,
+		SnapshotDigestCount:            product.SnapshotDigestCount,
+		SnapshotBeginCount:             product.SnapshotBeginCount,
+		SnapshotEndCount:               product.SnapshotEndCount,
+		SnapshotCommitCount:            product.SnapshotCommitCount,
+		UserDismissCount:               product.UserDismissCount,
+		UnpairInboundCount:             product.UnpairInboundCount,
+		UnpairOutcome:                  product.UnpairOutcome,
+		ActiveQueueCount:               product.ActiveQueueCount,
+		ActiveQueueBytes:               product.ActiveQueueBytes,
+		PeakQueueCount:                 product.PeakQueueCount,
+		PeakQueueBytes:                 product.PeakQueueBytes,
+		Terminal:                       raw.Health.Service == "connected" && raw.ActiveOutbox == 0 && raw.ActiveInbound == 0 && raw.PendingMaterialization == 0,
+		Canonical:                      map[string]string{},
+		CanonicalSequences:             map[string]int{},
+		CanonicalSemanticStates:        map[string]string{},
+		CanonicalMaterializedSequences: map[string]int{},
 	}
-	for _, item := range raw.Canonical {
+	for _, encoded := range raw.Canonical {
+		item, err := parseCanonicalObservation(encoded)
+		if err != nil {
+			return Observation{}, err
+		}
 		state.Canonical[item.CanonIDHash] = item.State
 		state.CanonicalSequences[item.CanonIDHash] = item.Sequence
+		state.CanonicalMaterializedSequences[item.CanonIDHash] = item.Materialized
+		if item.SemanticState != "" {
+			state.CanonicalSemanticStates[item.CanonIDHash] = item.SemanticState
+		}
 		if item.State == "ACTIVE" {
 			state.Mirror = true
 		}
@@ -317,6 +364,56 @@ func ParseObservation(payload []byte) (Observation, error) {
 	return state, nil
 }
 
+type canonicalObservation struct {
+	CanonIDHash      string  `json:"canon_id_hash"`
+	State            string  `json:"state"`
+	Sequence         int     `json:"sequence"`
+	Materialized     int     `json:"materialized_sequence"`
+	SemanticStateRaw *string `json:"semantic_state,omitempty"`
+	SemanticState    string  `json:"-"`
+}
+
+var canonicalHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func parseCanonicalObservation(payload json.RawMessage) (canonicalObservation, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return canonicalObservation{}, errors.New("E2E state malformed canonical observation")
+	}
+	allowed := map[string]bool{
+		"canon_id_hash": true, "state": true, "sequence": true,
+		"materialized_sequence": true, "semantic_state": true,
+	}
+	for key := range fields {
+		if !allowed[key] {
+			return canonicalObservation{}, fmt.Errorf("E2E state unknown canonical observation %q", key)
+		}
+	}
+	for _, key := range []string{"canon_id_hash", "state", "sequence", "materialized_sequence"} {
+		if value, ok := fields[key]; !ok || string(value) == "null" {
+			return canonicalObservation{}, fmt.Errorf("E2E state missing canonical observation %s", key)
+		}
+	}
+	var item canonicalObservation
+	if err := json.Unmarshal(payload, &item); err != nil ||
+		!canonicalHashPattern.MatchString(item.CanonIDHash) ||
+		!map[string]bool{"ACTIVE": true, "CANCELLED": true}[item.State] ||
+		item.Sequence <= 0 || item.Sequence > 1_000_000_000 ||
+		item.Materialized < 0 || item.Materialized > item.Sequence {
+		return canonicalObservation{}, errors.New("E2E state malformed canonical observation")
+	}
+	if item.SemanticStateRaw != nil {
+		semantic := *item.SemanticStateRaw
+		valid := (item.State == "ACTIVE" && (semantic == "RINGING" || semantic == "ACTIVE")) ||
+			(item.State == "CANCELLED" && semantic == "IDLE")
+		if !valid {
+			return canonicalObservation{}, errors.New("E2E state malformed canonical semantic_state")
+		}
+		item.SemanticState = semantic
+	}
+	return item, nil
+}
+
 var productEventKeys = map[string]bool{
 	"notif_post": true, "notif_update": true, "notif_cancel": true, "call_state": true,
 	"state_digest": true, "state_snapshot_begin": true, "state_snapshot_item": true,
@@ -330,6 +427,7 @@ type productObservations struct {
 	SnapshotDigestCount int64
 	SnapshotBeginCount  int64
 	SnapshotEndCount    int64
+	SnapshotCommitCount int64
 	UserDismissCount    int64
 	UnpairInboundCount  int64
 	UnpairOutcome       string
@@ -347,7 +445,8 @@ func parseProductObservations(payload []byte) (productObservations, error) {
 	allowed := map[string]bool{
 		"paired": true, "custody_counts": true, "peer_receipt_count": true,
 		"snapshot_digest_count": true, "snapshot_begin_count": true, "snapshot_end_count": true,
-		"user_dismiss_count": true, "unpair_inbound_count": true, "unpair_outcome": true,
+		"snapshot_commit_count": true,
+		"user_dismiss_count":    true, "unpair_inbound_count": true, "unpair_outcome": true,
 		"active_queue_count": true, "active_queue_bytes": true, "peak_queue_count": true,
 		"peak_queue_bytes": true,
 	}
@@ -385,6 +484,10 @@ func parseProductObservations(payload []byte) (productObservations, error) {
 		return productObservations{}, err
 	}
 	ends, err := readInt("snapshot_end_count", 1_000_000_000)
+	if err != nil {
+		return productObservations{}, err
+	}
+	commits, err := readInt("snapshot_commit_count", 1_000_000_000)
 	if err != nil {
 		return productObservations{}, err
 	}
@@ -444,7 +547,8 @@ func parseProductObservations(payload []byte) (productObservations, error) {
 	return productObservations{
 		Paired: paired, CustodyCounts: custody, PeerReceiptCount: peerReceipts,
 		SnapshotDigestCount: digests, SnapshotBeginCount: begins, SnapshotEndCount: ends,
-		UserDismissCount: dismisses, UnpairInboundCount: unpairs, UnpairOutcome: outcome,
+		SnapshotCommitCount: commits,
+		UserDismissCount:    dismisses, UnpairInboundCount: unpairs, UnpairOutcome: outcome,
 		ActiveQueueCount: int(activeCount), ActiveQueueBytes: activeBytes,
 		PeakQueueCount: int(peakCount), PeakQueueBytes: peakBytes,
 	}, nil

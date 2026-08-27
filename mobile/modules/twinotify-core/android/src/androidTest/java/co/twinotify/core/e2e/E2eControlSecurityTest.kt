@@ -17,6 +17,11 @@ import org.json.JSONObject
 import java.nio.file.Files
 import java.io.File
 import co.twinotify.core.listener.PendingPeerCancel
+import co.twinotify.core.service.SnapshotConvergence
+import co.twinotify.core.service.StateDigest
+import co.twinotify.core.service.forceRepairSnapshotForE2e
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 
 @RunWith(AndroidJUnit4::class)
 class E2eControlSecurityTest {
@@ -48,6 +53,11 @@ class E2eControlSecurityTest {
                     return E2eControlOutcome("ok", "emitted")
                 }
 
+                override suspend fun forceRepairSnapshot(context: Context): E2eControlOutcome {
+                    calls += "force-repair"
+                    return E2eControlOutcome("ok", "repair_started")
+                }
+
                 override suspend fun localUnpair(context: Context): E2eControlOutcome {
                     calls += "unpair"
                     return E2eControlOutcome("ok", "lan")
@@ -59,6 +69,7 @@ class E2eControlSecurityTest {
         for ((name, call) in listOf(
             "DISMISS_NEWEST_MIRROR" to "dismiss",
             "EMIT_SNAPSHOT" to "snapshot",
+            "FORCE_REPAIR_SNAPSHOT" to "force-repair",
             "LOCAL_UNPAIR" to "unpair",
         )) {
             assertEquals("unauthorized", receiver.executeForTest(
@@ -80,13 +91,48 @@ class E2eControlSecurityTest {
     }
 
     @Test
+    fun forcedRepairSnapshotDerivesMismatchAndDelegatesOnlyToProductionCoordinator() = runBlocking {
+        val digest = StateDigest("local-origin", 0, "0".repeat(64))
+        val calls = mutableListOf<String>()
+        var delegated: StateDigest? = null
+        var forced = false
+
+        val started = forceRepairSnapshotForE2e(
+            localDigest = { calls += "local-digest"; digest },
+            onDigest = { mismatch, force ->
+                calls += "on-digest"
+                delegated = mismatch
+                forced = force
+                SnapshotConvergence.RepairStarted("private-id", 0)
+            },
+        )
+
+        assertTrue(started)
+        assertEquals(listOf("local-digest", "on-digest"), calls)
+        assertTrue(forced)
+        assertEquals(digest.originDevice, delegated?.originDevice)
+        assertEquals(digest.count, delegated?.count)
+        assertTrue(delegated?.digest?.matches(Regex("[0-9a-f]{64}")) == true)
+        assertTrue(delegated?.digest != digest.digest)
+
+        val cancellation = CancellationException("fixture")
+        val escaped = assertFailsWith<CancellationException> {
+            forceRepairSnapshotForE2e(
+                localDigest = { digest },
+                onDigest = { _, _ -> throw cancellation },
+            )
+        }
+        assertTrue(escaped === cancellation)
+    }
+
+    @Test
     fun productionObservationBlockIsClosedBoundedAndContentFree() {
         val root = JSONObject(E2eStateProvider.snapshotJson(context))
         val observation = root.getJSONObject("product_observations")
         assertEquals(
             setOf(
                 "paired", "custody_counts", "peer_receipt_count", "snapshot_digest_count",
-                "snapshot_begin_count", "snapshot_end_count", "user_dismiss_count",
+                "snapshot_begin_count", "snapshot_end_count", "snapshot_commit_count", "user_dismiss_count",
                 "unpair_inbound_count", "unpair_outcome", "active_queue_count",
                 "active_queue_bytes", "peak_queue_count", "peak_queue_bytes",
             ),
@@ -96,6 +142,7 @@ class E2eControlSecurityTest {
         assertTrue(observation.getLong("active_queue_bytes") in 0..134_217_728)
         assertTrue(observation.getLong("peak_queue_count") in 0..2_000)
         assertTrue(observation.getLong("peak_queue_bytes") in 0..134_217_728)
+        assertTrue(observation.getLong("snapshot_commit_count") in 0..1_000_000_000)
         val custody = observation.getJSONObject("custody_counts")
         assertEquals(setOf("lan", "relay"), custody.keys().asSequence().toSet())
         for (route in listOf("lan", "relay")) {
@@ -106,6 +153,34 @@ class E2eControlSecurityTest {
         val serialized = observation.toString()
         for (forbidden in listOf("device_id", "package", "canon", "msg_id", "title", "text", "token", "tls", "relay_url")) {
             assertFalse(serialized.contains(forbidden, ignoreCase = true), forbidden)
+        }
+    }
+
+    @Test
+    fun callCanonicalSemanticStateIsClosedWorldBoundedAndContentFree() {
+        val session = "11111111-1111-4111-8111-111111111111"
+        val ringing = JSONObject()
+            .put("call_session_id", session)
+            .put("state", "ringing")
+            .put("direction", "incoming")
+            .toString()
+        val active = JSONObject(ringing).put("state", "active").toString()
+
+        assertEquals("RINGING", E2eStateProvider.callSemanticState("call:$session", "ACTIVE", ringing))
+        assertEquals("ACTIVE", E2eStateProvider.callSemanticState("call:$session", "ACTIVE", active))
+        assertEquals("IDLE", E2eStateProvider.callSemanticState("call:$session", "CANCELLED", null))
+        assertEquals(null, E2eStateProvider.callSemanticState("notification:fixture", "ACTIVE", "not-json"))
+
+        for (malformed in listOf(
+            JSONObject(ringing).put("state", "unknown").toString(),
+            JSONObject(ringing).put("title", "forbidden").toString(),
+            JSONObject(ringing).put("call_session_id", "22222222-2222-4222-8222-222222222222").toString(),
+            "not-json",
+            "{" + " ".repeat(4_097) + "}",
+        )) {
+            assertFailsWith<IllegalArgumentException> {
+                E2eStateProvider.callSemanticState("call:$session", "ACTIVE", malformed)
+            }
         }
     }
 

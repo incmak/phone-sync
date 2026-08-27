@@ -106,6 +106,20 @@ func TestCLIRejectsUnsupportedScenarioBeforeADB(t *testing.T) {
 	}
 }
 
+func TestLanDirectSemanticScenariosPassPreflightBeforeADB(t *testing.T) {
+	for _, name := range []string{
+		"lan-direct-update", "lan-direct-peer-dismiss",
+		"lan-direct-call-state", "lan-direct-snapshot-receipt",
+	} {
+		if err := validateScenarioBeforeADB(name); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if err := validateScenarioBeforeADB("call-state"); err == nil {
+		t.Fatal("legacy call-state bypass must not remain executable")
+	}
+}
+
 func TestCLIPreflightFailuresWriteFailedEvidenceBeforeADB(t *testing.T) {
 	for _, tc := range []struct {
 		name string

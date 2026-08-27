@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ const (
 	actionForceStop
 	actionReconcile
 	actionLanAvailability
+	actionControl
 	actionUnsupported
 )
 
@@ -32,6 +34,9 @@ type action struct {
 	text     string
 	enabled  bool
 	original string
+	command  string
+	params   map[string]string
+	delivery bool
 }
 
 func (a action) eventID() string {
@@ -52,12 +57,31 @@ func (a action) eventID() string {
 		return "reconcile:" + a.device
 	case actionLanAvailability:
 		return "lan-available:" + a.device + ":" + fmt.Sprint(a.enabled)
+	case actionControl:
+		return "control:" + a.device + ":" + strings.ToLower(strings.ReplaceAll(a.command, "_", "-"))
 	default:
 		return "unsupported"
 	}
 }
 
 func parseAction(raw string) (action, error) {
+	switch raw {
+	case "A.control.call-capture-enable":
+		return action{kind: actionControl, device: "A", command: "CALL_CAPTURE_ENABLE", original: raw}, nil
+	case "B.control.dismiss-newest-mirror":
+		return action{kind: actionControl, device: "B", command: "DISMISS_NEWEST_MIRROR", delivery: true, original: raw}, nil
+	case "A.control.emit-snapshot":
+		return action{kind: actionControl, device: "A", command: "EMIT_SNAPSHOT", delivery: true, original: raw}, nil
+	case "A.control.force-repair-snapshot":
+		return action{kind: actionControl, device: "A", command: "FORCE_REPAIR_SNAPSHOT", delivery: true, original: raw}, nil
+	}
+	if strings.HasPrefix(raw, "A.control.call-state:") {
+		state := strings.TrimPrefix(raw, "A.control.call-state:")
+		if state != "ringing" && state != "active" && state != "idle" {
+			return action{}, fmt.Errorf("invalid scenario action %q", raw)
+		}
+		return action{kind: actionControl, device: "A", command: "CALL_STATE", params: map[string]string{"state": state}, delivery: true, original: raw}, nil
+	}
 	switch raw {
 	case "B.network.off":
 		return action{kind: actionNetwork, device: "B", enabled: false, original: raw}, nil
@@ -122,10 +146,23 @@ func knownPredicate(predicate string) bool {
 			return strings.TrimPrefix(predicate, prefix) != ""
 		}
 	}
+	for _, prefix := range []string{
+		"B.tracked.sequence:", "A.custody.lan:", "B.custody.lan:",
+		"A.peer-receipt.delta:", "B.peer-receipt.delta:",
+		"B.user-dismiss.delta:", "B.call.semantic:",
+		"B.snapshot.digest.delta:", "B.snapshot.begin.delta:", "B.snapshot.end.delta:",
+		"B.snapshot.commit.delta:",
+	} {
+		if strings.HasPrefix(predicate, prefix) {
+			return strings.TrimPrefix(predicate, prefix) != ""
+		}
+	}
 	switch predicate {
 	case "terminal.converged", "A.outbox.zero", "A.outbox.nonzero", "B.mirror.active:n1", "B.mirror.absent:n1", "B.mirror.sequence:3", "B.no-resurrection:n1", "B.health.connected", "B.health.offline", "A.source.absent:n1", "B.user-dismiss.reason":
 		return true
 	case "A.route.lan", "B.route.lan", "A.route.relay", "B.route.relay", "A.route.queued", "B.route.queued":
+		return true
+	case "A.call-capture.enabled", "A.tracked.cancelled", "B.tracked.cancelled", "B.tracked.no-resurrection", "direct.terminal":
 		return true
 	default:
 		return false
@@ -182,15 +219,18 @@ type Executor struct {
 	bridge        Bridge
 	stepTimeout   time.Duration
 	baseline      map[string]map[string]string
+	baselineState map[string]Observation
 	lanFaulted    map[string]bool
 	deliveryRoute *RouteEvidence
+	trackedHash   string
+	direct        bool
 }
 
 func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
 	if bridge == nil || stepTimeout <= 0 {
 		panic("scenario bridge and positive timeout are required")
 	}
-	return &Executor{bridge: bridge, stepTimeout: stepTimeout, baseline: map[string]map[string]string{}, lanFaulted: map[string]bool{}}
+	return &Executor{bridge: bridge, stepTimeout: stepTimeout, baseline: map[string]map[string]string{}, baselineState: map[string]Observation{}, lanFaulted: map[string]bool{}}
 }
 
 func (e *Executor) Run(ctx context.Context, name string) error {
@@ -219,8 +259,11 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		// Executor instances are reusable, but evidence and cleanup responsibility
 		// belong to exactly one public run.
 		e.baseline = map[string]map[string]string{}
+		e.baselineState = map[string]Observation{}
 		e.lanFaulted = map[string]bool{}
 		e.deliveryRoute = nil
+		e.trackedHash = ""
+		e.direct = strings.HasPrefix(plan.Name, "lan-direct-")
 	}
 	if err := ValidateExecutablePlan(plan); err != nil {
 		result.ErrorCode = errorCode(err)
@@ -262,7 +305,7 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 			}
 		}
 		if runErr != nil {
-			result.ErrorCode = errorCode(runErr)
+			result.ErrorCode = scenarioExecutionErrorCode(runErr)
 		} else {
 			result.Status = "passed"
 		}
@@ -273,7 +316,8 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 			return result, fmt.Errorf("scenario baseline %s: %w", device, snapshotErr)
 		}
 		e.baseline[device] = cloneCanonical(state.Canonical)
-		result.Before[device] = state
+		e.baselineState[device] = cloneObservation(state)
+		result.Before[device] = cloneObservation(state)
 	}
 	for _, step := range plan.Steps {
 		if step.Action != "" {
@@ -282,8 +326,12 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 				return result, err
 			}
 			result.Events = append(result.Events, a.eventID())
-			if err := e.action(ctx, step.Action); err != nil {
+			routeEvent, err := e.action(ctx, step.Action)
+			if err != nil {
 				return result, fmt.Errorf("%s action %s: %w", plan.Name, step.Action, err)
+			}
+			if routeEvent != "" {
+				result.Events = append(result.Events, routeEvent)
 			}
 		}
 		if step.Predicate != "" {
@@ -333,6 +381,30 @@ func cloneCanonical(value map[string]string) map[string]string {
 	return clone
 }
 
+func cloneObservation(value Observation) Observation {
+	value.Canonical = cloneCanonical(value.Canonical)
+	value.CanonicalSequences = cloneIntMap(value.CanonicalSequences)
+	value.CanonicalSemanticStates = cloneCanonical(value.CanonicalSemanticStates)
+	value.CanonicalMaterializedSequences = cloneIntMap(value.CanonicalMaterializedSequences)
+	value.CustodyCounts = map[string]map[string]int64{}
+	for route, counts := range value.CustodyCounts {
+		copyCounts := make(map[string]int64, len(counts))
+		for event, count := range counts {
+			copyCounts[event] = count
+		}
+		value.CustodyCounts[route] = copyCounts
+	}
+	return value
+}
+
+func cloneIntMap(value map[string]int) map[string]int {
+	clone := make(map[string]int, len(value))
+	for key, item := range value {
+		clone[key] = item
+	}
+	return clone
+}
+
 func (e *Executor) runAggregate(ctx context.Context, plan ScenarioPlan) (ScenarioResult, error) {
 	result := ScenarioResult{Scenario: plan.Name, Status: "failed", Before: map[string]Observation{}, After: map[string]Observation{}}
 	for index, child := range plan.Children {
@@ -352,32 +424,30 @@ func (e *Executor) runAggregate(ctx context.Context, plan ScenarioPlan) (Scenari
 	return result, nil
 }
 
-func (e *Executor) action(ctx context.Context, action string) error {
-	a, err := parseAction(action)
+func (e *Executor) action(ctx context.Context, raw string) (string, error) {
+	a, err := parseAction(raw)
 	if err != nil {
-		return err
+		return "", err
 	}
 	switch a.kind {
 	case actionPost:
-		observed, err := e.bridge.Snapshot(ctx, a.device)
+		routeEvent, err := e.observeDeliveryRoute(ctx, a)
 		if err != nil {
-			return err
+			return "", err
 		}
-		if observed.Route != "" && observed.Route != "none" && observed.RoutePhase != "authenticated" {
-			return errors.New("delivery action has no authenticated route observation")
-		}
-		if observed.Route != "" && observed.Route != "none" {
-			e.deliveryRoute = &RouteEvidence{Route: observed.Route, Phase: observed.RoutePhase, Generation: observed.RouteGeneration, QueuedCount: observed.Outbox, QueuedBytes: observed.QueuedBytes}
-		}
-		return e.bridge.Post(ctx, a.device, a.tag, a.text)
+		return routeEvent, e.bridge.Post(ctx, a.device, a.tag, a.text)
 	case actionCancel:
-		return e.bridge.Cancel(ctx, a.device, a.tag)
+		routeEvent, err := e.observeDeliveryRoute(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return routeEvent, e.bridge.Cancel(ctx, a.device, a.tag)
 	case actionNetwork:
-		return e.bridge.SetNetwork(ctx, a.device, a.enabled)
+		return "", e.bridge.SetNetwork(ctx, a.device, a.enabled)
 	case actionForceStop:
-		return e.bridge.ForceStop(ctx, a.device)
+		return "", e.bridge.ForceStop(ctx, a.device)
 	case actionReconcile:
-		return e.bridge.Reconcile(ctx, a.device)
+		return "", e.bridge.Reconcile(ctx, a.device)
 	case actionLanAvailability:
 		if !a.enabled {
 			e.lanFaulted[a.device] = true
@@ -386,16 +456,63 @@ func (e *Executor) action(ctx context.Context, action string) error {
 		if err == nil && a.enabled {
 			e.lanFaulted[a.device] = false
 		}
-		return err
+		return "", err
+	case actionControl:
+		routeEvent := ""
+		if a.delivery {
+			var routeErr error
+			routeEvent, routeErr = e.observeDeliveryRoute(ctx, a)
+			if routeErr != nil {
+				return "", routeErr
+			}
+		}
+		response, err := e.bridge.Control(ctx, a.device, a.command, a.params)
+		if err != nil {
+			return "", err
+		}
+		if response.Code != "ok" {
+			return "", oracleFailure("control_rejected")
+		}
+		if a.command == "CALL_STATE" {
+			hash, sequence, err := parseCallStateControlResult(response, a.params["state"])
+			if err != nil {
+				return "", err
+			}
+			if e.trackedHash == "" {
+				e.trackedHash = hash
+			}
+			if e.trackedHash != hash || sequence != map[string]int{"ringing": 1, "active": 2, "idle": 3}[a.params["state"]] {
+				return "", oracleFailure("invalid_call_control")
+			}
+		}
+		return routeEvent, nil
 	case actionUnsupported:
-		return fmt.Errorf("%w: %s", ErrUnsupportedEnvironment, action)
+		return "", fmt.Errorf("%w: %s", ErrUnsupportedEnvironment, raw)
 	default:
-		return fmt.Errorf("unknown scenario action %q", action)
+		return "", fmt.Errorf("unknown scenario action %q", raw)
 	}
 }
 
+func (e *Executor) observeDeliveryRoute(ctx context.Context, a action) (string, error) {
+	observed, err := e.bridge.Snapshot(ctx, a.device)
+	if err != nil {
+		return "", err
+	}
+	if e.direct && (observed.Route != "lan" || observed.RoutePhase != "authenticated") {
+		return "", oracleFailure("missing_authenticated_lan")
+	}
+	if observed.Route != "" && observed.Route != "none" && observed.RoutePhase != "authenticated" {
+		return "", errors.New("delivery action has no authenticated route observation")
+	}
+	if observed.Route == "" || observed.Route == "none" {
+		return "", nil
+	}
+	e.deliveryRoute = &RouteEvidence{Route: observed.Route, Phase: observed.RoutePhase, Generation: observed.RouteGeneration, QueuedCount: observed.Outbox, QueuedBytes: observed.QueuedBytes}
+	return fmt.Sprintf("route:%s:%s:g%d", a.eventID(), observed.Route, observed.RouteGeneration), nil
+}
+
 func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) error {
-	return Eventually(ctx, 200*time.Millisecond, e.stepTimeout, func() (bool, error) {
+	err := Eventually(ctx, 200*time.Millisecond, e.stepTimeout, func() (bool, error) {
 		stateA, err := e.bridge.Snapshot(ctx, "A")
 		if err != nil {
 			return false, err
@@ -406,9 +523,114 @@ func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) er
 		}
 		return e.predicateSatisfied(name, predicate, stateA, stateB), nil
 	})
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return oracleFailure(oracleCode(predicate))
+	}
+	return err
 }
 
 func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) bool {
+	if strings.HasPrefix(predicate, "B.tracked.sequence:") {
+		want, err := strconv.Atoi(strings.TrimPrefix(predicate, "B.tracked.sequence:"))
+		if err != nil {
+			return false
+		}
+		if e.trackedHash == "" {
+			candidate := ""
+			for hash, sequence := range b.CanonicalSequences {
+				if sequence == want && e.baselineState["B"].CanonicalSequences[hash] != sequence {
+					if candidate != "" {
+						return false
+					}
+					candidate = hash
+				}
+			}
+			if candidate == "" {
+				return false
+			}
+			e.trackedHash = candidate
+		}
+		return b.Canonical[e.trackedHash] == "ACTIVE" && b.CanonicalSequences[e.trackedHash] == want &&
+			b.CanonicalMaterializedSequences[e.trackedHash] == want
+	}
+	if strings.HasPrefix(predicate, "B.call.semantic:") {
+		want := strings.TrimPrefix(predicate, "B.call.semantic:")
+		sequence := map[string]int{"RINGING": 1, "ACTIVE": 2, "IDLE": 3}[want]
+		return e.trackedHash != "" && b.CanonicalSemanticStates[e.trackedHash] == want &&
+			b.CanonicalSequences[e.trackedHash] == sequence && b.CanonicalMaterializedSequences[e.trackedHash] == sequence
+	}
+	if strings.HasSuffix(predicate, ".tracked.cancelled") {
+		state := a
+		if strings.HasPrefix(predicate, "B.") {
+			state = b
+		}
+		return e.trackedHash != "" && state.Canonical[e.trackedHash] == "CANCELLED"
+	}
+	if predicate == "B.tracked.no-resurrection" {
+		return e.trackedHash != "" && b.Canonical[e.trackedHash] == "CANCELLED"
+	}
+	if strings.HasPrefix(predicate, "A.custody.lan:") || strings.HasPrefix(predicate, "B.custody.lan:") {
+		parts := strings.Split(predicate, ":")
+		if len(parts) != 3 {
+			return false
+		}
+		want, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil || want <= 0 {
+			return false
+		}
+		device := predicate[:1]
+		state, before := a, e.baselineState[device]
+		if device == "B" {
+			state = b
+		}
+		return custodyCount(state, "lan", parts[1])-custodyCount(before, "lan", parts[1]) >= want
+	}
+	if strings.HasPrefix(predicate, "A.peer-receipt.delta:") || strings.HasPrefix(predicate, "B.peer-receipt.delta:") {
+		want, err := strconv.ParseInt(predicate[strings.LastIndex(predicate, ":")+1:], 10, 64)
+		if err != nil || want <= 0 {
+			return false
+		}
+		device := predicate[:1]
+		state := a
+		if device == "B" {
+			state = b
+		}
+		return state.PeerReceiptCount-e.baselineState[device].PeerReceiptCount >= want
+	}
+	if strings.HasPrefix(predicate, "B.user-dismiss.delta:") {
+		want, err := strconv.ParseInt(strings.TrimPrefix(predicate, "B.user-dismiss.delta:"), 10, 64)
+		return err == nil && b.UserDismissCount-e.baselineState["B"].UserDismissCount >= want
+	}
+	if strings.HasPrefix(predicate, "B.snapshot.") {
+		parts := strings.Split(predicate, ":")
+		if len(parts) != 2 {
+			return false
+		}
+		want, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || want <= 0 {
+			return false
+		}
+		before := e.baselineState["B"]
+		switch parts[0] {
+		case "B.snapshot.digest.delta":
+			return b.SnapshotDigestCount-before.SnapshotDigestCount >= want
+		case "B.snapshot.begin.delta":
+			return b.SnapshotBeginCount-before.SnapshotBeginCount >= want
+		case "B.snapshot.end.delta":
+			return b.SnapshotEndCount-before.SnapshotEndCount >= want
+		case "B.snapshot.commit.delta":
+			return b.SnapshotCommitCount-before.SnapshotCommitCount >= want
+		}
+	}
+	if predicate == "A.call-capture.enabled" {
+		return a.CallCaptureEnabled
+	}
+	if predicate == "direct.terminal" {
+		return a.Terminal && b.Terminal && a.Outbox == 0 && b.Outbox == 0 &&
+			a.ActiveInbound == 0 && b.ActiveInbound == 0 &&
+			a.PendingMaterialization == 0 && b.PendingMaterialization == 0 &&
+			a.LoopEvents == 0 && b.LoopEvents == 0
+	}
 	if strings.HasPrefix(predicate, "B.mirror.active:") {
 		return hasNewActive(e.baseline["B"], b.Canonical)
 	}
@@ -416,6 +638,58 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 		return !hasNewActive(e.baseline["B"], b.Canonical)
 	}
 	return predicateSatisfied(name, predicate, a, b)
+}
+
+func custodyCount(state Observation, route, event string) int64 {
+	if state.CustodyCounts == nil || state.CustodyCounts[route] == nil {
+		return 0
+	}
+	return state.CustodyCounts[route][event]
+}
+
+type oracleFailure string
+
+func (e oracleFailure) Error() string { return string(e) }
+
+func scenarioExecutionErrorCode(err error) string {
+	var oracle oracleFailure
+	if errors.As(err, &oracle) {
+		return string(oracle)
+	}
+	return errorCode(err)
+}
+
+func oracleCode(predicate string) string {
+	switch {
+	case strings.Contains(predicate, ".route."):
+		return "missing_authenticated_lan"
+	case strings.Contains(predicate, "tracked.sequence"):
+		return "missing_sequence_transition"
+	case strings.Contains(predicate, "call.semantic"):
+		return "missing_call_state_transition"
+	case strings.Contains(predicate, "user-dismiss"):
+		return "missing_user_dismissal"
+	case strings.Contains(predicate, "tracked.cancelled"):
+		return "missing_exact_cancellation"
+	case strings.Contains(predicate, "tracked.no-resurrection"):
+		return "missing_no_resurrection"
+	case strings.Contains(predicate, "snapshot.digest"):
+		return "missing_snapshot_digest"
+	case strings.Contains(predicate, "snapshot.begin"):
+		return "missing_snapshot_begin"
+	case strings.Contains(predicate, "snapshot.end"):
+		return "missing_snapshot_end"
+	case strings.Contains(predicate, "snapshot.commit"):
+		return "missing_snapshot_commit"
+	case strings.Contains(predicate, "custody"):
+		return "missing_lan_custody"
+	case strings.Contains(predicate, "peer-receipt"):
+		return "missing_peer_receipt"
+	case predicate == "direct.terminal":
+		return "missing_terminal_convergence"
+	default:
+		return "missing_required_observation"
+	}
 }
 
 func hasNewActive(baseline, current map[string]string) bool {

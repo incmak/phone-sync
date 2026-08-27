@@ -123,6 +123,58 @@ func TestRejectSensitiveEvidenceAllowsOrdinaryScenarioEvidence(t *testing.T) {
 	}
 }
 
+func TestEvidenceSanitizerAllowsBoundedSnapshotCommitCount(t *testing.T) {
+	result := ScenarioResult{
+		Scenario: "lan-direct-snapshot-receipt", Status: "passed", Events: []string{"predicate:B.snapshot.commit.delta:1"}, Route: validRoute(),
+		Before: map[string]Observation{
+			"A": {Health: "stopped", Route: "none", RoutePhase: "idle"},
+			"B": {Health: "stopped", Route: "none", RoutePhase: "idle"},
+		},
+		After: map[string]Observation{
+			"A": {Health: "stopped", Route: "none", RoutePhase: "idle"},
+			"B": {Health: "stopped", Route: "none", RoutePhase: "idle", SnapshotCommitCount: 1},
+		},
+	}
+	if err := RejectSensitiveEvidence(result); err != nil {
+		t.Fatalf("bounded content-free snapshot commit count was rejected: %v", err)
+	}
+}
+
+func TestEvidenceSanitizerRejectsUnknownAndOutOfRangeSnapshotCommitEvidence(t *testing.T) {
+	observation := func() map[string]any {
+		return map[string]any{
+			"health": "connected", "call_capture_enabled": false, "outbox": 0,
+			"active_inbound": 0, "pending_materialization": 0, "mirror": false,
+			"sequence": 0, "terminal": true, "loop_events": 0, "route": "lan",
+			"route_phase": "authenticated", "queued_bytes": 0, "route_generation": 1,
+		}
+	}
+	base := func() map[string]any {
+		return map[string]any{
+			"scenario": "post", "status": "passed", "events": []any{"post"},
+			"before": map[string]any{"A": observation(), "B": observation()},
+			"after":  map[string]any{"A": observation(), "B": observation()},
+			"route":  map[string]any{"route": "lan", "phase": "authenticated", "route_generation": 1, "queued_count": 0, "queued_bytes": 0},
+		}
+	}
+	for name, value := range map[string]any{
+		"negative": -1, "above bound": 1_000_000_001, "wrong type": "one",
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := base()
+			payload["after"].(map[string]any)["B"].(map[string]any)["snapshot_commit_count"] = value
+			if err := RejectSensitiveEvidence(payload); err == nil {
+				t.Fatal("invalid snapshot commit count passed")
+			}
+		})
+	}
+	payload := base()
+	payload["after"].(map[string]any)["B"].(map[string]any)["snapshot_commit_detail"] = "looks-harmless"
+	if err := RejectSensitiveEvidence(payload); err == nil {
+		t.Fatal("unknown snapshot commit evidence passed")
+	}
+}
+
 func TestRejectSensitiveEvidenceAllowsADigestButNotAKey(t *testing.T) {
 	// A hex digest is a legitimate, non-reversible evidence field.
 	digest := map[string]string{

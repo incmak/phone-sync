@@ -126,10 +126,6 @@ func runWithOptions(ctx context.Context, cfg options) error {
 	}
 	if cfg.scenario != "status" {
 		bridge := scenario.ADBBridge{A: a, B: b, ADBA: adbA, ADBB: adbB, Package: cfg.packageName}
-		if cfg.scenario == "call-state" {
-			_, err := scenario.RunSyntheticCallState(ctx, bridge, cfg.timeout)
-			return err
-		}
 		result, runErr := scenario.NewExecutor(bridge, cfg.timeout).RunResult(ctx, cfg.scenario)
 		if cfg.scenarioEvidenceDir != "" {
 			if evidenceErr := scenario.WriteEvidenceArtifacts(cfg.scenarioEvidenceDir, result); evidenceErr != nil {
@@ -153,7 +149,7 @@ func runWithOptions(ctx context.Context, cfg options) error {
 }
 
 func validateScenarioBeforeADB(name string) error {
-	if name == "status" || name == "pair" || name == "offline-pairing" || name == "call-state" {
+	if name == "status" || name == "pair" || name == "offline-pairing" {
 		return nil
 	}
 	if err := metrics.ValidateScenarioID(name); err == nil {

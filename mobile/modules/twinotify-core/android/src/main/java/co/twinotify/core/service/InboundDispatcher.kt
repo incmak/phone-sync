@@ -210,9 +210,9 @@ class InboundDispatcher(
             return InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
         }
         if (inner.type == "state.snapshot.end") {
-            val result = runCatching { snapshots.onEnd(inner) }
+            val result = recordSnapshotCommitIfCommitted(runCatching { snapshots.onEnd(inner) }
                 .onFailure { android.util.Log.w("Twinotify", "snapshot end rejected", it) }
-                .getOrNull()
+            )
             if (result is SnapshotConvergence.Committed) {
                 val localDeviceId = DeviceIdentity.getOrCreate(ctx)
                 NotificationMaterializer(
@@ -457,4 +457,12 @@ class InboundDispatcher(
     private suspend fun requestServiceStopAfterPeerUnpair() {
         ctx.stopService(Intent(ctx, SyncService::class.java))
     }
+}
+
+internal fun recordSnapshotCommitIfCommitted(result: Result<SnapshotConvergence>): SnapshotConvergence? {
+    val convergence = result.getOrNull()
+    if (convergence is SnapshotConvergence.Committed) {
+        ProductObservationTracker.recordSnapshotCommit()
+    }
+    return convergence
 }
