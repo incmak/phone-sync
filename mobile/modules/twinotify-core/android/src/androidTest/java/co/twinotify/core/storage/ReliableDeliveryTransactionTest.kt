@@ -315,6 +315,91 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun lanFirstThenRelayAcceptanceRecordsBothCustodyFacts() = runBlocking {
+        dao.insertOutbound(outbound("lan-relay", sequence = 1, eventType = "notif.post"))
+
+        assertEquals(
+            CustodyAcceptanceResult.Accepted,
+            dao.acceptCustody("lan-relay", CustodyRoute.LAN.name, acceptedAt = 100, retryAt = 200),
+        )
+        assertEquals(
+            CustodyAcceptanceResult.AlreadyAccepted,
+            dao.acceptCustody("lan-relay", CustodyRoute.RELAY.name, acceptedAt = 300, retryAt = 400),
+        )
+
+        val row = dao.outboundMessage("lan-relay")!!
+        assertEquals(100, row.custodyAcceptedAt)
+        assertEquals(CustodyRoute.LAN.name, row.custodyRoute)
+        assertEquals("ACCEPTED", row.relayCustodyState)
+    }
+
+    @Test
+    fun localExpiryTerminalizesOnlyKnownNoRelayRowsOnceAndPreservesRemainingOrder() = runBlocking {
+        dao.insertOutbound(outbound("new-expired", 1, "notif.post").copy(createdAt = 7, expiresAt = 1_000))
+        dao.insertOutbound(outbound("relay-expired", 2, "notif.post").copy(createdAt = 7, expiresAt = 999))
+        dao.acceptCustody("relay-expired", CustodyRoute.RELAY.name, acceptedAt = 100, retryAt = 200)
+        dao.insertOutbound(outbound("lan-expired", 3, "notif.post").copy(createdAt = 7, expiresAt = 999))
+        dao.acceptCustody("lan-expired", CustodyRoute.LAN.name, acceptedAt = 100, retryAt = 200)
+        dao.insertOutbound(outbound("unknown-expired", 4, "notif.post").copy(
+            createdAt = 7,
+            expiresAt = 999,
+            state = "ACCEPTED",
+            custodyAcceptedAt = 100,
+            custodyRoute = CustodyRoute.LAN.name,
+            relayCustodyState = "UNKNOWN",
+        ))
+        dao.insertOutbound(outbound("fresh", 5, "notif.post").copy(createdAt = 7, expiresAt = 1_001))
+
+        assertEquals(2, dao.expireLocal(now = 1_000))
+        assertEquals(0, dao.expireLocal(now = 1_000))
+        assertEquals(
+            listOf("relay-expired", "unknown-expired", "fresh"),
+            dao.sendable(now = 1_000, limit = 10).map { it.msgId },
+        )
+        db.openHelper.readableDatabase.query(
+            "SELECT msgId,eventType,status,detailCode FROM activity_event " +
+                "WHERE msgId IN ('new-expired','lan-expired') ORDER BY occurredAt,msgId",
+        ).use { activities ->
+            val observed = buildList {
+                while (activities.moveToNext()) {
+                    add(List(4) { activities.getString(it) })
+                }
+            }
+            assertEquals(
+                listOf(
+                    listOf("lan-expired", "delivery.expired", "expired", "local_expired"),
+                    listOf("new-expired", "delivery.expired", "expired", "local_expired"),
+                ),
+                observed,
+            )
+        }
+    }
+
+    @Test
+    fun localAndRelayExpiryRaceProducesOneTerminalActivity() = runBlocking {
+        dao.insertOutbound(outbound("local-wins", 1, "notif.post").copy(expiresAt = 1_000))
+        assertEquals(1, dao.expireLocal(1_000))
+        assertEquals(RelayReceiptResult.AlreadyTerminal, dao.expireRelay("local-wins", 1_001))
+
+        dao.insertOutbound(outbound("relay-wins", 2, "notif.post").copy(expiresAt = 1_000))
+        assertEquals(RelayReceiptResult.Deleted, dao.expireRelay("relay-wins", 999))
+        assertEquals(0, dao.expireLocal(1_000))
+
+        db.openHelper.readableDatabase.query(
+            "SELECT msgId,COUNT(*) FROM activity_event " +
+                "WHERE msgId IN ('local-wins','relay-wins') GROUP BY msgId ORDER BY msgId",
+        ).use { activities ->
+            assertTrue(activities.moveToFirst())
+            assertEquals("local-wins", activities.getString(0))
+            assertEquals(1, activities.getInt(1))
+            assertTrue(activities.moveToNext())
+            assertEquals("relay-wins", activities.getString(0))
+            assertEquals(1, activities.getInt(1))
+            assertFalse(activities.moveToNext())
+        }
+    }
+
+    @Test
     fun custodyReceiptDeleteRollsBackWhenAckTransitionFails() = runBlocking {
         val receipt = outbound("receipt-rollback", sequence = null, eventType = "peer.receipt").copy(
             requiresPeerReceipt = false,

@@ -122,6 +122,21 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
     }
 }
 
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE outbound_message ADD COLUMN relayCustodyState TEXT NOT NULL DEFAULT 'NONE'",
+        )
+        db.execSQL(
+            "UPDATE outbound_message SET relayCustodyState = CASE " +
+                "WHEN state='NEW' THEN 'NONE' " +
+                "WHEN custodyRoute='RELAY' THEN 'ACCEPTED' " +
+                "WHEN state='ACCEPTED' THEN 'UNKNOWN' " +
+                "ELSE 'NONE' END",
+        )
+    }
+}
+
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
 
@@ -135,7 +150,13 @@ object NotificationDb {
                 super.onOpen(db)
                 db.execSQL("PRAGMA foreign_keys = ON")
             }
-        }).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { instance = it }
+        }).addMigrations(
+            MIGRATION_1_2,
+            MIGRATION_2_3,
+            MIGRATION_3_4,
+            MIGRATION_4_5,
+            MIGRATION_5_6,
+        ).build().also { instance = it }
     }
 }
 
@@ -152,7 +173,7 @@ object NotificationDb {
         SnapshotStage::class,
         MaterializationRetry::class,
     ],
-    version = 5,
+    version = 6,
 )
 abstract class NotificationDbImpl : RoomDatabase() {
     abstract fun notificationMapDao(): NotificationMapDao

@@ -12,7 +12,7 @@ class EnvelopeAuthenticatorTest {
         val decryptor = PayloadDecryptor {
             validInnerJson.replace(INNER_ID, DIFFERENT_ID).encodeToByteArray()
         }
-        val authenticator = EnvelopeAuthenticator(decryptor, peerDeviceId = "dev-a")
+        val authenticator = authenticator(decryptor)
 
         assertFailsWith<EnvelopeMismatchException> { authenticator.open(validOuterJson) }
     }
@@ -23,14 +23,14 @@ class EnvelopeAuthenticatorTest {
         val decryptor = PayloadDecryptor { calls += 1; byteArrayOf() }
 
         assertFailsWith<ProtocolException> {
-            EnvelopeAuthenticator(decryptor, "dev-a").open(validOuterJson.replace(VALID_NONCE, "%%%"))
+            authenticator(decryptor).open(validOuterJson.replace(VALID_NONCE, "%%%"))
         }
         assertEquals(0, calls)
     }
 
     @Test
     fun validEnvelope_authenticatesExactBytesAndComputesExactDigest() {
-        val opened = EnvelopeAuthenticator(PayloadDecryptor { validInnerJson.encodeToByteArray() }, "dev-a")
+        val opened = authenticator(PayloadDecryptor { validInnerJson.encodeToByteArray() })
             .open(validOuterJson)
 
         val expectedDigest = MessageDigest.getInstance("SHA-256")
@@ -54,9 +54,63 @@ class EnvelopeAuthenticatorTest {
         val inner = fixture.getJSONObject("inner").toString()
 
         assertFailsWith<EnvelopeMismatchException> {
-            EnvelopeAuthenticator(PayloadDecryptor { inner.encodeToByteArray() }, "dev-a").open(outer)
+            authenticator(PayloadDecryptor { inner.encodeToByteArray() }).open(outer)
         }
     }
+
+    @Test
+    fun authenticatedExpiry_acceptsExactFiveMinuteSkewBoundary() {
+        val expiry = OUTER_CREATED_AT + 10_000L
+        val opened = EnvelopeAuthenticator(
+            decryptor = PayloadDecryptor { innerWithExpiry(expiry).encodeToByteArray() },
+            peerDeviceId = "dev-a",
+            clock = { expiry + 300_000L },
+        ).open(validOuterJson)
+
+        assertEquals(expiry, opened.inner.expiresAt)
+    }
+
+    @Test
+    fun authenticatedExpiry_rejectsOneMillisecondBeyondSkewAfterDecryption() {
+        val expiry = OUTER_CREATED_AT + 10_000L
+        var decryptions = 0
+        val error = assertFailsWith<ProtocolException> {
+            EnvelopeAuthenticator(
+                decryptor = PayloadDecryptor {
+                    decryptions += 1
+                    innerWithExpiry(expiry).encodeToByteArray()
+                },
+                peerDeviceId = "dev-a",
+                clock = { expiry + 300_001L },
+            ).open(validOuterJson)
+        }
+
+        assertEquals(1, decryptions)
+        assertEquals("authenticated v2 envelope expired", error.message)
+    }
+
+    @Test
+    fun authenticatedExpiry_saturatesNearLongMaxValue() {
+        val expiry = Long.MAX_VALUE - 1L
+        val opened = EnvelopeAuthenticator(
+            decryptor = PayloadDecryptor { innerWithExpiry(expiry).encodeToByteArray() },
+            peerDeviceId = "dev-a",
+            clock = { Long.MAX_VALUE },
+        ).open(validOuterJson)
+
+        assertEquals(expiry, opened.inner.expiresAt)
+    }
+
+    private fun innerWithExpiry(expiresAt: Long): String = validInnerJson.replace(
+        "\"expires_at\":1786353748000",
+        "\"expires_at\":$expiresAt",
+    )
+
+    private fun authenticator(decryptor: PayloadDecryptor) = EnvelopeAuthenticator(
+        decryptor = decryptor,
+        peerDeviceId = "dev-a",
+        clock = { OUTER_CREATED_AT },
+    )
 
     private companion object {
         const val INNER_ID = "11111111-1111-4111-8111-111111111111"

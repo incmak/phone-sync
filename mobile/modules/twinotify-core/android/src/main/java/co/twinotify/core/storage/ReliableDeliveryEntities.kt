@@ -3,6 +3,7 @@ package co.twinotify.core.storage
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
 
 @Entity(
     tableName = "outbound_message",
@@ -26,7 +27,12 @@ data class OutboundMessage(
     val state: String,
     val lastError: String?,
     val requiresPeerReceipt: Boolean,
-)
+    @ColumnInfo(defaultValue = "'NONE'") val relayCustodyState: String = "NONE",
+) {
+    init {
+        require(relayCustodyState in setOf("NONE", "UNKNOWN", "ACCEPTED"))
+    }
+}
 
 @Entity(
     tableName = "inbound_message",

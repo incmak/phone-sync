@@ -6,6 +6,9 @@ import co.twinotify.core.service.OutboxRepository
 import co.twinotify.core.service.OutboxStore
 import co.twinotify.core.service.RelayAckRecord
 import co.twinotify.core.service.RelayRejectionResult
+import co.twinotify.core.protocol.EnvelopeAuthenticator
+import co.twinotify.core.protocol.PayloadDecryptor
+import co.twinotify.core.protocol.ProtocolException
 import co.twinotify.core.storage.CustodyAcceptanceResult
 import co.twinotify.core.storage.LegacyForwardResult
 import co.twinotify.core.storage.OutboundMessage
@@ -166,6 +169,36 @@ class LanTransportTest {
         assertTrue(connection.written.none { it is LanFrame.Accepted })
         assertEquals(LanFrame.Close("id_conflict"), connection.written.single())
         assertEquals(LanTransportEvent.Closed("id_conflict"), events.last())
+    }
+
+    @Test
+    fun expiredAuthenticatedInboundEmitsNoAcceptanceAndCannotMaterialize() = runTest {
+        var materialized = false
+        val connection = FakeConnection()
+        val outer = """{"v":2,"type":"enc","msg_id":"$MSG_A","origin_device":"dev-a","created_at":1000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"YQ=="}"""
+        val inner = """{"v":2,"msg_id":"$MSG_A","origin_device":"dev-a","type":"notif.cancel","created_at":1000,"expires_at":2000,"canon_id":"canon-a","sequence":1,"payload":{}}"""
+        val transport = LanTransport(connection, outbox(FakeStore())) { raw ->
+            try {
+                val opened = EnvelopeAuthenticator(
+                    PayloadDecryptor { inner.encodeToByteArray() },
+                    peerDeviceId = "dev-a",
+                    clock = { 302_001L },
+                ).open(raw)
+                materialized = true
+                InboundDispatchResult.Accepted(opened.inner.msgId, opened.envelopeSha256)
+            } catch (_: ProtocolException) {
+                InboundDispatchResult.Rejected("auth_failed")
+            }
+        }
+        val collected = collectEvents(transport)
+
+        connection.deliver(LanFrame.Put(outer.encodeToByteArray()))
+        val events = collected.await()
+
+        assertFalse(materialized)
+        assertTrue(connection.written.none { it is LanFrame.Accepted })
+        assertEquals(LanFrame.Close("auth_failed"), connection.written.single())
+        assertEquals(LanTransportEvent.Closed("auth_failed"), events.last())
     }
 
     @Test

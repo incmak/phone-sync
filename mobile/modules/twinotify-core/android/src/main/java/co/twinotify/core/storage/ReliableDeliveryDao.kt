@@ -123,6 +123,13 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     abstract suspend fun sendable(now: Long, limit: Int): List<OutboundMessage>
 
     @Query(
+        "SELECT * FROM outbound_message WHERE protocolVersion=2 AND expiresAt <= :now AND " +
+            "relayCustodyState='NONE' AND ((state='NEW' AND custodyAcceptedAt IS NULL) OR " +
+            "state='ACCEPTED') ORDER BY createdAt, rowid",
+    )
+    protected abstract suspend fun locallyExpired(now: Long): List<OutboundMessage>
+
+    @Query(
         "UPDATE outbound_message SET attempts=attempts + 1, nextAttemptAt=:retryAt " +
             "WHERE msgId=:msgId AND state IN ('NEW','ACCEPTED')",
     )
@@ -161,6 +168,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         require(activityRetentionMs >= 0)
         require(tombstoneRetentionMs >= 0)
         var removed = 0
+        removed += expireLocal(now)
         removed += deleteActivityBefore(now - activityRetentionMs)
         removed += deleteInboundBefore(now - activityRetentionMs)
         removed += deleteTerminalOutboundBefore(now - activityRetentionMs)
@@ -207,6 +215,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         acceptedAt: Long,
         retryAt: Long,
     ): Int
+
+    @Query(
+        "UPDATE outbound_message SET relayCustodyState='ACCEPTED' WHERE msgId=:msgId " +
+            "AND state IN ('NEW','ACCEPTED') AND relayCustodyState IN ('NONE','UNKNOWN')",
+    )
+    protected abstract suspend fun markRelayCustodyAccepted(msgId: String): Int
 
     @Query("SELECT msgId, envelopeSha256 FROM inbound_message WHERE relayAckState='READY' ORDER BY committedAt LIMIT :limit")
     abstract suspend fun readyRelayAcks(limit: Int): List<co.twinotify.core.service.RelayAckRecord>
@@ -571,10 +585,37 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
                 }
             }
         }
+        if (route == "RELAY") markRelayCustodyAccepted(msgId)
         if (row.state == "ACCEPTED") return CustodyAcceptanceResult.AlreadyAccepted
         if (row.state != "NEW") return CustodyAcceptanceResult.AlreadyAccepted
         check(acceptNewCustody(msgId, route, acceptedAt, retryAt) == 1)
         return CustodyAcceptanceResult.Accepted
+    }
+
+    /** Client-clock expiry is authoritative only while relay custody is known absent. */
+    @Transaction
+    open suspend fun expireLocal(now: Long): Int {
+        var expired = 0
+        locallyExpired(now).forEach { row ->
+            if (
+                moveToTerminalActivity(
+                    row.msgId,
+                    ActivityEvent(
+                        eventId = java.util.UUID.randomUUID().toString(),
+                        msgId = row.msgId,
+                        packageName = null,
+                        eventType = "delivery.expired",
+                        status = "expired",
+                        byteSize = row.byteSize,
+                        occurredAt = now,
+                        detailCode = "local_expired",
+                    ),
+                ) == TerminalMovementResult.Moved
+            ) {
+                expired += 1
+            }
+        }
+        return expired
     }
 
     /** Apply an authenticated peer receipt with digest equality and terminal metadata only. */

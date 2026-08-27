@@ -157,9 +157,54 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate5To6_assignsRelayCustodyConservativelyWithoutLosingFirstCustody() {
+        helper.createDatabase(TEST_DB_V6, 5).apply {
+            fun insert(msgId: String, state: String, acceptedAt: String, route: String) {
+                execSQL(
+                    "INSERT INTO outbound_message(" +
+                        "msgId,canonId,sequence,eventType,protocolVersion,envelopeJson,envelopeSha256," +
+                        "byteSize,createdAt,expiresAt,custodyAcceptedAt,custodyRoute,attempts,nextAttemptAt," +
+                        "state,lastError,requiresPeerReceipt) VALUES(" +
+                        "'$msgId',NULL,NULL,'notif.post',2,'{}','digest-$msgId',2,10,20," +
+                        "$acceptedAt,$route,0,10,'$state',NULL,1)",
+                )
+            }
+            insert("new", "NEW", "NULL", "NULL")
+            insert("relay", "ACCEPTED", "11", "'RELAY'")
+            insert("lan-ambiguous", "ACCEPTED", "12", "'LAN'")
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB_V6, 6, true, MIGRATION_5_6)
+        db.query(
+            "SELECT msgId,custodyAcceptedAt,custodyRoute,relayCustodyState " +
+                "FROM outbound_message ORDER BY msgId",
+        ).use { rows ->
+            assertTrue(rows.moveToFirst())
+            assertEquals("lan-ambiguous", rows.getString(0))
+            assertEquals(12, rows.getLong(1))
+            assertEquals("LAN", rows.getString(2))
+            assertEquals("UNKNOWN", rows.getString(3))
+            assertTrue(rows.moveToNext())
+            assertEquals("new", rows.getString(0))
+            assertTrue(rows.isNull(1))
+            assertTrue(rows.isNull(2))
+            assertEquals("NONE", rows.getString(3))
+            assertTrue(rows.moveToNext())
+            assertEquals("relay", rows.getString(0))
+            assertEquals(11, rows.getLong(1))
+            assertEquals("RELAY", rows.getString(2))
+            assertEquals("ACCEPTED", rows.getString(3))
+            assertTrue(!rows.moveToNext())
+        }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
         const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"
         const val TEST_DB_V5 = "reliable-delivery-migration-v5-test"
+        const val TEST_DB_V6 = "reliable-delivery-migration-v6-test"
     }
 }

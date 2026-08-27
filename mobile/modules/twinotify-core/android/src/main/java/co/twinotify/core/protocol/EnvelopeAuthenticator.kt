@@ -14,6 +14,7 @@ import java.security.MessageDigest
 class EnvelopeAuthenticator(
     private val decryptor: PayloadDecryptor,
     private val peerDeviceId: String,
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
     init {
         require(peerDeviceId.isNotEmpty()) { "paired peer device ID is required" }
@@ -36,6 +37,14 @@ class EnvelopeAuthenticator(
         }
         val inner = ProtocolJson.decodeInner(decodeUtf8(plaintext))
         validateOuterAndInner(outer, inner)
+        val acceptedThrough = if (inner.expiresAt > Long.MAX_VALUE - EXPIRY_SKEW_MS) {
+            Long.MAX_VALUE
+        } else {
+            inner.expiresAt + EXPIRY_SKEW_MS
+        }
+        if (clock() > acceptedThrough) {
+            throw ProtocolException("authenticated v2 envelope expired")
+        }
         return AuthenticatedEnvelope(
             outer = outer,
             inner = inner,
@@ -71,4 +80,8 @@ class EnvelopeAuthenticator(
     private fun sha256Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+    private companion object {
+        const val EXPIRY_SKEW_MS = 300_000L
+    }
 }

@@ -52,6 +52,58 @@ class OutboxRepositoryTest {
     }
 
     @Test
+    fun lanFirstThenRelayAcceptanceRecordsRelayCustodyWithoutChangingFirstRoute() = kotlinx.coroutines.test.runTest {
+        val store = FakeOutboxStore()
+        store.rows["m1"] = message("m1", requiresPeerReceipt = true)
+        val repo = OutboxRepository(store, clock)
+
+        assertEquals(OutboxTransition.Retained, repo.onLanAccepted("m1", 1_000))
+        assertEquals(OutboxTransition.Retained, repo.onRelayAccepted("m1", 2_000))
+
+        val row = store.rows.getValue("m1")
+        assertEquals(1_000, row.custodyAcceptedAt)
+        assertEquals("LAN", row.custodyRoute)
+        assertEquals("ACCEPTED", row.relayCustodyState)
+    }
+
+    @Test
+    fun sendableTerminalizesOnlyKnownNoRelayExpiryOnceBeforeSelection() = kotlinx.coroutines.test.runTest {
+        val store = FakeOutboxStore()
+        store.rows["new-expired"] = message("new-expired", true).copy(expiresAt = 1_000)
+        store.rows["lan-expired"] = message("lan-expired", true).copy(
+            expiresAt = 999,
+            state = "ACCEPTED",
+            custodyAcceptedAt = 500,
+            custodyRoute = "LAN",
+        )
+        store.rows["relay-expired"] = message("relay-expired", true).copy(
+            expiresAt = 999,
+            state = "ACCEPTED",
+            custodyAcceptedAt = 500,
+            custodyRoute = "RELAY",
+            relayCustodyState = "ACCEPTED",
+        )
+        store.rows["unknown-expired"] = message("unknown-expired", true).copy(
+            expiresAt = 999,
+            state = "ACCEPTED",
+            custodyAcceptedAt = 500,
+            custodyRoute = "LAN",
+            relayCustodyState = "UNKNOWN",
+        )
+        store.rows["fresh"] = message("fresh", true).copy(expiresAt = 1_001)
+        val repo = OutboxRepository(store, clock)
+
+        assertEquals(
+            listOf("relay-expired", "unknown-expired", "fresh"),
+            repo.sendable(now = 1_000).map { it.msgId },
+        )
+        assertEquals(listOf("new-expired", "lan-expired"), store.localExpirations)
+
+        repo.sendable(now = 1_000)
+        assertEquals(listOf("new-expired", "lan-expired"), store.localExpirations)
+    }
+
+    @Test
     fun legacyRowIsDeletedOnlyAfterLegacyForwarded() = kotlinx.coroutines.test.runTest {
         val store = FakeOutboxStore()
         store.rows["legacy"] = message("legacy", requiresPeerReceipt = true).copy(protocolVersion = 1)
@@ -66,10 +118,23 @@ class OutboxRepositoryTest {
         protocolVersion = 2, envelopeJson = "{}", envelopeSha256 = digest, byteSize = 2, createdAt = 1,
         expiresAt = 10_000, custodyAcceptedAt = null, custodyRoute = null, attempts = 0, nextAttemptAt = 1,
         state = "NEW", lastError = null, requiresPeerReceipt = requiresPeerReceipt,
+        relayCustodyState = "NONE",
     )
 
     private class FakeOutboxStore : OutboxStore {
         val rows = linkedMapOf<String, OutboundMessage>()
+        val localExpirations = mutableListOf<String>()
+        override suspend fun expireLocal(now: Long): Int {
+            val expired = rows.values.filter {
+                it.expiresAt <= now && it.relayCustodyState == "NONE" &&
+                    (it.state == "NEW" || it.state == "ACCEPTED")
+            }
+            expired.forEach {
+                rows.remove(it.msgId)
+                localExpirations += it.msgId
+            }
+            return expired.size
+        }
         override suspend fun sendable(now: Long, limit: Int) = rows.values.filter { it.nextAttemptAt <= now }.take(limit)
         override suspend fun markSent(msgId: String, retryAt: Long): Int {
             val row = rows[msgId] ?: return 0
@@ -86,11 +151,17 @@ class OutboxRepositoryTest {
         ): CustodyAcceptanceResult {
             val row = rows[msgId] ?: return CustodyAcceptanceResult.Missing
             if (!row.requiresPeerReceipt) { rows.remove(msgId); return CustodyAcceptanceResult.DeletedReceipt }
-            if (row.state == "ACCEPTED") return CustodyAcceptanceResult.AlreadyAccepted
+            if (row.state == "ACCEPTED") {
+                if (route == CustodyRoute.RELAY) {
+                    rows[msgId] = row.copy(relayCustodyState = "ACCEPTED")
+                }
+                return CustodyAcceptanceResult.AlreadyAccepted
+            }
             rows[msgId] = row.copy(
                 state = "ACCEPTED",
                 custodyAcceptedAt = acceptedAt,
                 custodyRoute = route.name,
+                relayCustodyState = if (route == CustodyRoute.RELAY) "ACCEPTED" else "NONE",
                 nextAttemptAt = retryAt,
             )
             return CustodyAcceptanceResult.Accepted

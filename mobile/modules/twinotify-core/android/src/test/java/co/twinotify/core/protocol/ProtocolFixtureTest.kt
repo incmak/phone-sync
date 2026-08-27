@@ -79,7 +79,11 @@ class ProtocolFixtureTest {
                     val outer = fixture.getJSONObject("outer").toString()
                     val inner = fixture.getJSONObject("inner").toString()
                     val error = assertFailsWith<EnvelopeMismatchException> {
-                        EnvelopeAuthenticator(PayloadDecryptor { inner.encodeToByteArray() }, "dev-a").open(outer)
+                        EnvelopeAuthenticator(
+                            PayloadDecryptor { inner.encodeToByteArray() },
+                            "dev-a",
+                            clock = { 0L },
+                        ).open(outer)
                     }
                     assertEquals("outer and inner msg_id differ", error.message)
                     assertEquals(expectedCode, observedFixtureCode(error))

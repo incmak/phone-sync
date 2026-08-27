@@ -9,6 +9,7 @@ import co.twinotify.core.storage.RelayReceiptResult
 
 /** A narrow store seam keeps custody transitions deterministic and easy to test without Room. */
 interface OutboxStore {
+    suspend fun expireLocal(now: Long): Int = 0
     suspend fun sendable(now: Long, limit: Int): List<OutboundMessage>
     suspend fun markSent(msgId: String, retryAt: Long): Int
     suspend fun legacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult
@@ -68,8 +69,10 @@ class OutboxRepository(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val retryPolicy: RetryPolicy = RetryPolicy(),
 ) {
-    suspend fun sendable(limit: Int = 32, now: Long = clock()): List<OutboundMessage> =
-        store.sendable(now, limit.coerceIn(1, 32))
+    suspend fun sendable(limit: Int = 32, now: Long = clock()): List<OutboundMessage> {
+        store.expireLocal(now)
+        return store.sendable(now, limit.coerceIn(1, 32))
+    }
 
     suspend fun markSent(msgId: String, attempt: Int, now: Long = clock()): Boolean {
         val retryAt = now + retryPolicy.delay(attempt)
@@ -176,6 +179,7 @@ data class RetryPolicy(
 
 /** Room adapter; all multi-field custody changes are transactional DAO operations. */
 class DaoOutboxStore(private val dao: ReliableDeliveryDao) : OutboxStore {
+    override suspend fun expireLocal(now: Long): Int = dao.expireLocal(now)
     override suspend fun sendable(now: Long, limit: Int): List<OutboundMessage> = dao.sendable(now, limit)
     override suspend fun markSent(msgId: String, retryAt: Long): Int = dao.markSent(msgId, retryAt)
     override suspend fun legacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult = dao.markLegacyForwarded(msgId, forwardedAt)
