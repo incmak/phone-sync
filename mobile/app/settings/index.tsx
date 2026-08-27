@@ -3,6 +3,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,8 +14,8 @@ import {
   useTheme,
   TwRow,
   TwSwitch,
-  TwCard,
 } from '../../components';
+import { HandoffDisclosureMark } from '../../components/HandoffTrace';
 import { useSyncStatus } from '../../hooks/useSyncStatus';
 import TwinotifyCoreModule, { PairStatus, SyncState } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../../state/onboardingState';
@@ -36,6 +37,8 @@ function connectionLabel(state: SyncState): string {
 export default function SettingsScreen() {
   const theme = useTheme();
   const { state } = useSyncStatus();
+  const { width } = useWindowDimensions();
+  const horizontalGutter = width <= 360 ? 16 : 22;
 
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
   const [relayUrl, setRelayUrl] = useState<string | null | undefined>(undefined);
@@ -71,44 +74,41 @@ export default function SettingsScreen() {
   const version = Constants.expoConfig?.version ?? '1.0.0';
 
   const sectionHeader = (label: string) => (
-    <Text style={[styles.sectionHeader, { color: theme.ink3, fontFamily: theme.fonts.uiSemi }]}>
+    <Text style={[styles.sectionHeader, { color: theme.ink2, fontFamily: theme.fonts.uiMedium }]}>
       {label}
     </Text>
+  );
+  const disclosure = (testID: string) => (
+    <View testID={testID} style={styles.disclosureSlot}>
+      <HandoffDisclosureMark color={theme.accentText} />
+    </View>
   );
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>
-      {/* Header */}
-      <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <Text style={[styles.title, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
+      <View style={[styles.header, { paddingHorizontal: horizontalGutter }]}>
+        <Text style={[styles.title, { color: theme.ink, fontFamily: theme.fonts.display }]}>
           Settings
         </Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-
-        {/* Pairing */}
-        {sectionHeader('Pairing')}
-        <TwCard tone="default" padding={0} style={styles.group}>
+      <ScrollView contentContainerStyle={[styles.scroll, { paddingHorizontal: horizontalGutter }]} showsVerticalScrollIndicator={false}>
+        <View style={styles.group}>
+          {sectionHeader('Pairing')}
           <TwRow
             title="Paired device"
             subtitle={peerStatusStr}
             onPress={pairStatus.paired ? () => router.push('/settings/pair') : undefined}
-            trailing={
-              pairStatus.paired ? (
-                <Text style={[styles.chevron, { color: theme.ink3 }]}>›</Text>
-              ) : undefined
-            }
-            style={styles.rowPad}
+            trailing={pairStatus.paired ? disclosure('settings-pair-disclosure') : undefined}
+            style={styles.ledgerRow}
           />
-        </TwCard>
+        </View>
 
-        {/* Sync */}
-        {sectionHeader('Sync')}
-        <TwCard tone="default" padding={0} style={styles.group}>
+        <View style={styles.group}>
+          {sectionHeader('Sync')}
           {relayUrl ? (
             <>
-              <TwRow title="Relay server" subtitle={relayDisplay} style={styles.rowPad} />
+              <TwRow title="Relay server" subtitle={relayDisplay} style={styles.ledgerRow} />
               <TwRow
                 title="Prefer direct Wi-Fi"
                 subtitle={
@@ -119,54 +119,54 @@ export default function SettingsScreen() {
                     : 'Uses the relay first, with direct Wi-Fi as backup'
                 }
                 trailing={
-                  <TwSwitch
-                    checked={preferLan ?? false}
-                    onChange={handlePreferLanChange}
-                    size="md"
-                    disabled={preferLan === null}
-                    accessibilityLabel="Prefer direct Wi-Fi delivery"
-                  />
+                  <View style={styles.controlSlot}>
+                    <TwSwitch
+                      checked={preferLan ?? false}
+                      onChange={handlePreferLanChange}
+                      size="md"
+                      disabled={preferLan === null}
+                      accessibilityLabel="Prefer direct Wi-Fi delivery"
+                    />
+                  </View>
                 }
-                style={styles.rowPad}
+                style={styles.ledgerRow}
               />
             </>
           ) : (
             <TwRow
               title="Delivery route"
               subtitle={relayUrl === undefined ? 'Loading delivery configuration' : relayDisplay}
-              style={styles.rowPad}
+              style={styles.ledgerRow}
             />
           )}
-        </TwCard>
+        </View>
 
-        {/* Privacy */}
-        {sectionHeader('Privacy')}
-        <TwCard tone="default" padding={0} style={styles.group}>
+        <View style={styles.group}>
+          {sectionHeader('Privacy')}
           <TwRow
             title="App filter"
             subtitle="Control which apps are mirrored"
             onPress={() => router.push('/filter')}
-            trailing={<Text style={[styles.chevron, { color: theme.ink3 }]}>›</Text>}
-            style={styles.rowPad}
+            trailing={disclosure('settings-filter-disclosure')}
+            style={styles.ledgerRow}
           />
-        </TwCard>
+        </View>
 
-        {/* About */}
-        {sectionHeader('About')}
-        <TwCard tone="default" padding={0} style={styles.group}>
+        <View style={styles.group}>
+          {sectionHeader('About')}
           <TwRow
             title="Notification settings"
             subtitle="Tap to open system notification settings"
             onPress={() => TwinotifyCoreModule.openAppSettings().catch(() => {})}
-            trailing={<Text style={[styles.chevron, { color: theme.ink3 }]}>›</Text>}
-            style={styles.rowPad}
+            trailing={disclosure('settings-notification-disclosure')}
+            style={styles.ledgerRow}
           />
           <TwRow
             title="Version"
             subtitle={version}
-            style={styles.rowPad}
+            style={styles.ledgerRow}
           />
-        </TwCard>
+        </View>
 
       </ScrollView>
     </SafeAreaView>
@@ -176,20 +176,31 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   header: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingTop: 18,
+    paddingBottom: 10,
   },
-  title: { fontSize: 22, letterSpacing: -0.3 },
-  scroll: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40, gap: 0 },
+  title: { fontSize: 34, lineHeight: 40, letterSpacing: -0.4 },
+  scroll: { paddingTop: 8, paddingBottom: 48, gap: 32 },
   sectionHeader: {
-    fontSize: 11,
+    fontSize: 16,
+    lineHeight: 22,
     letterSpacing: 0,
-    marginBottom: 8,
-    marginTop: 20,
-    paddingHorizontal: 4,
+    marginBottom: 6,
   },
-  group: { overflow: 'hidden', marginBottom: 4 },
-  rowPad: { paddingHorizontal: 16 },
-  chevron: { fontSize: 22 },
+  group: { gap: 2 },
+  ledgerRow: { paddingHorizontal: 0, paddingVertical: 12, alignItems: 'flex-start' },
+  disclosureSlot: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -2,
+  },
+  controlSlot: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -2,
+  },
 });
