@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Pressable,
   ScrollView,
@@ -27,6 +27,9 @@ export default function FilterScreen() {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AppFilter>({});
   const [loading, setLoading] = useState(true);
+  const [pendingKeys, setPendingKeys] = useState<Set<string>>(() => new Set());
+  const [saveError, setSaveError] = useState(false);
+  const pendingKeysRef = useRef(new Set<string>());
 
   // Load user denylist from native bridge on mount
   useEffect(() => {
@@ -53,14 +56,26 @@ export default function FilterScreen() {
       .finally(() => setLoading(false));
   }, []);
 
-  const handleToggle = useCallback((key: string, next: boolean) => {
+  const handleToggle = useCallback(async (key: string, next: boolean) => {
+    if (pendingKeysRef.current.has(key)) return;
+    pendingKeysRef.current.add(key);
+    setPendingKeys(new Set(pendingKeysRef.current));
+    setSaveError(false);
     setFilter((prev) => ({ ...prev, [key]: next }));
-    if (next) {
-      // Turning ON = allow = remove from denylist
-      TwinotifyCoreModule.removeFromDenylist(key).catch(() => {});
-    } else {
-      // Turning OFF = block = add to denylist
-      TwinotifyCoreModule.addToDenylist(key).catch(() => {});
+    try {
+      if (next) {
+        // Turning ON = allow = remove from denylist
+        await TwinotifyCoreModule.removeFromDenylist(key);
+      } else {
+        // Turning OFF = block = add to denylist
+        await TwinotifyCoreModule.addToDenylist(key);
+      }
+    } catch {
+      setFilter((prev) => ({ ...prev, [key]: !next }));
+      setSaveError(true);
+    } finally {
+      pendingKeysRef.current.delete(key);
+      setPendingKeys(new Set(pendingKeysRef.current));
     }
   }, []);
 
@@ -172,6 +187,19 @@ export default function FilterScreen() {
             </Text>
           </View>
         )}
+
+        {saveError && (
+          <Text
+            accessibilityRole="alert"
+            accessibilityLiveRegion="assertive"
+            style={[
+              styles.saveError,
+              { color: theme.sem.danger.foreground, fontFamily: theme.fonts.uiMedium },
+            ]}
+          >
+            Couldn&apos;t save this change. Try again.
+          </Text>
+        )}
       </View>
 
       {/* App list */}
@@ -215,8 +243,10 @@ export default function FilterScreen() {
                     </Text>
                     <TwSwitch
                       checked={allowed}
-                      onChange={(next) => handleToggle(k, next)}
+                      onChange={(next) => { void handleToggle(k, next); }}
                       size="md"
+                      disabled={pendingKeys.has(k)}
+                      accessibilityLabel={`${app.name} mirroring`}
                     />
                   </View>
                 </View>
@@ -277,6 +307,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   otpText: { fontSize: 12 },
+  saveError: { fontSize: 13, lineHeight: 18 },
   // List
   list: { padding: 20, paddingBottom: 40 },
   listCard: {
