@@ -307,7 +307,7 @@ Critical path: Task 2 -> Task 3 -> Task 4 -> Task 5 -> Task 6
 
 - [ ] 6. Reconcile direct-LAN documentation and verification status
 
-  What to do: After Tasks 1-5 land, update the two active direct-LAN plans with checked implementation tasks and exact commit hashes, but leave physical handset acceptance unchecked until evidence exists. Rewrite stale manual scenarios to describe current v2 durable delivery, LAN-first/relay fallback, peer-notifying unpair, new scenario names, exact aggregate/Make invocation, evidence location, and safety prerequisites. State that automation is implemented and host-tested while the requested two-physical-phone run remains pending. Remove claims that LAN is absent or unpair cannot notify the peer. Run link/path/command checks and an independent documentation review.
+  What to do: After Tasks 1-5 land, update the two active direct-LAN plans with checked implementation tasks and exact commit hashes, but leave physical handset acceptance unchecked until evidence exists. Rewrite stale manual scenarios to describe current v2 durable delivery, LAN-first/relay fallback, peer-notifying unpair, new scenario names, exact aggregate/Make invocation, evidence location, and safety prerequisites. State that automation is implemented and host-tested while the requested two-physical-phone run remains pending. Remove claims that LAN is absent or unpair cannot notify the peer. First add the planned `--check-doc-status <docs...>` mode to `scripts/verify-lan-product-evidence.sh` with shell RED/GREEN fixtures: it must reject stale no-LAN/no-peer-unpair claims, checked physical acceptance without reachable evidence, missing pending-physical wording, and nonexistent documented paths/commands, while accepting the corrected live documents. Run link/path/command checks and an independent documentation review.
   Must NOT do: Do not claim a physical pass, invent evidence, mark operator-only radio/no-uplink checks complete, rewrite historical superseded plans, or fold dependency override/UI redesign into this status.
 
   Parallelization: Can parallel: NO | Wave 5 | Blocks: [final verification] | Blocked by: [1, 2, 3, 4, 5]
@@ -319,6 +319,8 @@ Critical path: Task 2 -> Task 3 -> Task 4 -> Task 5 -> Task 6
   - Pattern:  `e2e/README.md:1-15` - currently documents only call-state usage.
   - API/Type: `Makefile:e2e-lan-product` - exact final invocation to document after Task 5.
   - Test:     `scripts/verify-host-workflows.sh:1-220` - documentation/path command consistency gate.
+  - API/Type: `scripts/verify-lan-product-evidence.sh` - add the missing closed-world `--check-doc-status` mode required by this task; preserve the reviewed evidence-directory and self-test modes.
+  - Test:     `e2e/scripts/lan_product_target_test.sh` - extend shell coverage only as needed for the documented status/target invocation; never contact ADB or mutate radios/data.
 
   Acceptance criteria (agent-executable only):
   - [ ] `rg -n "Unpair doesn't notify peer|doesn't push an explicit unpair|LAN transport does not|Phase 3 doesn't" docs/test-scenarios.md docs/superpowers/plans/2026-08-20-direct-lan-delivery.md docs/superpowers/plans/2026-08-26-live-direct-lan-service-integration.md` returns no stale live-state claim.
@@ -341,7 +343,7 @@ Critical path: Task 2 -> Task 3 -> Task 4 -> Task 5 -> Task 6
     Evidence: <attemptDir>/task-6-docs-error.txt
   ```
 
-  Commit: YES | Message: `docs: report direct LAN readiness truthfully` | Files: [`docs/superpowers/plans/2026-08-20-direct-lan-delivery.md`, `docs/superpowers/plans/2026-08-26-live-direct-lan-service-integration.md`, `docs/test-scenarios.md`, `e2e/README.md`]
+  Commit: YES | Message: `docs: report direct LAN readiness truthfully` | Files: [`scripts/verify-lan-product-evidence.sh`, `e2e/scripts/lan_product_target_test.sh`, `docs/superpowers/plans/2026-08-20-direct-lan-delivery.md`, `docs/superpowers/plans/2026-08-26-live-direct-lan-service-integration.md`, `docs/test-scenarios.md`, `e2e/README.md`]
 
 ## Final verification wave (MANDATORY - after all implementation tasks)
 > Runs in PARALLEL. ALL must APPROVE. Surface results to the caller and wait for an explicit "okay" before declaring complete.
