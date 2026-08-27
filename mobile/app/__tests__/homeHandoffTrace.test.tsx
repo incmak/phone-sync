@@ -1,9 +1,18 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Dimensions, StyleSheet } from 'react-native';
-
 import HomeScreen from '../home';
 import { OnboardingState } from '../../state/onboardingState';
+
+jest.mock('react-native-reanimated', () => {
+  const actual = jest.requireActual('react-native-reanimated');
+  return {
+    __esModule: true,
+    ...actual,
+    default: actual.default,
+    useReducedMotion: jest.fn(() => true),
+  };
+});
 
 type ScreenCase = {
   state: 'direct' | 'relay' | 'reconnecting' | 'queued' | 'paused' | 'unpaired';
@@ -195,6 +204,27 @@ describe('Home handoff trace', () => {
     } finally {
       screen?.unmount();
       Dimensions.set({ window: originalWindow, screen: originalScreen });
+    }
+  });
+
+  it('does not emit React lifecycle warnings while asserting reconnecting route truth', async () => {
+    arrange(cases[2]);
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const screen = render(<HomeScreen />);
+
+    try {
+      await screen.findByLabelText(
+        'Reconnecting. Looking for your other phone. This retries on its own.',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const actWarnings = consoleError.mock.calls.filter(([message]) =>
+        String(message).includes('not wrapped in act'),
+      );
+      expect(actWarnings).toEqual([]);
+    } finally {
+      screen.unmount();
+      consoleError.mockRestore();
     }
   });
 });

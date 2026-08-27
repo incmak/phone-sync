@@ -54,6 +54,7 @@ inputs. Local bundled APKs are QA artifacts, not protected release candidates.
 | 024 | Run heavyweight mobile verification once per CI job | P2 | S | 023 | DONE |
 | 025 | Preserve capture reconciliation wakeups | P0 | S | 022 | DONE: lease-safe coalescing gate, native 583/583, independent lifecycle review approved |
 | 026 | Align LAN operator guidance with the executable harness | P2 | S | 019, 023 | DONE: docs contract mutations, host gate, and independent truth review approved |
+| 027 | Keep Handoff Trace screen tests warning-free | P2 | S | 025 | DONE: 157/157 Jest, exact host gate, independent review approved |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.
@@ -85,6 +86,8 @@ REJECTED with a one-line rationale.
   whole-range review after Plan 022.
 - Plan 026 removes a stale documentation contradiction without changing the
   explicitly pending physical LAN acceptance state.
+- Plan 027 isolates screen assertions from the real reconnecting animation while
+  retaining dedicated motion and reduced-motion coverage.
 
 ## 2026-08-27 current-HEAD findings
 
