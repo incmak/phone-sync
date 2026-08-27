@@ -11,6 +11,7 @@
 
 ## Status
 
+- **Status**: DONE - bounded admission/recovery landed; focused/full native gates and terminal independent re-review are green.
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH

@@ -3,6 +3,7 @@ package co.twinotify.core.listener
 import android.content.Context
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -16,6 +17,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+/** Closed-world result for a capture admission attempt. */
+sealed interface CaptureAdmission {
+    data object Accepted : CaptureAdmission
+    data object ReconcileRequired : CaptureAdmission
+    data object Closed : CaptureAdmission
+}
+
 /**
  * Process-scoped ordered capture coordinator. Each canonical notification owns one actor lane;
  * unrelated notifications are allowed to prepare and persist concurrently.
@@ -24,11 +32,14 @@ class CaptureCoordinator(
     private val scope: CoroutineScope,
     private val persister: CapturePersister,
     private val laneIdleMs: Long = DEFAULT_LANE_IDLE_MS,
+    private val maxCanonicalLanes: Int = DEFAULT_MAX_CANONICAL_LANES,
     internal val onLaneCompletionForTest: ((Throwable?) -> Unit)? = null,
     internal val beforePairingDeferralForTest: (suspend () -> Unit)? = null,
     internal val afterPairingDeferralForTest: (suspend () -> Unit)? = null,
     internal val beforeLaneRetirementForTest: (suspend () -> Unit)? = null,
 ) {
+    private enum class AdmissionMode { LISTENER, DURABLE }
+
     private class Lane(
         val signal: Channel<Unit> = Channel(Channel.CONFLATED),
         var active: Boolean = true,
@@ -41,32 +52,78 @@ class CaptureCoordinator(
     private val lanes = ConcurrentHashMap<String, Lane>()
     private val deferredUntilPaired = ConcurrentHashMap<String, CaptureCommand>()
     private val laneLock = Any()
+    /** Bounded union of canon IDs retained by either a live lane or a pairing deferral. */
+    private val reservedCanonIds = HashSet<String>()
+    /** One process-wide signal: overflow is repaired from a fresh snapshot, never retained by ID. */
+    private var reconciliationNeeded = false
+    /** Advances for every listener overflow, including one that arrives while recovery is active. */
+    private var reconciliationGeneration = 0L
+    private var capacityChanged = CompletableDeferred<Unit>()
     private var pairingGeneration = 0L
 
     init {
         require(laneIdleMs > 0) { "lane idle timeout must be positive" }
+        require(maxCanonicalLanes > 0) { "canonical lane limit must be positive" }
     }
 
     /** Enqueue without blocking the notification-listener callback. */
-    fun submit(command: CaptureCommand): Boolean {
-        if (!scope.isActive) return false
-        synchronized(laneLock) {
-            if (!scope.isActive) return false
+    fun submit(command: CaptureCommand): CaptureAdmission =
+        submit(command, AdmissionMode.LISTENER)
+
+    private fun submit(command: CaptureCommand, mode: AdmissionMode): CaptureAdmission {
+        if (!scope.isActive) return CaptureAdmission.Closed
+        var launch: Pair<String, Lane>? = null
+        val admission = synchronized(laneLock) {
+            if (!scope.isActive) return@synchronized CaptureAdmission.Closed
             var lane = lanes[command.canonId]
             if (lane == null || !lane.active) {
+                // A retired no-peer lane leaves one canonical's final desired state in the
+                // bounded deferred map. A newer callback replaces it in place; creating a
+                // fresh worker here would let resume append the old state after the new one.
+                if (deferredUntilPaired.containsKey(command.canonId)) {
+                    deferredUntilPaired[command.canonId] = command
+                    return@synchronized CaptureAdmission.Accepted
+                }
+                if (command.canonId !in reservedCanonIds &&
+                    reservedCanonIds.size >= maxCanonicalLanes
+                ) {
+                    if (mode == AdmissionMode.LISTENER) {
+                        reconciliationNeeded = true
+                        reconciliationGeneration += 1
+                    }
+                    return@synchronized CaptureAdmission.ReconcileRequired
+                }
                 lane = Lane()
                 lanes[command.canonId] = lane
-                launchLane(command.canonId, lane)
+                reservedCanonIds += command.canonId
+                launch = command.canonId to lane
             }
             if (lane.waitingForPeer) {
                 // Before pairing there is no key with which to encrypt. Keep only the latest
                 // state command per canonical ID, matching the safe compaction rule.
                 deferredUntilPaired[command.canonId] = command
-                return true
+                return@synchronized CaptureAdmission.Accepted
             }
             enqueueLocked(lane, command)
-            return true
+            CaptureAdmission.Accepted
         }
+        launch?.let { (canonId, lane) -> launchLane(canonId, lane) }
+        return admission
+    }
+
+    /** Suspend-capable callers wait for one bounded slot and never claim durable admission early. */
+    suspend fun submitDurably(command: CaptureCommand): CaptureAdmission {
+        while (currentCoroutineContext().isActive) {
+            when (val admission = submit(command, AdmissionMode.DURABLE)) {
+                CaptureAdmission.Accepted,
+                CaptureAdmission.Closed,
+                -> return admission
+                CaptureAdmission.ReconcileRequired -> {
+                    awaitCapacityChange()
+                }
+            }
+        }
+        return CaptureAdmission.Closed
     }
 
     private fun launchLane(canonId: String, lane: Lane): Job = scope.launch {
@@ -108,6 +165,7 @@ class CaptureCoordinator(
                 if (lanes[canonId] === lane) {
                     lane.active = false
                     lanes.remove(canonId, lane)
+                    releaseReservationIfUnusedLocked(canonId)
                 }
             }
             return null
@@ -169,7 +227,10 @@ class CaptureCoordinator(
             }
             lane.active = false
             lanes.remove(canonId, lane)
-            if (successor == null || !scope.isActive) return@synchronized null
+            if (successor == null || !scope.isActive) {
+                releaseReservationIfUnusedLocked(canonId)
+                return@synchronized null
+            }
             Lane().also { replacement ->
                 lanes[canonId] = replacement
                 enqueueLocked(replacement, successor)
@@ -219,9 +280,51 @@ class CaptureCoordinator(
     }
 
     internal fun activeLaneCountForTest(): Int = lanes.size
+    internal fun retainedCanonicalCountForTest(): Int = synchronized(laneLock) { reservedCanonIds.size }
+    internal fun reconciliationLatchCountForTest(): Int = synchronized(laneLock) {
+        if (reconciliationNeeded) 1 else 0
+    }
+
+    internal fun reconciliationNeeded(): Boolean = synchronized(laneLock) { reconciliationNeeded }
+
+    /** Snapshot lease captured before platform/Room recovery begins. */
+    internal fun reconciliationGeneration(): Long = synchronized(laneLock) { reconciliationGeneration }
+
+    /** Clears only the generation whose snapshot was recovered; newer overflow keeps the latch. */
+    internal fun clearReconciliationLatchIfCurrent(generation: Long): Boolean = synchronized(laneLock) {
+        if (reconciliationGeneration != generation) return@synchronized false
+        reconciliationNeeded = false
+        true
+    }
+
+    /** A listener recovery waits for retirement/pairing rather than timer-polling while full. */
+    internal suspend fun awaitReconciliationCapacity(): Boolean {
+        while (currentCoroutineContext().isActive) {
+            val signal = synchronized(laneLock) {
+                when {
+                    !reconciliationNeeded -> return true
+                    reservedCanonIds.size < maxCanonicalLanes -> return true
+                    else -> capacityChanged
+                }
+            }
+            signal.await()
+        }
+        return false
+    }
+
+    /** Waits for a real capacity or pairing transition after a failed recovery attempt. */
+    internal suspend fun awaitReconciliationStateChange(): Boolean {
+        val signal = synchronized(laneLock) {
+            if (!reconciliationNeeded) return false
+            capacityChanged
+        }
+        signal.await()
+        return reconciliationNeeded()
+    }
 
     /** Called after peer keys are stored, and on listener rebind. */
     fun resumeDeferred() {
+        val launches = mutableListOf<Pair<String, Lane>>()
         synchronized(laneLock) {
             pairingGeneration += 1
             val pending = deferredUntilPaired.values.toList()
@@ -238,15 +341,38 @@ class CaptureCoordinator(
                 if (lane == null || !lane.active) {
                     lane = Lane()
                     lanes[command.canonId] = lane
-                    launchLane(command.canonId, lane)
+                    reservedCanonIds += command.canonId
+                    launches += command.canonId to lane
                 }
                 lane.waitingForPeer = false
                 enqueueLocked(lane, command)
             }
+            signalCapacityChangedLocked()
         }
+        launches.forEach { (canonId, lane) -> launchLane(canonId, lane) }
     }
 
     internal fun deferredCountForTest(): Int = deferredUntilPaired.size
+
+    private fun releaseReservationIfUnusedLocked(canonId: String) {
+        if (lanes.containsKey(canonId) || deferredUntilPaired.containsKey(canonId)) return
+        if (reservedCanonIds.remove(canonId)) {
+            signalCapacityChangedLocked()
+        }
+    }
+
+    private fun signalCapacityChangedLocked() {
+        capacityChanged.complete(Unit)
+        capacityChanged = CompletableDeferred()
+    }
+
+    private suspend fun awaitCapacityChange() {
+        val signal = synchronized(laneLock) {
+            if (!scope.isActive || reservedCanonIds.size < maxCanonicalLanes) return
+            capacityChanged
+        }
+        signal.await()
+    }
 
     private fun logPersistFailure() {
         runCatching {
@@ -263,6 +389,8 @@ class CaptureCoordinator(
     companion object {
         private const val TAG = "TwinotifyCapture"
         private const val DEFAULT_LANE_IDLE_MS = 30_000L
+        /** Process-wide bound across active, queued, and no-peer deferred canonical IDs. */
+        private const val DEFAULT_MAX_CANONICAL_LANES = 256
         private const val INITIAL_RETRY_DELAY_MS = 250L
         private const val MAX_RETRY_DELAY_MS = 30_000L
 

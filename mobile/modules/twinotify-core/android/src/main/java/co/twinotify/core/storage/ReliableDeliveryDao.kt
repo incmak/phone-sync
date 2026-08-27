@@ -490,6 +490,13 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     abstract suspend fun activeOriginStates(originDevice: String): List<CanonicalNotificationState>
 
     @Query(
+        "SELECT * FROM canonical_notification_state WHERE originDevice != :originDevice AND state='ACTIVE' " +
+            "AND mirrorLocalTag IS NOT NULL AND mirrorLocalId IS NOT NULL " +
+            "AND canonId NOT LIKE 'call:%'",
+    )
+    abstract suspend fun activePeerMirrorStates(originDevice: String): List<CanonicalNotificationState>
+
+    @Query(
         "SELECT * FROM canonical_notification_state " +
             "WHERE originDevice=:originDevice AND state='ACTIVE' " +
             "AND substr(canonId, 1, 5)='call:' ORDER BY updatedAt, canonId",

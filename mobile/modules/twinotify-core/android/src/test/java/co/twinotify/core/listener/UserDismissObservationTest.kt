@@ -2,7 +2,6 @@ package co.twinotify.core.listener
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 
 class UserDismissObservationTest {
     private val command = RemoveCommand("canon", "source", "user_swipe", 1L)
@@ -18,7 +17,7 @@ class UserDismissObservationTest {
             inMemoryPeerCancelConsumed = false,
             removalReason = 2,
             command = command,
-            submit = { submitted += 1; true },
+            submit = { submitted += 1; CaptureAdmission.Accepted },
             recordUserDismiss = { observed += 1 },
         )
 
@@ -39,7 +38,7 @@ class UserDismissObservationTest {
                 inMemoryPeerCancelConsumed = inMemory,
                 removalReason = 2,
                 command = command,
-                submit = { submitted += 1; true },
+                submit = { submitted += 1; CaptureAdmission.Accepted },
                 recordUserDismiss = { observed += 1 },
             )
 
@@ -62,7 +61,7 @@ class UserDismissObservationTest {
                 inMemoryPeerCancelConsumed = false,
                 removalReason = 2,
                 command = command,
-                submit = { sourceSubmissions += 1; true },
+                submit = { sourceSubmissions += 1; CaptureAdmission.Accepted },
                 recordUserDismiss = { observed += 1 },
             ),
         )
@@ -74,7 +73,7 @@ class UserDismissObservationTest {
                 inMemoryPeerCancelConsumed = false,
                 removalReason = 4,
                 command = command,
-                submit = { sourceSubmissions += 1; true },
+                submit = { sourceSubmissions += 1; CaptureAdmission.Accepted },
                 recordUserDismiss = { observed += 1 },
             ),
         )
@@ -83,31 +82,36 @@ class UserDismissObservationTest {
     }
 
     @Test
-    fun `rejected and throwing submission never record`() {
+    fun `capacity pressure and closed submission never throw or record`() {
         var observed = 0
+        var reconciliationRequested = 0
 
-        assertFailsWith<IllegalStateException> {
+        assertEquals(
+            FilterResult.Emit("user_swipe"),
             submitRemovalWithObservation(
                 ownPackage = true,
                 durablePeerCancelConsumed = false,
                 inMemoryPeerCancelConsumed = false,
                 removalReason = 2,
                 command = command,
-                submit = { false },
+                submit = { CaptureAdmission.ReconcileRequired },
+                requestReconciliation = { reconciliationRequested += 1 },
                 recordUserDismiss = { observed += 1 },
-            )
-        }
-        assertFailsWith<IllegalArgumentException> {
+            ),
+        )
+        assertEquals(
+            FilterResult.Emit("user_swipe"),
             submitRemovalWithObservation(
                 ownPackage = true,
                 durablePeerCancelConsumed = false,
                 inMemoryPeerCancelConsumed = false,
                 removalReason = 2,
                 command = command,
-                submit = { throw IllegalArgumentException("rejected") },
+                submit = { CaptureAdmission.Closed },
                 recordUserDismiss = { observed += 1 },
-            )
-        }
+            ),
+        )
         assertEquals(0, observed)
+        assertEquals(1, reconciliationRequested)
     }
 }

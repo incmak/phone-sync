@@ -60,5 +60,28 @@ object NotificationListenerBridge {
         .mapNotNull { NotifPostBuilder.captureSnapshot(it, context, denylist) }
         .toList()
 
+    /** Captures source payloads and this package's live mirrors from one bound-listener read. */
+    internal fun activeCaptureSnapshot(
+        context: Context,
+        denylist: Set<String> = emptySet(),
+        selfPackage: String = context.packageName,
+    ): ListenerCaptureSnapshot {
+        val notifications = activeNotifications()
+        return ListenerCaptureSnapshot(
+            sourceSnapshots = notifications.asSequence()
+                .filter { it.packageName != selfPackage }
+                .mapNotNull { NotifPostBuilder.captureSnapshot(it, context, denylist) }
+                .toList(),
+            liveMirrorIdentities = notifications.asSequence()
+                .filter { it.packageName == selfPackage }
+                .mapTo(hashSetOf()) { MirrorNotificationIdentity(it.tag.orEmpty(), it.id) },
+        )
+    }
+
     internal fun attachedForTest(): TwinotifyNotificationListener? = synchronized(lock) { attached }
 }
+
+internal data class ListenerCaptureSnapshot(
+    val sourceSnapshots: List<SourceNotificationSnapshot>,
+    val liveMirrorIdentities: Set<MirrorNotificationIdentity>,
+)

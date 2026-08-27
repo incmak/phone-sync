@@ -128,6 +128,25 @@ class ReliableDeliveryDaoMaterializationTest {
         }
     }
 
+    @Test
+    fun activePeerMirrorStatesExcludesLocalRowsUnmappedRowsAndCalls() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, NotificationDbImpl::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val dao = db.reliableDeliveryDao()
+            dao.putCanonical(state(canonId = "peer-live", originDevice = "peer", mirrorId = 9, mirrorTag = "mirror"))
+            dao.putCanonical(state(canonId = "local", originDevice = "local", mirrorId = 10, mirrorTag = "local"))
+            dao.putCanonical(state(canonId = "peer-no-mirror", originDevice = "peer", mirrorId = null, mirrorTag = null))
+            dao.putCanonical(state(canonId = "call:peer-call", originDevice = "peer", mirrorId = 11, mirrorTag = "call"))
+
+            assertEquals(listOf("peer-live"), dao.activePeerMirrorStates("local").map { it.canonId })
+        } finally {
+            db.close()
+        }
+    }
+
     private fun retry(sequence: Long, dueAt: Long = 10_000) = MaterializationRetry(
         canonId = "canon",
         sequence = sequence,
@@ -137,16 +156,23 @@ class ReliableDeliveryDaoMaterializationTest {
         lastError = "platform_retryable",
     )
 
-    private fun state(sequence: Long, materialized: Long) = CanonicalNotificationState(
-        canonId = "canon",
-        originDevice = "peer",
+    private fun state(
+        sequence: Long = 2,
+        materialized: Long = 0,
+        canonId: String = "canon",
+        originDevice: String = "peer",
+        mirrorId: Int? = 1,
+        mirrorTag: String? = "tag",
+    ) = CanonicalNotificationState(
+        canonId = canonId,
+        originDevice = originDevice,
         latestSequence = sequence,
         state = "ACTIVE",
         desiredPayloadJson = "{}",
         materializedSequence = materialized,
         sourceNotificationKey = null,
-        mirrorLocalId = 1,
-        mirrorLocalTag = "tag",
+        mirrorLocalId = mirrorId,
+        mirrorLocalTag = mirrorTag,
         peerCancelPending = false,
         updatedAt = 1_000,
     )

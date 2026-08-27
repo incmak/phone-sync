@@ -1,10 +1,12 @@
 package co.twinotify.core.listener
 
+import co.twinotify.core.storage.CanonicalNotificationState
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.advanceTimeBy
@@ -15,11 +17,288 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CaptureCoordinatorTest {
+    @Test
+    fun distinctCanonicalCapacityRetainsOnlyTwoLanesAndOneReconciliationLatch() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var activePersists = 0
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister {
+                activePersists += 1
+                if (activePersists == 2) entered.complete(Unit)
+                release.await()
+                CapturePersistResult(activePersists.toLong())
+            },
+            laneIdleMs = 50,
+            maxCanonicalLanes = 2,
+        )
+
+        assertEquals(CaptureAdmission.Accepted, coordinator.submit(PostCommand("one", "one", post("one"))))
+        assertEquals(CaptureAdmission.Accepted, coordinator.submit(PostCommand("two", "two", post("two"))))
+        entered.await()
+
+        repeat(1_000) { index ->
+            assertEquals(
+                CaptureAdmission.ReconcileRequired,
+                coordinator.submit(PostCommand("overflow-$index", "overflow-$index", post("overflow-$index"))),
+            )
+        }
+
+        assertEquals(2, coordinator.retainedCanonicalCountForTest())
+        assertEquals(2, coordinator.activeLaneCountForTest())
+        assertEquals(0, coordinator.deferredCountForTest())
+        assertEquals(1, coordinator.reconciliationLatchCountForTest())
+
+        release.complete(Unit)
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun capacityRetirementWakesOneReconciliationWaiterAndDurableAdmissionDoesNotLoseItsCommand() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var attempts = 0
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister { command ->
+                attempts += 1
+                if (attempts <= 2) {
+                    if (attempts == 2) entered.complete(Unit)
+                    release.await()
+                }
+                persisted += command.canonId
+                CapturePersistResult(attempts.toLong())
+            },
+            laneIdleMs = 50,
+            maxCanonicalLanes = 2,
+        )
+
+        coordinator.submit(PostCommand("one", "one", post("one")))
+        coordinator.submit(PostCommand("two", "two", post("two")))
+        entered.await()
+        assertEquals(CaptureAdmission.ReconcileRequired, coordinator.submit(PostCommand("listener-overflow", "listener-overflow", post("listener-overflow"))))
+
+        val durableThird = async {
+            coordinator.submitDurably(PostCommand("durable-third", "durable-third", post("durable-third")))
+        }
+        assertFalse(durableThird.isCompleted, "suspend-capable callers wait rather than silently accepting overflow")
+
+        release.complete(Unit)
+        advanceTimeBy(60)
+        advanceUntilIdle()
+
+        assertEquals(CaptureAdmission.Accepted, durableThird.await())
+        assertEquals(1, coordinator.reconciliationLatchCountForTest())
+        assertTrue(persisted.contains("durable-third"))
+    }
+
+    @Test
+    fun overflowedOwnPackageMirrorDismissalRecoversOnePeerRemovalAfterCapacityOpens() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister { command ->
+                if (persisted.isEmpty()) {
+                    entered.complete(Unit)
+                    release.await()
+                }
+                persisted += command.canonId
+                CapturePersistResult(persisted.size.toLong())
+            },
+            laneIdleMs = 50,
+            maxCanonicalLanes = 1,
+        )
+        coordinator.submit(PostCommand("source", "source", post("source")))
+        entered.await()
+
+        // A self-package mirror dismissal is a peer-origin canonical. Under saturation its
+        // callback retains no command; only the single reconciliation latch remains.
+        assertEquals(
+            CaptureAdmission.ReconcileRequired,
+            coordinator.submit(RemoveCommand("peer-mirror", "peer-source", "user_swipe", 1)),
+        )
+        assertEquals(1, coordinator.reconciliationLatchCountForTest())
+
+        release.complete(Unit)
+        advanceTimeBy(60)
+        advanceUntilIdle()
+
+        val peerMirror = CanonicalNotificationState(
+            canonId = "peer-mirror",
+            originDevice = "peer-device",
+            latestSequence = 1,
+            state = "ACTIVE",
+            desiredPayloadJson = null,
+            materializedSequence = 0,
+            sourceNotificationKey = "peer-source",
+            mirrorLocalId = 7,
+            mirrorLocalTag = "mirror-tag",
+            peerCancelPending = false,
+            updatedAt = 1,
+        )
+        val recovered = CaptureReconciliation.recoveryCommands(
+            originDevice = "local-device",
+            snapshots = emptyList(),
+            states = emptyList(),
+            peerMirrorStates = listOf(peerMirror),
+            liveMirrorIdentities = emptySet(),
+            removedAt = 2,
+        ).toList()
+        assertEquals(listOf("peer-mirror"), recovered.filterIsInstance<RemoveCommand>().map { it.canonId })
+
+        recovered.forEach { assertEquals(CaptureAdmission.Accepted, coordinator.submit(it)) }
+        advanceUntilIdle()
+        assertEquals(listOf("source", "peer-mirror"), persisted)
+    }
+
+    @Test
+    fun cancellationFreesAReservedCanonicalLaneAndKeepsItsExactInstance() = runTest {
+        val expected = java.util.concurrent.CancellationException("lane cancellation")
+        val observed = CompletableDeferred<Throwable?>()
+        var first = true
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister {
+                if (first) {
+                    first = false
+                    throw expected
+                }
+                CapturePersistResult(1)
+            },
+            laneIdleMs = 50,
+            maxCanonicalLanes = 2,
+            onLaneCompletionForTest = observed::complete,
+        )
+
+        assertEquals(CaptureAdmission.Accepted, coordinator.submit(PostCommand("cancelled", "cancelled", post("cancelled"))))
+        runCurrent()
+        assertSame(expected, observed.await())
+        assertEquals(0, coordinator.retainedCanonicalCountForTest())
+        assertEquals(CaptureAdmission.Accepted, coordinator.submit(PostCommand("replacement", "replacement", post("replacement"))))
+    }
+
+    @Test
+    fun durableOnlyCapacityWaitDoesNotCreateAListenerReconciliationLatch() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var attempts = 0
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister {
+                attempts += 1
+                if (attempts <= 2) {
+                    if (attempts == 2) entered.complete(Unit)
+                    release.await()
+                }
+                CapturePersistResult(attempts.toLong())
+            },
+            laneIdleMs = 50,
+            maxCanonicalLanes = 2,
+        )
+
+        coordinator.submit(PostCommand("one", "one", post("one")))
+        coordinator.submit(PostCommand("two", "two", post("two")))
+        entered.await()
+        val durable = async {
+            coordinator.submitDurably(PostCommand("durable", "durable", post("durable")))
+        }
+
+        assertFalse(durable.isCompleted)
+        assertEquals(0, coordinator.reconciliationLatchCountForTest())
+
+        release.complete(Unit)
+        advanceTimeBy(60)
+        advanceUntilIdle()
+        assertEquals(CaptureAdmission.Accepted, durable.await())
+    }
+
+    @Test
+    fun clearedLatchDoesNotLeaveAStaleWakeForTheNextFullRecovery() = runTest {
+        val firstEntered = CompletableDeferred<Unit>()
+        val firstRelease = CompletableDeferred<Unit>()
+        val secondEntered = CompletableDeferred<Unit>()
+        val secondRelease = CompletableDeferred<Unit>()
+        var attempt = 0
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister {
+                attempt += 1
+                when (attempt) {
+                    1 -> {
+                        firstEntered.complete(Unit)
+                        firstRelease.await()
+                    }
+                    2 -> {
+                        secondEntered.complete(Unit)
+                        secondRelease.await()
+                    }
+                }
+                CapturePersistResult(attempt.toLong())
+            },
+            laneIdleMs = 50,
+            maxCanonicalLanes = 1,
+        )
+
+        coordinator.submit(PostCommand("first", "first", post("first")))
+        firstEntered.await()
+        assertEquals(CaptureAdmission.ReconcileRequired, coordinator.submit(PostCommand("first-overflow", "first-overflow", post("first-overflow"))))
+        firstRelease.complete(Unit)
+        advanceTimeBy(60)
+        advanceUntilIdle()
+        assertTrue(coordinator.clearReconciliationLatchIfCurrent(coordinator.reconciliationGeneration()))
+
+        coordinator.submit(PostCommand("second", "second", post("second")))
+        secondEntered.await()
+        assertEquals(CaptureAdmission.ReconcileRequired, coordinator.submit(PostCommand("second-overflow", "second-overflow", post("second-overflow"))))
+        val wake = async { coordinator.awaitReconciliationCapacity() }
+        runCurrent()
+        assertFalse(wake.isCompleted, "a cleared latch must not leave a stale capacity wake")
+
+        secondRelease.complete(Unit)
+        advanceTimeBy(60)
+        advanceUntilIdle()
+        assertTrue(wake.await())
+    }
+
+    @Test
+    fun newerOverflowBetweenSnapshotCaptureAndClearKeepsTheReconciliationLatch() = runTest {
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister { CapturePersistResult(1) },
+            laneIdleMs = 50,
+            maxCanonicalLanes = 1,
+        )
+        assertEquals(CaptureAdmission.Accepted, coordinator.submit(PostCommand("occupied", "occupied", post("occupied"))))
+        assertEquals(CaptureAdmission.ReconcileRequired, coordinator.submit(PostCommand("overflow-one", "overflow-one", post("overflow-one"))))
+
+        val snapshotCaptured = CompletableDeferred<Long>()
+        val allowClear = CompletableDeferred<Unit>()
+        val recovery = async {
+            // Deterministic hook: the recovery has its snapshot lease but has not cleared it.
+            snapshotCaptured.complete(coordinator.reconciliationGeneration())
+            allowClear.await()
+            coordinator.clearReconciliationLatchIfCurrent(snapshotCaptured.await())
+        }
+        snapshotCaptured.await()
+
+        assertEquals(CaptureAdmission.ReconcileRequired, coordinator.submit(PostCommand("overflow-two", "overflow-two", post("overflow-two"))))
+        allowClear.complete(Unit)
+
+        assertFalse(recovery.await())
+        assertTrue(coordinator.reconciliationNeeded())
+        assertEquals(1, coordinator.reconciliationLatchCountForTest())
+    }
+
     @Test
     fun commandsForSameCanonStayOrderedWhileDifferentCanonsRunConcurrently() = runTest {
         val persister = RecordingCapturePersister()
@@ -99,6 +378,36 @@ class CaptureCoordinatorTest {
         advanceUntilIdle()
         assertEquals(0, coordinator.deferredCountForTest())
         assertEquals(1, persisted, "only the latest command should be replayed after pairing")
+    }
+
+    @Test
+    fun retiredNoPeerLaneCannotReplayOldDeferredStateAfterNewerSameCanonSubmission() = runTest {
+        var paired = false
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister { command ->
+                if (!paired) throw CaptureNotPairedException("no peer")
+                persisted += command.sourceKey
+                CapturePersistResult(persisted.size.toLong())
+            },
+            laneIdleMs = 50,
+        )
+
+        coordinator.submit(PostCommand("offline", "old", post("offline")))
+        advanceUntilIdle()
+        assertEquals(1, coordinator.deferredCountForTest())
+        assertEquals(0, coordinator.activeLaneCountForTest())
+
+        // Do not run this new callback worker before pairing resumes: the old implementation
+        // enqueued the deferred old command as its latest state and rolled the peer backward.
+        coordinator.submit(RemoveCommand("offline", "new", "app_cancel", 2_000))
+        paired = true
+        coordinator.resumeDeferred()
+        advanceUntilIdle()
+
+        assertEquals(listOf("new"), persisted)
+        assertEquals(0, coordinator.deferredCountForTest())
     }
 
     @Test
@@ -427,7 +736,10 @@ class CaptureCoordinatorTest {
         val laneScope = CoroutineScope(SupervisorJob()).also { it.cancel() }
         val coordinator = CaptureCoordinator(laneScope, CapturePersister { CapturePersistResult(1) })
 
-        assertTrue(!coordinator.submit(PostCommand("cancelled", "key", post("cancelled"))))
+        assertEquals(
+            CaptureAdmission.Closed,
+            coordinator.submit(PostCommand("cancelled", "key", post("cancelled"))),
+        )
     }
 
     private fun post(canonId: String) = SourceNotificationSnapshot(

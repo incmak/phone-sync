@@ -13,17 +13,15 @@ class DurableOutboundSink private constructor(context: android.content.Context) 
     private val persister = DurableCapturePersister(appContext)
 
     override suspend fun enqueuePost(post: NotifPostJson) {
-        check(coordinator.submit(PostCommand(
+        requireDurableAdmission(coordinator.submitDurably(PostCommand(
             canonId = post.canon_id,
             sourceKey = "",
             snapshot = SourceNotificationSnapshot.fromPost(post),
-        ))) { "durable capture lane rejected notification post" }
+        )))
     }
 
     override suspend fun enqueueCancel(canonId: String, reason: String, originDevice: String, tsMs: Long) {
-        check(coordinator.submit(RemoveCommand(canonId, "", reason, tsMs))) {
-            "durable capture lane rejected notification cancel"
-        }
+        requireDurableAdmission(coordinator.submitDurably(RemoveCommand(canonId, "", reason, tsMs)))
     }
 
     override suspend fun enqueueUnpair(reason: String, originDevice: String, tsMs: Long) {
@@ -37,4 +35,8 @@ class DurableOutboundSink private constructor(context: android.content.Context) 
             instance ?: DurableOutboundSink(context.applicationContext).also { instance = it }
         }
     }
+}
+
+private fun requireDurableAdmission(admission: CaptureAdmission) {
+    check(admission == CaptureAdmission.Accepted) { "durable_capture_admission_closed" }
 }

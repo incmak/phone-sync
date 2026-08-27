@@ -23,7 +23,8 @@ internal fun submitRemovalWithObservation(
     inMemoryPeerCancelConsumed: Boolean,
     removalReason: Int,
     command: RemoveCommand,
-    submit: (RemoveCommand) -> Boolean,
+    submit: (RemoveCommand) -> CaptureAdmission,
+    requestReconciliation: () -> Unit = {},
     recordUserDismiss: () -> Unit,
 ): FilterResult {
     val result = if (durablePeerCancelConsumed) {
@@ -32,8 +33,11 @@ internal fun submitRemovalWithObservation(
         ReasonCodeFilter.filter(ownPackage, inMemoryPeerCancelConsumed, removalReason)
     }
     if (result is FilterResult.Emit) {
-        check(submit(command.copy(reason = result.reason))) { "durable capture lane rejected cancel" }
-        if (ownPackage) recordUserDismiss()
+        when (submit(command.copy(reason = result.reason))) {
+            CaptureAdmission.Accepted -> if (ownPackage) recordUserDismiss()
+            CaptureAdmission.ReconcileRequired -> requestReconciliation()
+            CaptureAdmission.Closed -> Unit
+        }
     }
     return result
 }
@@ -48,6 +52,8 @@ class TwinotifyNotificationListener : NotificationListenerService() {
     private lateinit var denylist: Set<String>
     private lateinit var originDevice: String
     private lateinit var coordinator: CaptureCoordinator
+    private val reconciliationLock = Any()
+    private var reconciliationRunning = false
 
     override fun onCreate() {
         super.onCreate()
@@ -102,32 +108,12 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         )
         scope.launch {
             runCatching { co.twinotify.core.service.RetentionCoordinator.sweep(applicationContext) }
-                .onFailure { android.util.Log.w(TAG, "retention sweep unavailable", it) }
+                .onFailure { android.util.Log.w(TAG, "retention_sweep_unavailable") }
         }
         coordinator.resumeDeferred()
         val active = runCatching { activeNotifications.orEmpty() }.getOrDefault(emptyArray())
         active.forEach(::capturePosted)
-        scope.launch {
-            try {
-                val liveKeys = active.mapTo(hashSetOf()) { it.key }
-                CaptureReconciliation.missingActiveStates(
-                    reliableDao.activeOriginStates(originDevice),
-                    liveKeys,
-                )
-                    .forEach { state ->
-                        coordinator.submit(
-                            RemoveCommand(
-                                canonId = state.canonId,
-                                sourceKey = state.sourceNotificationKey.orEmpty(),
-                                reason = "listener_reconcile",
-                                removedAt = System.currentTimeMillis(),
-                            ),
-                        )
-                    }
-            } catch (error: Throwable) {
-                android.util.Log.w(TAG, "active notification reconciliation unavailable", error)
-            }
-        }
+        requestCaptureReconciliation()
     }
 
     private fun capturePosted(sbn: StatusBarNotification) {
@@ -142,9 +128,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
             return
         }
         check(snapshot.sourceKey == sbn.key) { "capture snapshot lost source notification key" }
-        check(coordinator.submit(PostCommand(canonId, snapshot.sourceKey, snapshot))) {
-            android.util.Log.e(TAG, "durable capture lane rejected post canon=$canonId")
-        }
+        submitFromListener(PostCommand(canonId, snapshot.sourceKey, snapshot))
     }
 
     override fun onNotificationRemoved(
@@ -205,6 +189,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
             removalReason = reason,
             command = command,
             submit = coordinator::submit,
+            requestReconciliation = ::requestCaptureReconciliation,
             recordUserDismiss = co.twinotify.core.service.ProductObservationTracker::recordUserDismiss,
         )) {
             is FilterResult.Suppress -> if (ownPkg) scope.launch {
@@ -217,6 +202,78 @@ class TwinotifyNotificationListener : NotificationListenerService() {
                     reliableDao.clearPeerCancelPending(canonId)
                     dao.deleteByCanonId(canonId)
                 }
+            }
+        }
+    }
+
+    private fun submitFromListener(command: CaptureCommand) {
+        when (coordinator.submit(command)) {
+            CaptureAdmission.Accepted -> Unit
+            CaptureAdmission.ReconcileRequired -> requestCaptureReconciliation()
+            CaptureAdmission.Closed -> android.util.Log.w(TAG, "capture_admission_closed")
+        }
+    }
+
+    private fun requestCaptureReconciliation() {
+        if (!NotificationListenerBridge.isAttached() || !coordinator.reconciliationNeeded()) return
+        val shouldLaunch = synchronized(reconciliationLock) {
+            if (reconciliationRunning) false else {
+                reconciliationRunning = true
+                true
+            }
+        }
+        if (!shouldLaunch) return
+        scope.launch {
+            try {
+                reconcileCaptureOverflow()
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                android.util.Log.w(TAG, "capture_reconciliation_unavailable")
+            } finally {
+                synchronized(reconciliationLock) { reconciliationRunning = false }
+            }
+        }
+    }
+
+    private suspend fun reconcileCaptureOverflow() {
+        while (coordinator.reconciliationNeeded() && NotificationListenerBridge.isAttached()) {
+            if (!coordinator.awaitReconciliationCapacity()) return
+            val recoveryGeneration = coordinator.reconciliationGeneration()
+            val recovered = try {
+                val listenerSnapshot = NotificationListenerBridge.activeCaptureSnapshot(
+                    context = applicationContext,
+                    denylist = denylist + AppFilterStore.cachedOrEmpty(),
+                    selfPackage = packageName,
+                )
+                CaptureReconciliation.recoveryCommands(
+                    originDevice = originDevice,
+                    snapshots = listenerSnapshot.sourceSnapshots,
+                    states = reliableDao.activeOriginStates(originDevice),
+                    peerMirrorStates = reliableDao.activePeerMirrorStates(originDevice),
+                    liveMirrorIdentities = listenerSnapshot.liveMirrorIdentities,
+                    removedAt = System.currentTimeMillis(),
+                )
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                android.util.Log.w(TAG, "capture_reconciliation_unavailable")
+                if (!coordinator.awaitReconciliationStateChange()) return
+                continue
+            }
+            var saturated = false
+            for (command in recovered) {
+                when (coordinator.submit(command)) {
+                    CaptureAdmission.Accepted -> Unit
+                    CaptureAdmission.ReconcileRequired -> {
+                        saturated = true
+                        break
+                    }
+                    CaptureAdmission.Closed -> return
+                }
+            }
+            if (!saturated) {
+                if (coordinator.clearReconciliationLatchIfCurrent(recoveryGeneration)) return
             }
         }
     }
