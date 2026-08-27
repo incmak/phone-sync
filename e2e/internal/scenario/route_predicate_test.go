@@ -169,3 +169,29 @@ func TestDirectionalCustodyGrammarIsClosedAndRouteSpecific(t *testing.T) {
 		t.Fatalf("relay oracle code=%q", got)
 	}
 }
+
+func TestAggregateChildCustodyBaselineIsolationForLanAndRelay(t *testing.T) {
+	for _, route := range []string{"lan", "relay"} {
+		t.Run(route, func(t *testing.T) {
+			source := Observation{CustodyCounts: map[string]map[string]int64{
+				"lan":   {"notif_post": 4},
+				"relay": {"notif_post": 3},
+			}}
+			baseline := cloneObservation(source)
+			executor := &Executor{baselineState: map[string]Observation{"A": baseline, "B": {}}}
+			predicate := "A.custody." + route + ":notif_post:1"
+			if executor.predicateSatisfied("child", predicate, source, Observation{}) {
+				t.Fatalf("unchanged %s custody from a prior child satisfied a new child delta", route)
+			}
+			current := cloneObservation(source)
+			current.CustodyCounts[route]["notif_post"]++
+			if !executor.predicateSatisfied("child", predicate, current, Observation{}) {
+				t.Fatalf("new %s custody delta was not observed", route)
+			}
+			current.CustodyCounts[route]["notif_post"]++
+			if source.CustodyCounts[route]["notif_post"] != baseline.CustodyCounts[route]["notif_post"] {
+				t.Fatal("cloned custody maps alias the source")
+			}
+		})
+	}
+}

@@ -479,8 +479,9 @@ func cloneObservation(value Observation) Observation {
 	value.CanonicalSequences = cloneIntMap(value.CanonicalSequences)
 	value.CanonicalSemanticStates = cloneCanonical(value.CanonicalSemanticStates)
 	value.CanonicalMaterializedSequences = cloneIntMap(value.CanonicalMaterializedSequences)
+	sourceCustodyCounts := value.CustodyCounts
 	value.CustodyCounts = map[string]map[string]int64{}
-	for route, counts := range value.CustodyCounts {
+	for route, counts := range sourceCustodyCounts {
 		copyCounts := make(map[string]int64, len(counts))
 		for event, count := range counts {
 			copyCounts[event] = count
