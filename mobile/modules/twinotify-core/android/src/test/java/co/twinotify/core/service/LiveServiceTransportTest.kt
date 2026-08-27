@@ -4,6 +4,7 @@ import co.twinotify.core.storage.CustodyAcceptanceResult
 import co.twinotify.core.storage.LegacyForwardResult
 import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.RelayReceiptResult
+import java.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -17,6 +18,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 
@@ -64,6 +66,37 @@ class LiveServiceTransportTest {
         assertEquals(listOf(RouteKind.LAN), authenticatedRoutes)
         job.cancelAndJoin()
         assertEquals(1, lan.session().closeCount)
+    }
+
+    @Test
+    fun serviceLoopSurvivesEstablishedLanFailureAndFallsBackToRelay() = runTest {
+        val lan = FakeRoute(
+            kind = RouteKind.LAN,
+            successfulOpens = 1,
+            sessionFactory = {
+                FakeSession(
+                    kind = RouteKind.LAN,
+                    awaitClosedFailure = IOException("lan_reader_failed"),
+                )
+            },
+        )
+        val relay = FakeRoute(RouteKind.RELAY)
+        val loop = LiveServiceTransportLoop(
+            outbox = OutboxRepository(EmptyStore()),
+            loadRoutes = { LiveTransportRoutes(lan = lan, relay = relay) },
+            queuedCount = { 0 },
+            publishHealth = {},
+        )
+
+        val job = backgroundScope.launch { loop.run(preferLan = true) }
+        runCurrent()
+        advanceTimeBy(5_001)
+        runCurrent()
+
+        assertTrue(job.isActive, "service transport job terminated after established route failure")
+        assertEquals(1, relay.opens)
+        assertEquals(RouteKind.RELAY, loop.health.value.active)
+        job.cancelAndJoin()
     }
 
     @Test
@@ -294,22 +327,30 @@ class LiveServiceTransportTest {
     private class FakeRoute(
         override val kind: RouteKind,
         private val failOpen: Boolean = false,
+        private val successfulOpens: Int = Int.MAX_VALUE,
+        private val sessionFactory: (() -> FakeSession)? = null,
     ) : TransportRoute {
         var opens = 0
         private val sessions = mutableListOf<FakeSession>()
         override suspend fun open(): AuthenticatedRouteSession {
             opens += 1
-            if (failOpen) error("route_unavailable")
-            return FakeSession(kind).also(sessions::add)
+            if (failOpen || sessions.size >= successfulOpens) error("route_unavailable")
+            return (sessionFactory?.invoke() ?: FakeSession(kind)).also(sessions::add)
         }
         fun session() = sessions.last()
     }
 
-    private class FakeSession(override val kind: RouteKind) : AuthenticatedRouteSession {
+    private class FakeSession(
+        override val kind: RouteKind,
+        private val awaitClosedFailure: Throwable? = null,
+    ) : AuthenticatedRouteSession {
         private val closed = CompletableDeferred<String>()
         var closeCount = 0
         override suspend fun send(message: OutboundMessage) = Unit
-        override suspend fun awaitClosed(): String = closed.await()
+        override suspend fun awaitClosed(): String {
+            awaitClosedFailure?.let { throw it }
+            return closed.await()
+        }
         override suspend fun close(code: String) {
             closeCount += 1
             closed.complete(code)

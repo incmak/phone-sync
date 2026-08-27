@@ -232,8 +232,16 @@ private class LanRouteSession(
     override suspend fun awaitClosed(): String = closed.await()
 
     override suspend fun close(code: String) {
-        runCatching { transport.close(code) }
+        val cancellation = try {
+            transport.close(code)
+            null
+        } catch (error: CancellationException) {
+            error
+        } catch (_: Throwable) {
+            null
+        }
         session.cancelAndJoin()
         closed.complete(code)
+        cancellation?.let { throw it }
     }
 }

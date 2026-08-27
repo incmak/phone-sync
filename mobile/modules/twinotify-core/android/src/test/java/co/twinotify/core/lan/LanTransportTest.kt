@@ -12,7 +12,11 @@ import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.RelayReceiptResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -338,6 +342,31 @@ class LanTransportTest {
         assertEquals(1, connection.closes)
     }
 
+    @Test
+    fun realRouteCloseCancellationPropagatesByIdentityBeforeReplacementCanOpen() = runTest {
+        val cancellation = CancellationException("close_cancelled")
+        val connection = ObservingConnection { frame ->
+            if (frame is LanFrame.Close) throw cancellation
+        }
+        val route = LanRoute(
+            connect = { connection },
+            outbox = outbox(FakeStore()),
+            dispatch = { InboundDispatchResult.Accepted(MSG_A, DIGEST_A) },
+        )
+        val session = route.open()
+        runCurrent()
+        var replacementOpened = false
+
+        val observed = assertFailsWith<CancellationException> {
+            session.close("route_failed")
+            replacementOpened = true
+        }
+
+        assertSame(cancellation, observed)
+        assertFalse(replacementOpened, "replacement opened after close cancellation was swallowed")
+        assertEquals(1, connection.closes, "route worker was not fully joined before cancellation escaped")
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     private fun CoroutineScope.collectEvents(
@@ -415,12 +444,16 @@ class LanTransportTest {
         )
         private val frames = Channel<LanFrame>(Channel.UNLIMITED)
         val written = mutableListOf<LanFrame>()
+        var closes = 0
         override val incoming: Flow<LanFrame> = frames.consumeAsFlow()
         override suspend fun send(frame: LanFrame) {
             onSend(frame)
             written += frame
         }
-        override fun close() { frames.close() }
+        override fun close() {
+            closes += 1
+            frames.close()
+        }
         suspend fun deliver(frame: LanFrame) { frames.send(frame) }
         fun closeSession() { frames.close() }
     }

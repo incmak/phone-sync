@@ -2,7 +2,8 @@ package co.twinotify.core.service
 
 import co.twinotify.core.storage.OutboundMessage
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 enum class RouteKind { LAN, RELAY, NONE }
@@ -99,10 +101,27 @@ class TransportCoordinator(
             }
             publish(session.kind, RoutePhase.AUTHENTICATED)
             val authenticatedAt = clock()
+            var closeCode = COORDINATOR_STOPPED
+            var carryCancellation: CancellationException? = null
             try {
                 carry(session)
+            } catch (error: CancellationException) {
+                carryCancellation = error
+                throw error
+            } catch (_: Exception) {
+                closeCode = ESTABLISHED_ROUTE_FAILURE
             } finally {
-                runCatching { session.close("coordinator_stopped") }
+                try {
+                    // Cleanup owns the granted session until close has fully joined it,
+                    // even when the coordinator itself is being cancelled.
+                    closeGrantedSession(session, closeCode)
+                } catch (error: CancellationException) {
+                    // Never replace the cancellation that ended carry with a cleanup one.
+                    if (carryCancellation == null) throw error
+                } catch (_: Exception) {
+                    // Closing is still inside the established-session failure boundary.
+                    // The bounded code above is the only failure detail given to routes.
+                }
             }
             // Only a session that held for the full window counts as healthy.
             val sustained = clock() - authenticatedAt >= STABILITY_WINDOW_MS
@@ -133,13 +152,42 @@ class TransportCoordinator(
      * whether the rows are selected here or inside a self-draining session, exactly one
      * owner reads the outbox at a time.
      */
-    private suspend fun carry(session: AuthenticatedRouteSession) = coroutineScope {
-        val closed = async { session.awaitClosed() }
-        val pump = if (session.selfDraining) null else launch { pump(session) }
-        try {
-            closed.await()
-        } finally {
-            pump?.cancel()
+    private suspend fun carry(session: AuthenticatedRouteSession) {
+        val failure = coroutineScope {
+            val ended = CompletableDeferred<Throwable?>()
+            val closed = launch {
+                try {
+                    session.awaitClosed()
+                    ended.complete(null)
+                } catch (error: Throwable) {
+                    // Complete with the object instead of completing exceptionally so
+                    // coroutine stack-trace recovery cannot replace cancellation identity.
+                    ended.complete(error)
+                }
+            }
+            val pump = if (session.selfDraining) null else launch {
+                try {
+                    pump(session)
+                    ended.complete(null)
+                } catch (error: Throwable) {
+                    ended.complete(error)
+                }
+            }
+            try {
+                ended.await()
+            } finally {
+                closed.cancel()
+                pump?.cancel()
+            }
+        }
+        failure?.let { throw it }
+    }
+
+    private suspend fun closeGrantedSession(session: AuthenticatedRouteSession, code: String) {
+        if (currentCoroutineContext().isActive) {
+            session.close(code)
+        } else {
+            withContext(NonCancellable) { session.close(code) }
         }
     }
 
@@ -186,6 +234,9 @@ class TransportCoordinator(
     }
 
     companion object {
+        private const val COORDINATOR_STOPPED = "coordinator_stopped"
+        private const val ESTABLISHED_ROUTE_FAILURE = "established_route_failure"
+
         /** How long a session must stay authenticated before its route counts as healthy. */
         const val STABILITY_WINDOW_MS = 30_000L
     }
