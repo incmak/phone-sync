@@ -41,14 +41,13 @@ jobs:
       - name: Build and prepare AVDs
         run: |
           make relay-build
-          make mobile-verify
           ./e2e/scripts/prepare-avds.sh
       - name: Run requested scenario
         env:
           E2E_SCENARIO: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.scenario || 'post' }}
           E2E_KEEP_RUN_DIR: '1'
           E2E_RUN_DIR_FILE: ${{ runner.temp }}/e2e-run-dir
-        run: make e2e-emulator
+        run: make e2e-emulator-run
       - name: Upload sanitized E2E evidence
         if: always()
         run: |

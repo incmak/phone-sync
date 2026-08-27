@@ -19,6 +19,7 @@ copy_workflows() {
   mkdir -p "$tmp/.github/workflows"
   cp "$ROOT_DIR/.github/workflows/mobile.yml" "$tmp/.github/workflows/mobile.yml"
   cp "$ROOT_DIR/.github/workflows/e2e-host.yml" "$tmp/.github/workflows/e2e-host.yml"
+  cp "$ROOT_DIR/.github/workflows/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
   cp "$ROOT_DIR/Makefile" "$tmp/Makefile"
 }
 
@@ -67,6 +68,155 @@ expect_rejection 'mobile typecheck job must not duplicate Jest'
 copy_workflows
 sed -i.bak 's/e2e\/\*\*/not-e2e\/\*\*/g' "$tmp/.github/workflows/mobile.yml"
 expect_rejection 'mobile paths omit E2E changes'
+
+copy_workflows
+awk '/^[[:space:]]*run: make verify$/ { print; print "      - name: Repeat mobile verification"; print "        run: make mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not repeat mobile verification after the full gate'
+
+copy_workflows
+sed -i.bak 's/run: make e2e-emulator-run/run: make e2e-emulator/' "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must use the run-only target after preparing artifacts'
+
+copy_workflows
+sed -i.bak '/run: make verify/d' "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must retain the canonical full verification gate'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must build the relay exactly once'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print "          # make relay-build"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'commented E2E Android relay build cannot satisfy the artifact producer contract'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          npm ci"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not install dependencies directly after the full gate'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          command make mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not prefix mobile verification with command'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          env CHECK=1 make mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not prefix mobile verification with env'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          make${IFS}mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not construct mobile verification with IFS'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          make$(printf \" \")mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not construct mobile verification with command substitution'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          printf \"$(make mobile-verify)\""; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not execute mobile verification in a printf command substitution'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          sh -c \047make mobile-verify\047"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not execute mobile verification through sh -c'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          eval \047make mobile-verify\047"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not execute mobile verification through eval'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          ma\\ke mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not escape the mobile verification command name'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          :;make mobile-verify;:"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not hide terminal mobile verification behind shell separators'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          printf \047 # \047;make mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not treat a quoted hash as a shell comment'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          :;make mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not hide mobile verification behind a shell separator'
+
+copy_workflows
+awk '
+  /^[[:space:]]*make relay-build$/ { print "          make e2e-emulator-run"; print; next }
+  /^[[:space:]]*run: make e2e-emulator-run$/ { print "        # run: make e2e-emulator-run"; next }
+  { print }
+' "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_rejection 'E2E Android must not run the scenario before relay build and AVD preparation'
+
+copy_workflows
+sed -i.bak '/test -x bin\/relay/d' "$tmp/Makefile"
+expect_rejection 'run-only E2E target must preflight the exact relay binary'
+
+copy_workflows
+sed -i.bak '/test -f mobile\/android\/app\/build\/outputs\/apk\/debug\/app-debug.apk/d' "$tmp/Makefile"
+expect_rejection 'run-only E2E target must preflight the exact debug APK'
+
+copy_workflows
+awk '
+  /^e2e-emulator:/ { in_target = 1 }
+  in_target && /^\t\.\/e2e\/scripts\/run-two-emulators\.sh$/ { print "\t# ./e2e/scripts/run-two-emulators.sh"; next }
+  { print }
+' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'run-only E2E target must invoke the scenario script only after explicit artifact preflight'
+
+copy_workflows
+set +e
+make -C "$tmp" e2e-emulator-run >/dev/null 2>"$tmp/e2e-preflight-error"
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || { echo "run-only target must fail with exit 2 for a missing relay artifact, got $status" >&2; exit 1; }
+grep -Fq 'e2e-emulator-run: relay binary not found or not executable: bin/relay' "$tmp/e2e-preflight-error" || {
+  echo "run-only target did not report the missing relay artifact" >&2
+  exit 1
+}
+
+copy_workflows
+mkdir -p "$tmp/bin"
+touch "$tmp/bin/relay"
+chmod +x "$tmp/bin/relay"
+set +e
+make -C "$tmp" e2e-emulator-run >/dev/null 2>"$tmp/e2e-preflight-error"
+status=$?
+set -e
+[[ "$status" -eq 2 ]] || { echo "run-only target must fail with exit 2 for a missing APK artifact, got $status" >&2; exit 1; }
+grep -Fq 'e2e-emulator-run: debug APK not found: mobile/android/app/build/outputs/apk/debug/app-debug.apk' "$tmp/e2e-preflight-error" || {
+  echo "run-only target did not report the missing APK artifact" >&2
+  exit 1
+}
 
 copy_workflows
 sed -i.bak 's#\.github/workflows/mobile\.yml#.github/workflows/not-mobile.yml#g' "$tmp/.github/workflows/e2e-host.yml"
@@ -163,6 +313,18 @@ expect_acceptance() {
     exit 1
   fi
 }
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          printf \047make mobile-verify\047"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_acceptance 'quoted E2E heavy-command mention is not executable'
+
+copy_workflows
+awk '/^[[:space:]]*make relay-build$/ { print; print "          # make mobile-verify"; next } { print }' \
+  "$tmp/.github/workflows/e2e-android.yml" > "$tmp/e2e-android.yml"
+mv "$tmp/e2e-android.yml" "$tmp/.github/workflows/e2e-android.yml"
+expect_acceptance 'commented E2E heavy-command mention is not executable'
 
 copy_workflows
 sed -i.bak 's/Run E2E Go race tests/ADB wording is not a command/' "$tmp/.github/workflows/e2e-host.yml"

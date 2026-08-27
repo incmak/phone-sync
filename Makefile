@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify e2e-emulator e2e-lan-delivery e2e-lan-product e2e-offline-pairing release-audit clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify e2e-emulator e2e-emulator-run e2e-lan-delivery e2e-lan-product e2e-offline-pairing release-audit clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -58,6 +58,11 @@ host-verify: proto-test
 	./scripts/verify-generated-clean.sh
 
 e2e-emulator: relay-build mobile-verify
+	$(MAKE) e2e-emulator-run
+
+e2e-emulator-run:
+	test -x bin/relay || { echo "e2e-emulator-run: relay binary not found or not executable: bin/relay" >&2; exit 2; }
+	test -f mobile/android/app/build/outputs/apk/debug/app-debug.apk || { echo "e2e-emulator-run: debug APK not found: mobile/android/app/build/outputs/apk/debug/app-debug.apk" >&2; exit 2; }
 	./e2e/scripts/run-two-emulators.sh
 
 e2e-lan-delivery:

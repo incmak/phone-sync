@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR=${TWINOTIFY_HOST_WORKFLOW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 MOBILE_WORKFLOW="$ROOT_DIR/.github/workflows/mobile.yml"
 E2E_WORKFLOW="$ROOT_DIR/.github/workflows/e2e-host.yml"
+E2E_ANDROID_WORKFLOW="$ROOT_DIR/.github/workflows/e2e-android.yml"
 MAKEFILE="$ROOT_DIR/Makefile"
 
 require_literal() {
@@ -559,8 +560,253 @@ require_mobile_verify_recipe() {
   }
 }
 
+require_e2e_emulator_targets() {
+  local makefile=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function finish_target() {
+      if (target == "e2e-emulator") {
+        local_target_count++
+        if (recipe_count != 1 || recipe[1] != "$(MAKE) e2e-emulator-run") invalid = 1
+      } else if (target == "e2e-emulator-run") {
+        run_target_count++
+        if (recipe_count != 3 ||
+            recipe[1] != "test -x bin/relay || { echo \"e2e-emulator-run: relay binary not found or not executable: bin/relay\" >&2; exit 2; }" ||
+            recipe[2] != "test -f mobile/android/app/build/outputs/apk/debug/app-debug.apk || { echo \"e2e-emulator-run: debug APK not found: mobile/android/app/build/outputs/apk/debug/app-debug.apk\" >&2; exit 2; }" ||
+            recipe[3] != "./e2e/scripts/run-two-emulators.sh") invalid = 1
+      }
+      target = ""
+      recipe_count = 0
+      delete recipe
+    }
+    /^[^ \t#][^:]*:/ {
+      finish_target()
+      if ($0 == "e2e-emulator: relay-build mobile-verify") target = "e2e-emulator"
+      else if ($0 == "e2e-emulator-run:") target = "e2e-emulator-run"
+      next
+    }
+    target != "" && /^[ \t]/ {
+      command = trim($0)
+      if (command == "" || command ~ /^#/) next
+      sub(/^@/, "", command)
+      recipe[++recipe_count] = command
+    }
+    END {
+      finish_target()
+      if (local_target_count != 1 || run_target_count != 1) invalid = 1
+      exit invalid ? 1 : 0
+    }
+  ' "$makefile" || {
+    echo "e2e-emulator must retain local preparation and delegate to a run-only target with exact APK and relay artifact preflight" >&2
+    exit 1
+  }
+}
+
+canonical_run_payload() {
+  local workflow=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    function sanitize_executable(value, result, position, character, quote, escaped, previous) {
+      for (position = 1; position <= length(value); position++) {
+        character = substr(value, position, 1)
+        if (quote != "") {
+          if (quote == "\"" && escaped) {
+            escaped = 0
+            continue
+          }
+          if (quote == "\"" && character == "\\") {
+            escaped = 1
+            continue
+          }
+          if (character == quote) quote = ""
+          continue
+        }
+        if (character == "\"" || character == sprintf("%c", 39)) {
+          quote = character
+          continue
+        }
+        previous = substr(result, length(result), 1)
+        if (character == "#" && (result == "" || previous ~ /[[:space:];&|()]/)) break
+        result = result character
+      }
+      return result
+    }
+    function without_shell_comment(value, result, position, character, quote, escaped, previous) {
+      for (position = 1; position <= length(value); position++) {
+        character = substr(value, position, 1)
+        if (quote != "") {
+          result = result character
+          if (quote == "\"" && escaped) {
+            escaped = 0
+            continue
+          }
+          if (quote == "\"" && character == "\\") {
+            escaped = 1
+            continue
+          }
+          if (character == quote) quote = ""
+          continue
+        }
+        if (character == "\"" || character == sprintf("%c", 39)) {
+          quote = character
+          result = result character
+          continue
+        }
+        previous = substr(result, length(result), 1)
+        if (character == "#" && (result == "" || previous ~ /[[:space:];&|()]/)) break
+        result = result character
+      }
+      return trim(result)
+    }
+    function inert_quoted_printf(canonical, single_quote) {
+      single_quote = sprintf("%c", 39)
+      return canonical ~ ("^printf[ \t]+" single_quote "[^" single_quote "]*" single_quote "$")
+    }
+    function emit(kind, value, executable, canonical) {
+      executable = trim(sanitize_executable(value))
+      # Comments are inert. The only inert printf fixture is one single-quoted
+      # literal argument: double quotes, substitutions, extra arguments, and
+      # operators all remain structural contract input.
+      if (executable == "") return
+      canonical = without_shell_comment(value)
+      if (inert_quoted_printf(canonical)) return
+      if (canonical != "") print kind ":" canonical
+    }
+    {
+      raw = $0
+      indent = indentation(raw)
+      if (in_run) {
+        if (indent > run_indent) {
+          emit("block", raw)
+          next
+        }
+        in_run = 0
+      }
+      entry = trim(raw)
+      if (entry ~ /^-?[[:space:]]*run:[[:space:]]*/) {
+        command = entry
+        sub(/^-?[[:space:]]*run:[[:space:]]*/, "", command)
+        if (command ~ /^[>|][+-]?$/) {
+          in_run = 1
+          run_indent = indent
+        } else {
+          emit("scalar", command)
+        }
+      }
+    }
+  ' "$workflow"
+}
+
+require_canonical_run_payload() {
+  local workflow=$1 expected_digest=$2 label=$3 actual_digest
+  if command -v shasum >/dev/null 2>&1; then
+    actual_digest=$(canonical_run_payload "$workflow" | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    actual_digest=$(canonical_run_payload "$workflow" | sha256sum | awk '{print $1}')
+  else
+    echo "shasum or sha256sum is required to verify the $label run-payload contract" >&2
+    exit 1
+  fi
+  [[ "$actual_digest" == "$expected_digest" ]] || {
+    echo "$label run payload differs from its reviewed contract (got $actual_digest); review the workflow and update the checked digest intentionally" >&2
+    exit 1
+  }
+}
+
+require_e2e_android_artifact_flow() {
+  local workflow=$1
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    function sanitize_executable(value, result, position, character, quote, escaped, previous) {
+      for (position = 1; position <= length(value); position++) {
+        character = substr(value, position, 1)
+        if (quote != "") {
+          if (quote == "\"" && escaped) {
+            escaped = 0
+            continue
+          }
+          if (quote == "\"" && character == "\\") {
+            escaped = 1
+            continue
+          }
+          if (character == quote) quote = ""
+          continue
+        }
+        if (character == "\"" || character == sprintf("%c", 39)) {
+          quote = character
+          continue
+        }
+        previous = substr(result, length(result), 1)
+        if (character == "#" && (result == "" || previous ~ /[[:space:];&|()]/)) break
+        result = result character
+      }
+      return result
+    }
+    function inspect(command, normalized) {
+      normalized = trim(sanitize_executable(command))
+      if (normalized == "make verify") { verify++; verify_line = NR }
+      if (normalized == "make relay-build") { relay_build++; relay_build_line = NR }
+      if (normalized == "./e2e/scripts/prepare-avds.sh") { prepare_avds++; prepare_avds_line = NR }
+      if (normalized == "make e2e-emulator-run") { run_only++; run_only_line = NR }
+    }
+    {
+      code = $0
+      executable_code = sanitize_executable(code)
+      indent = indentation(code)
+      if (in_run) {
+        if (indent > run_indent) {
+          inspect(code)
+          next
+        }
+        in_run = 0
+      }
+      if (trim(executable_code) == "") next
+      entry = trim(executable_code)
+      if (entry ~ /^-?[[:space:]]*run:[[:space:]]*/) {
+        command = entry
+        sub(/^-?[[:space:]]*run:[[:space:]]*/, "", command)
+        if (command ~ /^[>|][+-]?$/) {
+          in_run = 1
+          run_indent = indent
+        } else inspect(command)
+      }
+    }
+    END {
+      if (verify != 1 || relay_build != 1 || prepare_avds != 1 || run_only != 1 ||
+          verify_line >= relay_build_line || relay_build_line >= prepare_avds_line ||
+          prepare_avds_line >= run_only_line) exit 1
+    }
+  ' "$workflow" || {
+    echo "E2E Android must run one full verification, one relay build, one AVD preparation, and the run-only scenario without direct mobile rebuild work" >&2
+    exit 1
+  }
+}
+
 [[ -f "$MOBILE_WORKFLOW" ]] || { echo "mobile workflow missing: $MOBILE_WORKFLOW" >&2; exit 1; }
 [[ -f "$E2E_WORKFLOW" ]] || { echo "E2E host workflow missing: $E2E_WORKFLOW" >&2; exit 1; }
+[[ -f "$E2E_ANDROID_WORKFLOW" ]] || { echo "E2E Android workflow missing: $E2E_ANDROID_WORKFLOW" >&2; exit 1; }
 [[ -f "$MAKEFILE" ]] || { echo "Makefile missing: $MAKEFILE" >&2; exit 1; }
 
 require_mobile_typecheck_runs "$MOBILE_WORKFLOW"
@@ -604,6 +850,9 @@ done
 require_literal "$E2E_WORKFLOW" 'run: ./scripts/verify-host-workflows_test.sh' 'E2E host workflow must run the workflow verifier self-test'
 require_host_verify_recipe "$MAKEFILE"
 require_mobile_verify_recipe "$MAKEFILE"
+require_e2e_emulator_targets "$MAKEFILE"
+require_e2e_android_artifact_flow "$E2E_ANDROID_WORKFLOW"
+require_canonical_run_payload "$E2E_ANDROID_WORKFLOW" '4355e3c2ad67cdf2088a3aa8b45e093bb18aab72e3c5df1f62353404efb93e0f' 'E2E Android workflow'
 require_approved_run_commands "$E2E_WORKFLOW"
 require_no_secrets "$E2E_WORKFLOW"
 

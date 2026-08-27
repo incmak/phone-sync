@@ -10,6 +10,7 @@
 
 ## Status
 
+- **Status**: DONE
 - **Priority**: P2
 - **Effort**: S
 - **Risk**: MED
@@ -147,11 +148,11 @@ counts and artifact flow.
 
 ## Done criteria
 
-- [ ] E2E Android performs one mobile install/prebuild/native verification cycle.
-- [ ] Protected release performs one locked mobile install through host verify.
-- [ ] Local `make e2e-emulator` remains safe and self-preparing.
-- [ ] CI run-only target fails closed on missing APK or relay binary.
-- [ ] Workflow verifiers, their self-tests, `make host-verify`, and diff check
+- [x] E2E Android performs one mobile install/prebuild/native verification cycle.
+- [x] Protected release performs one locked mobile install through host verify.
+- [x] Local `make e2e-emulator` remains safe and self-preparing.
+- [x] CI run-only target fails closed on missing APK or relay binary.
+- [x] Workflow verifiers, their self-tests, `make host-verify`, and diff check
       pass.
 
 ## STOP conditions

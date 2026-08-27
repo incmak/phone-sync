@@ -212,11 +212,205 @@ verify_secret_scopes() {
   ' "$WORKFLOW" || die "protected secrets must be scoped only to their exact consuming steps"
 }
 
+canonical_run_payload() {
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    function sanitize_executable(value, result, position, character, quote, escaped, previous) {
+      for (position = 1; position <= length(value); position++) {
+        character = substr(value, position, 1)
+        if (quote != "") {
+          if (quote == "\"" && escaped) {
+            escaped = 0
+            continue
+          }
+          if (quote == "\"" && character == "\\") {
+            escaped = 1
+            continue
+          }
+          if (character == quote) quote = ""
+          continue
+        }
+        if (character == "\"" || character == sprintf("%c", 39)) {
+          quote = character
+          continue
+        }
+        previous = substr(result, length(result), 1)
+        if (character == "#" && (result == "" || previous ~ /[[:space:];&|()]/)) break
+        result = result character
+      }
+      return result
+    }
+    function without_shell_comment(value, result, position, character, quote, escaped, previous) {
+      for (position = 1; position <= length(value); position++) {
+        character = substr(value, position, 1)
+        if (quote != "") {
+          result = result character
+          if (quote == "\"" && escaped) {
+            escaped = 0
+            continue
+          }
+          if (quote == "\"" && character == "\\") {
+            escaped = 1
+            continue
+          }
+          if (character == quote) quote = ""
+          continue
+        }
+        if (character == "\"" || character == sprintf("%c", 39)) {
+          quote = character
+          result = result character
+          continue
+        }
+        previous = substr(result, length(result), 1)
+        if (character == "#" && (result == "" || previous ~ /[[:space:];&|()]/)) break
+        result = result character
+      }
+      return trim(result)
+    }
+    function inert_quoted_printf(canonical, single_quote) {
+      single_quote = sprintf("%c", 39)
+      return canonical ~ ("^printf[ \t]+" single_quote "[^" single_quote "]*" single_quote "$")
+    }
+    function emit(kind, value, executable, canonical) {
+      executable = trim(sanitize_executable(value))
+      # Ignore true comments and exactly one single-quoted literal printf
+      # argument. Every other run payload is structural contract input,
+      # including wrappers and expansions that could execute work indirectly.
+      if (executable == "") return
+      canonical = without_shell_comment(value)
+      if (inert_quoted_printf(canonical)) return
+      if (canonical != "") print kind ":" canonical
+    }
+    {
+      raw = $0
+      indent = indentation(raw)
+      if (in_run) {
+        if (indent > run_indent) {
+          emit("block", raw)
+          next
+        }
+        in_run = 0
+      }
+      entry = trim(raw)
+      if (entry ~ /^-?[[:space:]]*run:[[:space:]]*/) {
+        command = entry
+        sub(/^-?[[:space:]]*run:[[:space:]]*/, "", command)
+        if (command ~ /^[>|][+-]?$/) {
+          in_run = 1
+          run_indent = indent
+        } else {
+          emit("scalar", command)
+        }
+      }
+    }
+  ' "$WORKFLOW"
+}
+
+verify_canonical_run_payload() {
+  local actual_digest
+  if command -v shasum >/dev/null 2>&1; then
+    actual_digest=$(canonical_run_payload | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    actual_digest=$(canonical_run_payload | sha256sum | awk '{print $1}')
+  else
+    die "shasum or sha256sum is required to verify the protected-release run-payload contract"
+  fi
+  [[ "$actual_digest" == 'e0d6b6158649f8c9389fcdf95a99f4e0d989f65c569c1319e283dda65fe48f7e' ]] ||
+    die "protected-release run payload differs from its reviewed contract (got $actual_digest); review the workflow and update the checked digest intentionally"
+}
+
+verify_host_verification_ownership() {
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    function sanitize_executable(value, result, position, character, quote, escaped, previous) {
+      for (position = 1; position <= length(value); position++) {
+        character = substr(value, position, 1)
+        if (quote != "") {
+          if (quote == "\"" && escaped) {
+            escaped = 0
+            continue
+          }
+          if (quote == "\"" && character == "\\") {
+            escaped = 1
+            continue
+          }
+          if (character == quote) quote = ""
+          continue
+        }
+        if (character == "\"" || character == sprintf("%c", 39)) {
+          quote = character
+          continue
+        }
+        previous = substr(result, length(result), 1)
+        if (character == "#" && (result == "" || previous ~ /[[:space:];&|()]/)) break
+        result = result character
+      }
+      return result
+    }
+    function inspect_run(command, normalized) {
+      normalized = trim(sanitize_executable(command))
+      if (normalized == "make host-verify") {
+        host_verify++
+        host_verify_line = NR
+      }
+    }
+    {
+      raw_code = $0
+      secret_code = raw_code
+      sub(/[ \t]+#.*/, "", secret_code)
+      if (tolower(secret_code) ~ /secrets[[:space:]]*([.\[]|[[:space:]]+[.\[])/ && first_secret == 0) first_secret = NR
+      executable_code = sanitize_executable(raw_code)
+      indent = indentation(raw_code)
+      if (in_run) {
+        if (indent > run_indent) {
+          inspect_run(raw_code)
+          next
+        }
+        in_run = 0
+      }
+      if (trim(executable_code) == "") next
+      entry = trim(executable_code)
+      if (entry ~ /^-?[[:space:]]*run:[[:space:]]*/) {
+        command = entry
+        sub(/^-?[[:space:]]*run:[[:space:]]*/, "", command)
+        if (command ~ /^[>|][+-]?$/) {
+          in_run = 1
+          run_indent = indent
+        } else inspect_run(command)
+      }
+    }
+    END {
+      if (host_verify != 1 || host_verify_line == 0 ||
+          first_secret == 0 || host_verify_line >= first_secret) exit 1
+    }
+  ' "$WORKFLOW" || die "make host-verify must own the only locked install and run before protected secrets"
+}
+
 verify_workflow() {
   [[ -f "$WORKFLOW" ]] || die "protected Android release workflow is missing"
   verify_release_triggers
   verify_read_only_permissions
   verify_secret_scopes
+  verify_host_verification_ownership
+  verify_canonical_run_payload
   verify_eas_cli_invocations
   grep -Eq '^[[:space:]]*environment:[[:space:]]*android-release[[:space:]]*$' "$WORKFLOW" || die "android-release protected environment is required"
 
@@ -261,6 +455,13 @@ self_test() {
     local label=$1
     if TWINOTIFY_ANDROID_RELEASE_ROOT="$tmp" "$ROOT_DIR/scripts/verify-android-release-workflow.sh" >/dev/null 2>"$tmp/error"; then
       die "self-test expected rejection: $label"
+    fi
+  }
+  expect_acceptance() {
+    local label=$1
+    if ! TWINOTIFY_ANDROID_RELEASE_ROOT="$tmp" "$ROOT_DIR/scripts/verify-android-release-workflow.sh" >/dev/null 2>"$tmp/error"; then
+      cat "$tmp/error" >&2
+      die "self-test expected acceptance: $label"
     fi
   }
 
@@ -308,19 +509,19 @@ self_test() {
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection job-level-secret
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets[\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        env:"; print "          LEAK: ${{ secrets[\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection early-step-single-quoted-secret
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets[\"EAS_TOKEN\"] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        env:"; print "          LEAK: ${{ secrets[\"EAS_TOKEN\"] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection early-step-double-quoted-secret
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets[format(\"{0}\", \"EAS_TOKEN\")] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        env:"; print "          LEAK: ${{ secrets[format(\"{0}\", \"EAS_TOKEN\")] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection early-step-dynamic-secret
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        if: ${{ secrets[\"EAS_TOKEN\"] != \"\" }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        if: ${{ secrets[\"EAS_TOKEN\"] != \"\" }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection early-step-if-secret
   copy_fixture
@@ -328,27 +529,27 @@ self_test() {
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection early-step-with-secret
   copy_fixture
-  awk '/^[[:space:]]*run: npm ci$/ { print "        run: printf \"%s\" \"${{ secrets.EAS_TOKEN }}\""; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*run: make host-verify$/ { print "        run: printf \"%s\" \"${{ secrets.EAS_TOKEN }}\""; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection early-step-run-secret
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets [\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        env:"; print "          LEAK: ${{ secrets [\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection whitespace-before-bracket-secret
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets  . EAS_TOKEN }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        env:"; print "          LEAK: ${{ secrets  . EAS_TOKEN }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection whitespace-around-dot-secret
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ secrets\t[\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        env:"; print "          LEAK: ${{ secrets\t[\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection tab-before-bracket-secret
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: >-"; print "            ${{"; print "              secrets"; print "              [\047EAS_TOKEN\047]"; print "            }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        env:"; print "          LEAK: >-"; print "            ${{"; print "              secrets"; print "              [\047EAS_TOKEN\047]"; print "            }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection multiline-secret-context
   copy_fixture
-  awk '/^[[:space:]]*- name: Install locked dependencies$/ { print; print "        env:"; print "          LEAK: ${{ SeCrEtS [\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print; print "        env:"; print "          LEAK: ${{ SeCrEtS [\047EAS_TOKEN\047] }}"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
   expect_rejection mixed-case-secret-context
   copy_fixture
@@ -360,6 +561,78 @@ self_test() {
   copy_fixture
   sed -i.bak '/run: make host-verify/d' "$tmp/.github/workflows/android-release.yml"
   expect_rejection missing-host-gate
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: npm ci"; print "        working-directory: mobile" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          cd mobile && npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-block-scalar
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          cd mobile;npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-no-space-semicolon
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          command npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-command-prefix
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          env CHECK=1 npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-env-prefix
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          npm${IFS}ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-ifs-construction
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          npm$(printf \" \")ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-command-substitution
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          printf \"$(npm ci)\"" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-printf-command-substitution
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          sh -c \047npm ci\047" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-sh-c
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          eval \047npm ci\047" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-eval
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          n\\pm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-escaped-command-name
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          :&&npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-no-space-and
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          false||npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-no-space-or
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          printf x|npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-no-space-pipe
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: |"; print "          (npm ci)" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-locked-install-subshell
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Quoted hash before executable install"; print "        run: |"; print "          printf \047 # \047;npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection quoted-hash-before-install
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Quoted install mention"; print "        run: |"; print "          printf \047:;npm ci\047" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_acceptance quoted-install-mention
+  copy_fixture
+  awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Commented install mention"; print "        run: |"; print "          # :;npm ci" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_acceptance commented-install-mention
   copy_fixture
   sed -i.bak 's/--profile production/--profile preview/' "$tmp/.github/workflows/android-release.yml"
   expect_rejection wrong-aab-profile
