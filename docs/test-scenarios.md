@@ -469,18 +469,17 @@ A 64-character hex digest is allowed, because it is bounded and not reversible.
 A scenario that observed no route at all omits the block rather than inventing
 one.
 
-### Still operator-driven
+### Automated scenarios with physical acceptance pending
 
-The host harness implements bounded burst and unpair-during-traffic scenarios,
-but their physical handset execution remains pending. These additional topology
-and lifecycle checks also remain operator-driven:
+The host harness implements bounded burst, unpair-during-traffic,
+`lan-relay-fallback-return`, and `lan-restart-persistence`. The fallback child
+uses the app-internal direct-route control so relay remains available, then
+restores LAN and proves a second tagged delivery. The restart child force-stops
+and restarts A and B through the typed launcher without clearing app data.
 
-- **LAN loss with relay fallback, and the return to LAN.** Turning a device's
-  network off removes the direct route and the relay together, so it cannot
-  isolate the two. A device control that disables only the direct route is
-  needed before this can be a host scenario.
-- **Process restart while direct traffic is pending.** This needs two live
-  handsets and operator observation of the restarted app and notification tray.
+Their actual handset execution and operator observation remain pending physical
+two-phone work. One topology check remains operator-driven:
+
 - **The controlled no-uplink run.** This needs a network with no internet path
   plus packet and DNS observation, per
   [`scripts/verify-offline-pairing-evidence.sh`](../scripts/verify-offline-pairing-evidence.sh).

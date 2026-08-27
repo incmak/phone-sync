@@ -48,6 +48,11 @@ write_valid_fixture() {
     '}' \
     '```' \
     > "$tmp/docs/docs/release-evidence/README.md"
+  printf '%s\n' \
+    '# Test scenarios' \
+    'The automated aggregate includes lan-relay-fallback-return and lan-restart-persistence.' \
+    'Their acceptance remains pending physical two-phone run.' \
+    > "$tmp/docs/docs/test-scenarios.md"
 }
 
 expect_rejection() {
@@ -116,5 +121,21 @@ expect_rejection 'physical release gate rewritten as passed'
 write_valid_fixture
 sed -i.bak 's/protected Android producer remains externally blocked/protected Android producer passed/' "$tmp/docs/docs/release-evidence/README.md"
 expect_rejection 'protected producer rewritten as passed'
+
+write_valid_fixture
+printf '%s\n' 'A device control that disables only the direct route is needed before this can be a host scenario.' >> "$tmp/docs/docs/test-scenarios.md"
+expect_rejection 'stale missing direct-route control claim'
+
+write_valid_fixture
+sed -i.bak 's/lan-relay-fallback-return/fallback omitted/' "$tmp/docs/docs/test-scenarios.md"
+expect_rejection 'missing automated fallback and return scenario'
+
+write_valid_fixture
+sed -i.bak 's/lan-restart-persistence/restart omitted/' "$tmp/docs/docs/test-scenarios.md"
+expect_rejection 'missing automated restart persistence scenario'
+
+write_valid_fixture
+sed -i.bak 's/pending physical two-phone run/passed physical two-phone run/' "$tmp/docs/docs/test-scenarios.md"
+expect_rejection 'physical LAN acceptance rewritten as passed'
 
 echo 'project documentation verifier self-test passed'

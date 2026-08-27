@@ -6,6 +6,7 @@ ROOT_README="$ROOT_DIR/README.md"
 MOBILE_README="$ROOT_DIR/mobile/README.md"
 PROTO_README="$ROOT_DIR/proto/README.md"
 RELEASE_README="$ROOT_DIR/docs/release-evidence/README.md"
+TEST_SCENARIOS="$ROOT_DIR/docs/test-scenarios.md"
 
 die() {
   echo "project documentation check failed: $*" >&2
@@ -29,7 +30,7 @@ reject_pattern() {
   fi
 }
 
-for file in "$ROOT_README" "$MOBILE_README" "$PROTO_README" "$RELEASE_README"; do
+for file in "$ROOT_README" "$MOBILE_README" "$PROTO_README" "$RELEASE_README" "$TEST_SCENARIOS"; do
   [[ -f "$file" ]] || die "required document is missing: $file"
 done
 
@@ -50,6 +51,11 @@ done
 
 require_pattern "$RELEASE_README" 'physical.*pending|pending.*physical' 'release README must preserve the pending physical-release gate'
 require_pattern "$RELEASE_README" 'protected.*(externally blocked|not yet linked)|not yet linked.*protected' 'release README must preserve the protected-release pending state'
+
+require_literal "$TEST_SCENARIOS" 'lan-relay-fallback-return' 'test scenarios must document automated LAN fallback and return'
+require_literal "$TEST_SCENARIOS" 'lan-restart-persistence' 'test scenarios must document automated two-sided restart persistence'
+require_pattern "$TEST_SCENARIOS" 'pending physical two-phone run|physical two-phone run.*pending' 'test scenarios must preserve pending physical LAN acceptance'
+reject_pattern "$TEST_SCENARIOS" 'device control that disables only the direct route is needed' 'test scenarios must not claim the implemented direct-route control is missing'
 
 manifest=$(mktemp "${TMPDIR:-/tmp}/twinotify-project-docs-manifest.XXXXXX")
 trap 'rm -f -- "$manifest"' EXIT
