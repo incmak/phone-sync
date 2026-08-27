@@ -104,5 +104,5 @@ const styles = StyleSheet.create({
   headline: { marginBottom: 12, fontWeight: '600' },
   body: { maxWidth: 520 },
   actions: { gap: 12, paddingBottom: 8, flexShrink: 0 },
-  secondaryLink: { alignItems: 'flex-start', justifyContent: 'center', minHeight: 44, paddingVertical: 8 },
+  secondaryLink: { alignItems: 'flex-start', justifyContent: 'center', minHeight: 48, paddingVertical: 8 },
 });

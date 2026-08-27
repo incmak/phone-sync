@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { StyleSheet } from 'react-native';
+import { Dimensions, StyleSheet } from 'react-native';
 
 import HomeScreen from '../home';
 import { OnboardingState } from '../../state/onboardingState';
@@ -60,6 +60,16 @@ function arrange(routeCase: ScreenCase) {
 
 function traceFor(screen: ReturnType<typeof render>, state: ScreenCase['state']) {
   return screen.UNSAFE_getByProps({ testID: `handoff-trace-${state}` });
+}
+
+function closestFlexDirection(node: ReturnType<typeof render>['root'] | null): unknown {
+  let current = node;
+  while (current) {
+    const direction = StyleSheet.flatten(current.props.style)?.flexDirection;
+    if (direction) return direction;
+    current = current.parent;
+  }
+  return undefined;
 }
 
 describe('Home handoff trace', () => {
@@ -161,5 +171,30 @@ describe('Home handoff trace', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open settings' })).toBeTruthy());
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Mirror notifications' }).props.accessibilityState.disabled).toBe(false));
     expect(StyleSheet.flatten(screen.getByText('settings').props.style).textTransform).toBe('capitalize');
+  });
+
+  it('keeps narrow route status readable and physical touch targets safely above 44dp', async () => {
+    const originalWindow = Dimensions.get('window');
+    const originalScreen = Dimensions.get('screen');
+    Dimensions.set({ window: { ...originalWindow, width: 320 }, screen: { ...originalScreen, width: 320 } });
+
+    let screen: ReturnType<typeof render> | undefined;
+    try {
+      arrange(cases[2]);
+      screen = render(<HomeScreen />);
+
+      const liveStatus = await screen.findByLabelText(
+        'Reconnecting. Looking for your other phone. This retries on its own.',
+      );
+      expect(closestFlexDirection(liveStatus)).toBe('column');
+      expect(
+        StyleSheet.flatten(
+          screen.getByRole('button', { name: 'Open paired device settings' }).props.style,
+        ).minHeight,
+      ).toBeGreaterThanOrEqual(48);
+    } finally {
+      screen?.unmount();
+      Dimensions.set({ window: originalWindow, screen: originalScreen });
+    }
   });
 });

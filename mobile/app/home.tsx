@@ -64,6 +64,7 @@ export default function HomeScreen() {
     ? (pairStatus.peerDisplayName?.trim() || pairStatus.peerDeviceId?.slice(0, 8) || 'Unknown device')
     : 'Not paired';
   const peerReachable = route.state === 'direct' || route.state === 'relay';
+  const useNarrowRouteHeader = windowWidth <= 360;
   const gutter = windowWidth <= 360 ? 16 : 20;
   const traceWidth = Math.max(240, windowWidth - gutter * 2);
 
@@ -84,12 +85,14 @@ export default function HomeScreen() {
           </Pressable>
         </View>
 
-        <View style={styles.routeHead}>
+        <View style={[styles.routeHead, useNarrowRouteHeader && styles.routeHeadNarrow]}>
           <View accessible accessibilityRole="text" accessibilityLiveRegion="polite" accessibilityLabel={`${route.label}. ${route.explanation}`} style={styles.routeCopy}>
             <Text style={[styles.routeState, { color: theme.ink, fontFamily: theme.fonts.display }]}>{route.label}</Text>
             <Text style={[styles.routeExplanation, { color: theme.ink2, fontFamily: theme.fonts.ui }]}>{route.explanation}</Text>
           </View>
-          <TwSwitch checked={mirrorOn} onChange={handleMirrorToggle} size="lg" disabled={!pairStatus.paired} accessibilityLabel="Mirror notifications" />
+          <View style={[styles.routeToggle, useNarrowRouteHeader && styles.routeToggleNarrow]}>
+            <TwSwitch checked={mirrorOn} onChange={handleMirrorToggle} size="lg" disabled={!pairStatus.paired} accessibilityLabel="Mirror notifications" />
+          </View>
         </View>
 
         <View style={[styles.traceStage, { backgroundColor: theme.fill }]}>
@@ -154,7 +157,10 @@ const styles = StyleSheet.create({
   settingsAction: { minWidth: 72, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 14, paddingHorizontal: 8 },
   settingsText: { fontSize: 15, lineHeight: 20, textTransform: 'capitalize' },
   routeHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  routeHeadNarrow: { flexDirection: 'column', gap: 8 },
   routeCopy: { flex: 1, minWidth: 0, paddingTop: 2 },
+  routeToggle: { flexShrink: 0 },
+  routeToggleNarrow: { alignSelf: 'flex-end' },
   routeState: { fontSize: 34, fontWeight: '700', letterSpacing: -0.6, lineHeight: 39 },
   routeExplanation: { fontSize: 14, lineHeight: 20, marginTop: 5 },
   traceStage: { alignItems: 'center', justifyContent: 'center', minHeight: 104, borderRadius: 20, marginTop: 20, overflow: 'hidden' },
@@ -163,7 +169,7 @@ const styles = StyleSheet.create({
   peerEyebrow: { fontSize: 12, lineHeight: 17 },
   peerName: { fontSize: 16, lineHeight: 22, marginTop: 1 },
   peerReachability: { fontSize: 13, lineHeight: 18, marginTop: 1 },
-  disclosureTarget: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 14, marginLeft: 12 },
+  disclosureTarget: { minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 14, marginLeft: 12 },
   metricsRow: { flexDirection: 'row', gap: 12, marginTop: 20 },
   metric: { flex: 1, minWidth: 0 },
   metricLabel: { fontSize: 12, lineHeight: 17, marginBottom: 3 },

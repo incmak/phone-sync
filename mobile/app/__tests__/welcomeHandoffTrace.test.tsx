@@ -6,7 +6,7 @@ import WelcomeScreen from '../onboarding/welcome';
 
 type RenderNode = {
   props?: Record<string, unknown>;
-  children?: Array<RenderNode | string>;
+  children?: (RenderNode | string)[];
 };
 
 function nodesWithTestId(node: RenderNode | RenderNode[] | string | null, testID: string): RenderNode[] {
@@ -65,7 +65,9 @@ describe('Welcome Handoff Trace composition', () => {
       expect(text.props.allowFontScaling).not.toBe(false);
       expect(style.lineHeight).toBeGreaterThan(style.fontSize);
     }
-    expect(StyleSheet.flatten(alternate.props.style).minHeight).toBeGreaterThanOrEqual(44);
+    // 48dp stays at or above the verifier's 44dp physical target after Android
+    // rounds layout coordinates at high display densities.
+    expect(StyleSheet.flatten(alternate.props.style).minHeight).toBeGreaterThanOrEqual(48);
     expect(StyleSheet.flatten(screen.getByRole('button', { name: 'Get started' }).props.style).minHeight).toBeGreaterThanOrEqual(44);
     expect(StyleSheet.flatten(screen.getByTestId('welcome-actions').props.style).position).toBeUndefined();
   });
