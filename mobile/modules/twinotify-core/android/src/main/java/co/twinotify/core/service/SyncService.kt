@@ -975,6 +975,9 @@ class SyncService : Service() {
             this,
             snapshotCoordinator,
             onAuthenticatedEvent = ProductObservationTracker::recordAuthenticatedInbound,
+            materializationRequester = MaterializationRequester {
+                requestPendingMaterialization(MaterializationTrigger.ROUTINE)
+            },
         )
         // Every health transition refreshes the foreground text from the same native snapshot.
         healthJob = scope.launch {

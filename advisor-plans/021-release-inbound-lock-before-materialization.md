@@ -16,6 +16,9 @@
 - **Depends on**: Plan 020
 - **Category**: perf
 - **Planned at**: commit `f119224`, 2026-08-27
+- **Result**: DONE on 2026-08-27; notification and call behavioral REDs,
+  native 567/567, Android-test compilation, lint, debug assembly, and
+  independent transport/Room review passed
 
 ## Why this matters
 
@@ -149,11 +152,11 @@ custody/receipt-before-ACK ordering is unchanged.
 
 ## Done criteria
 
-- [ ] No platform materializer or requester runs while `stateMutex` is held.
-- [ ] Unrelated durable ingress progresses while the first platform pass blocks.
-- [ ] Production uses exactly one process coalescing gate.
-- [ ] Durable custody and receipt-before-ACK behavior is unchanged.
-- [ ] Full native gate, diff check, and independent transport/Room review pass.
+- [x] No platform materializer or requester runs while `stateMutex` is held.
+- [x] Unrelated durable ingress progresses while the first platform pass blocks.
+- [x] Production uses exactly one process coalescing gate.
+- [x] Durable custody and receipt-before-ACK behavior is unchanged.
+- [x] Full native gate, diff check, and independent transport/Room review pass.
 
 ## STOP conditions
 

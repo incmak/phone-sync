@@ -48,7 +48,7 @@ inputs. Local bundled APKs are QA artifacts, not protected release candidates.
 | 018 | Terminalize superseded inbound state atomically | P0 | L | 017 | DONE: `12d12c9`; exact-set receipt bundles, reconciliation, Room instrumentation and review approved |
 | 019 | Complete the eleven-child LAN product gate | P1 | L | 018 | DONE: `a307e8c` + `8751536`; host gate and custody-baseline isolation review approved; physical execution remains pending evidence |
 | 020 | Stop routine passes from rescanning permission-held mirrors | P1 | M | none | DONE: routine holds parked, restoration trigger coalesced, process-wide pass serialization, native 562/562 and independent review approved |
-| 021 | Release inbound state serialization before platform materialization | P1 | M | 020 | TODO |
+| 021 | Release inbound state serialization before platform materialization | P1 | M | 020 | DONE: notification/call post-commit handoff, native 567/567, transport/Room review approved |
 | 022 | Bound capture coordination across distinct canonical IDs | P1 | L | none | TODO |
 | 023 | Make contributor and release documentation match the live product | P2 | S | none | TODO |
 | 024 | Run heavyweight mobile verification once per CI job | P2 | S | 023 | TODO |

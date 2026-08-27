@@ -70,6 +70,27 @@ fun interface DirectControlJournal {
     ): DirectControlCommitResult
 }
 
+/** Requests a coalesced materialization pass after durable desired state exists. */
+internal fun interface MaterializationRequester {
+    suspend fun request()
+}
+
+/** Closed-world handoff from the desired-state transaction to materialization. */
+internal data class DesiredStateDispatch(
+    val result: InboundDispatchResult,
+    val requestMaterialization: Boolean,
+)
+
+internal suspend fun dispatchDesiredStateAfterCommit(
+    stateMutex: Mutex,
+    requester: MaterializationRequester,
+    lockedPhase: suspend () -> DesiredStateDispatch,
+): InboundDispatchResult {
+    val dispatch = stateMutex.withLock { lockedPhase() }
+    if (dispatch.requestMaterialization) requester.request()
+    return dispatch.result
+}
+
 sealed interface CallRejectionCommitResult {
     data object Committed : CallRejectionCommitResult
     data object Duplicate : CallRejectionCommitResult
@@ -231,14 +252,16 @@ class InboundDispatcher internal constructor(
     private val onAuthenticatedEvent: (String) -> Unit,
     private val authenticatedV2Opener: ((String) -> AuthenticatedEnvelope)?,
     private val directControlJournal: DirectControlJournal?,
+    private val materializationRequester: MaterializationRequester,
 ) {
-    constructor(
+    internal constructor(
         ctx: Context,
         snapshotCoordinator: SnapshotCoordinator = SnapshotCoordinator(
             NotificationDb.get(ctx.applicationContext).reliableDeliveryDao(),
         ),
         onAuthenticatedEvent: (String) -> Unit = {},
-    ) : this(ctx, snapshotCoordinator, onAuthenticatedEvent, null, null)
+        materializationRequester: MaterializationRequester,
+    ) : this(ctx, snapshotCoordinator, onAuthenticatedEvent, null, null, materializationRequester)
 
     private val reliableDao by lazy { NotificationDb.get(ctx.applicationContext).reliableDeliveryDao() }
     private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao)) }
@@ -409,15 +432,15 @@ class InboundDispatcher internal constructor(
             // event in the journal only when it has a canonical desired state.
             return InboundDispatchResult.Rejected("unsupported_event")
         }
-        return stateMutex.withLock {
+        return dispatchDesiredStateAfterCommit(stateMutex, materializationRequester) {
             val canonId = requireNotNull(inner.canonId)
             val localDeviceId = DeviceIdentity.getOrCreate(ctx)
             val current = reliableDao.canonical(canonId)
             reliableDao.inbound(inner.msgId)?.let { existing ->
-                return@withLock if (existing.envelopeSha256 == opened.envelopeSha256) {
-                    InboundDispatchResult.Duplicate(inner.msgId, opened.envelopeSha256)
+                return@dispatchDesiredStateAfterCommit if (existing.envelopeSha256 == opened.envelopeSha256) {
+                    DesiredStateDispatch(InboundDispatchResult.Duplicate(inner.msgId, opened.envelopeSha256), false)
                 } else {
-                    InboundDispatchResult.Rejected("id_conflict")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("id_conflict"), false)
                 }
             }
             val nextMirrorLocalId = reliableDao.nextMirrorLocalId()
@@ -428,21 +451,27 @@ class InboundDispatcher internal constructor(
                 authenticatedPeerId = peer?.deviceId ?: inner.originDevice,
             ) ?: run {
                 android.util.Log.w("Twinotify", "v2 cancel origin is not the paired peer")
-                return@withLock InboundDispatchResult.Rejected("unauthorized_cancel")
+                return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    InboundDispatchResult.Rejected("unauthorized_cancel"),
+                    false,
+                )
             }
             if (current != null && requireNotNull(inner.sequence) <= current.latestSequence) {
                 val receiptFactory = DurableReceiptFactory(ctx)
-                return@withLock dispatchAuthenticatedCallRejection(
-                    msgId = inner.msgId,
-                    originDevice = inner.originDevice,
-                    envelopeSha256 = opened.envelopeSha256,
-                    canonId = canonId,
-                    sequence = requireNotNull(inner.sequence),
-                    reason = "notification_sequence_stale",
-                    committedAt = System.currentTimeMillis(),
-                    eventType = inner.type,
-                    createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, opened.envelopeSha256, reason) },
-                    journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    dispatchAuthenticatedCallRejection(
+                        msgId = inner.msgId,
+                        originDevice = inner.originDevice,
+                        envelopeSha256 = opened.envelopeSha256,
+                        canonId = canonId,
+                        sequence = requireNotNull(inner.sequence),
+                        reason = "notification_sequence_stale",
+                        committedAt = System.currentTimeMillis(),
+                        eventType = inner.type,
+                        createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, opened.envelopeSha256, reason) },
+                        journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                    ),
+                    false,
                 )
             }
             val desired = try {
@@ -459,7 +488,10 @@ class InboundDispatcher internal constructor(
                 }
             } catch (error: Throwable) {
                 android.util.Log.w("Twinotify", "v2 desired-state reduction rejected event", error)
-                return@withLock InboundDispatchResult.Rejected("reduction_rejected")
+                return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    InboundDispatchResult.Rejected("reduction_rejected"),
+                    false,
+                )
             }
             val inbound = InboundMessage(
                 msgId = inner.msgId,
@@ -480,7 +512,10 @@ class InboundDispatcher internal constructor(
                 is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
                     prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
                 )
-                SupersessionPreparation.Unavailable -> return@withLock InboundDispatchResult.Rejected("supersession_receipt_unavailable")
+                SupersessionPreparation.Unavailable -> return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    InboundDispatchResult.Rejected("supersession_receipt_unavailable"),
+                    false,
+                )
             }
             var commitDesired = desired
             var commitResult: co.twinotify.core.storage.InboundDesiredCommitResult? = null
@@ -498,47 +533,46 @@ class InboundDispatcher internal constructor(
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Committed,
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate,
                 -> {
-                    NotificationMaterializer(
-                        dao = reliableDao,
-                        port = DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao),
-                        receiptFactory = DurableReceiptFactory(ctx),
-                        localDeviceId = localDeviceId,
-                        retryScheduler = materializationStartupScheduler(ctx),
-                    ).materializePending()
                     // Platform materialization may still fail and retry. Custody is
                     // already durable, so the peer is told to stop resending.
-                    if (result is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate) {
-                        InboundDispatchResult.Duplicate(inner.msgId, opened.envelopeSha256)
-                    } else {
-                        InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
-                    }
+                    DesiredStateDispatch(
+                        if (result is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate) {
+                            InboundDispatchResult.Duplicate(inner.msgId, opened.envelopeSha256)
+                        } else {
+                            InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
+                        },
+                        requestMaterialization = true,
+                    )
                 }
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Stale -> {
                     // The canonical check can advance between the preflight and this transaction.
                     // Journal a terminal receipt instead of leaving a receipt-less STALE row.
                     val receiptFactory = DurableReceiptFactory(ctx)
-                    dispatchAuthenticatedCallRejection(
-                        msgId = inner.msgId,
-                        originDevice = inner.originDevice,
-                        envelopeSha256 = opened.envelopeSha256,
-                        canonId = canonId,
-                        sequence = requireNotNull(inner.sequence),
-                        reason = "notification_sequence_stale",
-                        committedAt = System.currentTimeMillis(),
-                        eventType = inner.type,
-                        createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, opened.envelopeSha256, reason) },
-                        journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                    DesiredStateDispatch(
+                        dispatchAuthenticatedCallRejection(
+                            msgId = inner.msgId,
+                            originDevice = inner.originDevice,
+                            envelopeSha256 = opened.envelopeSha256,
+                            canonId = canonId,
+                            sequence = requireNotNull(inner.sequence),
+                            reason = "notification_sequence_stale",
+                            committedAt = System.currentTimeMillis(),
+                            eventType = inner.type,
+                            createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, opened.envelopeSha256, reason) },
+                            journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                        ),
+                        false,
                     )
                 }
                 is co.twinotify.core.storage.InboundDesiredCommitResult.IdConflict ->
-                    InboundDispatchResult.Rejected("id_conflict")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("id_conflict"), false)
                 co.twinotify.core.storage.InboundDesiredCommitResult.SupersessionUnavailable ->
-                    InboundDispatchResult.Rejected("supersession_unavailable")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("supersession_unavailable"), false)
                 is co.twinotify.core.storage.InboundDesiredCommitResult.ReceiptConflict ->
-                    InboundDispatchResult.Rejected("supersession_receipt_conflict")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("supersession_receipt_conflict"), false)
                 is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision ->
-                    InboundDispatchResult.Rejected("mirror_identity_collision")
-                null -> InboundDispatchResult.Rejected("commit_failed")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("mirror_identity_collision"), false)
+                null -> DesiredStateDispatch(InboundDispatchResult.Rejected("commit_failed"), false)
             }
         }
     }
@@ -548,16 +582,19 @@ class InboundDispatcher internal constructor(
         envelopeSha256: String,
         authenticatedPeerId: String,
     ): InboundDispatchResult {
-        return stateMutex.withLock {
+        return dispatchDesiredStateAfterCommit(stateMutex, materializationRequester) {
             if (inner.originDevice != authenticatedPeerId) {
                 android.util.Log.w("Twinotify", "call state origin is not the paired peer")
-                return@withLock InboundDispatchResult.Rejected("unauthorized_call_origin")
+                return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    InboundDispatchResult.Rejected("unauthorized_call_origin"),
+                    false,
+                )
             }
             reliableDao.inbound(inner.msgId)?.let { existing ->
-                return@withLock if (existing.envelopeSha256 == envelopeSha256) {
-                    InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+                return@dispatchDesiredStateAfterCommit if (existing.envelopeSha256 == envelopeSha256) {
+                    DesiredStateDispatch(InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256), false)
                 } else {
-                    InboundDispatchResult.Rejected("id_conflict")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("id_conflict"), false)
                 }
             }
             val payload = inner.payloadObject()
@@ -585,7 +622,10 @@ class InboundDispatcher internal constructor(
                 )
             }.getOrElse {
                 android.util.Log.w("Twinotify", "call state rejected", it)
-                return@withLock InboundDispatchResult.Rejected("call_state_rejected")
+                return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    InboundDispatchResult.Rejected("call_state_rejected"),
+                    false,
+                )
             }
             val rejectionCode = when (reduction) {
                 is co.twinotify.core.call.CallReduction.LowerSequence -> reduction.code
@@ -594,18 +634,21 @@ class InboundDispatcher internal constructor(
             }
             if (rejectionCode != null) {
                 val receiptFactory = DurableReceiptFactory(ctx)
-                return@withLock dispatchAuthenticatedCallRejection(
-                    msgId = inner.msgId,
-                    originDevice = inner.originDevice,
-                    envelopeSha256 = envelopeSha256,
-                    canonId = requireNotNull(inner.canonId),
-                    sequence = requireNotNull(inner.sequence),
-                    reason = rejectionCode,
-                    committedAt = System.currentTimeMillis(),
-                    createReceipt = { reason ->
-                        receiptFactory.createRejected(inner.msgId, envelopeSha256, reason)
-                    },
-                    journal = CallRejectionJournal(reliableDao::commitCallRejection),
+                return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    dispatchAuthenticatedCallRejection(
+                        msgId = inner.msgId,
+                        originDevice = inner.originDevice,
+                        envelopeSha256 = envelopeSha256,
+                        canonId = requireNotNull(inner.canonId),
+                        sequence = requireNotNull(inner.sequence),
+                        reason = rejectionCode,
+                        committedAt = System.currentTimeMillis(),
+                        createReceipt = { reason ->
+                            receiptFactory.createRejected(inner.msgId, envelopeSha256, reason)
+                        },
+                        journal = CallRejectionJournal(reliableDao::commitCallRejection),
+                    ),
+                    false,
                 )
             }
             val inbound = InboundMessage(
@@ -627,51 +670,46 @@ class InboundDispatcher internal constructor(
                 is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
                     prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
                 )
-                SupersessionPreparation.Unavailable -> return@withLock InboundDispatchResult.Rejected("supersession_receipt_unavailable")
+                SupersessionPreparation.Unavailable -> return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    InboundDispatchResult.Rejected("supersession_receipt_unavailable"),
+                    false,
+                )
             }
             val commit = reliableDao.commitInboundDesired(
                 inbound,
                 (reduction as co.twinotify.core.call.CallReduction.Apply).state,
                 supersession,
             )
-            if (commit is co.twinotify.core.storage.InboundDesiredCommitResult.Committed ||
-                commit is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate
-            ) {
-                NotificationMaterializer(
-                    dao = reliableDao,
-                    port = DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao),
-                    receiptFactory = DurableReceiptFactory(ctx),
-                    localDeviceId = localDeviceId,
-                    retryScheduler = materializationStartupScheduler(ctx),
-                ).materializePending()
-            }
             when (commit) {
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate ->
-                    InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+                    DesiredStateDispatch(InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256), true)
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Committed ->
-                    InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+                    DesiredStateDispatch(InboundDispatchResult.Accepted(inner.msgId, envelopeSha256), true)
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Stale -> {
                     val receiptFactory = DurableReceiptFactory(ctx)
-                    dispatchAuthenticatedCallRejection(
-                        msgId = inner.msgId,
-                        originDevice = inner.originDevice,
-                        envelopeSha256 = envelopeSha256,
-                        canonId = requireNotNull(inner.canonId),
-                        sequence = requireNotNull(inner.sequence),
-                        reason = "call_sequence_lower",
-                        committedAt = System.currentTimeMillis(),
-                        createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, envelopeSha256, reason) },
-                        journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                    DesiredStateDispatch(
+                        dispatchAuthenticatedCallRejection(
+                            msgId = inner.msgId,
+                            originDevice = inner.originDevice,
+                            envelopeSha256 = envelopeSha256,
+                            canonId = requireNotNull(inner.canonId),
+                            sequence = requireNotNull(inner.sequence),
+                            reason = "call_sequence_lower",
+                            committedAt = System.currentTimeMillis(),
+                            createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, envelopeSha256, reason) },
+                            journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                        ),
+                        false,
                     )
                 }
                 is co.twinotify.core.storage.InboundDesiredCommitResult.IdConflict ->
-                    InboundDispatchResult.Rejected("id_conflict")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("id_conflict"), false)
                 co.twinotify.core.storage.InboundDesiredCommitResult.SupersessionUnavailable ->
-                    InboundDispatchResult.Rejected("supersession_unavailable")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("supersession_unavailable"), false)
                 is co.twinotify.core.storage.InboundDesiredCommitResult.ReceiptConflict ->
-                    InboundDispatchResult.Rejected("supersession_receipt_conflict")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("supersession_receipt_conflict"), false)
                 is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision ->
-                    InboundDispatchResult.Rejected("mirror_identity_collision")
+                    DesiredStateDispatch(InboundDispatchResult.Rejected("mirror_identity_collision"), false)
             }
         }
     }

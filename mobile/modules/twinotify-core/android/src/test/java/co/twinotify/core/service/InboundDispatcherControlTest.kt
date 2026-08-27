@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import java.util.concurrent.CancellationException
 import java.util.Base64
+import java.io.File
 import co.twinotify.core.protocol.EncryptedEnvelope
 import co.twinotify.core.protocol.EnvelopeAuthenticator
 import co.twinotify.core.protocol.InnerEventV2
@@ -15,15 +16,189 @@ import co.twinotify.core.storage.SnapshotBeginResult
 import co.twinotify.core.storage.SnapshotCommitResult
 import co.twinotify.core.storage.SnapshotStage
 import co.twinotify.core.storage.SnapshotStageResult
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class InboundDispatcherControlTest {
+    @Test
+    fun notificationRequesterRunsAfterItsDurableCommitReleasesStateMutex() = runTest {
+        val stateMutex = Mutex()
+        val firstRequesterEntered = CompletableDeferred<Unit>()
+        val releaseFirstRequester = CompletableDeferred<Unit>()
+        val durableCanonIds = mutableListOf<String>()
+        var requests = 0
+        val requester = MaterializationRequester {
+            assertTrue(durableCanonIds.isNotEmpty(), "request must follow the durable notification callback")
+            requests += 1
+            if (requests == 1) {
+                firstRequesterEntered.complete(Unit)
+                releaseFirstRequester.await()
+            }
+        }
+
+        val first = async {
+            dispatchDesiredStateAfterCommit(stateMutex, requester) {
+                durableCanonIds += "notification-first"
+                DesiredStateDispatch(
+                    InboundDispatchResult.Accepted("notification-first", "a".repeat(64)),
+                    requestMaterialization = true,
+                )
+            }
+        }
+        firstRequesterEntered.await()
+
+        val second = async {
+            dispatchDesiredStateAfterCommit(stateMutex, requester) {
+                durableCanonIds += "notification-second"
+                DesiredStateDispatch(
+                    InboundDispatchResult.Accepted("notification-second", "b".repeat(64)),
+                    requestMaterialization = true,
+                )
+            }
+        }
+
+        assertEquals(
+            InboundDispatchResult.Accepted("notification-second", "b".repeat(64)),
+            withTimeout(100) { second.await() },
+        )
+        assertEquals(listOf("notification-first", "notification-second"), durableCanonIds)
+        assertEquals(2, requests)
+        assertFalse(first.isCompleted, "the first requester remains blocked without holding stateMutex")
+
+        releaseFirstRequester.complete(Unit)
+        assertEquals(
+            InboundDispatchResult.Accepted("notification-first", "a".repeat(64)),
+            first.await(),
+        )
+    }
+
+    @Test
+    fun callRequesterRunsAfterItsDurableCommitReleasesStateMutex() = runTest {
+        val stateMutex = Mutex()
+        val firstRequesterEntered = CompletableDeferred<Unit>()
+        val releaseFirstRequester = CompletableDeferred<Unit>()
+        val durableCanonIds = mutableListOf<String>()
+        var requests = 0
+        val requester = MaterializationRequester {
+            assertTrue(durableCanonIds.isNotEmpty(), "request must follow the durable call callback")
+            requests += 1
+            if (requests == 1) {
+                firstRequesterEntered.complete(Unit)
+                releaseFirstRequester.await()
+            }
+        }
+
+        val first = async {
+            dispatchDesiredStateAfterCommit(stateMutex, requester) {
+                durableCanonIds += "call-first"
+                DesiredStateDispatch(
+                    InboundDispatchResult.Accepted("call-first", "a".repeat(64)),
+                    requestMaterialization = true,
+                )
+            }
+        }
+        firstRequesterEntered.await()
+
+        val second = async {
+            dispatchDesiredStateAfterCommit(stateMutex, requester) {
+                durableCanonIds += "call-second"
+                DesiredStateDispatch(
+                    InboundDispatchResult.Accepted("call-second", "b".repeat(64)),
+                    requestMaterialization = true,
+                )
+            }
+        }
+
+        assertEquals(
+            InboundDispatchResult.Accepted("call-second", "b".repeat(64)),
+            withTimeout(100) { second.await() },
+        )
+        assertEquals(listOf("call-first", "call-second"), durableCanonIds)
+        assertEquals(2, requests)
+        assertFalse(first.isCompleted, "the first requester remains blocked without holding stateMutex")
+
+        releaseFirstRequester.complete(Unit)
+        assertEquals(
+            InboundDispatchResult.Accepted("call-first", "a".repeat(64)),
+            first.await(),
+        )
+    }
+
+    @Test
+    fun desiredStateRequesterPropagatesCancellationExactlyAfterCommit() = runTest {
+        val expected = CancellationException("request cancelled")
+        val actual = assertFailsWith<CancellationException> {
+            dispatchDesiredStateAfterCommit(
+                stateMutex = Mutex(),
+                requester = MaterializationRequester { throw expected },
+            ) {
+                DesiredStateDispatch(
+                    InboundDispatchResult.Accepted("committed", "a".repeat(64)),
+                    requestMaterialization = true,
+                )
+            }
+        }
+
+        assertSame(expected, actual)
+    }
+
+    @Test
+    fun committedDuplicateRequestsButRejectionsAndReceiptConflictsDoNot() = runTest {
+        var requests = 0
+        val requester = MaterializationRequester { requests += 1 }
+        val mutex = Mutex()
+        val duplicate = InboundDispatchResult.Duplicate("duplicate", "a".repeat(64))
+
+        assertEquals(
+            duplicate,
+            dispatchDesiredStateAfterCommit(mutex, requester) {
+                DesiredStateDispatch(duplicate, requestMaterialization = true)
+            },
+        )
+        for (rejection in listOf(
+            InboundDispatchResult.Rejected("id_conflict"),
+            InboundDispatchResult.Rejected("supersession_receipt_conflict"),
+        )) {
+            assertEquals(
+                rejection,
+                dispatchDesiredStateAfterCommit(mutex, requester) {
+                    DesiredStateDispatch(rejection, requestMaterialization = false)
+                },
+            )
+        }
+
+        assertEquals(1, requests)
+    }
+
+    @Test
+    fun productionNotificationAndCallBranchesUseTheTestedPostCommitRequester() {
+        val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core/service")
+        val dispatcherSource = File(sourceRoot, "InboundDispatcher.kt").readText()
+        val notificationBranch = dispatcherSource
+            .substringAfter("if (inner.type !in setOf(\"notif.post\", \"notif.update\", \"notif.cancel\"))")
+            .substringBefore("private suspend fun dispatchCallState")
+        val callBranch = dispatcherSource.substringAfter("private suspend fun dispatchCallState")
+
+        assertTrue(notificationBranch.contains("dispatchDesiredStateAfterCommit(stateMutex, materializationRequester)"))
+        assertTrue(callBranch.contains("dispatchDesiredStateAfterCommit(stateMutex, materializationRequester)"))
+
+        val serviceSource = File(sourceRoot, "SyncService.kt").readText()
+        val onCreate = serviceSource.substringAfter("override fun onCreate()").substringBefore("override fun onStartCommand")
+        assertTrue(onCreate.contains("materializationRequester = MaterializationRequester"))
+        assertTrue(onCreate.contains("requestPendingMaterialization(MaterializationTrigger.ROUTINE)"))
+    }
+
     @Test
     fun supersessionPreparationCreatesOneRejectedReceiptPerStoredInboundInOrder() = runTest {
         val older = listOf(
@@ -192,6 +367,7 @@ class InboundDispatcherControlTest {
                     is DirectControlProcessingResult.Rejected -> DirectControlCommitResult.Rejected(result.code)
                 }
             },
+            materializationRequester = MaterializationRequester {},
         )
 
         assertEquals(
