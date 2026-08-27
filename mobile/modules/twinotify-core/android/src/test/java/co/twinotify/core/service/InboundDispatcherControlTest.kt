@@ -25,6 +25,36 @@ import kotlin.test.assertIs
 
 class InboundDispatcherControlTest {
     @Test
+    fun supersessionPreparationCreatesOneRejectedReceiptPerStoredInboundInOrder() = runTest {
+        val older = listOf(
+            InboundMessage("old-1", "peer", "a".repeat(64), "notif.post", "canon", 1, "PENDING_PLATFORM", 1, null, null, "NONE"),
+            InboundMessage("old-2", "peer", "b".repeat(64), "notif.update", "canon", 2, "PENDING_PLATFORM", 2, null, null, "NONE"),
+        )
+
+        val result = prepareSupersessionRejections(older) { row, reason ->
+            assertEquals("superseded", reason)
+            outboundPeerReceipt("receipt-${row.msgId}")
+        }
+
+        val prepared = assertIs<SupersessionPreparation.Prepared>(result)
+        assertEquals(listOf("old-1", "old-2"), prepared.entries.map { it.inboundMsgId })
+        assertEquals(listOf("a".repeat(64), "b".repeat(64)), prepared.entries.map { it.envelopeSha256 })
+    }
+
+    @Test
+    fun supersessionPreparationFailsClosedAndPreservesCancellationIdentity() = runTest {
+        val older = listOf(InboundMessage("old", "peer", "a".repeat(64), "notif.post", "canon", 1, "PENDING_PLATFORM", 1, null, null, "NONE"))
+        assertEquals(
+            SupersessionPreparation.Unavailable,
+            prepareSupersessionRejections(older) { _, _ -> null },
+        )
+        val expected = CancellationException("stop")
+        assertSame(expected, assertFailsWith<CancellationException> {
+            prepareSupersessionRejections(older) { _, _ -> throw expected }
+        })
+    }
+
+    @Test
     fun callSequenceRejectionCreatesDurableTerminalReceiptBeforeAcceptance() = runTest {
         var inbound: InboundMessage? = null
         var receipt: co.twinotify.core.storage.OutboundMessage? = null
@@ -58,6 +88,31 @@ class InboundDispatcherControlTest {
         assertEquals(expectedReceipt, receipt)
         assertEquals("peer.receipt", receipt?.eventType)
         assertEquals(false, receipt?.requiresPeerReceipt)
+    }
+
+    @Test
+    fun notificationSequenceRejectionJournalsRejectedNotificationRatherThanReceiptlessStale() = runTest {
+        var journaled: InboundMessage? = null
+
+        val result = dispatchAuthenticatedCallRejection(
+            msgId = "11111111-1111-4111-8111-111111111111",
+            originDevice = "peer-device",
+            envelopeSha256 = "a".repeat(64),
+            canonId = "peer-device:chat:42:",
+            sequence = 1,
+            reason = "notification_sequence_stale",
+            committedAt = 100,
+            eventType = "notif.update",
+            createReceipt = { outboundPeerReceipt("receipt-stale") },
+            journal = CallRejectionJournal { row, _ ->
+                journaled = row
+                CallRejectionCommitResult.Committed
+            },
+        )
+
+        assertEquals(InboundDispatchResult.Accepted("11111111-1111-4111-8111-111111111111", "a".repeat(64)), result)
+        assertEquals("notif.update", journaled?.eventType)
+        assertEquals("REJECTED", journaled?.outcome)
     }
 
     @Test

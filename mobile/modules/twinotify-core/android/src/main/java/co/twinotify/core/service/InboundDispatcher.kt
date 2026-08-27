@@ -84,6 +84,35 @@ fun interface CallRejectionJournal {
     ): CallRejectionCommitResult
 }
 
+data class SupersessionReceiptEntry(
+    val inboundMsgId: String,
+    val envelopeSha256: String,
+    val receipt: co.twinotify.core.storage.OutboundMessage,
+)
+
+sealed interface SupersessionPreparation {
+    data class Prepared(val entries: List<SupersessionReceiptEntry>) : SupersessionPreparation
+    data object Unavailable : SupersessionPreparation
+}
+
+/** Crypto stays outside Room; callers commit this exact set atomically or reject the newer delivery. */
+suspend fun prepareSupersessionRejections(
+    older: List<InboundMessage>,
+    createReceipt: suspend (InboundMessage, String) -> co.twinotify.core.storage.OutboundMessage?,
+): SupersessionPreparation {
+    val entries = ArrayList<SupersessionReceiptEntry>(older.size)
+    for (row in older) {
+        val receipt = try {
+            createReceipt(row, "superseded")
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        }
+        if (receipt == null) return SupersessionPreparation.Unavailable
+        entries += SupersessionReceiptEntry(row.msgId, row.envelopeSha256, receipt)
+    }
+    return SupersessionPreparation.Prepared(entries)
+}
+
 internal suspend fun dispatchAuthenticatedCallRejection(
     msgId: String,
     originDevice: String,
@@ -92,6 +121,7 @@ internal suspend fun dispatchAuthenticatedCallRejection(
     sequence: Long,
     reason: String,
     committedAt: Long,
+    eventType: String = "call.state",
     createReceipt: suspend (String) -> co.twinotify.core.storage.OutboundMessage?,
     journal: CallRejectionJournal,
 ): InboundDispatchResult {
@@ -101,7 +131,7 @@ internal suspend fun dispatchAuthenticatedCallRejection(
         msgId = msgId,
         originDevice = originDevice,
         envelopeSha256 = envelopeSha256,
-        eventType = "call.state",
+        eventType = eventType,
         canonId = canonId,
         sequence = sequence,
         outcome = "REJECTED",
@@ -383,6 +413,13 @@ class InboundDispatcher internal constructor(
             val canonId = requireNotNull(inner.canonId)
             val localDeviceId = DeviceIdentity.getOrCreate(ctx)
             val current = reliableDao.canonical(canonId)
+            reliableDao.inbound(inner.msgId)?.let { existing ->
+                return@withLock if (existing.envelopeSha256 == opened.envelopeSha256) {
+                    InboundDispatchResult.Duplicate(inner.msgId, opened.envelopeSha256)
+                } else {
+                    InboundDispatchResult.Rejected("id_conflict")
+                }
+            }
             val nextMirrorLocalId = reliableDao.nextMirrorLocalId()
             val allocator = LocalIdAllocator { nextMirrorLocalId }
             val authorizedEvent = NotificationStateReducer.authorizePeerCancel(
@@ -392,6 +429,21 @@ class InboundDispatcher internal constructor(
             ) ?: run {
                 android.util.Log.w("Twinotify", "v2 cancel origin is not the paired peer")
                 return@withLock InboundDispatchResult.Rejected("unauthorized_cancel")
+            }
+            if (current != null && requireNotNull(inner.sequence) <= current.latestSequence) {
+                val receiptFactory = DurableReceiptFactory(ctx)
+                return@withLock dispatchAuthenticatedCallRejection(
+                    msgId = inner.msgId,
+                    originDevice = inner.originDevice,
+                    envelopeSha256 = opened.envelopeSha256,
+                    canonId = canonId,
+                    sequence = requireNotNull(inner.sequence),
+                    reason = "notification_sequence_stale",
+                    committedAt = System.currentTimeMillis(),
+                    eventType = inner.type,
+                    createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, opened.envelopeSha256, reason) },
+                    journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                )
             }
             val desired = try {
                 when (
@@ -422,10 +474,18 @@ class InboundDispatcher internal constructor(
                 receiptMsgId = null,
                 relayAckState = "NONE",
             )
+            val preparedSupersession = when (val prepared = prepareSupersessionRejections(
+                reliableDao.pendingSupersededInboundPreflight(canonId, requireNotNull(inner.sequence)),
+            ) { older, reason -> DurableReceiptFactory(ctx).createRejected(older.msgId, older.envelopeSha256, reason) }) {
+                is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
+                    prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
+                )
+                SupersessionPreparation.Unavailable -> return@withLock InboundDispatchResult.Rejected("supersession_receipt_unavailable")
+            }
             var commitDesired = desired
             var commitResult: co.twinotify.core.storage.InboundDesiredCommitResult? = null
             for (attempt in 0 until 3) {
-                commitResult = reliableDao.commitInboundDesired(inbound, commitDesired)
+                commitResult = reliableDao.commitInboundDesired(inbound, commitDesired, preparedSupersession)
                 if (commitResult !is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision) {
                     break
                 }
@@ -453,11 +513,29 @@ class InboundDispatcher internal constructor(
                         InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
                     }
                 }
-                // Stale still inserts the inbound row, so custody exists.
-                is co.twinotify.core.storage.InboundDesiredCommitResult.Stale ->
-                    InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Stale -> {
+                    // The canonical check can advance between the preflight and this transaction.
+                    // Journal a terminal receipt instead of leaving a receipt-less STALE row.
+                    val receiptFactory = DurableReceiptFactory(ctx)
+                    dispatchAuthenticatedCallRejection(
+                        msgId = inner.msgId,
+                        originDevice = inner.originDevice,
+                        envelopeSha256 = opened.envelopeSha256,
+                        canonId = canonId,
+                        sequence = requireNotNull(inner.sequence),
+                        reason = "notification_sequence_stale",
+                        committedAt = System.currentTimeMillis(),
+                        eventType = inner.type,
+                        createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, opened.envelopeSha256, reason) },
+                        journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                    )
+                }
                 is co.twinotify.core.storage.InboundDesiredCommitResult.IdConflict ->
                     InboundDispatchResult.Rejected("id_conflict")
+                co.twinotify.core.storage.InboundDesiredCommitResult.SupersessionUnavailable ->
+                    InboundDispatchResult.Rejected("supersession_unavailable")
+                is co.twinotify.core.storage.InboundDesiredCommitResult.ReceiptConflict ->
+                    InboundDispatchResult.Rejected("supersession_receipt_conflict")
                 is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision ->
                     InboundDispatchResult.Rejected("mirror_identity_collision")
                 null -> InboundDispatchResult.Rejected("commit_failed")
@@ -543,9 +621,18 @@ class InboundDispatcher internal constructor(
                 receiptMsgId = null,
                 relayAckState = "NONE",
             )
+            val supersession = when (val prepared = prepareSupersessionRejections(
+                reliableDao.pendingSupersededInboundPreflight(requireNotNull(inner.canonId), requireNotNull(inner.sequence)),
+            ) { older, reason -> DurableReceiptFactory(ctx).createRejected(older.msgId, older.envelopeSha256, reason) }) {
+                is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
+                    prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
+                )
+                SupersessionPreparation.Unavailable -> return@withLock InboundDispatchResult.Rejected("supersession_receipt_unavailable")
+            }
             val commit = reliableDao.commitInboundDesired(
                 inbound,
                 (reduction as co.twinotify.core.call.CallReduction.Apply).state,
+                supersession,
             )
             if (commit is co.twinotify.core.storage.InboundDesiredCommitResult.Committed ||
                 commit is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate
@@ -561,11 +648,28 @@ class InboundDispatcher internal constructor(
             when (commit) {
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate ->
                     InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
-                is co.twinotify.core.storage.InboundDesiredCommitResult.Committed,
-                is co.twinotify.core.storage.InboundDesiredCommitResult.Stale,
-                -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Committed ->
+                    InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+                is co.twinotify.core.storage.InboundDesiredCommitResult.Stale -> {
+                    val receiptFactory = DurableReceiptFactory(ctx)
+                    dispatchAuthenticatedCallRejection(
+                        msgId = inner.msgId,
+                        originDevice = inner.originDevice,
+                        envelopeSha256 = envelopeSha256,
+                        canonId = requireNotNull(inner.canonId),
+                        sequence = requireNotNull(inner.sequence),
+                        reason = "call_sequence_lower",
+                        committedAt = System.currentTimeMillis(),
+                        createReceipt = { reason -> receiptFactory.createRejected(inner.msgId, envelopeSha256, reason) },
+                        journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+                    )
+                }
                 is co.twinotify.core.storage.InboundDesiredCommitResult.IdConflict ->
                     InboundDispatchResult.Rejected("id_conflict")
+                co.twinotify.core.storage.InboundDesiredCommitResult.SupersessionUnavailable ->
+                    InboundDispatchResult.Rejected("supersession_unavailable")
+                is co.twinotify.core.storage.InboundDesiredCommitResult.ReceiptConflict ->
+                    InboundDispatchResult.Rejected("supersession_receipt_conflict")
                 is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision ->
                     InboundDispatchResult.Rejected("mirror_identity_collision")
             }

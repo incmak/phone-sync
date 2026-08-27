@@ -1057,6 +1057,149 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun terminalizingSupersededCanonicalGroupRejectsEveryOlderPendingInboundWithReceipts() = runBlocking {
+        dao.putCanonical(canonical(sequence = 3, state = "ACTIVE", payload = "payload"))
+        val oldOne = inbound("old-one", "digest-one").copy(
+            eventType = "notif.post", canonId = CANON_ID, sequence = 1, committedAt = 10,
+        )
+        val oldTwo = inbound("old-two", "digest-two").copy(
+            eventType = "notif.update", canonId = CANON_ID, sequence = 2, committedAt = 11,
+        )
+        dao.commitInboundDesired(oldOne, desired = null)
+        dao.commitInboundDesired(oldTwo, desired = null)
+        val receiptOne = outbound("receipt-one", null, "peer.receipt").copy(
+            canonId = null, envelopeSha256 = "receipt-digest-one", requiresPeerReceipt = false,
+        )
+        val receiptTwo = outbound("receipt-two", null, "peer.receipt").copy(
+            canonId = null, envelopeSha256 = "receipt-digest-two", requiresPeerReceipt = false,
+        )
+
+        assertTrue(dao.terminalizeSupersededInbound(
+            canonId = CANON_ID,
+            sequence = 3,
+            supersession = SupersessionBundle(listOf(
+                SupersessionEntry("old-one", "digest-one", receiptOne),
+                SupersessionEntry("old-two", "digest-two", receiptTwo),
+            )),
+            terminalAt = 20,
+        ))
+
+        assertEquals("REJECTED", dao.inbound("old-one")?.outcome)
+        assertEquals("REJECTED", dao.inbound("old-two")?.outcome)
+        assertEquals("receipt-one", dao.inbound("old-one")?.receiptMsgId)
+        assertEquals("receipt-two", dao.inbound("old-two")?.receiptMsgId)
+        assertEquals("NEW", dao.outboundMessage("receipt-one")?.state)
+        assertEquals("NEW", dao.outboundMessage("receipt-two")?.state)
+    }
+
+    @Test
+    fun newerDesiredAtomicallyTerminalizesOlderInboundAndRejectsReceiptIdConflictWithoutMutation() = runBlocking {
+        dao.putCanonical(canonical(sequence = 2, state = "ACTIVE", payload = "old"))
+        val old = inbound("old", "digest-old").copy(
+            eventType = "notif.update", canonId = CANON_ID, sequence = 1, committedAt = 10,
+        )
+        dao.commitInboundDesired(old, desired = null)
+        val incoming = inbound("new", "digest-new").copy(
+            eventType = "notif.update", canonId = CANON_ID, sequence = 3, committedAt = 20,
+        )
+        val receipt = outbound("receipt", null, "peer.receipt").copy(
+            canonId = null, envelopeSha256 = "receipt-digest", requiresPeerReceipt = false,
+        )
+        val desired = canonical(sequence = 3, state = "ACTIVE", payload = "new", updatedAt = 20)
+
+        assertEquals(
+            InboundDesiredCommitResult.Committed,
+            dao.commitInboundDesired(incoming, desired, SupersessionBundle(listOf(
+                SupersessionEntry(old.msgId, old.envelopeSha256, receipt),
+            ))),
+        )
+        assertEquals("REJECTED", dao.inbound(old.msgId)?.outcome)
+        assertEquals("PENDING_PLATFORM", dao.inbound(incoming.msgId)?.outcome)
+        assertEquals(3, dao.canonical(CANON_ID)?.latestSequence)
+
+        val next = inbound("next", "digest-next").copy(
+            eventType = "notif.update", canonId = CANON_ID, sequence = 4, committedAt = 30,
+        )
+        val conflictingReceipt = receipt.copy(envelopeSha256 = "different-receipt-digest")
+        assertEquals(
+            InboundDesiredCommitResult.ReceiptConflict("receipt-digest"),
+            dao.commitInboundDesired(next, canonical(sequence = 4, state = "ACTIVE", payload = "next", updatedAt = 30),
+                SupersessionBundle(listOf(SupersessionEntry(incoming.msgId, incoming.envelopeSha256, conflictingReceipt)))),
+        )
+        assertEquals("PENDING_PLATFORM", dao.inbound(incoming.msgId)?.outcome)
+        assertNull(dao.inbound(next.msgId))
+        assertEquals(3, dao.canonical(CANON_ID)?.latestSequence)
+    }
+
+    @Test
+    fun newerDesiredWithMissingSupersessionBundleRetainsSenderCustodyAndLeavesStateUntouched() = runBlocking {
+        dao.putCanonical(canonical(sequence = 2, state = "ACTIVE", payload = "old"))
+        val old = inbound("old-missing", "digest-old-missing").copy(
+            eventType = "notif.update", canonId = CANON_ID, sequence = 1, committedAt = 10,
+        )
+        dao.commitInboundDesired(old, desired = null)
+        val incoming = inbound("new-missing", "digest-new-missing").copy(
+            eventType = "notif.update", canonId = CANON_ID, sequence = 3, committedAt = 20,
+        )
+
+        assertEquals(
+            InboundDesiredCommitResult.SupersessionUnavailable,
+            dao.commitInboundDesired(incoming, canonical(3, "ACTIVE", "new", 20)),
+        )
+        assertEquals("PENDING_PLATFORM", dao.inbound(old.msgId)?.outcome)
+        assertNull(dao.inbound(incoming.msgId))
+        assertEquals(2, dao.canonical(CANON_ID)?.latestSequence)
+    }
+
+    @Test
+    fun notificationRejectionJournalRetainsTerminalReceiptForStaleNotification() = runBlocking {
+        val rejected = inbound("stale", "digest-stale").copy(
+            eventType = "notif.cancel", canonId = CANON_ID, sequence = 1, outcome = "REJECTED",
+            receiptMsgId = "stale-receipt",
+        )
+        val receipt = outbound("stale-receipt", null, "peer.receipt").copy(
+            canonId = null, envelopeSha256 = "stale-receipt-digest", requiresPeerReceipt = false,
+        )
+
+        assertEquals(co.twinotify.core.service.CallRejectionCommitResult.Committed, dao.commitInboundRejection(rejected, receipt))
+        assertEquals("REJECTED", dao.inbound("stale")?.outcome)
+        assertEquals("stale-receipt", dao.inbound("stale")?.receiptMsgId)
+        assertEquals("NEW", dao.outboundMessage("stale-receipt")?.state)
+    }
+
+    @Test
+    fun newerDesiredReplacesOnlyItsPrivateUnactivatedAppliedReceipt() = runBlocking {
+        dao.putCanonical(canonical(sequence = 2, state = "ACTIVE", payload = "old"))
+        val old = inbound("old-staged", "digest-old-staged").copy(
+            eventType = "notif.post", canonId = CANON_ID, sequence = 1, committedAt = 10,
+        )
+        dao.commitInboundDesired(old, desired = null)
+        val staged = outbound("staged-applied", null, "peer.receipt").copy(
+            canonId = null, state = "PENDING_PLATFORM", requiresPeerReceipt = false,
+        )
+        dao.insertOutbound(staged)
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE inbound_message SET receiptMsgId='staged-applied' WHERE msgId='old-staged'",
+        )
+        val incoming = inbound("new-staged", "digest-new-staged").copy(
+            eventType = "notif.update", canonId = CANON_ID, sequence = 3, committedAt = 20,
+        )
+        val replacement = outbound("replacement-applied", null, "peer.receipt").copy(
+            canonId = null, requiresPeerReceipt = false,
+        )
+
+        assertEquals(
+            InboundDesiredCommitResult.Committed,
+            dao.commitInboundDesired(incoming, canonical(3, "ACTIVE", "new", 20), SupersessionBundle(listOf(
+                SupersessionEntry(old.msgId, old.envelopeSha256, replacement),
+            ))),
+        )
+        assertNull(dao.outboundMessage("staged-applied"))
+        assertEquals("NEW", dao.outboundMessage("replacement-applied")?.state)
+        assertEquals("replacement-applied", dao.inbound("old-staged")?.receiptMsgId)
+    }
+
+    @Test
     fun retentionRemovesTerminalHistoryButKeepsPendingMaterialization() = runBlocking {
         dao.putCanonical(canonical(sequence = 2, state = "CANCELLED", payload = null, updatedAt = 1))
         dao.commitInboundDesired(
@@ -1075,6 +1218,13 @@ class ReliableDeliveryTransactionTest {
             ),
             desired = null,
         )
+        dao.commitInboundDesired(
+            inbound("rejected-old", "digest-rejected").copy(
+                outcome = "REJECTED",
+                committedAt = 1,
+            ),
+            desired = null,
+        )
         db.openHelper.writableDatabase.execSQL(
             "INSERT INTO activity_event(eventId,msgId,packageName,eventType,status,byteSize,occurredAt,detailCode) " +
                 "VALUES('activity-old','applied-old',NULL,'peer.receipt','applied',1,1,NULL)",
@@ -1087,6 +1237,7 @@ class ReliableDeliveryTransactionTest {
         )
 
         assertNull(dao.inbound("applied-old"))
+        assertNull(dao.inbound("rejected-old"))
         assertTrue(dao.inbound("pending-old") != null)
         assertTrue(dao.canonical(CANON_ID) != null)
         db.openHelper.readableDatabase.query("SELECT * FROM activity_event WHERE eventId='activity-old'").use {

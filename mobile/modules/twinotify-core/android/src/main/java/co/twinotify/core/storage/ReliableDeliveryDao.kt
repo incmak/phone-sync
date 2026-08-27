@@ -20,7 +20,23 @@ sealed interface InboundDesiredCommitResult {
     data class Duplicate(val outcome: String, val receiptMsgId: String?) : InboundDesiredCommitResult
     data class IdConflict(val existingSha256: String) : InboundDesiredCommitResult
     data class Stale(val latestSequence: Long) : InboundDesiredCommitResult
+    data object SupersessionUnavailable : InboundDesiredCommitResult
+    data class ReceiptConflict(val existingSha256: String) : InboundDesiredCommitResult
     data class MirrorIdentityCollision(val existingCanonId: String) : InboundDesiredCommitResult
+}
+
+data class SupersessionEntry(
+    val inboundMsgId: String,
+    val envelopeSha256: String,
+    val receipt: OutboundMessage,
+)
+
+data class SupersessionBundle(val entries: List<SupersessionEntry>)
+
+private sealed interface SupersessionMutationResult {
+    data object Applied : SupersessionMutationResult
+    data object Invalid : SupersessionMutationResult
+    data class ReceiptConflict(val existingSha256: String) : SupersessionMutationResult
 }
 
 sealed interface MaterializationResult {
@@ -172,7 +188,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     @Query("DELETE FROM activity_event WHERE occurredAt < :cutoff")
     protected abstract suspend fun deleteActivityBefore(cutoff: Long): Int
 
-    @Query("DELETE FROM inbound_message WHERE committedAt < :cutoff AND outcome IN ('APPLIED','STALE')")
+    @Query("DELETE FROM inbound_message WHERE committedAt < :cutoff AND outcome IN ('APPLIED','STALE','REJECTED')")
     protected abstract suspend fun deleteInboundBefore(cutoff: Long): Int
 
     @Query("DELETE FROM canonical_notification_state WHERE state='CANCELLED' AND peerCancelPending=0 AND updatedAt < :cutoff AND canonId NOT IN (SELECT canonId FROM inbound_message WHERE outcome='PENDING_PLATFORM')")
@@ -309,11 +325,11 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     abstract suspend fun insertInbound(row: InboundMessage)
 
     @Transaction
-    open suspend fun commitCallRejection(
+    open suspend fun commitInboundRejection(
         row: InboundMessage,
         receipt: OutboundMessage,
     ): CallRejectionCommitResult {
-        require(row.eventType == "call.state" && row.outcome == "REJECTED")
+        require(row.outcome == "REJECTED")
         require(row.receiptMsgId == receipt.msgId)
         require(receipt.eventType == "peer.receipt" && !receipt.requiresPeerReceipt)
         val existing = inbound(row.msgId)
@@ -331,6 +347,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         if (existingReceipt == null) insertOutbound(receipt)
         insertInbound(row)
         return CallRejectionCommitResult.Committed
+    }
+
+    @Transaction
+    open suspend fun commitCallRejection(row: InboundMessage, receipt: OutboundMessage): CallRejectionCommitResult {
+        require(row.eventType == "call.state")
+        return commitInboundRejection(row, receipt)
     }
 
     @Query("SELECT * FROM canonical_notification_state WHERE canonId=:canonId")
@@ -515,6 +537,31 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     ): List<InboundMessage>
 
     @Query(
+        "SELECT * FROM inbound_message WHERE canonId=:canonId AND outcome='PENDING_PLATFORM' " +
+            "AND sequence < :sequence ORDER BY committedAt, msgId",
+    )
+    protected abstract suspend fun pendingSupersededInbound(canonId: String, sequence: Long): List<InboundMessage>
+
+    suspend fun pendingSupersededInboundPreflight(canonId: String, sequence: Long): List<InboundMessage> =
+        pendingSupersededInbound(canonId, sequence)
+
+    @Query(
+        "SELECT state.* FROM canonical_notification_state AS state WHERE EXISTS (SELECT 1 FROM inbound_message AS inbound " +
+            "WHERE inbound.canonId=state.canonId AND inbound.outcome='PENDING_PLATFORM' AND inbound.sequence < state.latestSequence) " +
+            "ORDER BY state.updatedAt, state.canonId LIMIT :limit",
+    )
+    abstract suspend fun strandedSupersededCanonicalGroups(limit: Int): List<CanonicalNotificationState>
+
+    @Query("SELECT COUNT(*) FROM inbound_message WHERE receiptMsgId=:receiptMsgId")
+    protected abstract suspend fun inboundReceiptReferenceCount(receiptMsgId: String): Int
+
+    @Query("DELETE FROM outbound_message WHERE msgId=:msgId AND state='PENDING_PLATFORM' AND eventType='peer.receipt' AND requiresPeerReceipt=0")
+    protected abstract suspend fun deletePrivateStagedReceipt(msgId: String): Int
+
+    @Query("UPDATE inbound_message SET outcome='REJECTED', appliedAt=:at, receiptMsgId=:receiptMsgId WHERE msgId=:msgId AND outcome='PENDING_PLATFORM'")
+    protected abstract suspend fun markInboundRejected(msgId: String, at: Long, receiptMsgId: String): Int
+
+    @Query(
         "UPDATE inbound_message SET outcome='APPLIED', appliedAt=:appliedAt, receiptMsgId=:receiptMsgId " +
             "WHERE msgId=:msgId AND outcome='PENDING_PLATFORM'",
     )
@@ -594,6 +641,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     open suspend fun commitInboundDesired(
         row: InboundMessage,
         desired: CanonicalNotificationState?,
+        supersession: SupersessionBundle = SupersessionBundle(emptyList()),
     ): InboundDesiredCommitResult {
         val existing = inbound(row.msgId)
         if (existing != null) {
@@ -617,14 +665,70 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
                 return InboundDesiredCommitResult.MirrorIdentityCollision(mirrorOwner)
             }
             if (current != null && desired.latestSequence <= current.latestSequence) {
-                insertInbound(row.copy(outcome = "STALE"))
                 return InboundDesiredCommitResult.Stale(current.latestSequence)
+            }
+            when (val terminalized = applySupersessionBundle(
+                pendingSupersededInbound(desired.canonId, desired.latestSequence), supersession, row.committedAt,
+            )) {
+                SupersessionMutationResult.Applied -> Unit
+                SupersessionMutationResult.Invalid ->
+                    return InboundDesiredCommitResult.SupersessionUnavailable
+                is SupersessionMutationResult.ReceiptConflict ->
+                    return InboundDesiredCommitResult.ReceiptConflict(terminalized.existingSha256)
             }
         }
 
         insertInbound(row)
         if (desired != null) putCanonical(desired)
         return InboundDesiredCommitResult.Committed
+    }
+
+    /** Repairs a complete canonical group; partial bundles are rejected without mutation. */
+    @Transaction
+    open suspend fun terminalizeSupersededInbound(
+        canonId: String,
+        sequence: Long,
+        supersession: SupersessionBundle,
+        terminalAt: Long,
+    ): Boolean {
+        return applySupersessionBundle(
+            pendingSupersededInbound(canonId, sequence), supersession, terminalAt,
+        ) is SupersessionMutationResult.Applied
+    }
+
+    /** Validates the full canonical group before changing any old row or receipt. */
+    private suspend fun applySupersessionBundle(
+        older: List<InboundMessage>,
+        supersession: SupersessionBundle,
+        terminalAt: Long,
+    ): SupersessionMutationResult {
+        if (older.isEmpty() && supersession.entries.isEmpty()) return SupersessionMutationResult.Applied
+        val byId = supersession.entries.associateBy { it.inboundMsgId }
+        if (byId.size != supersession.entries.size || byId.keys != older.map { it.msgId }.toSet() ||
+            older.any { byId[it.msgId]?.envelopeSha256 != it.envelopeSha256 } ||
+            supersession.entries.map { it.receipt.msgId }.distinct().size != supersession.entries.size
+        ) return SupersessionMutationResult.Invalid
+        for (olderRow in older) {
+            val entry = byId[olderRow.msgId] ?: return SupersessionMutationResult.Invalid
+            if (entry.receipt.eventType != "peer.receipt" || entry.receipt.requiresPeerReceipt) {
+                return SupersessionMutationResult.Invalid
+            }
+            outbound(entry.receipt.msgId)?.let { return SupersessionMutationResult.ReceiptConflict(it.envelopeSha256) }
+            olderRow.receiptMsgId?.let { stagedId ->
+                val staged = outbound(stagedId)
+                if (staged == null || staged.state != "PENDING_PLATFORM" ||
+                    staged.eventType != "peer.receipt" || staged.requiresPeerReceipt ||
+                    inboundReceiptReferenceCount(stagedId) != 1
+                ) return SupersessionMutationResult.Invalid
+            }
+        }
+        for (olderRow in older) {
+            val entry = requireNotNull(byId[olderRow.msgId])
+            olderRow.receiptMsgId?.let { stagedId -> deletePrivateStagedReceipt(stagedId) }
+            insertOutbound(entry.receipt.copy(state = "NEW", requiresPeerReceipt = false))
+            markInboundRejected(olderRow.msgId, terminalAt, entry.receipt.msgId)
+        }
+        return SupersessionMutationResult.Applied
     }
 
     @Transaction

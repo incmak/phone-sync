@@ -187,7 +187,7 @@ interface MaterializationStore {
     ): MaterializationResult
 }
 
-class DaoMaterializationStore(private val dao: ReliableDeliveryDao) : MaterializationStore {
+class DaoMaterializationStore(internal val dao: ReliableDeliveryDao) : MaterializationStore {
     override suspend fun pendingMaterialization(nowMs: Long): List<CanonicalNotificationState> = dao.pendingMaterialization(nowMs)
 
     override suspend fun pendingInbound(canonId: String, sequence: Long): List<InboundMessage> =
@@ -237,6 +237,8 @@ fun interface ReceiptFactory {
         state: CanonicalNotificationState,
         pendingInbound: List<InboundMessage>,
     ): OutboundMessage?
+
+    suspend fun createRejected(ackedMsgId: String, envelopeSha256: String, reason: String): OutboundMessage? = null
 }
 
 /** Applies persisted desired state after a platform crash window. */
@@ -259,6 +261,7 @@ class NotificationMaterializer(
         var applied = 0
         var pending = 0
         var skipped = 0
+        reconcileSupersededInbound(nowMs)
         var observedRetryDue: Long? = null
         suspend fun recordRetry(
             state: CanonicalNotificationState,
@@ -343,6 +346,42 @@ class NotificationMaterializer(
         return MaterializationSummary(applied = applied, pending = pending, skipped = skipped)
     }
 
+    private suspend fun reconcileSupersededInbound(nowMs: Long) {
+        val dao = (store as? DaoMaterializationStore)?.dao ?: return
+        val factory = receiptFactory ?: return
+        var retryRequired = false
+        for (state in dao.strandedSupersededCanonicalGroups(limit = 32)) {
+            val older = dao.pendingSupersededInboundPreflight(state.canonId, state.latestSequence)
+            val prepared = try {
+                when (val result = prepareSupersessionRejections(older) { row, reason ->
+                    factory.createRejected(row.msgId, row.envelopeSha256, reason)
+                }) {
+                    is SupersessionPreparation.Prepared -> result
+                    SupersessionPreparation.Unavailable -> {
+                        retryRequired = true
+                        continue
+                    }
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                retryRequired = true
+                continue
+            }
+            if (!dao.terminalizeSupersededInbound(
+                canonId = state.canonId,
+                sequence = state.latestSequence,
+                supersession = co.twinotify.core.storage.SupersessionBundle(
+                    prepared.entries.map { co.twinotify.core.storage.SupersessionEntry(it.inboundMsgId, it.envelopeSha256, it.receipt) },
+                ),
+                terminalAt = nowMs,
+            )) retryRequired = true
+        }
+        if (retryRequired) {
+            retryScheduler.schedule(5_000L) { materializePending() }
+        }
+    }
+
     private suspend fun applyPlatform(state: CanonicalNotificationState): NotificationPostOutcome {
         val isSource = localDeviceId != null && state.originDevice == localDeviceId
         return if (isSource) {
@@ -393,7 +432,7 @@ class DurableReceiptFactory(private val context: Context) : ReceiptFactory {
         return createReceipt(inbound.msgId, inbound.envelopeSha256, "applied", null)
     }
 
-    suspend fun createRejected(
+    override suspend fun createRejected(
         ackedMsgId: String,
         envelopeSha256: String,
         reason: String,
