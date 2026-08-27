@@ -16,12 +16,13 @@ export type TwButtonSize = 'sm' | 'md' | 'lg';
 
 export interface TwButtonColors {
   backgroundColor: string;
+  pressedBackgroundColor: string;
   textColor: string;
   borderColor?: string;
 }
 
-function pressedButtonStyle(backgroundColor: string, hover: string, pressed: boolean, disabled: boolean) {
-  return { backgroundColor: pressed && !disabled ? hover : backgroundColor };
+function pressedButtonStyle(backgroundColor: string, pressedBackgroundColor: string, pressed: boolean, disabled: boolean) {
+  return { backgroundColor: pressed && !disabled ? pressedBackgroundColor : backgroundColor };
 }
 
 export function resolveButtonColors(
@@ -30,16 +31,17 @@ export function resolveButtonColors(
 ): TwButtonColors {
   switch (variant) {
     case 'primary':
-      return { backgroundColor: theme.ink, textColor: theme.bg };
+      return { backgroundColor: theme.ink, pressedBackgroundColor: theme.borderHi, textColor: theme.bg };
     case 'accent':
-      return { backgroundColor: theme.accent, textColor: theme.bg };
+      return { backgroundColor: theme.accent, pressedBackgroundColor: theme.accentText, textColor: theme.bg };
     case 'secondary':
-      return { backgroundColor: theme.fill, textColor: theme.ink, borderColor: theme.border };
+      return { backgroundColor: theme.fill, pressedBackgroundColor: theme.hover, textColor: theme.ink, borderColor: theme.border };
     case 'ghost':
-      return { backgroundColor: 'transparent', textColor: theme.ink };
+      return { backgroundColor: 'transparent', pressedBackgroundColor: theme.hover, textColor: theme.ink };
     case 'destructive':
       return {
         backgroundColor: 'transparent',
+        pressedBackgroundColor: theme.sem.danger.surface,
         textColor: theme.sem.danger.foreground,
         borderColor: theme.sem.danger.foreground,
       };
@@ -87,7 +89,7 @@ export function TwButton({
     ? String(children)
     : undefined;
 
-  const { backgroundColor, textColor, borderColor } = resolveButtonColors(theme, variant);
+  const { backgroundColor, pressedBackgroundColor, textColor, borderColor } = resolveButtonColors(theme, variant);
 
   return (
     <Pressable
@@ -107,7 +109,7 @@ export function TwButton({
           minHeight: s.minHeight,
           paddingHorizontal: s.paddingHorizontal,
           paddingVertical: s.paddingVertical,
-          ...pressedButtonStyle(backgroundColor, theme.hover, pressed, isDisabled),
+          ...pressedButtonStyle(backgroundColor, pressedBackgroundColor, pressed, isDisabled),
           borderColor: borderColor,
           borderWidth: borderColor ? 1 : 0,
           borderRadius: theme.radius.md,
