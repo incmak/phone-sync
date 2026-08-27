@@ -74,34 +74,6 @@ export const TW_SPACE = [0, 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80] as const;
 
 export const TW_RADIUS = { xs: 6, sm: 10, md: 14, lg: 20, xl: 28, pill: 999 } as const;
 
-// RN shadow: iOS uses shadowColor/Offset/Opacity/Radius; Android uses elevation
-export const TW_SHADOW = {
-  sm: {
-    shadowColor: '#1a1713', shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08, shadowRadius: 2, elevation: 1,
-  },
-  md: {
-    shadowColor: '#1a1713', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.10, shadowRadius: 8, elevation: 3,
-  },
-  lg: {
-    shadowColor: '#1a1713', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.14, shadowRadius: 16, elevation: 8,
-  },
-  dSm: {
-    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.4, shadowRadius: 2, elevation: 1,
-  },
-  dMd: {
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.45, shadowRadius: 8, elevation: 3,
-  },
-  dLg: {
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5, shadowRadius: 16, elevation: 8,
-  },
-} as const;
-
 // Typography: lineHeight in pixels (not multiplier) for RN
 export const TW_TYPE = {
   display: { fontSize: 32, fontWeight: '600' as const, lineHeight: 37, letterSpacing: -0.5 },
@@ -121,10 +93,6 @@ export interface Theme {
   space: typeof TW_SPACE;
   radius: typeof TW_RADIUS;
   sem: SemanticDisplay;
-  shadow: typeof TW_SHADOW;
-  shadowSm: typeof TW_SHADOW.sm | typeof TW_SHADOW.dSm;
-  shadowMd: typeof TW_SHADOW.md | typeof TW_SHADOW.dMd;
-  shadowLg: typeof TW_SHADOW.lg | typeof TW_SHADOW.dLg;
   bg: string; card: string; fill: string; hover: string;
   border: string; borderHi: string;
   switchOff: string;
@@ -142,9 +110,5 @@ export function twTheme({ dark = false }: { dark?: boolean } = {}): Theme {
     radius: TW_RADIUS,
     sem: dark ? TW_SEMANTIC_DARK : TW_SEMANTIC_LIGHT,
     ...colors,
-    shadow:    TW_SHADOW,
-    shadowSm:  dark ? TW_SHADOW.dSm : TW_SHADOW.sm,
-    shadowMd:  dark ? TW_SHADOW.dMd : TW_SHADOW.md,
-    shadowLg:  dark ? TW_SHADOW.dLg : TW_SHADOW.lg,
   };
 }

@@ -63,15 +63,13 @@ export function TwSwitch({
       accessibilityRole="switch"
       accessibilityLabel={accessibilityLabel}
       accessibilityState={{ checked, disabled: !!disabled }}
-      // A 44pt target regardless of the visual size of the track.
-      hitSlop={10}
-      style={{ opacity: disabled ? 0.5 : 1 }}
+      style={[styles.target, { opacity: disabled ? 0.5 : 1 }]}
     >
       <Animated.View
         style={[
           styles.track,
           trackStyle,
-          { width: w, height: h, borderRadius: h / 2 },
+          { width: w, height: h, borderRadius: h / 2, borderColor: theme.border },
         ]}
       >
         <Animated.View
@@ -84,6 +82,7 @@ export function TwSwitch({
               borderRadius: d / 2,
               top: 3,
               left: 3,
+              backgroundColor: theme.bg,
             },
           ]}
         />
@@ -95,14 +94,15 @@ export function TwSwitch({
 const styles = StyleSheet.create({
   track: {
     position: 'relative',
+    borderWidth: 1,
+  },
+  target: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   thumb: {
     position: 'absolute',
-    backgroundColor: '#ffffff',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-    elevation: 2,
   },
 });

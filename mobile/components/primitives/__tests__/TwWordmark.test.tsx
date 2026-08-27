@@ -4,10 +4,13 @@ import { render, screen } from '@testing-library/react-native';
 import { ThemeProvider } from '../../Theme';
 import { TwWordmark } from '../TwWordmark';
 
-describe('TwWordmark font scaling', () => {
-  test('keeps the brand mark on one complete line at enlarged system fonts', () => {
-    render(<ThemeProvider><TwWordmark /></ThemeProvider>);
+describe('TwWordmark brand contract', () => {
+  test('uses one text node in one system color without an icon', () => {
+    const { toJSON } = render(<ThemeProvider><TwWordmark /></ThemeProvider>);
+    const tree = JSON.stringify(toJSON());
 
     expect(screen.getByText(/twin/).props.allowFontScaling).toBe(false);
+    expect((tree.match(/Text/g) ?? []).length).toBe(1);
+    expect(tree).not.toMatch(/TwLogo|Svg|accent/i);
   });
 });

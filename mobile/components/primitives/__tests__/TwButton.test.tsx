@@ -1,18 +1,29 @@
 import React from 'react';
 import { StyleSheet } from 'react-native';
-import { render, screen } from '@testing-library/react-native';
+import { fireEvent, render, screen } from '@testing-library/react-native';
 
 import { ThemeProvider } from '../../Theme';
-import { pressedButtonScale, TwButton } from '../TwButton';
+import { twTheme } from '../../tokens';
+import { TwButton } from '../TwButton';
 
 function renderButton(element: React.ReactElement) {
   return render(<ThemeProvider>{element}</ThemeProvider>);
 }
 
 describe('TwButton accessibility contract', () => {
-  test('does not scale on press when reduced motion is enabled', () => {
-    expect(pressedButtonScale(true, true)).toBe(1);
-    expect(pressedButtonScale(false, true)).toBeLessThan(1);
+  test('never moves on press', () => {
+    renderButton(<TwButton>Continue</TwButton>);
+    const button = screen.getByRole('button', { name: 'Continue' });
+    const restingBefore = StyleSheet.flatten(button.props.style);
+    fireEvent(button, 'pressIn');
+    const pressed = StyleSheet.flatten(screen.getByRole('button', { name: 'Continue' }).props.style);
+    fireEvent(button, 'pressOut');
+    const resting = StyleSheet.flatten(screen.getByRole('button', { name: 'Continue' }).props.style);
+    expect(restingBefore.backgroundColor).toBe(twTheme({ dark: false }).ink);
+    expect(pressed.backgroundColor).toBe(twTheme({ dark: false }).hover);
+    expect(resting.backgroundColor).toBe(twTheme({ dark: false }).ink);
+    expect(JSON.stringify(pressed)).not.toMatch(/transform|scale|translate/i);
+    expect(JSON.stringify(resting)).not.toMatch(/transform|scale|translate/i);
   });
 
   test('infers a button name and keeps the small target at least 48dp', () => {

@@ -26,17 +26,14 @@ export function TwCard({
   // Semantic tones always use the active mode's explicit foreground/surface pair.
   let bg = '';
   let borderColor = '';
-  let shadowStyle = {};
+  let borderWidth = 0;
 
   switch (tone) {
     case 'default':
       bg = theme.card;
-      borderColor = theme.border;
       break;
     case 'raised':
       bg = theme.card;
-      borderColor = theme.border;
-      shadowStyle = theme.shadowSm;
       break;
     case 'fill':
       bg = theme.fill;
@@ -45,24 +42,27 @@ export function TwCard({
     case 'accent':
       bg = theme.accentLo;
       borderColor = theme.accent;
+      borderWidth = 1;
       break;
     case 'warn':
       bg = theme.sem.warn.surface;
       borderColor = theme.sem.warn.foreground;
+      borderWidth = 1;
       break;
     case 'danger':
       bg = theme.sem.danger.surface;
       borderColor = theme.sem.danger.foreground;
+      borderWidth = 1;
       break;
   }
 
   const cardStyle: ViewStyle = {
     backgroundColor: bg,
     borderColor,
-    borderWidth: 1,
+    borderWidth,
     borderRadius: theme.radius.lg,
     padding,
-    ...shadowStyle,
+    ...((interactive || onPress) ? { minWidth: 44, minHeight: 44 } : {}),
   };
 
   if (interactive || onPress) {
