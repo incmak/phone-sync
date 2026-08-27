@@ -1,14 +1,21 @@
 package co.twinotify.core.listener
 
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -92,6 +99,335 @@ class CaptureCoordinatorTest {
         advanceUntilIdle()
         assertEquals(0, coordinator.deferredCountForTest())
         assertEquals(1, persisted, "only the latest command should be replayed after pairing")
+    }
+
+    @Test
+    fun permanentFailureDropsHeadAndAllowsLatestLaterStateToPersist() = runTest {
+        var badAttempts = 0
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(this, CapturePersister { command ->
+            if (command.sourceKey == "bad") {
+                badAttempts += 1
+                throw CapturePermanentException("invalid payload")
+            }
+            persisted += command.sourceKey
+            CapturePersistResult(1)
+        }, laneIdleMs = 50)
+
+        coordinator.submit(PostCommand("same", "bad", post("same")))
+        runCurrent()
+        coordinator.submit(RemoveCommand("same", "good", "app_cancel", 2_000))
+        advanceUntilIdle()
+
+        assertEquals(1, badAttempts)
+        assertEquals(listOf("good"), persisted)
+    }
+
+    @Test
+    fun laterStateIsConflatedWhileTransientHeadFailureRetries() = runTest {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var headAttempts = 0
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(this, CapturePersister { command ->
+            if (command.sourceKey == "head") {
+                headAttempts += 1
+                if (headAttempts == 1) {
+                    started.complete(Unit)
+                    release.await()
+                    throw IllegalStateException("temporary Room failure")
+                }
+            }
+            persisted += command.sourceKey
+            CapturePersistResult(persisted.size.toLong())
+        }, laneIdleMs = 50)
+
+        coordinator.submit(PostCommand("same", "head", post("same")))
+        started.await()
+        coordinator.submit(PostCommand("same", "stale", post("same")))
+        coordinator.submit(RemoveCommand("same", "latest", "app_cancel", 2_000))
+        release.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(2, headAttempts)
+        assertEquals(listOf("head", "latest"), persisted)
+    }
+
+    @Test
+    fun newerStateSubmittedAfterPairDeferralIsNotReplacedByOlderBufferedState() = runTest {
+        val persistStarted = CompletableDeferred<Unit>()
+        val allowPairFailure = CompletableDeferred<Unit>()
+        val deferralRecorded = CompletableDeferred<Unit>()
+        val allowCompletion = CompletableDeferred<Unit>()
+        var paired = false
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister { command ->
+                if (!paired) {
+                    persistStarted.complete(Unit)
+                    allowPairFailure.await()
+                    throw CaptureNotPairedException("no peer")
+                }
+                persisted += command.sourceKey
+                CapturePersistResult(persisted.size.toLong())
+            },
+            laneIdleMs = 50,
+            afterPairingDeferralForTest = {
+                deferralRecorded.complete(Unit)
+                allowCompletion.await()
+            },
+        )
+
+        coordinator.submit(PostCommand("offline", "head", post("offline")))
+        persistStarted.await()
+        coordinator.submit(PostCommand("offline", "older", post("offline")))
+        allowPairFailure.complete(Unit)
+        deferralRecorded.await()
+        coordinator.submit(RemoveCommand("offline", "newer", "app_cancel", 2_000))
+        allowCompletion.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, coordinator.deferredCountForTest())
+        paired = true
+        coordinator.resumeDeferred()
+        advanceUntilIdle()
+
+        assertEquals(listOf("newer"), persisted)
+    }
+
+    @Test
+    fun resumeDuringPairDeferralPromotesRetainedLatestWithoutRetryingOldHead() = runTest {
+        val persistStarted = CompletableDeferred<Unit>()
+        val allowPairFailure = CompletableDeferred<Unit>()
+        val deferralRecorded = CompletableDeferred<Unit>()
+        val allowCompletion = CompletableDeferred<Unit>()
+        var paired = false
+        var oldHeadAttempts = 0
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister { command ->
+                if (command.sourceKey == "head") {
+                    oldHeadAttempts += 1
+                    if (!paired) {
+                        persistStarted.complete(Unit)
+                        allowPairFailure.await()
+                        throw CaptureNotPairedException("no peer")
+                    }
+                }
+                persisted += command.sourceKey
+                CapturePersistResult(persisted.size.toLong())
+            },
+            laneIdleMs = 50,
+            afterPairingDeferralForTest = {
+                deferralRecorded.complete(Unit)
+                allowCompletion.await()
+            },
+        )
+
+        coordinator.submit(PostCommand("offline", "head", post("offline")))
+        persistStarted.await()
+        coordinator.submit(RemoveCommand("offline", "latest", "app_cancel", 2_000))
+        allowPairFailure.complete(Unit)
+        deferralRecorded.await()
+        paired = true
+        coordinator.resumeDeferred()
+        allowCompletion.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, oldHeadAttempts)
+        assertEquals(listOf("latest"), persisted)
+        assertEquals(0, coordinator.deferredCountForTest())
+        assertEquals(0, coordinator.activeLaneCountForTest())
+    }
+
+    @Test
+    fun resumeBeforePairDeferralPublicationRetriesInsteadOfStrandingHead() = runTest {
+        val beforePublication = CompletableDeferred<Unit>()
+        val allowPublication = CompletableDeferred<Unit>()
+        var paired = false
+        var attempts = 0
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(
+            scope = this,
+            persister = CapturePersister { command ->
+                attempts += 1
+                if (!paired) throw CaptureNotPairedException("no peer")
+                persisted += command.sourceKey
+                CapturePersistResult(persisted.size.toLong())
+            },
+            laneIdleMs = 50,
+            beforePairingDeferralForTest = {
+                beforePublication.complete(Unit)
+                allowPublication.await()
+            },
+        )
+
+        coordinator.submit(PostCommand("offline", "head", post("offline")))
+        beforePublication.await()
+        paired = true
+        coordinator.resumeDeferred()
+        allowPublication.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(2, attempts)
+        assertEquals(listOf("head"), persisted)
+        assertEquals(0, coordinator.deferredCountForTest())
+        assertEquals(0, coordinator.activeLaneCountForTest())
+    }
+
+    @Test
+    fun pendingBurstKeepsOrderedHeadAndOnlyLatestLaterState() = runTest {
+        val persisted = mutableListOf<String>()
+        val coordinator = CaptureCoordinator(this, CapturePersister { command ->
+            persisted += command.sourceKey
+            CapturePersistResult(persisted.size.toLong())
+        }, laneIdleMs = 50)
+
+        coordinator.submit(PostCommand("same", "first", post("same")))
+        coordinator.submit(PostCommand("same", "stale", post("same")))
+        coordinator.submit(RemoveCommand("same", "latest", "app_cancel", 2_000))
+        advanceUntilIdle()
+
+        assertEquals(listOf("first", "latest"), persisted)
+    }
+
+    @Test
+    fun validationFailureKeepsItsCauseWhenClassifiedPermanent() {
+        val cause = IllegalArgumentException("envelope too large")
+        val actual = assertFailsWith<CapturePermanentException> {
+            captureValidated { throw cause }
+        }
+
+        assertSame(cause, actual.cause)
+    }
+
+    @Test
+    fun permanentFailureDiagnosticContainsOnlyTheBoundedFailureCode() {
+        assertEquals(
+            "capture persist discarded invalid state code=capture_validation",
+            permanentCaptureFailureLogMessage(),
+        )
+    }
+
+    @Test
+    fun retryableFailureDiagnosticContainsOnlyTheBoundedFailureCode() {
+        assertEquals(
+            "capture persist failed code=retryable subsystem=capture",
+            retryableCaptureFailureLogMessage(),
+        )
+    }
+
+    @Test
+    fun cancellationKeepsItsExactInstanceThroughValidationBoundary() {
+        val expected = java.util.concurrent.CancellationException("capture cancelled")
+        val actual = assertFailsWith<java.util.concurrent.CancellationException> {
+            captureValidated { throw expected }
+        }
+
+        assertSame(expected, actual)
+    }
+
+    @Test
+    fun laneReportsTheExactPersisterCancellationInstanceOnCompletion() = runTest {
+        val expected = java.util.concurrent.CancellationException("capture cancelled")
+        val observed = CompletableDeferred<Throwable?>()
+        val laneScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(
+            scope = laneScope,
+            persister = CapturePersister { throw expected },
+            laneIdleMs = 50,
+            onLaneCompletionForTest = { cause -> observed.complete(cause) },
+        )
+
+        coordinator.submit(PostCommand("cancel", "cancel", post("cancel")))
+        runCurrent()
+
+        assertSame(expected, observed.await())
+        laneScope.cancel()
+    }
+
+    @Test
+    fun cancellationRetiresLaneSoLaterStateStartsFreshWorker() = runTest {
+        val expected = java.util.concurrent.CancellationException("capture cancelled")
+        val observed = CompletableDeferred<Throwable?>()
+        val persisted = mutableListOf<String>()
+        var first = true
+        val laneScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(
+            scope = laneScope,
+            persister = CapturePersister { command ->
+                if (first) {
+                    first = false
+                    throw expected
+                }
+                persisted += command.sourceKey
+                CapturePersistResult(persisted.size.toLong())
+            },
+            laneIdleMs = 50,
+            onLaneCompletionForTest = { cause -> observed.complete(cause) },
+        )
+
+        coordinator.submit(PostCommand("same", "cancelled", post("same")))
+        runCurrent()
+        assertSame(expected, observed.await())
+        assertEquals(0, coordinator.activeLaneCountForTest())
+
+        coordinator.submit(RemoveCommand("same", "later", "app_cancel", 2_000))
+        advanceUntilIdle()
+
+        assertEquals(listOf("later"), persisted)
+        assertEquals(0, coordinator.activeLaneCountForTest())
+        laneScope.cancel()
+    }
+
+    @Test
+    fun terminalStateSubmittedBeforeCancelledLaneRetiresIsPreservedOnce() = runTest {
+        val expected = java.util.concurrent.CancellationException("capture cancelled")
+        val enteredRetirement = CompletableDeferred<Unit>()
+        val allowRetirement = CompletableDeferred<Unit>()
+        val observed = CompletableDeferred<Throwable?>()
+        val persisted = mutableListOf<String>()
+        var first = true
+        val laneScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(
+            scope = laneScope,
+            persister = CapturePersister { command ->
+                if (first) {
+                    first = false
+                    throw expected
+                }
+                persisted += command.sourceKey
+                CapturePersistResult(persisted.size.toLong())
+            },
+            laneIdleMs = 50,
+            onLaneCompletionForTest = { cause -> observed.complete(cause) },
+            beforeLaneRetirementForTest = {
+                enteredRetirement.complete(Unit)
+                allowRetirement.await()
+            },
+        )
+
+        coordinator.submit(PostCommand("same", "cancelled", post("same")))
+        runCurrent()
+        enteredRetirement.await()
+        coordinator.submit(RemoveCommand("same", "terminal", "app_cancel", 2_000))
+        allowRetirement.complete(Unit)
+        advanceUntilIdle()
+
+        assertSame(expected, observed.await())
+        assertEquals(listOf("terminal"), persisted)
+        assertEquals(0, coordinator.activeLaneCountForTest())
+        laneScope.cancel()
+    }
+
+    @Test
+    fun submitToCancelledScopeIsRejected() {
+        val laneScope = CoroutineScope(SupervisorJob()).also { it.cancel() }
+        val coordinator = CaptureCoordinator(laneScope, CapturePersister { CapturePersistResult(1) })
+
+        assertTrue(!coordinator.submit(PostCommand("cancelled", "key", post("cancelled"))))
     }
 
     private fun post(canonId: String) = SourceNotificationSnapshot(

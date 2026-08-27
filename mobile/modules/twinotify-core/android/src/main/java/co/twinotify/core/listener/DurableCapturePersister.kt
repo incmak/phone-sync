@@ -47,14 +47,16 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             is PostCommand -> command.snapshot.postTime.coerceAtLeast(0L)
         }.coerceAtLeast(System.currentTimeMillis())
         val expiresAt = now + RETENTION_MS
-        val payloadJson = when (command) {
-            is PostCommand -> NotifPostBuilder.toPayloadJson(
-                NotifPostBuilder.build(command.snapshot, appContext, originDevice, eventType),
-            )
-            is RemoveCommand -> JSONObject().apply {
-                put("reason", command.reason)
-                put("removed_at", command.removedAt)
-            }.toString()
+        val payloadJson = captureValidated {
+            when (command) {
+                is PostCommand -> NotifPostBuilder.toPayloadJson(
+                    NotifPostBuilder.build(command.snapshot, appContext, originDevice, eventType),
+                )
+                is RemoveCommand -> JSONObject().apply {
+                    put("reason", command.reason)
+                    put("removed_at", command.removedAt)
+                }.toString()
+            }
         }
         val msgId = UUID.randomUUID().toString()
         val inner = InnerEventV2(
@@ -68,7 +70,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             expiresAt = expiresAt,
             payloadJson = payloadJson,
         )
-        val innerJson = ProtocolJson.encodeInner(inner)
+        val innerJson = captureValidated { ProtocolJson.encodeInner(inner) }
         val (box, _) = CryptoStore.loadOrGenerate(appContext)
         val nonce = NonceSource.next(appContext)
         val ciphertext = Encrypter.encrypt(
@@ -85,7 +87,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             nonceB64 = Base64.encodeToString(nonce, Base64.NO_WRAP),
             ciphertextB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP),
         )
-        val envelopeJson = ProtocolJson.encodeEnvelope(envelope)
+        val envelopeJson = captureValidated { ProtocolJson.encodeEnvelope(envelope) }
         val desired = CanonicalNotificationState(
             canonId = command.canonId,
             // A peer mirror may be cancelled by the local user without transferring canonical
@@ -422,3 +424,10 @@ class DurableCapturePersister(context: Context) : CapturePersister {
 }
 
 class CaptureNotPairedException(message: String) : IllegalStateException(message)
+
+/** Converts deterministic notification payload/protocol validation into a non-retryable outcome. */
+internal inline fun <T> captureValidated(block: () -> T): T = try {
+    block()
+} catch (error: IllegalArgumentException) {
+    throw CapturePermanentException("capture payload rejected", error)
+}

@@ -83,6 +83,10 @@ data class CapturePersistResult(
     val msgId: String? = null,
 )
 
+/** The immutable notification snapshot or its protocol encoding cannot become valid by retrying. */
+class CapturePermanentException(message: String, cause: Throwable? = null) :
+    RuntimeException(message, cause)
+
 /** Durable boundary used by the ordered coordinator and replaceable by deterministic test fakes. */
 fun interface CapturePersister {
     suspend fun persist(command: CaptureCommand): CapturePersistResult
