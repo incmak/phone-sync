@@ -1,82 +1,73 @@
-// Twinotify design tokens — React Native port of tokens.jsx
-// oklch colors are pre-computed to hex via culori at module load time.
-
-import { converter, formatHex } from 'culori';
+// Twinotify's fixed Handoff Trace foundation. All colors are literal sRGB
+// values so the native UI has no runtime palette dependency or hue drift.
 
 export const TW_FONTS = {
-  ui: 'Inter_400Regular',
-  uiMedium: 'Inter_500Medium',
-  uiSemi: 'Inter_600SemiBold',
-  uiBold: 'Inter_700Bold',
-  mono: 'JetBrainsMono_400Regular',
-  monoMedium: 'JetBrainsMono_500Medium',
+  ui: 'sans-serif',
+  uiMedium: 'sans-serif-medium',
+  uiSemi: 'sans-serif-medium',
+  uiBold: 'sans-serif',
+  display: 'sans-serif-condensed',
+  mono: 'monospace',
+  monoMedium: 'monospace',
 } as const;
 
-export const TW_HUES = {
-  mint: 180,
-  indigo: 265,
-  amber: 65,
-  rose: 15,
+const TW_LIGHT = {
+  bg: '#E3E9E5',
+  card: '#EDF2EE',
+  fill: '#D4DED8',
+  hover: '#C6D2CB',
+  border: '#6E8176',
+  borderHi: '#52645A',
+  ink: '#17201C',
+  ink2: '#34423B',
+  ink3: '#52625A',
+  ink4: '#75837C',
+  accent: '#1F685A',
+  accentHi: '#3B7C6E',
+  accentLo: '#CADBD3',
+  accentText: '#145446',
+  switchOff: '#52625A',
 } as const;
 
-export type TwHue = keyof typeof TW_HUES;
+const TW_DARK = {
+  bg: '#111815',
+  card: '#17201C',
+  fill: '#1E2924',
+  hover: '#27352F',
+  border: '#60766B',
+  borderHi: '#789085',
+  ink: '#EEF3EF',
+  ink2: '#C9D2CD',
+  ink3: '#98A69E',
+  ink4: '#6F7D75',
+  accent: '#7FAE9F',
+  accentHi: '#9BBEAE',
+  accentLo: '#263D34',
+  accentText: '#A9CCBE',
+  switchOff: '#98A69E',
+} as const;
 
-// oklch → hex via culori (replaces browser-only CSS oklch strings)
-const toRgb = converter('rgb');
-
-const oklchToHex = (l: number, c: number, h: number): string => {
-  const rgb = toRgb({ mode: 'oklch', l, c, h });
-  return rgb ? (formatHex(rgb) ?? '#000000') : '#000000';
-};
-
-export function twBuildPalette(hue = 180) {
-  return {
-    accent50:  oklchToHex(0.97, 0.02, hue),
-    accent100: oklchToHex(0.93, 0.04, hue),
-    accent200: oklchToHex(0.86, 0.08, hue),
-    accent300: oklchToHex(0.78, 0.11, hue),
-    accent400: oklchToHex(0.70, 0.13, hue),
-    accent500: oklchToHex(0.62, 0.14, hue),   // primary
-    accent600: oklchToHex(0.54, 0.13, hue),
-    accent700: oklchToHex(0.45, 0.11, hue),
-    accent800: oklchToHex(0.36, 0.08, hue),
-    accent900: oklchToHex(0.25, 0.05, hue),
-  };
+export interface SemanticDisplayPair {
+  foreground: string;
+  surface: string;
 }
 
-// Warm neutrals — not cold gray
-export const TW_NEUTRALS = {
-  // Light
-  surface0:    '#f7f5f1',
-  surface1:    '#ffffff',
-  surface2:    '#f1efea',
-  surface3:    '#e8e5df',
-  border:      '#e2ded6',
-  borderHigh:  '#cfcac0',
-  ink:         '#1a1713',
-  ink2:        '#3d3832',
-  ink3:        '#6e685f',
-  ink4:        '#9b968d',
-  // Dark
-  dSurface0:   '#141210',
-  dSurface1:   '#1c1a17',
-  dSurface2:   '#252320',
-  dSurface3:   '#2f2c28',
-  dBorder:     '#2e2a25',
-  dBorderHigh: '#3f3a33',
-  dInk:        '#f4f1eb',
-  dInk2:       '#c8c3ba',
-  dInk3:       '#8c867c',
-  dInk4:       '#5a564e',
-} as const;
+export type SemanticRole = 'ok' | 'info' | 'warn' | 'danger';
+export type SemanticDisplay = Record<SemanticRole, SemanticDisplayPair>;
 
-// Semantic statuses — pre-computed hex (no browser oklch support needed)
-export const TW_SEMANTIC = {
-  ok:     oklchToHex(0.70, 0.13, 155),   // green
-  info:   oklchToHex(0.68, 0.13, 240),   // blue
-  warn:   oklchToHex(0.78, 0.14, 75),    // amber
-  danger: oklchToHex(0.62, 0.18, 25),    // red
-} as const;
+const TW_SEMANTIC_LIGHT: SemanticDisplay = {
+  ok: { foreground: '#235C3C', surface: '#D2E4D6' },
+  info: { foreground: '#205D78', surface: '#D0E2E9' },
+  warn: { foreground: '#72520B', surface: '#E7DDC1' },
+  danger: { foreground: '#963B38', surface: '#EBD6D3' },
+};
+
+const TW_SEMANTIC_DARK: SemanticDisplay = {
+  ok: { foreground: '#79C894', surface: '#1B2A20' },
+  info: { foreground: '#74BDE7', surface: '#172731' },
+  warn: { foreground: '#F2C56C', surface: '#2A2418' },
+  danger: { foreground: '#F07B76', surface: '#2E1D1C' },
+};
 
 // Spacing: 4px base grid
 export const TW_SPACE = [0, 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80] as const;
@@ -111,16 +102,6 @@ export const TW_SHADOW = {
   },
 } as const;
 
-/** Convert #rrggbb (6-char hex) + opacity 0..1 to a 'rgba(r,g,b,a)' string safe on all RN platforms. */
-export function hexWithAlpha(hex: string, opacity: number): string {
-  const h = hex.replace('#', '');
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  const a = Math.max(0, Math.min(1, opacity));
-  return `rgba(${r},${g},${b},${a})`;
-}
-
 // Typography: lineHeight in pixels (not multiplier) for RN
 export const TW_TYPE = {
   display: { fontSize: 32, fontWeight: '600' as const, lineHeight: 37, letterSpacing: -0.5 },
@@ -134,14 +115,12 @@ export const TW_TYPE = {
 } as const;
 
 export interface Theme {
-  hue: number;
   dark: boolean;
   fonts: typeof TW_FONTS;
   type: typeof TW_TYPE;
   space: typeof TW_SPACE;
   radius: typeof TW_RADIUS;
-  sem: typeof TW_SEMANTIC;
-  pal: ReturnType<typeof twBuildPalette>;
+  sem: SemanticDisplay;
   shadow: typeof TW_SHADOW;
   shadowSm: typeof TW_SHADOW.sm | typeof TW_SHADOW.dSm;
   shadowMd: typeof TW_SHADOW.md | typeof TW_SHADOW.dMd;
@@ -153,32 +132,16 @@ export interface Theme {
   accent: string; accentHi: string; accentLo: string; accentText: string;
 }
 
-export function twTheme({ hue = 180, dark = false } = {}): Theme {
-  const pal = twBuildPalette(hue);
-  const n = TW_NEUTRALS;
+export function twTheme({ dark = false }: { dark?: boolean } = {}): Theme {
+  const colors = dark ? TW_DARK : TW_LIGHT;
   return {
-    hue, dark,
+    dark,
     fonts: TW_FONTS,
     type: TW_TYPE,
     space: TW_SPACE,
     radius: TW_RADIUS,
-    sem: TW_SEMANTIC,
-    pal,
-    bg:        dark ? n.dSurface0 : n.surface0,
-    card:      dark ? n.dSurface1 : n.surface1,
-    fill:      dark ? n.dSurface2 : n.surface2,
-    hover:     dark ? n.dSurface3 : n.surface3,
-    border:    dark ? n.dBorder   : n.border,
-    borderHi:  dark ? n.dBorderHigh : n.borderHigh,
-    switchOff: dark ? n.dInk3 : n.ink3,
-    ink:       dark ? n.dInk      : n.ink,
-    ink2:      dark ? n.dInk2     : n.ink2,
-    ink3:      dark ? n.dInk3     : n.ink3,
-    ink4:      dark ? n.dInk4     : n.ink4,
-    accent:    pal.accent500,
-    accentHi:  pal.accent400,
-    accentLo:  dark ? pal.accent800 : pal.accent100,
-    accentText: dark ? pal.accent200 : pal.accent700,
+    sem: dark ? TW_SEMANTIC_DARK : TW_SEMANTIC_LIGHT,
+    ...colors,
     shadow:    TW_SHADOW,
     shadowSm:  dark ? TW_SHADOW.dSm : TW_SHADOW.sm,
     shadowMd:  dark ? TW_SHADOW.dMd : TW_SHADOW.md,

@@ -17,14 +17,7 @@ jest.mock('./components/Theme', () => {
   const { twTheme } = jest.requireActual('./components/tokens');
   return {
     ThemeProvider: ({ children }) => children,
-    useTheme: () => twTheme({ hue: 180, dark: mockDarkTheme }),
-    useThemeControls: () => ({
-      theme: twTheme({ hue: 180, dark: false }),
-      hue: 'mint',
-      setHue: jest.fn(),
-      darkOverride: 'light',
-      setDarkOverride: jest.fn(),
-    }),
+    useTheme: () => twTheme({ dark: mockDarkTheme }),
   };
 });
 

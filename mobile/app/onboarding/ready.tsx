@@ -58,7 +58,7 @@ export default function ReadyScreen() {
             style={[
               theme.type.display,
               styles.headline,
-              { color: theme.ink, fontFamily: theme.fonts.uiBold },
+              { color: theme.ink, fontFamily: theme.fonts.uiBold, fontWeight: '700' },
             ]}
           >
             You&#39;re ready.

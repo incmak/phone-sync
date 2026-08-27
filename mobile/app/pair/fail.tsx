@@ -15,9 +15,9 @@ export default function PairFailScreen() {
     <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1, backgroundColor: theme.bg }}>
       <ScrollView contentContainerStyle={{ flexGrow: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 20 }}>
         <Svg width={48} height={48} viewBox="0 0 36 36" accessibilityRole="image" accessibilityLabel="Pairing stopped">
-          <Path d="M18 4 L32 28 H4 Z" stroke={theme.sem.danger} strokeWidth={2} fill="none" strokeLinejoin="round" />
-          <Path d="M18 14 v8" stroke={theme.sem.danger} strokeWidth={2.4} strokeLinecap="round" />
-          <Path d="M18 25.5 v0.01" stroke={theme.sem.danger} strokeWidth={2.8} strokeLinecap="round" />
+          <Path d="M18 4 L32 28 H4 Z" stroke={theme.sem.danger.foreground} strokeWidth={2} fill="none" strokeLinejoin="round" />
+          <Path d="M18 14 v8" stroke={theme.sem.danger.foreground} strokeWidth={2.4} strokeLinecap="round" />
+          <Path d="M18 25.5 v0.01" stroke={theme.sem.danger.foreground} strokeWidth={2.8} strokeLinecap="round" />
         </Svg>
 
         <Text style={{ fontSize: 22, lineHeight: 28, fontFamily: theme.fonts.uiSemi, color: theme.ink, textAlign: 'center' }}>

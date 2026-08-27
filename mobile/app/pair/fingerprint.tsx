@@ -138,7 +138,7 @@ export default function FingerprintScreen() {
 
         {errorMsg !== null && (
           <Text style={{
-            color: theme.sem.danger,
+            color: theme.sem.danger.foreground,
             fontFamily: theme.fonts.ui,
             fontSize: 14,
             marginTop: 12,

@@ -84,7 +84,7 @@ export default function OemScreen() {
             style={[
               theme.type.title1,
               styles.headline,
-              { color: theme.ink, fontFamily: theme.fonts.uiBold },
+              { color: theme.ink, fontFamily: theme.fonts.uiBold, fontWeight: '700' },
             ]}
           >
             One last thing

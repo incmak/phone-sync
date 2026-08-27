@@ -1,7 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useTheme } from '../Theme';
-import { TW_SEMANTIC } from '../tokens';
 
 export interface TwApp {
   name: string;
@@ -54,13 +53,22 @@ export function TwAppChip({ app, size = 'md', showBadge }: TwAppChipProps) {
           },
         ]}
       >
-        <Text style={[styles.glyph, { fontSize: px * 0.45, fontFamily: theme.fonts.uiBold }]}>
+        <Text style={[
+          styles.glyph,
+          { fontSize: px * 0.45, fontFamily: theme.fonts.uiBold, fontWeight: '700' },
+        ]}>
           {app.glyph}
         </Text>
 
         {showBadge !== undefined && (
-          <View style={[styles.badge, { borderColor: theme.card, backgroundColor: TW_SEMANTIC.danger }]}>
-            <Text style={styles.badgeText}>{showBadge}</Text>
+          <View style={[
+            styles.badge,
+            {
+              borderColor: theme.sem.danger.foreground,
+              backgroundColor: theme.sem.danger.surface,
+            },
+          ]}>
+            <Text style={[styles.badgeText, { color: theme.sem.danger.foreground }]}>{showBadge}</Text>
           </View>
         )}
       </View>
@@ -97,7 +105,6 @@ const styles = StyleSheet.create({
   },
   glyph: {
     color: '#ffffff',
-    fontWeight: '700',
   },
   badge: {
     position: 'absolute',
@@ -112,7 +119,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   badgeText: {
-    color: '#ffffff',
     fontSize: 9,
     fontWeight: '700',
   },

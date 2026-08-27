@@ -77,7 +77,7 @@ export default function RelayScreen() {
           <Text
             style={[
               theme.type.display,
-              { color: theme.ink, fontFamily: theme.fonts.uiBold },
+              { color: theme.ink, fontFamily: theme.fonts.uiBold, fontWeight: '700' },
             ]}
           >
             Relay server
@@ -108,7 +108,7 @@ export default function RelayScreen() {
             style={[
               styles.input,
               {
-                borderColor: testState === 'error' ? theme.sem.danger : theme.border,
+                borderColor: testState === 'error' ? theme.sem.danger.foreground : theme.border,
                 borderRadius: theme.radius.md,
                 backgroundColor: theme.fill,
                 color: theme.ink,
@@ -134,7 +134,7 @@ export default function RelayScreen() {
             <Text
               style={[
                 styles.feedbackOk,
-                { color: theme.sem.ok, fontFamily: theme.fonts.uiMedium },
+                { color: theme.sem.ok.foreground, fontFamily: theme.fonts.uiMedium },
               ]}
             >
               Reached in {latency}ms
@@ -144,7 +144,7 @@ export default function RelayScreen() {
             <Text
               style={[
                 styles.feedbackErr,
-                { color: theme.sem.danger, fontFamily: theme.fonts.ui },
+                { color: theme.sem.danger.foreground, fontFamily: theme.fonts.ui },
               ]}
             >
               {errorMsg}

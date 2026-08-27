@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import Svg, { Path, Circle, Rect } from 'react-native-svg';
 import { useTheme, TwButton } from '../../components';
+import type { SemanticDisplayPair } from '../../components/tokens';
 import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import * as Notifications from 'expo-notifications';
 
@@ -56,11 +57,12 @@ interface PermCardProps {
   granted: boolean;
   onGrant: () => void;
   accent: string;
+  accentInk: string;
   border: string;
   fill: string;
   ink: string;
   ink3: string;
-  sem: { ok: string };
+  sem: { ok: SemanticDisplayPair };
   uiSemi: string;
   ui: string;
   radius: number;
@@ -68,7 +70,7 @@ interface PermCardProps {
 
 function PermCard({
   icon, title, description, granted, onGrant,
-  accent, border, fill, ink, ink3, sem, uiSemi, ui, radius,
+  accent, accentInk, border, fill, ink, ink3, sem, uiSemi, ui, radius,
 }: PermCardProps) {
   return (
     <View
@@ -76,7 +78,7 @@ function PermCard({
         permStyles.card,
         {
           backgroundColor: fill,
-          borderColor: granted ? sem.ok : border,
+          borderColor: granted ? sem.ok.foreground : border,
           borderWidth: granted ? 2 : 1,
           borderRadius: radius,
         },
@@ -94,15 +96,15 @@ function PermCard({
         </Text>
       </View>
       {granted ? (
-        <View style={[permStyles.statusBadge, { backgroundColor: sem.ok + '22' }]}>
-          <CheckIcon color={sem.ok} size={18} />
+        <View style={[permStyles.statusBadge, { backgroundColor: sem.ok.surface }]}>
+          <CheckIcon color={sem.ok.foreground} size={18} />
         </View>
       ) : (
         <Pressable
           onPress={onGrant}
           style={[permStyles.grantBtn, { backgroundColor: accent, borderRadius: radius / 2 }]}
         >
-          <ChevronIcon color="#fff" size={16} />
+          <ChevronIcon color={accentInk} size={16} />
         </Pressable>
       )}
     </View>
@@ -177,6 +179,7 @@ export default function PermsScreen() {
 
   const cardProps = {
     accent: theme.accent,
+    accentInk: theme.bg,
     border: theme.border,
     fill: theme.fill,
     ink: theme.ink,
@@ -197,7 +200,7 @@ export default function PermsScreen() {
           <Text
             style={[
               theme.type.display,
-              { color: theme.ink, fontFamily: theme.fonts.uiBold },
+              { color: theme.ink, fontFamily: theme.fonts.uiBold, fontWeight: '700' },
             ]}
           >
             Grant permissions

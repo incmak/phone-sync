@@ -128,7 +128,10 @@ export default function RoleScreen() {
     >
       <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.header}>
-          <Text style={[theme.type.display, { color: theme.ink, fontFamily: theme.fonts.uiBold }]}>
+          <Text style={[
+            theme.type.display,
+            { color: theme.ink, fontFamily: theme.fonts.uiBold, fontWeight: '700' },
+          ]}>
             Which device{'\n'}is this?
           </Text>
           <Text style={[theme.type.body, styles.subtitle, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>

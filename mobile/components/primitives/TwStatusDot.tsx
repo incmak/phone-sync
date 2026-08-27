@@ -1,7 +1,6 @@
 import React from 'react';
 import { View, StyleSheet } from 'react-native';
 import { useTheme } from '../Theme';
-import { TW_SEMANTIC } from '../tokens';
 
 /** The delivery states the product reports. Kept in step with `state/routePresentation`. */
 export type TwConnectionState = 'direct' | 'relay' | 'reconnecting' | 'queued' | 'unpaired';
@@ -21,10 +20,10 @@ interface TwStatusDotProps {
 export function TwStatusDot({ state = 'unpaired', size = 10 }: TwStatusDotProps) {
   const theme = useTheme();
   const stateColor: Record<TwConnectionState, string> = {
-    direct: TW_SEMANTIC.ok,
-    relay: TW_SEMANTIC.info,
-    reconnecting: TW_SEMANTIC.warn,
-    queued: TW_SEMANTIC.warn,
+    direct: theme.sem.ok.foreground,
+    relay: theme.sem.info.foreground,
+    reconnecting: theme.sem.warn.foreground,
+    queued: theme.sem.warn.foreground,
     // An unlinked device is quiet ink, not a colour that competes for attention.
     unpaired: theme.ink4,
   };

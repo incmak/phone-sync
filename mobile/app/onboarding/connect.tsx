@@ -23,7 +23,10 @@ export default function ConnectScreen() {
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>
       <ScrollView contentContainerStyle={styles.content}>
         <View>
-          <Text style={[theme.type.display, { color: theme.ink, fontFamily: theme.fonts.uiBold }]}>
+          <Text style={[
+            theme.type.display,
+            { color: theme.ink, fontFamily: theme.fonts.uiBold, fontWeight: '700' },
+          ]}>
             Connect your phones
           </Text>
           <Text style={[theme.type.body, styles.intro, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>

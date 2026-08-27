@@ -1,7 +1,6 @@
 import React from 'react';
 import { Pressable, View, StyleSheet, ViewStyle } from 'react-native';
 import { useTheme } from '../Theme';
-import { TW_SEMANTIC, hexWithAlpha } from '../tokens';
 
 export type TwCardTone = 'default' | 'raised' | 'fill' | 'accent' | 'warn' | 'danger';
 
@@ -24,8 +23,7 @@ export function TwCard({
 }: TwCardProps) {
   const theme = useTheme();
 
-  // Pre-compute tone colors. color-mix(in oklch, ...) is replaced with
-  // static hex blends: warn/danger backgrounds use an approximate tint.
+  // Semantic tones always use the active mode's explicit foreground/surface pair.
   let bg = '';
   let borderColor = '';
   let shadowStyle = {};
@@ -46,16 +44,15 @@ export function TwCard({
       break;
     case 'accent':
       bg = theme.accentLo;
-      borderColor = hexWithAlpha(theme.accent, 0.25); // ~25% opacity
+      borderColor = theme.accent;
       break;
     case 'warn':
-      // Approximate color-mix(warn 10%, card): blend warn at low opacity over card
-      bg = hexWithAlpha(TW_SEMANTIC.warn, 0.10); // ~10% opacity layer
-      borderColor = hexWithAlpha(TW_SEMANTIC.warn, 0.30); // ~30%
+      bg = theme.sem.warn.surface;
+      borderColor = theme.sem.warn.foreground;
       break;
     case 'danger':
-      bg = hexWithAlpha(TW_SEMANTIC.danger, 0.08); // ~8%
-      borderColor = hexWithAlpha(TW_SEMANTIC.danger, 0.30); // ~30%
+      bg = theme.sem.danger.surface;
+      borderColor = theme.sem.danger.foreground;
       break;
   }
 

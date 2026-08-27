@@ -1,6 +1,5 @@
 export * from './tokens';
 export * from './Theme';
-export { useAppFonts } from './useFonts';
 export * from './primitives/TwLogo';
 export * from './primitives/TwWordmark';
 export * from './primitives/TwStatusDot';

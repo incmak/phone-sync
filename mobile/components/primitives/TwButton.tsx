@@ -15,10 +15,38 @@ import Animated, {
   useReducedMotion,
 } from 'react-native-reanimated';
 import { useTheme } from '../Theme';
-import { TW_SEMANTIC, hexWithAlpha } from '../tokens';
+import type { Theme } from '../tokens';
 
 export type TwButtonVariant = 'primary' | 'accent' | 'secondary' | 'ghost' | 'destructive';
 export type TwButtonSize = 'sm' | 'md' | 'lg';
+
+export interface TwButtonColors {
+  backgroundColor: string;
+  textColor: string;
+  borderColor?: string;
+}
+
+export function resolveButtonColors(
+  theme: Theme,
+  variant: TwButtonVariant,
+): TwButtonColors {
+  switch (variant) {
+    case 'primary':
+      return { backgroundColor: theme.ink, textColor: theme.bg };
+    case 'accent':
+      return { backgroundColor: theme.accent, textColor: theme.bg };
+    case 'secondary':
+      return { backgroundColor: theme.fill, textColor: theme.ink, borderColor: theme.border };
+    case 'ghost':
+      return { backgroundColor: 'transparent', textColor: theme.ink };
+    case 'destructive':
+      return {
+        backgroundColor: 'transparent',
+        textColor: theme.sem.danger.foreground,
+        borderColor: theme.sem.danger.foreground,
+      };
+  }
+}
 
 interface TwButtonProps extends Pick<PressableProps, 'accessibilityHint' | 'accessibilityLabel' | 'testID'> {
   variant?: TwButtonVariant;
@@ -81,37 +109,7 @@ export function TwButton({
     scale.value = reduceMotion ? 1 : withTiming(1, { duration: 120 });
   }, [reduceMotion, scale]);
 
-  // Resolve background + text colors per variant
-  let bg = '';
-  let textColor = '';
-  let borderColor: string | undefined;
-
-  switch (variant) {
-    case 'primary':
-      bg = theme.ink;
-      textColor = theme.bg;
-      break;
-    case 'accent':
-      bg = theme.accent;
-      textColor = '#ffffff';
-      break;
-    case 'secondary':
-      bg = theme.fill;
-      textColor = theme.ink;
-      borderColor = theme.border;
-      break;
-    case 'ghost':
-      bg = 'transparent';
-      textColor = theme.ink;
-      break;
-    case 'destructive':
-      bg = 'transparent';
-      textColor = TW_SEMANTIC.danger;
-      // blend danger with border: approximate the color-mix by using a slightly
-      // tinted border (pre-computed: 40% danger over existing border hue)
-      borderColor = hexWithAlpha(TW_SEMANTIC.danger, 0.40); // ~40% opacity
-      break;
-  }
+  const { backgroundColor, textColor, borderColor } = resolveButtonColors(theme, variant);
 
   return (
     <Animated.View style={[animStyle, fullWidth && styles.fullWidth, style]}>
@@ -132,7 +130,7 @@ export function TwButton({
             minHeight: s.minHeight,
             paddingHorizontal: s.paddingHorizontal,
             paddingVertical: s.paddingVertical,
-            backgroundColor: bg,
+            backgroundColor,
             borderColor: borderColor,
             borderWidth: borderColor ? 1 : 0,
             borderRadius: theme.radius.md,

@@ -42,6 +42,7 @@ export default function WelcomeScreen() {
               {
                 color: theme.ink,
                 fontFamily: theme.fonts.uiBold,
+                fontWeight: '700',
                 lineHeight: theme.type.display.lineHeight * fontScale,
               },
             ]}

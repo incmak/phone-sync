@@ -13,12 +13,17 @@ function contrast(a: string, b: string): number {
 
 describe('route control contrast', () => {
   test.each([false, true])('keeps small accent text readable when dark=%s', (dark) => {
-    const theme = twTheme({ hue: 180, dark });
+    const theme = twTheme({ dark });
     expect(contrast(theme.accentText, theme.bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(theme.ink3, theme.bg)).toBeGreaterThanOrEqual(4.5);
   });
 
-  test.each([false, true])('keeps the off switch track distinct when dark=%s', (dark) => {
-    const theme = twTheme({ hue: 180, dark });
-    expect(contrast(theme.switchOff, theme.bg)).toBeGreaterThanOrEqual(3);
+  test.each([false, true])('keeps route boundaries distinct on every supported surface when dark=%s', (dark) => {
+    const theme = twTheme({ dark });
+    for (const surface of [theme.bg, theme.card, theme.fill]) {
+      expect(contrast(theme.switchOff, surface)).toBeGreaterThanOrEqual(3);
+      expect(contrast(theme.border, surface)).toBeGreaterThanOrEqual(3);
+      expect(contrast(theme.borderHi, surface)).toBeGreaterThanOrEqual(3);
+    }
   });
 });
