@@ -12,7 +12,7 @@
 
 ## Status
 
-- **Status**: TODO
+- **Status**: DONE - compatible transitive refresh and fail-closed protected-release audit landed; Plan 029 completed the required Expo 57 migration; the fresh full-tree audit reports 0 high/critical advisories.
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
@@ -235,19 +235,19 @@ high/critical result is waived silently.
 
 ## Done criteria
 
-- [ ] Fresh authorized full-locked-tree audit evidence exists and is not an
+- [x] Fresh authorized full-locked-tree audit evidence exists and is not an
       offline/cache-only or dependency-filtered result.
-- [ ] All range-compatible vulnerable transitive versions are absent from the
+- [x] All range-compatible vulnerable transitive versions are absent from the
       lockfile.
-- [ ] The protected workflow runs exactly one fail-closed full-tree audit
+- [x] The protected workflow runs exactly one fail-closed full-tree audit
       before any secret-bearing step and after the one locked install.
-- [ ] High/critical, malformed, network failure, audit suppression, and any
+- [x] High/critical, malformed, network failure, audit suppression, and any
       waiver/allowlist input or bypass attempt all fail.
-- [ ] No broad or cross-major override was introduced.
-- [ ] Final authorized full-locked-tree audit has zero high/critical advisories,
+- [x] No broad or cross-major override was introduced.
+- [x] Final authorized full-locked-tree audit has zero high/critical advisories,
       or Plan 028 is honestly BLOCKED and protected release remains impossible.
-- [ ] Full mobile/native/host gates and independent review pass.
-- [ ] Only in-scope files changed; `git diff --check` exits 0.
+- [x] Full mobile/native/host gates and independent review pass.
+- [x] Only in-scope files changed; `git diff --check` exits 0.
 
 ## STOP conditions
 
@@ -270,3 +270,11 @@ online and fail closed; use deterministic JSON only for its self-test. A
 risk-acceptance note may guide follow-up ownership but is never an executable
 release exception. Delete it when upstream support lands. Do not treat a
 zero-result offline cache as release evidence.
+
+## Completion
+
+Completed across `61829be` and `93f5472`, with the framework-major portion
+carried by Plan 029 under separate approval. The exact host/mobile/native gates
+and independent review passed, and a fresh full-tree audit reported zero high
+or critical advisories. This completion does not change the separately pending
+physical two-phone acceptance or protected EAS credential boundary.
