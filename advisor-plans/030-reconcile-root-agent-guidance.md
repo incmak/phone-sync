@@ -128,10 +128,20 @@ Update `scripts/verify-project-docs.sh` to require the fixture's `AGENTS.md`,
 check the current facts with bounded literal/pattern checks, and reject the
 known stale forms. Do not parse arbitrary prose or make formatting brittle.
 
-**Verify**: run `./scripts/verify-project-docs_test.sh` before changing
-`AGENTS.md`. Expected: nonzero, with a `project documentation check failed:`
-message that names the first stale root-agent fact; it must not fail because a
-fixture path is missing or malformed.
+**Verify RED**: after adding the first stale-guidance mutation but before
+changing `scripts/verify-project-docs.sh`, run
+`./scripts/verify-project-docs_test.sh`. Expected: nonzero with
+`self-test expected rejection: stale Expo SDK guidance`; it must not fail
+because a fixture path is missing or malformed.
+
+Then implement all bounded `AGENTS.md` checks in
+`scripts/verify-project-docs.sh` and add the remaining independent mutations.
+Run `./scripts/verify-project-docs_test.sh` again. Expected: exit 0 for the
+isolated valid fixture and every mutation. Before changing the live
+`AGENTS.md`, run `./scripts/verify-project-docs.sh`. Expected: nonzero with a
+`project documentation check failed:` message naming the first stale live
+root-agent fact. This second RED proves the production verifier is wired to the
+real repository document.
 
 ### Step 2: Correct only current operational facts in AGENTS.md
 
