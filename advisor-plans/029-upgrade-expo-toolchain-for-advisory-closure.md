@@ -12,7 +12,7 @@
 
 ## Status
 
-- **Status**: TODO
+- **Status**: DONE: source/toolchain migration complete; physical two-phone acceptance remains pending
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH

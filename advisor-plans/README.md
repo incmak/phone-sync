@@ -22,9 +22,9 @@ evidence.
 
 The protected Android producer remains externally blocked on the intended EAS
 project link and owner-controlled signing, token, certificate, and attestation
-inputs. It is also fail-closed on nine high advisories in the Expo 54/Metro
-build chain; only the separately planned Expo 57 migration can currently close
-them. Local bundled APKs are QA artifacts, not protected release candidates.
+inputs. Plan 029 moved the source tree to Expo 57 and closed the Expo 54/Metro
+high-advisory chain without weakening the fail-closed audit gate. Local bundled
+APKs are QA artifacts, not protected release candidates.
 
 ## Execution order and status
 
@@ -58,7 +58,7 @@ them. Local bundled APKs are QA artifacts, not protected release candidates.
 | 026 | Align LAN operator guidance with the executable harness | P2 | S | 019, 023 | DONE: docs contract mutations, host gate, and independent truth review approved |
 | 027 | Keep Handoff Trace screen tests warning-free | P2 | S | 025 | DONE: 157/157 Jest, exact host gate, independent review approved |
 | 028 | Close or fail closed on high mobile dependency advisories | P1 | M | 024 | BLOCKED: compatible highs removed and fail-closed release gate landed; Expo 54/Metro retains 9 highs and the only current remediation is an Expo 57 major |
-| 029 | Upgrade the Expo toolchain to close upstream advisories | P1 | L | 028 | TODO |
+| 029 | Upgrade the Expo toolchain to close upstream advisories | P1 | L | 028 | DONE: Expo 57 graph has 0 high/critical advisories; host/mobile/native gates and review green; physical two-phone smoke remains pending |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.
@@ -110,7 +110,9 @@ REJECTED with a one-line rationale.
   candidate with those advisories. Local APKs remain QA artifacts. No current
   notification or call-sync exploit was demonstrated.
 - **Plan**: 028 delivered the compatible refresh and gate; 029 owns the
-  separately approved Expo major migration. **Confidence**: HIGH.
+  separately approved Expo major migration. Plan 029 completed that migration
+  with zero high/critical audit entries; physical two-phone acceptance remains
+  explicitly pending. **Confidence**: HIGH.
 
 ## 2026-08-27 current-HEAD findings
 
