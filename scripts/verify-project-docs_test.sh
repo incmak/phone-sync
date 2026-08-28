@@ -63,6 +63,23 @@ write_valid_fixture() {
     > "$tmp/docs/docs/test-scenarios.md"
 }
 
+write_wrapped_agent_fixture() {
+  write_valid_fixture
+  printf '%s\n' \
+    '# Agent guidance' \
+    'Mobile uses Expo SDK 57 / React Native 0.86.' \
+    'Room is at version 7. A new entity means version 8, explicit Migration(7,8), registration in NotificationDb.addMigrations(...), and committed schema 8.json. Never use fallbackToDestructiveMigration().' \
+    'Direct-LAN Tasks 1-9 implementation and host' \
+    'automation are complete; named hardware checks remain pending physical two-phone run.' \
+    '' \
+    'advisor-plans/README.md tracks Plans 001-030. Plan 004 is externally blocked on owner-controlled EAS' \
+    'project, signing, token, certificate, and attestation inputs. Plan 015 source is' \
+    'complete and only PHY-CALL-01 physical proof is deferred.' \
+    '' \
+    'Local APKs are QA artifacts, not protected release candidates.' \
+    > "$tmp/docs/AGENTS.md"
+}
+
 expect_rejection() {
   local label=$1
   if TWINOTIFY_PROJECT_DOCS_ROOT="$tmp/docs" "$VERIFY" >/dev/null 2>"$tmp/error"; then
@@ -86,6 +103,9 @@ remove_scenario() {
 }
 
 write_valid_fixture
+TWINOTIFY_PROJECT_DOCS_ROOT="$tmp/docs" "$VERIFY"
+
+write_wrapped_agent_fixture
 TWINOTIFY_PROJECT_DOCS_ROOT="$tmp/docs" "$VERIFY"
 
 write_valid_fixture

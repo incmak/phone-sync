@@ -115,13 +115,14 @@ candidates; never name or expose protected secret values.
 
 Extend `scripts/verify-project-docs_test.sh` so its valid fixture includes an
 `AGENTS.md` with the current Expo major, Room version, completed direct-LAN task
-range, plans-through-029 statement, and explicit physical/protected-release
-pending truth. Add one independent mutation for each of these regressions:
+range, final plans-through-030 statement, and explicit physical/protected-release
+pending truth. The historical source state before Plan 030 tracked Plans 001-029.
+Add one independent mutation for each of these regressions:
 
 1. Expo 57 rewritten to Expo 54;
 2. Room 7 / next migration 7-to-8 rewritten to Room 5 / 5-to-6;
 3. direct-LAN Tasks 5-9 rewritten as open;
-4. advisor ledger ending at 010 rather than 029;
+4. advisor ledger ending at 010 rather than the final 030;
 5. physical two-phone or protected EAS pending state rewritten as complete.
 
 Update `scripts/verify-project-docs.sh` to require the fixture's `AGENTS.md`,
@@ -154,8 +155,9 @@ Make these surgical updates:
   committed schema `8.json`”; retain the destructive-fallback prohibition;
 - say direct-LAN Tasks 1-9 implementation/host automation are complete while
   the named two-phone hardware evidence remains pending;
-- say `advisor-plans/README.md` tracks Plans 001-029 and names the two blocked
-  boundaries without implying source work remains in Plan 015.
+- say `advisor-plans/README.md` tracks Plans 001-030 and names the two blocked
+  boundaries without implying source work remains in Plan 015. The 001-029
+  range is the historical source state immediately before Plan 030 landed.
 
 Do not rewrite the long-form architecture beyond facts proven by the cited
 sources. Preserve the instructions to trust git/code over stale `MEMORY.md` and
