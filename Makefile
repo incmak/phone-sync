@@ -41,6 +41,7 @@ mobile-verify: sync-proto
 
 host-verify: proto-test
 	cd mobile && npm ci
+	./scripts/verify-mobile-dependencies_test.sh
 	cd mobile && npm run typecheck
 	cd mobile && npm test -- --runInBand
 	cd e2e && go test ./... -race -count=1

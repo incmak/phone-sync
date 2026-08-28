@@ -324,7 +324,7 @@ verify_canonical_run_payload() {
   else
     die "shasum or sha256sum is required to verify the protected-release run-payload contract"
   fi
-  [[ "$actual_digest" == 'e0d6b6158649f8c9389fcdf95a99f4e0d989f65c569c1319e283dda65fe48f7e' ]] ||
+  [[ "$actual_digest" == '61dbd01de32c207e206179ee5c256e16a2ea0f51fc7e9a77c07f62c44c169caa' ]] ||
     die "protected-release run payload differs from its reviewed contract (got $actual_digest); review the workflow and update the checked digest intentionally"
 }
 
@@ -404,12 +404,66 @@ verify_host_verification_ownership() {
   ' "$WORKFLOW" || die "make host-verify must own the only locked install and run before protected secrets"
 }
 
+verify_dependency_audit_gate() {
+  awk '
+    function trim(value) {
+      sub(/^[ \t]+/, "", value)
+      sub(/[ \t]+$/, "", value)
+      return value
+    }
+    function indentation(value, prefix) {
+      prefix = value
+      sub(/[^ \t].*$/, "", prefix)
+      return length(prefix)
+    }
+    {
+      raw = $0
+      code = raw
+      sub(/[ \t]+#.*/, "", code)
+      entry = trim(code)
+      indent = indentation(code)
+      normalized = tolower(entry)
+      gsub(/\\/, "", normalized)
+
+      if (normalized ~ /npm_config_(omit|production|offline)/ ||
+          normalized ~ /node_env.*production/ ||
+          normalized ~ /twinotify_mobile_dependency_root/) {
+        forbidden_audit_config++
+      }
+
+      if (tolower(code) ~ /secrets[[:space:]]*([.\[]|[[:space:]]+[.\[])/ && first_secret == 0) {
+        first_secret = NR
+      }
+      if (indent == 6 && entry ~ /^- name: /) {
+        step = entry
+        sub(/^- name: /, "", step)
+      }
+      if (entry == "run: make host-verify") host_line = NR
+
+      if (normalized ~ /verify-mobile-dependencies[.]sh/) verifier_mentions++
+      if (normalized ~ /(^|[^[:alnum:]_-])npm[[:space:]]+audit([^[:alnum:]_-]|$)/) raw_audits++
+      if (entry == "run: ./scripts/verify-mobile-dependencies.sh" &&
+          step == "Audit full mobile dependency tree") {
+        valid_audits++
+        audit_line = NR
+      }
+    }
+    END {
+      if (valid_audits != 1 || verifier_mentions != 1 || raw_audits != 0 ||
+          forbidden_audit_config != 0 ||
+          host_line == 0 || audit_line <= host_line || first_secret == 0 ||
+          audit_line >= first_secret) exit 1
+    }
+  ' "$WORKFLOW" || die "dependency audit must run exactly once through the fail-closed verifier after host verification and before protected secrets"
+}
+
 verify_workflow() {
   [[ -f "$WORKFLOW" ]] || die "protected Android release workflow is missing"
   verify_release_triggers
   verify_read_only_permissions
   verify_secret_scopes
   verify_host_verification_ownership
+  verify_dependency_audit_gate
   verify_canonical_run_payload
   verify_eas_cli_invocations
   grep -Eq '^[[:space:]]*environment:[[:space:]]*android-release[[:space:]]*$' "$WORKFLOW" || die "android-release protected environment is required"
@@ -453,8 +507,13 @@ self_test() {
   }
   expect_rejection() {
     local label=$1
+    local expected=${2:-}
     if TWINOTIFY_ANDROID_RELEASE_ROOT="$tmp" "$ROOT_DIR/scripts/verify-android-release-workflow.sh" >/dev/null 2>"$tmp/error"; then
       die "self-test expected rejection: $label"
+    fi
+    if [[ -n "$expected" ]] && ! grep -Fqi "$expected" "$tmp/error"; then
+      cat "$tmp/error" >&2
+      die "self-test expected rejection reason '$expected': $label"
     fi
   }
   expect_acceptance() {
@@ -561,6 +620,58 @@ self_test() {
   copy_fixture
   sed -i.bak '/run: make host-verify/d' "$tmp/.github/workflows/android-release.yml"
   expect_rejection missing-host-gate
+  copy_fixture
+  sed -i.bak '/Audit full mobile dependency tree/d; /run: \.\/scripts\/verify-mobile-dependencies\.sh/d' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection missing-dependency-audit "dependency audit"
+  copy_fixture
+  awk '
+    /Audit full mobile dependency tree/ { skip = 2 }
+    skip > 0 { skip--; next }
+    /^[[:space:]]*- name: Build installable release APK/ {
+      print "      - name: Audit full mobile dependency tree"
+      print "        run: ./scripts/verify-mobile-dependencies.sh"
+    }
+    { print }
+  ' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-after-secret "dependency audit"
+  copy_fixture
+  sed -i.bak 's#run: \./scripts/verify-mobile-dependencies\.sh#run: ./scripts/verify-mobile-dependencies.sh || true#' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-suppressed "dependency audit"
+  copy_fixture
+  sed -i.bak 's#run: \./scripts/verify-mobile-dependencies\.sh#run: cd mobile \&\& npm audit --audit-level=moderate --json#' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-lower-severity "dependency audit"
+  copy_fixture
+  sed -i.bak 's#run: \./scripts/verify-mobile-dependencies\.sh#run: cd mobile \&\& npm audit --audit-level=high --json --offline#' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-offline "dependency audit"
+  copy_fixture
+  sed -i.bak 's#run: \./scripts/verify-mobile-dependencies\.sh#run: cd mobile \&\& npm audit --audit-level=high --json --omit=dev#' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-omits-dev "dependency audit"
+  copy_fixture
+  sed -i.bak 's#run: \./scripts/verify-mobile-dependencies\.sh#run: cd mobile \&\& npm audit --audit-level=high --json --production#' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-production-only "dependency audit"
+  copy_fixture
+  sed -i.bak 's#run: \./scripts/verify-mobile-dependencies\.sh#run: printf '\''{"auditReportVersion":2}'\''#' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-static-json "dependency audit"
+  copy_fixture
+  awk '/run: \.\/scripts\/verify-mobile-dependencies\.sh/ { print; print "      - name: Duplicate dependency audit"; print "        run: ./scripts/verify-mobile-dependencies.sh"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-dependency-audit "dependency audit"
+  copy_fixture
+  awk '/run: \.\/scripts\/verify-mobile-dependencies\.sh/ { print; print "      - name: Duplicate raw network audit"; print "        run: cd mobile && npm audit --audit-level=high --json"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection duplicate-network-audit "dependency audit"
+  copy_fixture
+  sed -i.bak 's#run: \./scripts/verify-mobile-dependencies\.sh#run: ./scripts/verify-mobile-dependencies.sh --allow GHSA-placeholder#' "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-waiver "dependency audit"
+  copy_fixture
+  awk '/^[[:space:]]*- name: Audit full mobile dependency tree$/ { print; print "        env:"; print "          NPM_CONFIG_OFFLINE: true"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-offline-env "dependency audit"
+  copy_fixture
+  awk '/^[[:space:]]*runs-on: ubuntu-latest$/ { print; print "    env:"; print "      NODE_ENV: production"; next } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
+  mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"
+  expect_rejection dependency-audit-production-env "dependency audit"
   copy_fixture
   awk '/^[[:space:]]*- name: Verify exact source and host contract$/ { print "      - name: Install locked dependencies"; print "        run: npm ci"; print "        working-directory: mobile" } { print }' "$tmp/.github/workflows/android-release.yml" > "$tmp/workflow.tmp"
   mv "$tmp/workflow.tmp" "$tmp/.github/workflows/android-release.yml"

@@ -336,6 +336,20 @@ sed -i.bak '/verify-host-workflows_test\.sh/d' "$tmp/Makefile"
 expect_rejection 'host Make target omits verifier self-test'
 
 copy_workflows
+sed -i.bak '/verify-mobile-dependencies_test\.sh/d' "$tmp/Makefile"
+expect_rejection 'host Make target omits mobile dependency verifier self-test'
+
+copy_workflows
+awk '/^[[:space:]]*\.\/scripts\/verify-mobile-dependencies_test\.sh$/ { print; print; next } { print }' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'host mobile dependency verifier self-test must not be duplicated'
+
+copy_workflows
+awk '/^[[:space:]]*\.\/scripts\/verify-mobile-dependencies_test\.sh$/ { print "\t# ./scripts/verify-mobile-dependencies_test.sh"; next } { print }' "$tmp/Makefile" > "$tmp/Makefile.mutated"
+mv "$tmp/Makefile.mutated" "$tmp/Makefile"
+expect_rejection 'commented mobile dependency verifier self-test cannot satisfy host gate'
+
+copy_workflows
 sed -i.bak '/lan_product_target_test\.sh/d' "$tmp/Makefile"
 expect_rejection 'host Make target omits LAN product contract test'
 

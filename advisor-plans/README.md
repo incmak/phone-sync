@@ -22,7 +22,9 @@ evidence.
 
 The protected Android producer remains externally blocked on the intended EAS
 project link and owner-controlled signing, token, certificate, and attestation
-inputs. Local bundled APKs are QA artifacts, not protected release candidates.
+inputs. It is also fail-closed on nine high advisories in the Expo 54/Metro
+build chain; only the separately planned Expo 57 migration can currently close
+them. Local bundled APKs are QA artifacts, not protected release candidates.
 
 ## Execution order and status
 
@@ -55,7 +57,8 @@ inputs. Local bundled APKs are QA artifacts, not protected release candidates.
 | 025 | Preserve capture reconciliation wakeups | P0 | S | 022 | DONE: lease-safe coalescing gate, native 583/583, independent lifecycle review approved |
 | 026 | Align LAN operator guidance with the executable harness | P2 | S | 019, 023 | DONE: docs contract mutations, host gate, and independent truth review approved |
 | 027 | Keep Handoff Trace screen tests warning-free | P2 | S | 025 | DONE: 157/157 Jest, exact host gate, independent review approved |
-| 028 | Close or fail closed on high mobile dependency advisories | P1 | M | 024 | TODO |
+| 028 | Close or fail closed on high mobile dependency advisories | P1 | M | 024 | BLOCKED: compatible highs removed and fail-closed release gate landed; Expo 54/Metro retains 9 highs and the only current remediation is an Expo 57 major |
+| 029 | Upgrade the Expo toolchain to close upstream advisories | P1 | L | 028 | TODO |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.
@@ -91,22 +94,23 @@ REJECTED with a one-line rationale.
   retaining dedicated motion and reduced-motion coverage.
 - Plan 028 refreshes compatible transitives first and makes protected release
   fail closed if an upstream-only high advisory remains.
+- Plan 029 is the separately approved framework-major migration required to
+  remove the nine Expo 54/Metro highs. Plan 028 does not authorize its execution.
 
 ## 2026-08-27 dependency finding
 
 ### [DEPENDENCIES-02] Fail protected release on unresolved high mobile advisories
 
-- **Evidence**: the current `npm ci` reports 13 high advisories; lockfile paths
-  include `nanoid@3.3.11`, `ws@6.2.3`/`7.5.10`, `js-yaml@3.14.2`/`4.1.1`,
-  `brace-expansion@1.1.14`/`5.0.5`, `postcss@8.4.49`, and
-  `image-size@1.2.1`. `make host-verify` and the protected Android workflow run
-  `npm ci` but have no audit-level failure command.
-- **Impact**: a protected candidate can be produced with known high-severity
-  runtime or build-tool dependencies. Most current paths are build/dev-server
-  only, while `nanoid` is bundled by navigation code; the latter uses the
-  default positive size and is not presently an exploitable call shape.
-- **Plan**: 028. **Effort**: M. **Risk**: MED because forcing major transitive
-  overrides can break Metro/Expo. **Confidence**: HIGH.
+- **Evidence**: Plan 028 refreshed the admitted `nanoid`, `ws`, `js-yaml`, and
+  `brace-expansion` copies and added a full-tree online audit before protected
+  secrets. The final fresh audit reports 9 high and 0 critical entries, all in
+  the Expo 54/Metro chain. Expo 54 pins Metro 0.83.3 and PostCSS `~8.4.32`; the
+  live audit offers Expo 57.0.17 as the only remediation.
+- **Impact**: protected release now fails closed instead of producing a
+  candidate with those advisories. Local APKs remain QA artifacts. No current
+  notification or call-sync exploit was demonstrated.
+- **Plan**: 028 delivered the compatible refresh and gate; 029 owns the
+  separately approved Expo major migration. **Confidence**: HIGH.
 
 ## 2026-08-27 current-HEAD findings
 

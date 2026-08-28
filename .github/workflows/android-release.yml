@@ -29,6 +29,8 @@ jobs:
           cache-dependency-path: mobile/package-lock.json
       - name: Verify exact source and host contract
         run: make host-verify
+      - name: Audit full mobile dependency tree
+        run: ./scripts/verify-mobile-dependencies.sh
       - name: Verify protected release workflow contract
         run: ./scripts/verify-android-release-workflow.sh
       - name: Capture exact release commit

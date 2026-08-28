@@ -474,21 +474,22 @@ require_host_verify_recipe() {
     }
     BEGIN {
       expected[1] = "cd mobile && npm ci"
-      expected[2] = "cd mobile && npm run typecheck"
-      expected[3] = "cd mobile && npm test -- --runInBand"
-      expected[4] = "cd e2e && go test ./... -race -count=1"
-      expected[5] = "cd e2e && go vet ./..."
-	  expected[6] = "./e2e/scripts/lan_product_target_test.sh"
-	  expected[7] = "./e2e/scripts/validate-workflow.sh"
-	  expected[8] = "./e2e/scripts/preflight_test.sh"
-	  expected[9] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
-	  expected[10] = "./scripts/verify-release-evidence.sh --self-test"
-	  expected[11] = "./scripts/verify-project-docs.sh"
-	  expected[12] = "./scripts/verify-project-docs_test.sh"
-	  expected[13] = "./scripts/verify-android-release_test.sh"
-	  expected[14] = "./scripts/verify-host-workflows.sh"
-	  expected[15] = "./scripts/verify-host-workflows_test.sh"
-	  expected[16] = "./scripts/verify-generated-clean.sh"
+      expected[2] = "./scripts/verify-mobile-dependencies_test.sh"
+      expected[3] = "cd mobile && npm run typecheck"
+      expected[4] = "cd mobile && npm test -- --runInBand"
+      expected[5] = "cd e2e && go test ./... -race -count=1"
+      expected[6] = "cd e2e && go vet ./..."
+	  expected[7] = "./e2e/scripts/lan_product_target_test.sh"
+	  expected[8] = "./e2e/scripts/validate-workflow.sh"
+	  expected[9] = "./e2e/scripts/preflight_test.sh"
+	  expected[10] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
+	  expected[11] = "./scripts/verify-release-evidence.sh --self-test"
+	  expected[12] = "./scripts/verify-project-docs.sh"
+	  expected[13] = "./scripts/verify-project-docs_test.sh"
+	  expected[14] = "./scripts/verify-android-release_test.sh"
+	  expected[15] = "./scripts/verify-host-workflows.sh"
+	  expected[16] = "./scripts/verify-host-workflows_test.sh"
+	  expected[17] = "./scripts/verify-generated-clean.sh"
     }
     $0 ~ /^host-verify:[ \t]*proto-test[ \t]*$/ {
       target_count++
@@ -504,11 +505,11 @@ require_host_verify_recipe() {
         recipe = trim($0)
         if (recipe == "" || recipe ~ /^#/) next
         observed++
-		if (observed > 16 || recipe != expected[observed]) invalid = 1
+		if (observed > 17 || recipe != expected[observed]) invalid = 1
       }
     }
     END {
-	  if (target_count != 1 || observed != 16) invalid = 1
+	  if (target_count != 1 || observed != 17) invalid = 1
       exit invalid ? 1 : 0
     }
   ' "$makefile" || {
