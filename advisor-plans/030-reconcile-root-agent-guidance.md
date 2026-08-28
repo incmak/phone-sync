@@ -36,7 +36,7 @@ create the wrong migration, redo completed transport work, or misstate what is
 actually left. The fix must make those facts executable and regression-tested
 without converting pending physical or protected-release evidence into a pass.
 
-## Current state
+## Pre-Plan-030 source state
 
 - `AGENTS.md:19` calls the mobile app “Expo SDK 54 / RN”, while
   `mobile/package.json:20-36` pins Expo `57.0.17`, React Native `0.86.3`, and
