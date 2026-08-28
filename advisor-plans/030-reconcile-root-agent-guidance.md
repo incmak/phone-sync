@@ -207,7 +207,7 @@ Record its `APPROVE` verdict at
 
 Stop and report rather than improvise if:
 
-- any cited source of truth materially differs from the Current state section;
+- any cited source of truth materially differs from the Pre-Plan-030 source state section;
 - the database version is not 7 or an unregistered migration/schema is found;
 - direct-LAN Tasks 5-9 contain an unchecked non-physical implementation item;
 - completing the wording would require claiming physical or protected release
