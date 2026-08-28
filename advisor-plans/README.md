@@ -12,7 +12,7 @@ Direct LAN, relay fallback, route UX, durable local unpair, authenticated
 control custody, v2 expiry, call opt-in/admission, bounded per-canonical capture,
 permission-aware materialization, supersession terminalization, the eleven-child
 LAN aggregate, and the Handoff Trace UI are implemented. Current host/native/UI
-gates and independent reviews are green at `1576e33`.
+gates and independent reviews are green at `bde372d`.
 
 This is not a release-complete claim. The aggregate and release harness still
 have explicitly pending physical two-phone, no-uplink, OEM/Doze,
@@ -44,7 +44,7 @@ APKs are QA artifacts, not protected release candidates.
 | 012 | Recover from established-route failures without stopping delivery | P0 | M | 011 | DONE: `62d8cdf`; focused 47/47, native 479/479, lifecycle re-review approved |
 | 013 | Enforce v2 expiry on direct delivery and local retry | P1 | M | 012 | DONE: `8b60d9d`; full native gate, connected migration/transaction 7/7, review approved |
 | 014 | Complete durable custody for receipts and snapshot controls | P0 | M | 013 | DONE: `a45b42f`; native/relay gates, Room 41/41, terminal review approved |
-| 015 | Finish call sync as a truthful, user-reachable product | P0 | L | 011-014 | BLOCKED: source complete in `2a6c9bc` and `bf3d818`; local gates/reviews green; `PHY-CALL-01` awaits two protected physical phones |
+| 015 | Finish call sync as a truthful, user-reachable product | P0 | L | 011-014 | BLOCKED: source complete through `bde372d`; deferred opt-in, request ordering, shutdown liveness, and live health UI corrections reviewed; local gates green; `PHY-CALL-01` awaits two protected physical phones |
 | 016 | Bound capture lanes per canonical ID | P1 | M | 015 | DONE: `2d91503`; ordered head/latest, cancellation and pairing-race coverage, full native gate |
 | 017 | Make notification materialization permission-aware | P0 | L | 016 | DONE: `5019d51`; durable typed holds/retries, startup/foreground recovery, review approved |
 | 018 | Terminalize superseded inbound state atomically | P0 | L | 017 | DONE: `12d12c9`; exact-set receipt bundles, reconciliation, Room instrumentation and review approved |
@@ -57,7 +57,7 @@ APKs are QA artifacts, not protected release candidates.
 | 025 | Preserve capture reconciliation wakeups | P0 | S | 022 | DONE: lease-safe coalescing gate, native 583/583, independent lifecycle review approved |
 | 026 | Align LAN operator guidance with the executable harness | P2 | S | 019, 023 | DONE: docs contract mutations, host gate, and independent truth review approved |
 | 027 | Keep Handoff Trace screen tests warning-free | P2 | S | 025 | DONE: 157/157 Jest, exact host gate, independent review approved |
-| 028 | Close or fail closed on high mobile dependency advisories | P1 | M | 024 | BLOCKED: compatible highs removed and fail-closed release gate landed; Expo 54/Metro retains 9 highs and the only current remediation is an Expo 57 major |
+| 028 | Close or fail closed on high mobile dependency advisories | P1 | M | 024 | DONE: compatible refresh and fail-closed gate landed; Plan 029 completed the approved Expo 57 migration; fresh full-tree audit reports 0 high/critical advisories |
 | 029 | Upgrade the Expo toolchain to close upstream advisories | P1 | L | 028 | DONE: Expo 57 graph has 0 high/critical advisories; host/mobile/native gates and review green; physical two-phone smoke remains pending |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
