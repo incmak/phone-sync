@@ -7,6 +7,7 @@ MOBILE_README="$ROOT_DIR/mobile/README.md"
 PROTO_README="$ROOT_DIR/proto/README.md"
 RELEASE_README="$ROOT_DIR/docs/release-evidence/README.md"
 TEST_SCENARIOS="$ROOT_DIR/docs/test-scenarios.md"
+ROOT_AGENTS="$ROOT_DIR/AGENTS.md"
 
 die() {
   echo "project documentation check failed: $*" >&2
@@ -30,9 +31,25 @@ reject_pattern() {
   fi
 }
 
-for file in "$ROOT_README" "$MOBILE_README" "$PROTO_README" "$RELEASE_README" "$TEST_SCENARIOS"; do
+for file in "$ROOT_README" "$MOBILE_README" "$PROTO_README" "$RELEASE_README" "$TEST_SCENARIOS" "$ROOT_AGENTS"; do
   [[ -f "$file" ]] || die "required document is missing: $file"
 done
+
+require_literal "$ROOT_AGENTS" 'Expo SDK 57 / React Native 0.86' 'root AGENTS.md must name Expo SDK 57 and React Native 0.86'
+reject_pattern "$ROOT_AGENTS" 'Expo[[:space:]]+SDK[[:space:]]+54' 'root AGENTS.md must not retain stale Expo SDK 54 guidance'
+require_pattern "$ROOT_AGENTS" 'Room[[:space:]]+(is[[:space:]]+at[[:space:]]+)?version[[:space:]]+7' 'root AGENTS.md must name Room version 7'
+require_literal "$ROOT_AGENTS" 'Migration(7,8)' 'root AGENTS.md must require the next Room Migration(7,8)'
+require_pattern "$ROOT_AGENTS" 'schemas?[^0-9]*8\.json' 'root AGENTS.md must require the next committed Room schema 8.json'
+reject_pattern "$ROOT_AGENTS" 'Room[[:space:]]+(is[[:space:]]+at[[:space:]]+)?version[[:space:]]+5|Migration\(5,6\)' 'root AGENTS.md must not retain stale Room 5-to-6 guidance'
+require_pattern "$ROOT_AGENTS" 'Tasks[[:space:]]+1-9.*implementation and host automation.*complete' 'root AGENTS.md must record direct-LAN Tasks 1-9 source and host completion'
+require_literal "$ROOT_AGENTS" 'pending physical two-phone run' 'root AGENTS.md must preserve pending physical two-phone direct-LAN evidence'
+reject_pattern "$ROOT_AGENTS" 'Tasks[[:space:]]+1-4[[:space:]]+landed;[[:space:]]+5-9[[:space:]]+open|complete(d)?[[:space:]]+physical[[:space:]]+two-phone[[:space:]]+run' 'root AGENTS.md must not reopen direct-LAN tasks or complete pending hardware evidence'
+require_literal "$ROOT_AGENTS" 'tracks Plans 001-030' 'root AGENTS.md must name the advisor ledger through Plan 030'
+reject_pattern "$ROOT_AGENTS" 'tracks[[:space:]]+the[[:space:]]+audit-driven[[:space:]]+plans[[:space:]]+001-010' 'root AGENTS.md must not retain the stale advisor ledger range'
+require_pattern "$ROOT_AGENTS" 'Plan[[:space:]]+004.*externally blocked.*EAS.*(project|signing|token|certificate|attestation)' 'root AGENTS.md must preserve Plan 004 protected EAS block'
+require_pattern "$ROOT_AGENTS" 'Plan[[:space:]]+015.*source is complete.*PHY-CALL-01.*physical proof is deferred' 'root AGENTS.md must preserve Plan 015 deferred physical-call proof'
+require_literal "$ROOT_AGENTS" 'Local APKs are QA artifacts, not protected release candidates.' 'root AGENTS.md must preserve local APK release status'
+reject_pattern "$ROOT_AGENTS" 'Plan[[:space:]]+004[[:space:]]+is[[:space:]]+complete' 'root AGENTS.md must not complete protected EAS work'
 
 reject_pattern "$MOBILE_README" 'Expo[[:space:]]+Go[[:space:]]+(is|provides|offers|supports|can)[[:space:]]+(a|the|for|recommended|available|supported|used|required)' 'mobile README must not recommend Expo Go'
 reject_pattern "$MOBILE_README" '(run|open|use)[[:space:]]+(the[[:space:]]+)?Expo[[:space:]]+Go' 'mobile README must not recommend Expo Go'

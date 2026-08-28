@@ -17,7 +17,7 @@
 
 ## Status
 
-- **Status**: TODO
+- **Status**: DONE
 - **Priority**: P1
 - **Effort**: S
 - **Risk**: LOW
@@ -186,20 +186,20 @@ Record its `APPROVE` verdict at
 
 ## Done criteria
 
-- [ ] `AGENTS.md` names Expo 57 / React Native 0.86 and Room version 7.
-- [ ] Its next-migration instruction names version 8, `Migration(7,8)`, and
+- [x] `AGENTS.md` names Expo 57 / React Native 0.86 and Room version 7.
+- [x] Its next-migration instruction names version 8, `Migration(7,8)`, and
       schema `8.json`, while retaining the no-destructive-fallback invariant.
-- [ ] It states direct-LAN Tasks 1-9 implementation/host automation are done and
+- [x] It states direct-LAN Tasks 1-9 implementation/host automation are done and
       keeps every hardware-only check pending.
-- [ ] It identifies `advisor-plans/README.md` as tracking Plans 001-029 and
+- [x] It identifies `advisor-plans/README.md` as tracking Plans 001-030 and
       accurately distinguishes Plan 004's external EAS block from Plan 015's
       deferred physical evidence.
-- [ ] The docs verifier and self-test reject each stale form independently.
-- [ ] Host workflow checks, exact `make host-verify`, and `git diff --check`
+- [x] The docs verifier and self-test reject each stale form independently.
+- [x] Host workflow checks, exact `make host-verify`, and `git diff --check`
       all pass.
-- [ ] The independent truth review ends `APPROVE` and is recorded at
+- [x] The independent truth review ends `APPROVE` and is recorded at
       `.omo/evidence/plan-030/independent-truth-review.md`.
-- [ ] No file outside the in-scope list is modified.
+- [x] No file outside the in-scope list is modified.
 
 ## STOP conditions
 

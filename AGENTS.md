@@ -16,7 +16,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 Three cooperating parts:
 
 - `relay/` — Go 1.23 WebSocket + HTTP relay (chi, gorilla/websocket, bbolt). Pairing broker, JWT gate, durable per-recipient mailbox.
-- `mobile/` — Expo SDK 54 / RN app. All device logic lives in `mobile/modules/twinotify-core/`, a custom Expo native module written in Kotlin; the TS layer is screens + a thin bridge.
+- `mobile/` — Expo SDK 57 / React Native 0.86 app. All device logic lives in `mobile/modules/twinotify-core/`, a custom Expo native module written in Kotlin; the TS layer is screens + a thin bridge.
 - `proto/` — JSON Schema 2020-12 packet contracts. **Single source of truth** for both sides.
 
 ## Commands
@@ -73,7 +73,7 @@ Docker build context is the **repo root** with `dockerfile: relay/Dockerfile` (t
 
 `proto/` holds both generations. **v1** (`packet.schema.json`, `envelope-encrypted.schema.json` with `v:1`) is online-only passthrough: the relay forwards to a live peer or fails. **v2** (`inner-event-v2.schema.json`, `peer-receipt.schema.json`, `relay-control.schema.json`) adds an authenticated inner packet (`msg_id`, `canon_id`, `sequence`, `expires_at` inside the ciphertext), a durable relay mailbox, and end-to-end peer receipts.
 
-Current state: **the relay and Android both implement v1 + v2**. Android advertises `[2,1]` with `relay.hello`, sends durable v2 envelopes with `relay.put`, authenticates inner events, stores inbound/outbound state in Room version 5 under a route-neutral custody column (`custodyAcceptedAt`/`custodyRoute`), materializes desired notification/call state, and emits peer receipts. The deprecated DataStore replay guard and legacy outbound queue remain only for v1 compatibility/migration; do not route new reliable-delivery work through them.
+Current state: **the relay and Android both implement v1 + v2**. Android advertises `[2,1]` with `relay.hello`, sends durable v2 envelopes with `relay.put`, authenticates inner events, stores inbound/outbound state in Room version 7 under a route-neutral custody column (`custodyAcceptedAt`/`custodyRoute`), materializes desired notification/call state, and emits peer receipts. The deprecated DataStore replay guard and legacy outbound queue remain only for v1 compatibility/migration; do not route new reliable-delivery work through them.
 
 Frames (`relay/internal/server/relay_frame.go`): in — `relay.hello`, `relay.put`, `relay.ack`; out — `relay.accepted`, `relay.deliver`, `relay.rejected`, `relay.expired`, `relay.capabilities`, `relay.legacy_forwarded`. Once both devices advertise `[2,1]` the relay records a protocol floor of 2 per pair and refuses v1 frames for it, so a downgrade cannot be forced.
 
@@ -113,7 +113,7 @@ Kotlin flow: `TwinotifyNotificationListener` captures → filters → `OutboundQ
 - **Mirror-dismiss ordering:** `PendingPeerCancel.add` must run **before** `NotificationManager.cancel` in `MirrorDismisser`. Reversed, the listener's `onNotificationRemoved` misses the tombstone and emits a spurious `notif.cancel` back to the origin — an echo loop.
 - **`OutboundQueue.enqueue` goes through `enqueueCapped(@Transaction)`.** Bypassing it loses the atomic cap check.
 - **`SyncService.flushQueue` holds `flushMutex`.** Any new drain path must take the same mutex or messages send twice.
-- **Room is at version 5.** New entity → version 6 + an explicit `Migration(5,6)` registered in `NotificationDb.addMigrations(...)`, plus a committed `schemas/.../6.json`. Never `fallbackToDestructiveMigration()`; it wipes paired state.
+- **Room is at version 7.** New entity → version 8 + an explicit `Migration(7,8)` registered in `NotificationDb.addMigrations(...)`, plus a committed `schemas/.../8.json`. Never `fallbackToDestructiveMigration()`; it wipes paired state.
 - **Nonce counter is monotonic.** Reset only on `unpair()`/`regenerate()`. Reset + same random prefix = nonce reuse.
 - **libsodium JNA on Android is snake_case** (`sodium.crypto_box_easy`, `crypto_sign_detached`), and the Ed25519 secret key is **64 bytes** (seed‖pubkey), not 32.
 - **`ws.go` safety scaffolding** (`SetReadLimit`, pong handler + read deadlines, write mutex, ping goroutine) was clobbered once by a rewrite. Make surgical edits; don't regenerate the file.
@@ -125,7 +125,7 @@ Kotlin flow: `TwinotifyNotificationListener` captures → filters → `OutboundQ
 
 - `docs/superpowers/specs/2026-04-20-phone-sync-design.md` — overall system/crypto/threat model (v10).
 - `docs/superpowers/specs/2026-08-09-reliable-delivery-foundation-design.md` — the v2 protocol, data models, ordering, verification strategy, and release gate. Read this before touching mailbox, receipt, or sequencing code.
-- `docs/superpowers/plans/2026-08-09-reliable-delivery-{protocol-relay,android,verification}.md` — task-by-task plans, executed in that order. All three are complete. Active work is now `docs/superpowers/plans/2026-08-20-direct-lan-delivery.md` (Tasks 1-4 landed; 5-9 open), which supersedes the earlier `2026-08-18-direct-lan-transport.md`. `advisor-plans/README.md` tracks the audit-driven plans 001-010.
+- `docs/superpowers/plans/2026-08-09-reliable-delivery-{protocol-relay,android,verification}.md` — task-by-task plans, executed in that order. All three are complete. `docs/superpowers/plans/2026-08-20-direct-lan-delivery.md` records that Tasks 1-9 implementation and host automation are complete; its named hardware evidence remains a pending physical two-phone run. It supersedes the earlier `2026-08-18-direct-lan-transport.md`. `advisor-plans/README.md` tracks Plans 001-030. Plan 004 is externally blocked on owner-controlled EAS project, signing, token, certificate, and attestation inputs. Plan 015 source is complete and only `PHY-CALL-01` physical proof is deferred. Local APKs are QA artifacts, not protected release candidates.
 - `MEMORY.md` — long-form session handoff, but **last updated 2026-04-21**: it predates the reliable-delivery work and describes Phase 4 as in progress. Trust `git log` and the code over it.
 - `docs/test-scenarios.md` — manual two-phone smoke scenarios. `docs/design/SCREEN_INVENTORY.md` — UI surface reference.
 

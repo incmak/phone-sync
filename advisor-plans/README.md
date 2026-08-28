@@ -59,7 +59,7 @@ APKs are QA artifacts, not protected release candidates.
 | 027 | Keep Handoff Trace screen tests warning-free | P2 | S | 025 | DONE: 157/157 Jest, exact host gate, independent review approved |
 | 028 | Close or fail closed on high mobile dependency advisories | P1 | M | 024 | DONE: compatible refresh and fail-closed gate landed; Plan 029 completed the approved Expo 57 migration; fresh full-tree audit reports 0 high/critical advisories |
 | 029 | Upgrade the Expo toolchain to close upstream advisories | P1 | L | 028 | DONE: Expo 57 graph has 0 high/critical advisories; host/mobile/native gates and review green; physical two-phone smoke remains pending |
-| 030 | Make root agent guidance match the live repository | P1 | S | none | TODO |
+| 030 | Make root agent guidance match the live repository | P1 | S | none | DONE: root guidance contract, mutation self-tests, host gate, and independent truth review recorded in `.omo/evidence/plan-030/`; physical and protected-release truth preserved |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.
@@ -105,14 +105,15 @@ REJECTED with a one-line rationale.
 
 ### [DOCS-03] Reconcile root agent guidance with live repository state
 
-- **Evidence**: `AGENTS.md:19,76,116,128` still names Expo 54, Room 5, direct-LAN
+- **Evidence**: Plan 030 reconciled `AGENTS.md:19,76,116,128`, which had named Expo 54, Room 5, direct-LAN
   Tasks 5-9 as open, and the advisor ledger as Plans 001-010. The live sources
   are Expo 57, Room 7, completed Tasks 5-9 implementation/host automation, and
-  a ledger through Plan 029.
+  a ledger through Plan 030.
 - **Impact**: agents can create the wrong migration, redo completed transport
   work, or report the wrong remaining plan count.
 - **Effort**: S. **Risk**: LOW. **Confidence**: HIGH.
-- **Plan**: 030.
+- **Plan**: 030 completed its bounded documentation contract and preserved all
+  pending physical and protected-release markers.
 
 ## 2026-08-28 findings considered and rejected
 
