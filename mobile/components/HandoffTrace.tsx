@@ -233,10 +233,7 @@ export function HandoffTrace({
   const geometry = buildTraceGeometry(state, width, height);
 
   useEffect(() => {
-    if (state !== 'reconnecting' || reduceMotion) {
-      setMotionProgress(0);
-      return;
-    }
+    if (state !== 'reconnecting' || reduceMotion) return;
 
     let frame: number | undefined;
     let startedAt: number | undefined;

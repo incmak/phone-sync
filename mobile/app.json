@@ -7,17 +7,38 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "scheme": "twinotify",
-    "newArchEnabled": true,
-    "ios": { "supportsTablet": false, "bundleIdentifier": "com.twinotify.app" },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.twinotify.app"
+    },
     "android": {
       "package": "com.twinotify.app",
-      "adaptiveIcon": { "foregroundImage": "./assets/adaptive-icon.png", "backgroundColor": "#000000" }
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#000000"
+      }
     },
     "plugins": [
       "expo-router",
-      ["expo-build-properties", { "android": { "minSdkVersion": 34 } }],
-      "./plugins/with-optional-camera"
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 34
+          }
+        }
+      ],
+      "./plugins/with-optional-camera",
+      "./plugins/with-android-toolchain-workarounds",
+      "expo-asset",
+      "expo-font",
+      "expo-image",
+      "expo-splash-screen",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
-    "experiments": { "typedRoutes": true }
+    "experiments": {
+      "typedRoutes": true
+    }
   }
 }

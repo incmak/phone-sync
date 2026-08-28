@@ -24,7 +24,7 @@ describe('TwStatusDot', () => {
 
   test('stays out of the accessibility tree because the route is stated in words', () => {
     const { toJSON } = renderDot('relay');
-    const node = toJSON() as { props: Record<string, unknown> };
+    const node = toJSON() as unknown as { props: Record<string, unknown> };
 
     expect(node.props.accessible).toBe(false);
     expect(node.props.importantForAccessibility).toBe('no');
@@ -32,7 +32,7 @@ describe('TwStatusDot', () => {
 
   test('gives each delivery state its own colour', () => {
     const colorFor = (state: TwConnectionState) => {
-      const node = renderDot(state).toJSON() as { props: { style: ViewStyle } };
+      const node = renderDot(state).toJSON() as unknown as { props: { style: ViewStyle } };
       return StyleSheet.flatten(node.props.style).backgroundColor;
     };
 
@@ -46,8 +46,8 @@ describe('TwStatusDot', () => {
   });
 
   test('falls back to the unpaired marker for an unknown state', () => {
-    const unknown = renderDot('nonsense' as TwConnectionState).toJSON() as { props: { style: ViewStyle } };
-    const unpaired = renderDot('unpaired').toJSON() as { props: { style: ViewStyle } };
+    const unknown = renderDot('nonsense' as TwConnectionState).toJSON() as unknown as { props: { style: ViewStyle } };
+    const unpaired = renderDot('unpaired').toJSON() as unknown as { props: { style: ViewStyle } };
 
     expect(StyleSheet.flatten(unknown.props.style).backgroundColor).toBe(
       StyleSheet.flatten(unpaired.props.style).backgroundColor,

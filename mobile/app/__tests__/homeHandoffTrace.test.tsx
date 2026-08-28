@@ -163,6 +163,23 @@ describe('Home handoff trace', () => {
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Mirror notifications' }).props.accessibilityState.checked).toBe(false));
   });
 
+  it('reflects mirror intent immediately while the native start is still pending', async () => {
+    arrange(cases[4]);
+    let finishStart: (() => void) | undefined;
+    global.__TWINOTIFY_CORE__.startLanOnlySyncService.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { finishStart = resolve; }),
+    );
+    const screen = render(<HomeScreen />);
+
+    const mirror = await screen.findByRole('switch', { name: 'Mirror notifications' });
+    expect(mirror.props.accessibilityState.checked).toBe(false);
+
+    fireEvent.press(mirror);
+
+    expect(screen.getByRole('switch', { name: 'Mirror notifications' }).props.accessibilityState.checked).toBe(true);
+    await act(async () => { finishStart?.(); });
+  });
+
   it('does not retain the generic card and Unicode icon treatment', async () => {
     arrange(cases[0]);
     const screen = render(<HomeScreen />);

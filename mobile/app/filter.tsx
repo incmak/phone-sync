@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Pressable,
   ScrollView,
@@ -54,29 +54,6 @@ export default function FilterScreen() {
         setFilter(fallback);
       })
       .finally(() => setLoading(false));
-  }, []);
-
-  const handleToggle = useCallback(async (key: string, next: boolean) => {
-    if (pendingKeysRef.current.has(key)) return;
-    pendingKeysRef.current.add(key);
-    setPendingKeys(new Set(pendingKeysRef.current));
-    setSaveError(false);
-    setFilter((prev) => ({ ...prev, [key]: next }));
-    try {
-      if (next) {
-        // Turning ON = allow = remove from denylist
-        await TwinotifyCoreModule.removeFromDenylist(key);
-      } else {
-        // Turning OFF = block = add to denylist
-        await TwinotifyCoreModule.addToDenylist(key);
-      }
-    } catch {
-      setFilter((prev) => ({ ...prev, [key]: !next }));
-      setSaveError(true);
-    } finally {
-      pendingKeysRef.current.delete(key);
-      setPendingKeys(new Set(pendingKeysRef.current));
-    }
   }, []);
 
   const allKeys = Object.keys(TW_APPS);
@@ -243,7 +220,28 @@ export default function FilterScreen() {
                     </Text>
                     <TwSwitch
                       checked={allowed}
-                      onChange={(next) => { void handleToggle(k, next); }}
+                      onChange={async (next) => {
+                        if (pendingKeysRef.current.has(k)) return;
+                        pendingKeysRef.current.add(k);
+                        setPendingKeys(new Set(pendingKeysRef.current));
+                        setSaveError(false);
+                        setFilter((prev) => ({ ...prev, [k]: next }));
+                        try {
+                          if (next) {
+                            // Turning ON = allow = remove from denylist
+                            await TwinotifyCoreModule.removeFromDenylist(k);
+                          } else {
+                            // Turning OFF = block = add to denylist
+                            await TwinotifyCoreModule.addToDenylist(k);
+                          }
+                        } catch {
+                          setFilter((prev) => ({ ...prev, [k]: !next }));
+                          setSaveError(true);
+                        } finally {
+                          pendingKeysRef.current.delete(k);
+                          setPendingKeys(new Set(pendingKeysRef.current));
+                        }
+                      }}
                       size="md"
                       disabled={pendingKeys.has(k)}
                       accessibilityLabel={`${app.name} mirroring`}

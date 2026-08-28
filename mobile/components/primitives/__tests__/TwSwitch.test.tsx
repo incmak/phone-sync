@@ -21,7 +21,7 @@ type RenderNode = {
 
 function renderedThumbColor(scheme: 'light' | 'dark') {
   mockThemeDark = scheme === 'dark';
-  const tree = render(<ThemeProvider><TwSwitch checked accessibilityLabel="Enable mirroring" /></ThemeProvider>).toJSON() as RenderNode;
+  const tree = render(<ThemeProvider><TwSwitch checked accessibilityLabel="Enable mirroring" /></ThemeProvider>).toJSON() as unknown as RenderNode;
   const thumb = tree.children?.[0]?.children?.[0];
   if (!thumb) throw new Error('switch thumb did not render');
   return (StyleSheet.flatten(thumb.props.style) as Record<string, unknown>).backgroundColor;

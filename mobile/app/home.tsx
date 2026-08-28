@@ -24,17 +24,20 @@ export default function HomeScreen() {
   const metrics = useMetrics();
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
   const [relayUrl, setRelayUrl] = useState<string | null>(null);
-  const [mirrorOn, setMirrorOn] = useState(serviceIsRunning(state));
+  const nativeMirrorOn = serviceIsRunning(state);
+  const [previousNativeMirrorOn, setPreviousNativeMirrorOn] = useState(nativeMirrorOn);
+  const [mirrorOn, setMirrorOn] = useState(nativeMirrorOn);
   const [settingsPressed, setSettingsPressed] = useState(false);
+
+  if (previousNativeMirrorOn !== nativeMirrorOn) {
+    setPreviousNativeMirrorOn(nativeMirrorOn);
+    setMirrorOn(nativeMirrorOn);
+  }
 
   useEffect(() => {
     TwinotifyCoreModule.getPairStatus().then(setPairStatus).catch(() => {});
     OnboardingState.getRelayUrl().then(setRelayUrl).catch(() => {});
   }, []);
-
-  useEffect(() => {
-    setMirrorOn(serviceIsRunning(state));
-  }, [state]);
 
   const handleMirrorToggle = useCallback(async (next: boolean) => {
     setMirrorOn(next);

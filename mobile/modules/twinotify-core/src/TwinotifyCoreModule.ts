@@ -1,5 +1,5 @@
-import { NativeModule, requireNativeModule } from 'expo-modules-core';
-import type { PermissionResponse } from 'expo-modules-core';
+import { NativeModule, requireNativeModule } from 'expo';
+import type { PermissionResponse } from 'expo';
 import type {
   OfflinePairingStatus,
   OfflinePairingStatusEvent,

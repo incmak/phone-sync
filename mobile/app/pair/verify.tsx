@@ -85,7 +85,7 @@ export default function VerifyNearbyScreen() {
     } else {
       router.replace('/pair/nearby');
     }
-  }, [status?.sessionId]);
+  }, [status]);
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -106,7 +106,7 @@ export default function VerifyNearbyScreen() {
     } finally {
       setWorking(false);
     }
-  }, [status?.sessionId]);
+  }, [status]);
 
   const displayCode = useMemo(() => {
     const sas = status?.sas ?? '';
