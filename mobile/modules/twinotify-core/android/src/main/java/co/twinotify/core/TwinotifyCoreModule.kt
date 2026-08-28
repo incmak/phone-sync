@@ -34,6 +34,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -43,6 +45,7 @@ import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.text.Normalizer
 import java.util.concurrent.CancellationException
 import expo.modules.interfaces.permissions.Permissions
@@ -64,48 +67,139 @@ internal suspend fun persistLanOnlyConfigThenStart(
     start()
 }
 
-internal suspend fun <T> awaitPersistedCallCaptureAdmission(
-    begin: () -> T,
-    persist: suspend () -> Boolean,
-    start: (T) -> Unit,
-    await: suspend (T) -> Boolean,
-    abandon: (T) -> Unit,
-): Boolean {
-    val ticket = begin()
-    return try {
-        if (!persist()) {
-            abandon(ticket)
-            false
+internal class CallCapturePreferenceRequestGate {
+    private val latestRequest = AtomicLong(0)
+    private val mutationMutex = Mutex()
+
+    fun newRequest(): Long = latestRequest.incrementAndGet()
+
+    fun isCurrent(request: Long): Boolean = request == latestRequest.get()
+
+    suspend fun <T> mutateIfCurrent(
+        request: Long,
+        mutation: suspend () -> T,
+    ): CallCaptureRequestMutation<T> = mutationMutex.withLock {
+        if (!isCurrent(request)) {
+            CallCaptureRequestMutation.Superseded
         } else {
-            start(ticket)
-            await(ticket)
+            CallCaptureRequestMutation.Applied(mutation())
         }
-    } catch (error: Throwable) {
-        abandon(ticket)
-        throw error
+    }
+
+    suspend fun runLatest(
+        request: Long,
+        readCurrent: suspend () -> Boolean,
+        operation: suspend () -> Boolean,
+    ): Boolean {
+        if (!isCurrent(request)) return mutationMutex.withLock { readCurrent() }
+        val result = operation()
+        return if (isCurrent(request)) result else mutationMutex.withLock { readCurrent() }
+    }
+}
+
+internal sealed interface CallCaptureRequestMutation<out T> {
+    data class Applied<T>(val value: T) : CallCaptureRequestMutation<T>
+    data object Superseded : CallCaptureRequestMutation<Nothing>
+}
+
+internal sealed interface CallCaptureEnablementStage<out T> {
+    data class Complete(val enabled: Boolean) : CallCaptureEnablementStage<Nothing>
+    data class AwaitAdmission<T>(val ticket: T) : CallCaptureEnablementStage<T>
+}
+
+internal suspend fun <T> orchestrateCallCaptureEnablement(
+    awaitShutdownRelease: suspend () -> Unit,
+    requestIsCurrent: () -> Boolean = { true },
+    markMutationStarted: () -> Unit = {},
+    mutateIfCurrent: suspend (
+        suspend () -> CallCaptureEnablementStage<T>
+    ) -> CallCaptureRequestMutation<CallCaptureEnablementStage<T>> = { mutation ->
+        CallCaptureRequestMutation.Applied(mutation())
+    },
+    decideCallCaptureAdmission: suspend () -> CallCaptureDecision,
+    persistEnabled: suspend () -> Boolean,
+    decideServiceStart: suspend () -> co.twinotify.core.service.ServiceStartDecision,
+    beginAdmission: () -> T,
+    startService: (co.twinotify.core.service.ServiceStartDecision.Start, T) -> Unit,
+    awaitAdmission: suspend (T) -> Boolean,
+    abandonAdmission: (T) -> Unit,
+): Boolean {
+    awaitShutdownRelease()
+    if (!requestIsCurrent()) return false
+    val prepared = mutateIfCurrent {
+        if (!requestIsCurrent()) {
+            CallCaptureEnablementStage.Complete(false)
+        } else if (decideCallCaptureAdmission() !is CallCaptureDecision.Start) {
+            CallCaptureEnablementStage.Complete(false)
+        } else {
+            if (!requestIsCurrent()) {
+                CallCaptureEnablementStage.Complete(false)
+            } else {
+                markMutationStarted()
+                if (!persistEnabled() || !requestIsCurrent()) {
+                    CallCaptureEnablementStage.Complete(false)
+                } else {
+                    val serviceStart = decideServiceStart()
+                    if (!requestIsCurrent()) {
+                        CallCaptureEnablementStage.Complete(false)
+                    } else if (serviceStart !is co.twinotify.core.service.ServiceStartDecision.Start) {
+                        CallCaptureEnablementStage.Complete(true)
+                    } else {
+                        val ticket = beginAdmission()
+                        try {
+                            startService(serviceStart, ticket)
+                            CallCaptureEnablementStage.AwaitAdmission(ticket)
+                        } catch (error: Throwable) {
+                            abandonAdmission(ticket)
+                            throw error
+                        }
+                    }
+                }
+            }
+        }
+    }
+    val stage = when (prepared) {
+        is CallCaptureRequestMutation.Applied -> prepared.value
+        CallCaptureRequestMutation.Superseded -> return false
+    }
+    return when (stage) {
+        is CallCaptureEnablementStage.Complete -> stage.enabled
+        is CallCaptureEnablementStage.AwaitAdmission -> try {
+            awaitAdmission(stage.ticket)
+        } catch (error: Throwable) {
+            abandonAdmission(stage.ticket)
+            throw error
+        }
     }
 }
 
 internal suspend fun applyCallCapturePreference(
     requestedEnabled: Boolean,
     admission: CallCaptureDecision,
-    serviceCanStart: Boolean,
+    rollbackOnEnableFailure: () -> Boolean = { true },
+    mutateIfCurrent: suspend (suspend () -> Unit) -> CallCaptureRequestMutation<Unit> = { mutation ->
+        CallCaptureRequestMutation.Applied(mutation())
+    },
     disableGracefully: suspend () -> Unit,
     enable: suspend () -> Boolean,
 ): Boolean {
-    if (!requestedEnabled || !serviceCanStart || admission !is CallCaptureDecision.Start) {
-        disableGracefully()
+    if (!requestedEnabled || admission !is CallCaptureDecision.Start) {
+        mutateIfCurrent { disableGracefully() }
         return false
     }
     val enabled = try {
         enable()
     } catch (error: Throwable) {
-        val rollbackFailure = withContext(NonCancellable) {
-            try {
-                disableGracefully()
-                null
-            } catch (rollback: Throwable) {
-                rollback
+        var rollbackFailure: Throwable? = null
+        if (rollbackOnEnableFailure()) {
+            withContext(NonCancellable) {
+                mutateIfCurrent {
+                    try {
+                        disableGracefully()
+                    } catch (rollback: Throwable) {
+                        rollbackFailure = rollback
+                    }
+                }
             }
         }
         if (rollbackFailure != null && rollbackFailure !== error) {
@@ -114,10 +208,16 @@ internal suspend fun applyCallCapturePreference(
         throw error
     }
     if (!enabled) {
-        withContext(NonCancellable) { disableGracefully() }
+        withContext(NonCancellable) {
+            mutateIfCurrent { disableGracefully() }
+        }
     }
     return enabled
 }
+
+internal suspend fun readCallCapturePreference(
+    readDurablePreference: suspend () -> Boolean,
+): Boolean = readDurablePreference()
 
 internal suspend fun <T> settleTwinotifyPromise(
     code: String,
@@ -142,6 +242,7 @@ class TwinotifyCoreModule internal constructor(
     constructor() : this(null)
 
     private val moduleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val callCapturePreferenceGate = CallCapturePreferenceRequestGate()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val offlinePairing = OfflinePairingApiController(
         moduleScope,
@@ -300,6 +401,7 @@ class TwinotifyCoreModule internal constructor(
         }
 
         AsyncFunction("setCallCaptureEnabled") { enabled: Boolean, promise: Promise ->
+            val request = callCapturePreferenceGate.newRequest()
             moduleScope.launch {
                 settleTwinotifyPromise(
                     code = "CALL_CAPTURE",
@@ -310,53 +412,88 @@ class TwinotifyCoreModule internal constructor(
                     },
                     operation = {
                         val ctx = requireContext()
-                        val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
-                        val peer = PeerStore.load(ctx)
-                        val serviceStart = co.twinotify.core.service.ServiceStartPolicy.decide(
-                            intentAction = null,
-                            persisted = config,
-                            paired = peer != null,
-                            lanBound = peer?.lanBindingId != null,
-                        )
-                        val admission = CallCapturePolicy.decide(
-                            enabled,
-                            TelephonyCallStateSource(ctx).capabilities(),
-                        )
-                        applyCallCapturePreference(
-                            requestedEnabled = enabled,
-                            admission = admission,
-                            serviceCanStart = serviceStart is co.twinotify.core.service.ServiceStartDecision.Start,
-                            disableGracefully = {
-                                co.twinotify.core.service.SyncService.disableCallCaptureAndAwait(ctx)
+                        callCapturePreferenceGate.runLatest(
+                            request = request,
+                            readCurrent = {
+                                co.twinotify.core.service.ServiceConfigStore.read(ctx).callCaptureEnabled
                             },
-                            enable = {
-                                co.twinotify.core.service.SyncService.awaitCallShutdownRelease()
-                                val start = serviceStart as co.twinotify.core.service.ServiceStartDecision.Start
-                                awaitPersistedCallCaptureAdmission(
-                                    begin = co.twinotify.core.service.SyncService::beginCallCaptureAdmission,
-                                    persist = {
-                                        co.twinotify.core.service.ServiceConfigStore
-                                            .setCallCaptureEnabled(ctx, true)
-                                            .callCaptureEnabled
+                            operation = {
+                                val enableMutationStarted = AtomicBoolean(false)
+                                val admission = CallCapturePolicy.decide(
+                                    enabled,
+                                    TelephonyCallStateSource(ctx).capabilities(),
+                                )
+                                applyCallCapturePreference(
+                                    requestedEnabled = enabled,
+                                    admission = admission,
+                                    rollbackOnEnableFailure = enableMutationStarted::get,
+                                    mutateIfCurrent = { mutation ->
+                                        callCapturePreferenceGate.mutateIfCurrent(request, mutation)
                                     },
-                                    start = { admissionTicket ->
-                                        val intent = android.content.Intent(
-                                            ctx,
-                                            co.twinotify.core.service.SyncService::class.java,
-                                        ).apply {
-                                            action = co.twinotify.core.service.SyncService.ACTION_START
-                                            start.relayUrl?.let {
-                                                putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, it)
-                                            }
-                                            putExtra(
-                                                co.twinotify.core.service.SyncService.EXTRA_CALL_CAPTURE_ADMISSION_GENERATION,
-                                                admissionTicket.generation,
-                                            )
-                                        }
-                                        ctx.startForegroundService(intent)
+                                    disableGracefully = {
+                                        co.twinotify.core.service.SyncService.disableCallCaptureAndAwait(ctx)
                                     },
-                                    await = co.twinotify.core.service.SyncService::awaitCallCaptureAdmission,
-                                    abandon = co.twinotify.core.service.SyncService::abandonCallCaptureAdmission,
+                                    enable = {
+                                        orchestrateCallCaptureEnablement(
+                                            awaitShutdownRelease =
+                                                {
+                                                    co.twinotify.core.service.SyncService
+                                                        .awaitCallShutdownReleaseForEnable()
+                                                },
+                                            requestIsCurrent = {
+                                                callCapturePreferenceGate.isCurrent(request)
+                                            },
+                                            markMutationStarted = {
+                                                enableMutationStarted.set(true)
+                                            },
+                                            mutateIfCurrent = { mutation ->
+                                                callCapturePreferenceGate.mutateIfCurrent(request, mutation)
+                                            },
+                                            decideCallCaptureAdmission = {
+                                                CallCapturePolicy.decide(
+                                                    enabled = true,
+                                                    capabilities = TelephonyCallStateSource(ctx).capabilities(),
+                                                )
+                                            },
+                                            persistEnabled = {
+                                                co.twinotify.core.service.ServiceConfigStore
+                                                    .setCallCaptureEnabled(ctx, enabled = true)
+                                                    .callCaptureEnabled
+                                            },
+                                            decideServiceStart = {
+                                                val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
+                                                val peer = PeerStore.load(ctx)
+                                                co.twinotify.core.service.ServiceStartPolicy.decide(
+                                                    intentAction = null,
+                                                    persisted = config,
+                                                    paired = peer != null,
+                                                    lanBound = peer?.lanBindingId != null,
+                                                )
+                                            },
+                                            beginAdmission =
+                                                co.twinotify.core.service.SyncService::beginCallCaptureAdmission,
+                                            startService = { start, admissionTicket ->
+                                                val intent = android.content.Intent(
+                                                    ctx,
+                                                    co.twinotify.core.service.SyncService::class.java,
+                                                ).apply {
+                                                    action = co.twinotify.core.service.SyncService.ACTION_START
+                                                    start.relayUrl?.let {
+                                                        putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, it)
+                                                    }
+                                                    putExtra(
+                                                        co.twinotify.core.service.SyncService.EXTRA_CALL_CAPTURE_ADMISSION_GENERATION,
+                                                        admissionTicket.generation,
+                                                    )
+                                                }
+                                                ctx.startForegroundService(intent)
+                                            },
+                                            awaitAdmission =
+                                                co.twinotify.core.service.SyncService::awaitCallCaptureAdmission,
+                                            abandonAdmission =
+                                                co.twinotify.core.service.SyncService::abandonCallCaptureAdmission,
+                                        )
+                                    },
                                 )
                             },
                         )
@@ -374,28 +511,8 @@ class TwinotifyCoreModule internal constructor(
                     boundedMessage = "call_capture_preference_unavailable",
                     operation = {
                         val ctx = requireContext()
-                        val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
-                        val peer = PeerStore.load(ctx)
-                        val serviceStart = co.twinotify.core.service.ServiceStartPolicy.decide(
-                            intentAction = null,
-                            persisted = config,
-                            paired = peer != null,
-                            lanBound = peer?.lanBindingId != null,
-                        )
-                        val admission = CallCapturePolicy.decide(
-                            config.callCaptureEnabled,
-                            TelephonyCallStateSource(ctx).capabilities(),
-                        )
-                        val effective = co.twinotify.core.service.effectiveCallCaptureEnabled(
-                            config = config,
-                            admission = admission,
-                            serviceCanStart = serviceStart is co.twinotify.core.service.ServiceStartDecision.Start,
-                        )
-                        if (config.callCaptureEnabled && !effective) {
-                            co.twinotify.core.service.SyncService.disableCallCaptureAndAwait(ctx)
-                            false
-                        } else {
-                            effective
+                        readCallCapturePreference {
+                            co.twinotify.core.service.ServiceConfigStore.read(ctx).callCaptureEnabled
                         }
                     },
                     resolve = promise::resolve,

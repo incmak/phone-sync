@@ -1279,35 +1279,6 @@ class CallCaptureLifecycleTest {
         )
     }
 
-    @Test
-    fun effectivePreferenceRequiresEnabledRoutableServiceAndSupportedAdmission() {
-        val configured = ServiceConfig(enabled = true, callCaptureEnabled = true)
-
-        assertTrue(effectiveCallCaptureEnabled(configured, CallCaptureDecision.Start, serviceCanStart = true))
-        assertFalse(effectiveCallCaptureEnabled(configured.copy(enabled = false), CallCaptureDecision.Start, serviceCanStart = true))
-        assertFalse(
-            effectiveCallCaptureEnabled(
-                configured,
-                CallCaptureDecision.Disabled("call_telephony_unsupported"),
-                serviceCanStart = true,
-            ),
-        )
-        assertFalse(effectiveCallCaptureEnabled(configured, CallCaptureDecision.Start, serviceCanStart = false))
-    }
-
-    @Test
-    fun processRestartWithoutActiveInstancePreservesConfiguredPreference() {
-        val configured = ServiceConfig(enabled = true, callCaptureEnabled = true)
-
-        assertTrue(
-            effectiveCallCaptureEnabled(
-                config = configured,
-                admission = CallCaptureDecision.Start,
-                serviceCanStart = true,
-            ),
-        )
-    }
-
     private class FakeSource : CallStateSource {
         private var callback: ((CallFrameworkState) -> Unit)? = null
         override fun capabilities() = CallSourceCapabilities(true, true)

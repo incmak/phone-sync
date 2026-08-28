@@ -788,6 +788,10 @@ class SyncService : Service() {
             callShutdownGate.awaitRelease()
         }
 
+        suspend fun awaitCallShutdownReleaseForEnable() {
+            callShutdownGate.awaitReleaseForEnable()
+        }
+
         /** Stop all service-owned jobs and await cancellation before key/database cleanup. */
         suspend fun shutdownActive(
             ctx: android.content.Context,
@@ -1580,9 +1584,3 @@ class SyncService : Service() {
     }
 
 }
-internal fun effectiveCallCaptureEnabled(
-    config: ServiceConfig,
-    admission: CallCaptureDecision,
-    serviceCanStart: Boolean,
-): Boolean = config.enabled && config.callCaptureEnabled &&
-    admission is CallCaptureDecision.Start && serviceCanStart

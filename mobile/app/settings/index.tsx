@@ -33,6 +33,14 @@ function connectionLabel(state: SyncState): string {
   }
 }
 
+function callCaptureHealthMessage(code: string | null | undefined): string | null {
+  if (!code) return null;
+  if (code === 'call_event_persist_failed') {
+    return 'Enabled, but call state updates could not be saved. Try turning call mirroring off and on again.';
+  }
+  return 'Enabled, but call capture needs attention. Try turning call mirroring off and on again.';
+}
+
 // ── component ─────────────────────────────────────────────────────────────────
 
 export default function SettingsScreen() {
@@ -68,6 +76,13 @@ export default function SettingsScreen() {
       .then(setRelayUrl)
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (syncStatus.callCaptureDisabledReason !== 'call_permission_denied') return;
+    TwinotifyCoreModule.getCallStatePermissionAsync()
+      .then((permission) => setCallPermissionCanAskAgain(permission.canAskAgain))
+      .catch(() => {});
+  }, [syncStatus.callCaptureDisabledReason]);
 
   const peerShort = pairStatus.peerDeviceId
     ? pairStatus.peerDeviceId.slice(0, 8)
@@ -125,13 +140,21 @@ export default function SettingsScreen() {
   const relayDisplay = relayUrl ?? (pairStatus.paired ? 'Direct Wi-Fi only' : 'Not configured');
   const version = Constants.expoConfig?.version ?? '1.0.0';
   const callUnsupported = syncStatus.callCaptureDisabledReason === 'call_telephony_unsupported';
-  const callPreferenceEnabled = callCaptureEnabled === true && !callUnsupported;
+  const callPermissionDenied = syncStatus.callCaptureDisabledReason === 'call_permission_denied';
+  const callPreferenceEnabled = callCaptureEnabled === true && !callUnsupported && !callPermissionDenied;
   const callStarting = callEnablePending;
+  const callHealthMessage = callPreferenceEnabled && syncStatus.callCaptureEnabled === true
+    ? callCaptureHealthMessage(syncStatus.callCaptureHealthCode)
+    : null;
   const callUnavailable = callPreferenceEnabled && syncStatus.callCaptureEnabled !== true;
   const callSubtitle = callUnsupported
     ? 'Call state mirroring is unavailable on this device.'
+    : callPermissionDenied
+      ? 'Call state permission is required. Turn this on to grant it.'
     : callStarting
       ? 'Enabled. Waiting for call capture to start. No phone numbers or controls.'
+      : callHealthMessage
+        ? callHealthMessage
       : callUnavailable
         ? 'Enabled. Call capture is not active. No phone numbers or controls.'
         : 'Shares only ringing, active, and ended states. No phone numbers or controls.';

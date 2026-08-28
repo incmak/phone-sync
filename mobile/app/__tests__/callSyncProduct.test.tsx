@@ -3,8 +3,9 @@ import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Alert, StyleSheet } from 'react-native';
 
 import SettingsScreen from '../settings';
+import type { SyncStatus } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 
-const baseStatus = {
+const baseStatus: SyncStatus = {
   state: 'DISCONNECTED',
   queuedCount: 0,
   callCaptureEnabled: false,
@@ -25,6 +26,14 @@ function acceptRationale(alertSpy: jest.SpyInstance) {
   const buttons = alertSpy.mock.calls.at(-1)?.[2];
   const continueButton = buttons?.find((button: { text?: string }) => button.text === 'Continue');
   act(() => continueButton?.onPress?.());
+}
+
+function emitSyncStatus(status: SyncStatus) {
+  const registration = global.__TWINOTIFY_CORE__.addListener.mock.calls.find(
+    ([event]: [string]) => event === 'onSyncStatus',
+  );
+  const listener = registration?.[1] as ((next: SyncStatus) => void) | undefined;
+  act(() => listener?.(status));
 }
 
 describe('call sync Settings product', () => {
@@ -222,6 +231,109 @@ describe('call sync Settings product', () => {
       callCaptureDisabledReason: 'call_capture_starting',
     });
     const screen = render(<SettingsScreen />);
+
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state.*Call capture is not active.*On/ })
+        .props.accessibilityState.checked,
+    ).toBe(true));
+  });
+
+  it('renders live permission revocation as Off with a truthful recovery message', async () => {
+    global.__RESET_OFFLINE_TEST_STATE__();
+    global.__TWINOTIFY_CORE__.getCallCaptureEnabled.mockResolvedValue(true);
+    global.__TWINOTIFY_CORE__.getCallStatePermissionAsync.mockResolvedValueOnce({
+      status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+    }).mockResolvedValueOnce({
+      status: 'denied', granted: false, canAskAgain: false, expires: 'never',
+    });
+    global.__TWINOTIFY_CORE__.getSyncStatus.mockResolvedValue({
+      ...baseStatus,
+      callCaptureEnabled: true,
+      callCaptureDisabledReason: null,
+    });
+    const screen = render(<SettingsScreen />);
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state.*On/ }).props.accessibilityState.checked,
+    ).toBe(true));
+
+    emitSyncStatus({
+      ...baseStatus,
+      callCaptureEnabled: false,
+      callCaptureDisabledReason: 'call_permission_denied',
+    });
+
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state.*Call state permission is required.*Off/ })
+        .props.accessibilityState.checked,
+    ).toBe(false));
+    expect(await screen.findByRole('button', {
+      name: 'Open Android settings to allow call state permission',
+    })).toBeTruthy();
+  });
+
+  it('renders an active persistence health failure without exposing its internal code', async () => {
+    global.__RESET_OFFLINE_TEST_STATE__();
+    global.__TWINOTIFY_CORE__.getCallCaptureEnabled.mockResolvedValue(true);
+    global.__TWINOTIFY_CORE__.getCallStatePermissionAsync.mockResolvedValue({
+      status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+    });
+    global.__TWINOTIFY_CORE__.getSyncStatus.mockResolvedValue({
+      ...baseStatus,
+      callCaptureEnabled: true,
+      callCaptureDisabledReason: null,
+    });
+    const screen = render(<SettingsScreen />);
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state.*On/ }).props.accessibilityState.checked,
+    ).toBe(true));
+
+    emitSyncStatus({
+      ...baseStatus,
+      callCaptureEnabled: true,
+      callCaptureDisabledReason: null,
+      callCaptureHealthCode: 'call_event_persist_failed',
+    });
+
+    await waitFor(() => expect(screen.getByText(
+      'Enabled, but call state updates could not be saved. Try turning call mirroring off and on again.',
+    )).toBeTruthy());
+    expect(screen.getByRole('switch', { name: /Mirror call state.*On/ }).props.accessibilityState.checked).toBe(true);
+    expect(screen.queryByText(/call_event_persist_failed/)).toBeNull();
+
+    emitSyncStatus({
+      ...baseStatus,
+      callCaptureEnabled: true,
+      callCaptureDisabledReason: null,
+      callCaptureHealthCode: 'unexpected_native_detail',
+    });
+    await waitFor(() => expect(screen.getByText(
+      'Enabled, but call capture needs attention. Try turning call mirroring off and on again.',
+    )).toBeTruthy());
+    expect(screen.queryByText(/unexpected_native_detail/)).toBeNull();
+  });
+
+  it('keeps a durable opt-in On when a live stopped-service status defers capture', async () => {
+    global.__RESET_OFFLINE_TEST_STATE__();
+    global.__TWINOTIFY_CORE__.getCallCaptureEnabled.mockResolvedValue(true);
+    global.__TWINOTIFY_CORE__.getCallStatePermissionAsync.mockResolvedValue({
+      status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+    });
+    global.__TWINOTIFY_CORE__.getSyncStatus.mockResolvedValue({
+      ...baseStatus,
+      callCaptureEnabled: true,
+      callCaptureDisabledReason: null,
+    });
+    const screen = render(<SettingsScreen />);
+    await waitFor(() => expect(
+      screen.getByRole('switch', { name: /Mirror call state.*On/ }).props.accessibilityState.checked,
+    ).toBe(true));
+
+    emitSyncStatus({
+      ...baseStatus,
+      state: 'DISCONNECTED',
+      callCaptureEnabled: false,
+      callCaptureDisabledReason: 'call_capture_disabled',
+    });
 
     await waitFor(() => expect(
       screen.getByRole('switch', { name: /Mirror call state.*Call capture is not active.*On/ })

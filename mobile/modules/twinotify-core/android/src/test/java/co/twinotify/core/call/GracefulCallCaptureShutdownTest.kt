@@ -8,9 +8,12 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -21,6 +24,150 @@ import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class GracefulCallCaptureShutdownTest {
+    @Test
+    fun enableWaiterCancellationPreservesIdentityWhileShutdownRemainsActive() = runTest {
+        val gate = GracefulCallShutdownGate()
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val cancellation = CancellationException("cancel enable waiter")
+        var observed: Throwable? = null
+
+        supervisorScope {
+            val shutdown = gate.start(
+                this,
+                CallShutdownConfigIntent(disableCallCapture = true, disableService = false),
+            ) {
+                started.complete(Unit)
+                finish.await()
+                GracefulCallShutdownResult.Completed
+            }
+            started.await()
+            val waiter = launch {
+                try {
+                    gate.awaitReleaseForEnable()
+                } catch (error: Throwable) {
+                    observed = error
+                    throw error
+                }
+            }
+            testScheduler.runCurrent()
+
+            waiter.cancel(cancellation)
+            waiter.join()
+
+            assertSame(cancellation, observed)
+            assertFalse(shutdown.isCompleted)
+            assertTrue(gate.isReserved())
+
+            finish.complete(Unit)
+            assertSame(GracefulCallShutdownResult.Completed, shutdown.await())
+        }
+    }
+
+    @Test
+    fun enableAwaitPreservesActiveCancellationIdentity() = runTest {
+        val gate = GracefulCallShutdownGate()
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val cancellation = CancellationException("cancel active shutdown")
+
+        supervisorScope {
+            gate.start(
+                this,
+                CallShutdownConfigIntent(disableCallCapture = true, disableService = false),
+            ) {
+                started.complete(Unit)
+                finish.await()
+                throw cancellation
+            }
+            started.await()
+            launch { finish.complete(Unit) }
+
+            val actual = assertFailsWith<CancellationException> {
+                gate.awaitReleaseForEnable()
+            }
+            assertSame(cancellation, actual)
+        }
+    }
+
+    @Test
+    fun enableAwaitFailsBoundedlyAfterServiceStopShutdownFailedWithoutConsumingIntent() = runTest {
+        val gate = GracefulCallShutdownGate()
+        val serviceStop = CallShutdownConfigIntent(
+            disableCallCapture = false,
+            disableService = true,
+        )
+        val failed = gate.start(this, serviceStop) {
+            GracefulCallShutdownResult.Failed(CALL_SHUTDOWN_STALE)
+        }
+        assertEquals(GracefulCallShutdownResult.Failed(CALL_SHUTDOWN_STALE), failed.await())
+
+        val failure = assertFailsWith<ActiveCallRecoveryException> {
+            withTimeout(1_000) { gate.awaitReleaseForEnable() }
+        }
+        assertEquals(CALL_SHUTDOWN_STALE, failure.code)
+
+        var retainedIntent: CallShutdownConfigIntent? = null
+        val repair = gate.start(
+            this,
+            CallShutdownConfigIntent(disableCallCapture = true, disableService = false),
+        ) {
+            gate.persistMergedIntent { intent ->
+                retainedIntent = intent
+                GracefulCallShutdownResult.Completed
+            }
+        }
+        assertSame(GracefulCallShutdownResult.Completed, repair.await())
+        assertEquals(
+            CallShutdownConfigIntent(disableCallCapture = true, disableService = true),
+            retainedIntent,
+        )
+    }
+
+    @Test
+    fun enableAwaitJoinsActiveShutdownUntilItCompletesAndReleases() = runTest {
+        val gate = GracefulCallShutdownGate()
+        val finish = CompletableDeferred<Unit>()
+        val active = gate.start(
+            this,
+            CallShutdownConfigIntent(disableCallCapture = true, disableService = false),
+        ) {
+            finish.await()
+            GracefulCallShutdownResult.Completed
+        }
+        val waiter = async { gate.awaitReleaseForEnable() }
+        testScheduler.runCurrent()
+        assertFalse(waiter.isCompleted)
+
+        finish.complete(Unit)
+        withTimeout(1_000) { waiter.await() }
+        assertSame(GracefulCallShutdownResult.Completed, active.await())
+        assertFalse(gate.isReserved())
+    }
+
+    @Test
+    fun enableAwaitJoiningActiveFailureReturnsItsBoundedCode() = runTest {
+        val gate = GracefulCallShutdownGate()
+        val finish = CompletableDeferred<Unit>()
+        gate.start(
+            this,
+            CallShutdownConfigIntent(disableCallCapture = true, disableService = false),
+        ) {
+            finish.await()
+            GracefulCallShutdownResult.Failed(CALL_SHUTDOWN_FAILED)
+        }
+        supervisorScope {
+            val waiter = async { gate.awaitReleaseForEnable() }
+            testScheduler.runCurrent()
+            finish.complete(Unit)
+
+            val failure = assertFailsWith<ActiveCallRecoveryException> {
+                withTimeout(1_000) { waiter.await() }
+            }
+            assertEquals(CALL_SHUTDOWN_FAILED, failure.code)
+        }
+    }
+
     @Test
     fun successfulTerminalCustodyUsesOneImmediateAttempt() = runTest {
         var attempts = 0

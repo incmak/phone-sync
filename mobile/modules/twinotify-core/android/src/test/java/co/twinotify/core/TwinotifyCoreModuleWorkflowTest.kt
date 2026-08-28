@@ -2,63 +2,464 @@ package co.twinotify.core
 
 import co.twinotify.core.call.ActiveCallRecoveryException
 import co.twinotify.core.call.CALL_SHUTDOWN_FAILED
+import co.twinotify.core.call.CALL_SHUTDOWN_STALE
 import co.twinotify.core.call.CallShutdownConfigIntent
 import co.twinotify.core.call.CallCaptureDecision
+import co.twinotify.core.call.CallCapturePolicy
+import co.twinotify.core.call.CallSourceCapabilities
 import co.twinotify.core.call.GracefulCallShutdownGate
 import co.twinotify.core.call.GracefulCallShutdownResult
 import co.twinotify.core.service.executeCallCaptureStopRequest
 import co.twinotify.core.service.executeCallShutdownPhases
 import co.twinotify.core.service.CallCaptureStopRequestGate
 import co.twinotify.core.service.CallShutdownPhaseState
+import co.twinotify.core.service.ServiceConfig
+import co.twinotify.core.service.ServiceStartDecision
+import co.twinotify.core.service.ServiceStartPolicy
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.currentTime
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TwinotifyCoreModuleWorkflowTest {
     @Test
-    fun durableFalseAbandonsAdmissionWithoutStartingService() = runTest {
-        val order = mutableListOf<String>()
+    fun preMutationShutdownFailurePropagatesWithoutGenericRollback() = runTest {
+        val failure = ActiveCallRecoveryException(CALL_SHUTDOWN_STALE)
+        var mutationStarted = false
+        var rollbackCalls = 0
 
-        val admitted = awaitPersistedCallCaptureAdmission(
-            begin = { "ticket" },
-            persist = { order += "persist"; false },
-            start = { order += "start" },
-            await = { order += "await"; true },
-            abandon = { order += "abandon:$it" },
-        )
-
-        assertFalse(admitted)
-        assertEquals(listOf("persist", "abandon:ticket"), order)
-    }
-
-    @Test
-    fun durableExceptionAbandonsAdmissionAndPreservesFailure() = runTest {
-        val order = mutableListOf<String>()
-        val failure = IllegalStateException("durable write failed")
-
-        val actual = assertFailsWith<IllegalStateException> {
-            awaitPersistedCallCaptureAdmission(
-                begin = { "ticket" },
-                persist = { throw failure },
-                start = { order += "start" },
-                await = { order += "await"; true },
-                abandon = { order += "abandon:$it" },
+        val actual = assertFailsWith<ActiveCallRecoveryException> {
+            applyCallCapturePreference(
+                requestedEnabled = true,
+                admission = CallCaptureDecision.Start,
+                rollbackOnEnableFailure = { mutationStarted },
+                disableGracefully = { rollbackCalls += 1 },
+                enable = {
+                    orchestrateCallCaptureEnablement<String>(
+                        awaitShutdownRelease = { throw failure },
+                        markMutationStarted = { mutationStarted = true },
+                        decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                        persistEnabled = { error("pre-mutation failure must not persist") },
+                        decideServiceStart = { error("pre-mutation failure needs no policy") },
+                        beginAdmission = { error("pre-mutation failure needs no admission") },
+                        startService = { _, _ -> error("pre-mutation failure must not start") },
+                        awaitAdmission = { error("pre-mutation failure has no admission result") },
+                        abandonAdmission = { error("pre-mutation failure has no admission to abandon") },
+                    )
+                },
             )
         }
 
         assertSame(failure, actual)
-        assertEquals(listOf("abandon:ticket"), order)
+        assertFalse(mutationStarted)
+        assertEquals(0, rollbackCalls)
+    }
+
+    @Test
+    fun postMutationFailureStillRollsBack() = runTest {
+        val failure = IllegalStateException("service policy failed")
+        var mutationStarted = false
+        var rollbackCalls = 0
+
+        val actual = assertFailsWith<IllegalStateException> {
+            applyCallCapturePreference(
+                requestedEnabled = true,
+                admission = CallCaptureDecision.Start,
+                rollbackOnEnableFailure = { mutationStarted },
+                disableGracefully = { rollbackCalls += 1 },
+                enable = {
+                    orchestrateCallCaptureEnablement<String>(
+                        awaitShutdownRelease = {},
+                        markMutationStarted = { mutationStarted = true },
+                        decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                        persistEnabled = { true },
+                        decideServiceStart = { throw failure },
+                        beginAdmission = { error("failed policy needs no admission") },
+                        startService = { _, _ -> error("failed policy must not start") },
+                        awaitAdmission = { error("failed policy has no admission result") },
+                        abandonAdmission = { error("failed policy has no admission to abandon") },
+                    )
+                },
+            )
+        }
+
+        assertSame(failure, actual)
+        assertTrue(mutationStarted)
+        assertEquals(1, rollbackCalls)
+    }
+
+    @Test
+    fun newerDisableWinsWhenInvokedDuringOlderEnablePersistence() = runTest {
+        var durableEnabled = false
+        val gate = CallCapturePreferenceRequestGate()
+        val enableRequest = gate.newRequest()
+        val enablePersistenceStarted = CompletableDeferred<Unit>()
+        val allowEnablePersistenceToFinish = CompletableDeferred<Unit>()
+
+        val enable = async {
+            gate.runLatest(
+                request = enableRequest,
+                readCurrent = { durableEnabled },
+                operation = {
+                    applyCallCapturePreference(
+                        requestedEnabled = true,
+                        admission = CallCaptureDecision.Start,
+                        mutateIfCurrent = { mutation ->
+                            gate.mutateIfCurrent(enableRequest, mutation)
+                        },
+                        disableGracefully = { durableEnabled = false },
+                        enable = {
+                            orchestrateCallCaptureEnablement(
+                                awaitShutdownRelease = {},
+                                mutateIfCurrent = { mutation ->
+                                    gate.mutateIfCurrent(enableRequest, mutation)
+                                },
+                                decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                                persistEnabled = {
+                                    enablePersistenceStarted.complete(Unit)
+                                    allowEnablePersistenceToFinish.await()
+                                    durableEnabled = true
+                                    true
+                                },
+                                decideServiceStart = { ServiceStartDecision.Stop("disabled") },
+                                beginAdmission = { error("deferred enable needs no admission") },
+                                startService = { _, _ -> error("deferred enable must not start") },
+                                awaitAdmission = { error("deferred enable has no admission result") },
+                                abandonAdmission = { error("deferred enable has no admission to abandon") },
+                            )
+                        },
+                    )
+                },
+            )
+        }
+
+        enablePersistenceStarted.await()
+        val disableRequest = gate.newRequest()
+        val disable = async {
+            gate.runLatest(
+                request = disableRequest,
+                readCurrent = { durableEnabled },
+                operation = {
+                    gate.mutateIfCurrent(disableRequest) {
+                        durableEnabled = false
+                    }
+                    false
+                },
+            )
+        }
+
+        runCurrent()
+        assertFalse(disable.isCompleted)
+        allowEnablePersistenceToFinish.complete(Unit)
+
+        withTimeout(1_000) {
+            assertFalse(enable.await())
+            assertFalse(disable.await())
+        }
+        assertFalse(durableEnabled)
+    }
+
+    @Test
+    fun newerDisableRepairsFailedShutdownWhileOlderEnableIsWaiting() = runTest {
+        var durableEnabled = true
+        var staleRollbackCalls = 0
+        val gate = CallCapturePreferenceRequestGate()
+        val enableRequest = gate.newRequest()
+        val enableIsWaiting = CompletableDeferred<Unit>()
+        val shutdownRelease = CompletableDeferred<Unit>()
+
+        val enable = async {
+            gate.runLatest(
+                request = enableRequest,
+                readCurrent = { durableEnabled },
+                operation = {
+                    applyCallCapturePreference(
+                        requestedEnabled = true,
+                        admission = CallCaptureDecision.Start,
+                        mutateIfCurrent = { mutation ->
+                            gate.mutateIfCurrent(enableRequest, mutation)
+                        },
+                        disableGracefully = {
+                            staleRollbackCalls += 1
+                            durableEnabled = false
+                        },
+                        enable = {
+                            orchestrateCallCaptureEnablement(
+                                awaitShutdownRelease = {
+                                    enableIsWaiting.complete(Unit)
+                                    shutdownRelease.await()
+                                },
+                                requestIsCurrent = { gate.isCurrent(enableRequest) },
+                                mutateIfCurrent = { mutation ->
+                                    gate.mutateIfCurrent(enableRequest, mutation)
+                                },
+                                decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                                persistEnabled = {
+                                    durableEnabled = true
+                                    true
+                                },
+                                decideServiceStart = { ServiceStartDecision.Stop("disabled") },
+                                beginAdmission = { error("superseded enable needs no admission") },
+                                startService = { _, _ -> error("superseded enable must not start") },
+                                awaitAdmission = { error("superseded enable has no admission result") },
+                                abandonAdmission = { error("superseded enable has no admission to abandon") },
+                            )
+                        },
+                    )
+                },
+            )
+        }
+
+        enableIsWaiting.await()
+        val disableRequest = gate.newRequest()
+        val disable = async {
+            gate.runLatest(
+                request = disableRequest,
+                readCurrent = { durableEnabled },
+                operation = {
+                    durableEnabled = false
+                    shutdownRelease.complete(Unit)
+                    false
+                },
+            )
+        }
+
+        withTimeout(1_000) {
+            assertFalse(disable.await())
+            assertFalse(enable.await())
+        }
+        assertFalse(durableEnabled)
+        assertEquals(0, staleRollbackCalls)
+    }
+
+    @Test
+    fun earlierDisableThatStartsLateCannotOverwriteNewerEnable() = runTest {
+        var durableEnabled = false
+        val gate = CallCapturePreferenceRequestGate()
+        val earlierDisable = gate.newRequest()
+        val newerEnable = gate.newRequest()
+
+        val enableResult = gate.runLatest(
+            request = newerEnable,
+            readCurrent = { durableEnabled },
+            operation = {
+                durableEnabled = true
+                true
+            },
+        )
+        val staleDisableResult = gate.runLatest(
+            request = earlierDisable,
+            readCurrent = { durableEnabled },
+            operation = {
+                durableEnabled = false
+                false
+            },
+        )
+
+        assertTrue(enableResult)
+        assertTrue(staleDisableResult)
+        assertTrue(durableEnabled)
+    }
+
+    @Test
+    fun concurrentServiceStartThatObservedFalseIsNotifiedAfterDurableEnable() = runTest {
+        var durableEnabled = false
+        val letConcurrentStartRead = CompletableDeferred<Unit>()
+        val concurrentStartObserved = CompletableDeferred<Boolean>()
+        val order = mutableListOf<String>()
+        val concurrentStart = launch {
+            letConcurrentStartRead.await()
+            concurrentStartObserved.complete(durableEnabled)
+        }
+
+        val enabled = orchestrateCallCaptureEnablement(
+            awaitShutdownRelease = { order += "await-shutdown-release" },
+            decideCallCaptureAdmission = { CallCaptureDecision.Start },
+            persistEnabled = {
+                letConcurrentStartRead.complete(Unit)
+                assertFalse(concurrentStartObserved.await())
+                durableEnabled = true
+                order += "persist-enabled"
+                true
+            },
+            decideServiceStart = {
+                order += "decide-service-start"
+                ServiceStartPolicy.decide(
+                    intentAction = null,
+                    persisted = ServiceConfig(
+                        enabled = true,
+                        callCaptureEnabled = durableEnabled,
+                    ),
+                    paired = true,
+                    lanBound = true,
+                )
+            },
+            beginAdmission = {
+                order += "begin-admission"
+                "ticket"
+            },
+            startService = { start, ticket ->
+                assertEquals(ServiceStartDecision.Start(relayUrl = null, lanBound = true), start)
+                assertEquals("ticket", ticket)
+                assertTrue(durableEnabled)
+                order += "notify-service"
+            },
+            awaitAdmission = {
+                assertEquals("ticket", it)
+                order += "await-admission"
+                true
+            },
+            abandonAdmission = { order += "abandon:$it" },
+        )
+
+        concurrentStart.join()
+        assertTrue(enabled)
+        assertEquals(
+            listOf(
+                "await-shutdown-release",
+                "persist-enabled",
+                "decide-service-start",
+                "begin-admission",
+                "notify-service",
+                "await-admission",
+            ),
+            order,
+        )
+    }
+
+    @Test
+    fun newerEnablePersistsOnlyAfterEarlierDisableReleasesShutdown() = runTest {
+        var durableEnabled = true
+        val allowEarlierDisableToPersist = CompletableDeferred<Unit>()
+        val earlierDisable = launch {
+            allowEarlierDisableToPersist.await()
+            durableEnabled = false
+        }
+        val order = mutableListOf<String>()
+
+        val enabled = orchestrateCallCaptureEnablement(
+            awaitShutdownRelease = {
+                allowEarlierDisableToPersist.complete(Unit)
+                earlierDisable.join()
+                order += "earlier-disable-complete"
+            },
+            decideCallCaptureAdmission = { CallCaptureDecision.Start },
+            persistEnabled = {
+                durableEnabled = true
+                order += "persist-newer-enable"
+                true
+            },
+            decideServiceStart = { ServiceStartDecision.Stop("disabled") },
+            beginAdmission = { error("deferred preference needs no admission") },
+            startService = { _, _ -> error("deferred preference must not start service") },
+            awaitAdmission = { error("deferred preference needs no admission result") },
+            abandonAdmission = { error("deferred preference has no admission to abandon") },
+        )
+
+        if (!earlierDisable.isCompleted) {
+            allowEarlierDisableToPersist.complete(Unit)
+            earlierDisable.join()
+        }
+        assertTrue(enabled)
+        assertTrue(durableEnabled)
+        assertEquals(
+            listOf("earlier-disable-complete", "persist-newer-enable"),
+            order,
+        )
+    }
+
+    @Test
+    fun permissionRevokedDuringShutdownWaitCannotPersistDeferredOptIn() = runTest {
+        var permissionGranted = true
+        var persisted = false
+        val order = mutableListOf<String>()
+
+        val enabled = orchestrateCallCaptureEnablement(
+            awaitShutdownRelease = {
+                order += "await-shutdown-release"
+                permissionGranted = false
+            },
+            decideCallCaptureAdmission = {
+                order += "revalidate-capability"
+                CallCapturePolicy.decide(
+                    enabled = true,
+                    capabilities = CallSourceCapabilities(
+                        supported = true,
+                        permissionGranted = permissionGranted,
+                    ),
+                )
+            },
+            persistEnabled = {
+                persisted = true
+                true
+            },
+            decideServiceStart = { ServiceStartDecision.Stop("disabled") },
+            beginAdmission = { error("denied capture must not begin admission") },
+            startService = { _, _ -> error("denied capture must not start service") },
+            awaitAdmission = { error("denied capture has no admission result") },
+            abandonAdmission = { error("denied capture has no admission to abandon") },
+        )
+
+        assertFalse(enabled)
+        assertFalse(persisted)
+        assertEquals(listOf("await-shutdown-release", "revalidate-capability"), order)
+    }
+
+    @Test
+    fun durableFalseSkipsDecisionAdmissionAndServiceStart() = runTest {
+        val order = mutableListOf<String>()
+
+        val admitted = orchestrateCallCaptureEnablement(
+            awaitShutdownRelease = { order += "await-shutdown-release" },
+            decideCallCaptureAdmission = { CallCaptureDecision.Start },
+            persistEnabled = { order += "persist"; false },
+            decideServiceStart = { error("durable false must skip the start decision") },
+            beginAdmission = { error("durable false must skip admission") },
+            startService = { _, _ -> error("durable false must skip service start") },
+            awaitAdmission = { error("durable false must skip admission result") },
+            abandonAdmission = { error("durable false has no admission to abandon") },
+        )
+
+        assertFalse(admitted)
+        assertEquals(listOf("await-shutdown-release", "persist"), order)
+    }
+
+    @Test
+    fun durableExceptionSkipsAdmissionAndPreservesFailure() = runTest {
+        val order = mutableListOf<String>()
+        val failure = IllegalStateException("durable write failed")
+
+        val actual = assertFailsWith<IllegalStateException> {
+            orchestrateCallCaptureEnablement(
+                awaitShutdownRelease = { order += "await-shutdown-release" },
+                decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                persistEnabled = { throw failure },
+                decideServiceStart = { error("failed persistence must skip the start decision") },
+                beginAdmission = { error("failed persistence must skip admission") },
+                startService = { _, _ -> error("failed persistence must skip service start") },
+                awaitAdmission = { error("failed persistence must skip admission result") },
+                abandonAdmission = { error("failed persistence has no admission to abandon") },
+            )
+        }
+
+        assertSame(failure, actual)
+        assertEquals(listOf("await-shutdown-release"), order)
     }
 
     @Test
@@ -68,7 +469,6 @@ class TwinotifyCoreModuleWorkflowTest {
         val enabled = applyCallCapturePreference(
             requestedEnabled = true,
             admission = CallCaptureDecision.Disabled("call_permission_denied"),
-            serviceCanStart = true,
             disableGracefully = { order += "disable" },
             enable = { order += "enable"; true },
         )
@@ -84,7 +484,6 @@ class TwinotifyCoreModuleWorkflowTest {
         val enabled = applyCallCapturePreference(
             requestedEnabled = true,
             admission = CallCaptureDecision.Start,
-            serviceCanStart = true,
             disableGracefully = { order += "disable" },
             enable = { order += "enable"; true },
         )
@@ -100,7 +499,6 @@ class TwinotifyCoreModuleWorkflowTest {
         val enabled = applyCallCapturePreference(
             requestedEnabled = true,
             admission = CallCaptureDecision.Start,
-            serviceCanStart = true,
             disableGracefully = { order += "disable" },
             enable = { order += "await-admission"; false },
         )
@@ -110,19 +508,60 @@ class TwinotifyCoreModuleWorkflowTest {
     }
 
     @Test
-    fun serviceDisabledCannotPersistOrReportCallCaptureEnabled() = runTest {
+    fun serviceDisabledPersistsAndReportsDeferredCallCapturePreference() = runTest {
         val order = mutableListOf<String>()
 
         val enabled = applyCallCapturePreference(
             requestedEnabled = true,
             admission = CallCaptureDecision.Start,
-            serviceCanStart = false,
             disableGracefully = { order += "disable" },
-            enable = { order += "enable"; true },
+            enable = {
+                orchestrateCallCaptureEnablement(
+                    awaitShutdownRelease = { order += "await-shutdown-release" },
+                    decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                    persistEnabled = { order += "persist-deferred-preference"; true },
+                    decideServiceStart = {
+                        order += "decide-service-start"
+                        ServiceStartPolicy.decide(
+                            intentAction = null,
+                            persisted = ServiceConfig(
+                                enabled = false,
+                                callCaptureEnabled = true,
+                            ),
+                            paired = true,
+                            lanBound = true,
+                        )
+                    },
+                    beginAdmission = { error("disabled service must defer admission") },
+                    startService = { _, _ -> error("disabled service must not start") },
+                    awaitAdmission = { error("disabled service has no admission result") },
+                    abandonAdmission = { error("disabled service has no admission to abandon") },
+                )
+            },
         )
 
-        assertFalse(enabled)
-        assertEquals(listOf("disable"), order)
+        assertEquals(true, enabled)
+        assertEquals(
+            listOf(
+                "await-shutdown-release",
+                "persist-deferred-preference",
+                "decide-service-start",
+            ),
+            order,
+        )
+    }
+
+    @Test
+    fun getCallCaptureEnabledReturnsDurablePreferenceWithoutLifecycleMutation() = runTest {
+        var reads = 0
+
+        val enabled = readCallCapturePreference {
+            reads += 1
+            true
+        }
+
+        assertTrue(enabled)
+        assertEquals(1, reads)
     }
 
     @Test
@@ -132,7 +571,6 @@ class TwinotifyCoreModuleWorkflowTest {
         val enabled = applyCallCapturePreference(
             requestedEnabled = true,
             admission = CallCaptureDecision.Disabled("call_telephony_unsupported"),
-            serviceCanStart = true,
             disableGracefully = { order += "disable" },
             enable = { order += "enable"; true },
         )
@@ -142,57 +580,133 @@ class TwinotifyCoreModuleWorkflowTest {
     }
 
     @Test
-    fun missingConfiguredRouteCannotPersistOrReportCallCaptureEnabled() = runTest {
+    fun missingConfiguredRoutePersistsDeferredCallCapturePreference() = runTest {
         val order = mutableListOf<String>()
 
         val enabled = applyCallCapturePreference(
             requestedEnabled = true,
             admission = CallCaptureDecision.Start,
-            serviceCanStart = false,
             disableGracefully = { order += "disable" },
-            enable = { order += "enable"; true },
+            enable = {
+                orchestrateCallCaptureEnablement(
+                    awaitShutdownRelease = { order += "await-shutdown-release" },
+                    decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                    persistEnabled = { order += "persist-deferred-preference"; true },
+                    decideServiceStart = {
+                        order += "decide-service-start"
+                        ServiceStartPolicy.decide(
+                            intentAction = null,
+                            persisted = ServiceConfig(
+                                enabled = true,
+                                callCaptureEnabled = true,
+                            ),
+                            paired = true,
+                            lanBound = false,
+                        )
+                    },
+                    beginAdmission = { error("missing route must defer admission") },
+                    startService = { _, _ -> error("missing route must not start service") },
+                    awaitAdmission = { error("missing route has no admission result") },
+                    abandonAdmission = { error("missing route has no admission to abandon") },
+                )
+            },
         )
 
-        assertFalse(enabled)
-        assertEquals(listOf("disable"), order)
+        assertEquals(true, enabled)
+        assertEquals(
+            listOf(
+                "await-shutdown-release",
+                "persist-deferred-preference",
+                "decide-service-start",
+            ),
+            order,
+        )
     }
 
     @Test
-    fun failedServiceRestartSelfHealsPersistedCallPreferenceOff() = runTest {
+    fun failedServiceRestartAbandonsAdmissionAndRollsPreferenceBackOff() = runTest {
         val order = mutableListOf<String>()
 
         assertFailsWith<IllegalStateException> {
             applyCallCapturePreference(
                 requestedEnabled = true,
                 admission = CallCaptureDecision.Start,
-                serviceCanStart = true,
                 disableGracefully = { order += "disable" },
                 enable = {
-                    order += "enable"
-                    throw IllegalStateException("service start rejected")
+                    orchestrateCallCaptureEnablement(
+                        awaitShutdownRelease = { order += "await-shutdown-release" },
+                        decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                        persistEnabled = { order += "persist-enabled"; true },
+                        decideServiceStart = {
+                            order += "decide-service-start"
+                            ServiceStartDecision.Start(relayUrl = null, lanBound = true)
+                        },
+                        beginAdmission = { order += "begin-admission"; "ticket" },
+                        startService = { _, _ ->
+                            order += "start-service"
+                            throw IllegalStateException("service start rejected")
+                        },
+                        awaitAdmission = { error("failed start has no admission result") },
+                        abandonAdmission = { order += "abandon:$it" },
+                    )
                 },
             )
         }
 
-        assertEquals(listOf("enable", "disable"), order)
+        assertEquals(
+            listOf(
+                "await-shutdown-release",
+                "persist-enabled",
+                "decide-service-start",
+                "begin-admission",
+                "start-service",
+                "abandon:ticket",
+                "disable",
+            ),
+            order,
+        )
     }
 
     @Test
     fun enableCancellationKeepsIdentityEvenWhenRollbackAlsoFails() = runTest {
         val cancellation = CancellationException("cancel enable")
+        val order = mutableListOf<String>()
 
         val actual = assertFailsWith<CancellationException> {
             applyCallCapturePreference(
                 requestedEnabled = true,
                 admission = CallCaptureDecision.Start,
-                serviceCanStart = true,
                 disableGracefully = { throw IllegalStateException("rollback failed") },
-                enable = { throw cancellation },
+                enable = {
+                    orchestrateCallCaptureEnablement(
+                        awaitShutdownRelease = { order += "await-shutdown-release" },
+                        decideCallCaptureAdmission = { CallCaptureDecision.Start },
+                        persistEnabled = { order += "persist-enabled"; true },
+                        decideServiceStart = {
+                            order += "decide-service-start"
+                            ServiceStartDecision.Start(relayUrl = null, lanBound = true)
+                        },
+                        beginAdmission = { order += "begin-admission"; "ticket" },
+                        startService = { _, _ -> throw cancellation },
+                        awaitAdmission = { error("cancelled start has no admission result") },
+                        abandonAdmission = { order += "abandon:$it" },
+                    )
+                },
             )
         }
 
         assertSame(cancellation, actual)
         assertEquals("rollback failed", actual.suppressed.single().message)
+        assertEquals(
+            listOf(
+                "await-shutdown-release",
+                "persist-enabled",
+                "decide-service-start",
+                "begin-admission",
+                "abandon:ticket",
+            ),
+            order,
+        )
     }
     @Test
     fun lanOnlyConfigIsPersistedBeforeServiceAdmission() = runTest {

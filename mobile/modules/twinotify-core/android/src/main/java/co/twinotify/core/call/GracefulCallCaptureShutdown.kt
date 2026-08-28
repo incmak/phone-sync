@@ -5,8 +5,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 
 internal const val CALL_SHUTDOWN_FAILED = "call_shutdown_failed"
 internal const val CALL_SHUTDOWN_STALE = "call_shutdown_stale"
@@ -117,6 +120,7 @@ internal class GracefulCallShutdownGate(
     private var acceptingIntents = false
     private var managedPersistenceUsed = false
     private var sealedIntent: CallShutdownConfigIntent? = null
+    private var retainedFailureCode: String? = null
     private var releaseSignal = completedSignal()
 
     @Synchronized
@@ -159,6 +163,8 @@ internal class GracefulCallShutdownGate(
                 if (result == GracefulCallShutdownResult.Completed) {
                     if (!managedPersistenceUsed) coveredIntent = coveredIntent.mergedWith(intent)
                     generation.releaseAdmission = coveredIntent.covers(intent)
+                } else if (result is GracefulCallShutdownResult.Failed) {
+                    retainedFailureCode = result.code
                 }
                 acceptingIntents = false
             }
@@ -179,6 +185,9 @@ internal class GracefulCallShutdownGate(
         generation.deferred.invokeOnCompletion { failure ->
             var promote: ShutdownGeneration? = null
             synchronized(this) {
+                if (failure != null && retainedFailureCode == null) {
+                    retainedFailureCode = CALL_SHUTDOWN_FAILED
+                }
                 if (active === generation) {
                     active = null
                     val successor = queued
@@ -193,6 +202,7 @@ internal class GracefulCallShutdownGate(
                         acceptingIntents = false
                         managedPersistenceUsed = false
                         sealedIntent = null
+                        retainedFailureCode = null
                         reserved = false
                         releaseSignal.complete(Unit)
                     }
@@ -236,6 +246,37 @@ internal class GracefulCallShutdownGate(
             releaseSignal
         }
         signal.await()
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    suspend fun awaitReleaseForEnable() {
+        while (true) {
+            val generation = synchronized(this) {
+                if (!reserved) return
+                active ?: throw ActiveCallRecoveryException(
+                    retainedFailureCode ?: CALL_SHUTDOWN_FAILED,
+                )
+            }
+            val result = try {
+                generation.deferred.await()
+            } catch (cancellation: CancellationException) {
+                val completedCancellation = if (generation.deferred.isCompleted) {
+                    generation.deferred.getCompletionExceptionOrNull() as? CancellationException
+                } else {
+                    null
+                }
+                if (completedCancellation == null) {
+                    // Read the cancellation recorded by this waiter without stack recovery.
+                    currentCoroutineContext().ensureActive()
+                }
+                throw (completedCancellation ?: cancellation)
+            }
+            when (result) {
+                GracefulCallShutdownResult.Completed -> Unit
+                is GracefulCallShutdownResult.Failed ->
+                    throw ActiveCallRecoveryException(result.code)
+            }
+        }
     }
 
     private companion object {

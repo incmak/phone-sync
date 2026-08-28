@@ -111,7 +111,7 @@ class ServiceLifecycleTest {
         assertSourceOrder(
             enableBlock,
             "::beginCallCaptureAdmission",
-            "putExtra(\n                                                co.twinotify.core.service.SyncService.EXTRA_CALL_CAPTURE_ADMISSION_GENERATION",
+            "co.twinotify.core.service.SyncService.EXTRA_CALL_CAPTURE_ADMISSION_GENERATION",
             "admissionTicket.generation",
             "ctx.startForegroundService(intent)",
             "::awaitCallCaptureAdmission",
