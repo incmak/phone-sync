@@ -137,3 +137,68 @@ data class SnapshotStage(
     val payloadJson: String,
     val receivedAt: Long,
 )
+
+@Entity(
+    tableName = "action_invocation",
+    indices = [Index("canonId"), Index("state"), Index("expiresAt")],
+)
+data class ActionInvocation(
+    @PrimaryKey val invocationId: String,
+    val canonId: String,
+    val actionId: String,
+    val notificationSequence: Long,
+    val replyText: String?,
+    val state: String,
+    val createdAt: Long,
+    val expiresAt: Long,
+    val updatedAt: Long,
+) {
+    init {
+        require(state in ACTION_INVOCATION_STATES)
+    }
+
+    private companion object {
+        val ACTION_INVOCATION_STATES = setOf(
+            "PENDING",
+            "DISPATCHED",
+            "OUTCOME_UNKNOWN",
+            "FAILED",
+            "ACTION_GONE",
+            "NOTIFICATION_GONE",
+            "EXPIRED",
+        )
+    }
+}
+
+@Entity(
+    tableName = "action_execution",
+    indices = [Index("state"), Index("claimedAt"), Index("completedAt")],
+)
+data class ActionExecution(
+    @PrimaryKey val invocationId: String,
+    val canonId: String,
+    val actionId: String,
+    val state: String,
+    val resultStatus: String?,
+    val claimedAt: Long,
+    val completedAt: Long?,
+) {
+    init {
+        require(state == "CLAIMED" || state == "COMPLETED")
+        require((state == "CLAIMED") == (resultStatus == null && completedAt == null))
+    }
+}
+
+@Entity(
+    tableName = "notification_detail_cache",
+    indices = [Index(value = ["canonId"], unique = true), Index("cancelledAt")],
+)
+data class NotificationDetailCache(
+    @PrimaryKey val detailId: String,
+    val canonId: String,
+    val payloadJson: String,
+    val originDevice: String,
+    val receivedAt: Long,
+    val updatedAt: Long,
+    val cancelledAt: Long?,
+)

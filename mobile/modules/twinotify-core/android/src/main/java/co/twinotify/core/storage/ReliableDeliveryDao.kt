@@ -153,6 +153,47 @@ interface LegacyOutboxStore {
 @Dao
 abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Insert(onConflict = OnConflictStrategy.ABORT)
+    abstract suspend fun insertActionInvocation(row: ActionInvocation)
+
+    @Query("SELECT * FROM action_invocation WHERE invocationId=:invocationId")
+    abstract suspend fun actionInvocation(invocationId: String): ActionInvocation?
+
+    @Query(
+        "UPDATE action_invocation SET state=:state, replyText=NULL, updatedAt=:now " +
+            "WHERE invocationId=:invocationId AND state='PENDING'",
+    )
+    abstract suspend fun terminalizeActionInvocation(
+        invocationId: String,
+        state: String,
+        now: Long,
+    ): Int
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    abstract suspend fun insertActionExecution(row: ActionExecution)
+
+    @Query("SELECT * FROM action_execution WHERE invocationId=:invocationId")
+    abstract suspend fun actionExecution(invocationId: String): ActionExecution?
+
+    @Query(
+        "UPDATE action_execution SET state='COMPLETED', resultStatus=:status, completedAt=:now " +
+            "WHERE invocationId=:invocationId AND state='CLAIMED'",
+    )
+    abstract suspend fun completeActionExecutionClaim(
+        invocationId: String,
+        status: String,
+        now: Long,
+    ): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun putNotificationDetail(row: NotificationDetailCache)
+
+    @Query("SELECT * FROM notification_detail_cache WHERE detailId=:detailId")
+    abstract suspend fun notificationDetail(detailId: String): NotificationDetailCache?
+
+    @Query("SELECT * FROM notification_detail_cache WHERE canonId=:canonId")
+    abstract suspend fun notificationDetailForCanon(canonId: String): NotificationDetailCache?
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insertOutbound(row: OutboundMessage)
 
     @Query(
@@ -248,6 +289,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         clearUiActivityEvents()
         clearSnapshotStages()
         clearMaterializationRetries()
+        clearActionInvocations()
+        clearActionExecutions()
+        clearNotificationDetails()
     }
 
     @Query("DELETE FROM outbound_message")
@@ -266,6 +310,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     protected abstract suspend fun clearSnapshotStages()
     @Query("DELETE FROM materialization_retry")
     protected abstract suspend fun clearMaterializationRetries()
+    @Query("DELETE FROM action_invocation")
+    protected abstract suspend fun clearActionInvocations()
+    @Query("DELETE FROM action_execution")
+    protected abstract suspend fun clearActionExecutions()
+    @Query("DELETE FROM notification_detail_cache")
+    protected abstract suspend fun clearNotificationDetails()
 
     @Query(
         "UPDATE outbound_message SET state='ACCEPTED', custodyAcceptedAt=:acceptedAt, " +

@@ -263,6 +263,49 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate8To9_preservesHistoryAndAddsActionJournalsAndDetailCache() {
+        helper.createDatabase(TEST_DB_V9, 8).apply {
+            execSQL(
+                "INSERT INTO activity_event(" +
+                    "eventId,msgId,packageName,eventType,status,byteSize,occurredAt,detailCode) " +
+                    "VALUES('before-v9','message-9','example.messages','notif.post','applied',24,1000,NULL)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB_V9, 9, true, MIGRATION_8_9)
+        db.query("SELECT COUNT(*) FROM activity_event WHERE eventId='before-v9'").use { row ->
+            assertTrue(row.moveToFirst())
+            assertEquals(1, row.getInt(0))
+        }
+        val expectedIndices = mapOf(
+            "action_invocation" to setOf(
+                "index_action_invocation_canonId",
+                "index_action_invocation_state",
+                "index_action_invocation_expiresAt",
+            ),
+            "action_execution" to setOf(
+                "index_action_execution_state",
+                "index_action_execution_claimedAt",
+                "index_action_execution_completedAt",
+            ),
+            "notification_detail_cache" to setOf(
+                "index_notification_detail_cache_canonId",
+                "index_notification_detail_cache_cancelledAt",
+            ),
+        )
+        expectedIndices.forEach { (table, expected) ->
+            db.query("PRAGMA index_list('$table')").use { rows ->
+                val names = buildSet {
+                    while (rows.moveToNext()) add(rows.getString(rows.getColumnIndexOrThrow("name")))
+                }
+                assertTrue(expected.all(names::contains), "$table indices: $names")
+            }
+        }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
         const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"
@@ -270,5 +313,6 @@ class ReliableDeliveryMigrationTest {
         const val TEST_DB_V6 = "reliable-delivery-migration-v6-test"
         const val TEST_DB_V7 = "reliable-delivery-migration-v7-test"
         const val TEST_DB_V8 = "reliable-delivery-migration-v8-test"
+        const val TEST_DB_V9 = "reliable-delivery-migration-v9-test"
     }
 }

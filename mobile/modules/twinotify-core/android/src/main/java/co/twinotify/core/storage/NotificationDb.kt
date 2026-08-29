@@ -192,6 +192,57 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
     }
 }
 
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS action_invocation (
+                invocationId TEXT NOT NULL PRIMARY KEY,
+                canonId TEXT NOT NULL,
+                actionId TEXT NOT NULL,
+                notificationSequence INTEGER NOT NULL,
+                replyText TEXT,
+                state TEXT NOT NULL,
+                createdAt INTEGER NOT NULL,
+                expiresAt INTEGER NOT NULL,
+                updatedAt INTEGER NOT NULL)""",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_action_invocation_canonId ON action_invocation(canonId)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_action_invocation_state ON action_invocation(state)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_action_invocation_expiresAt ON action_invocation(expiresAt)")
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS action_execution (
+                invocationId TEXT NOT NULL PRIMARY KEY,
+                canonId TEXT NOT NULL,
+                actionId TEXT NOT NULL,
+                state TEXT NOT NULL,
+                resultStatus TEXT,
+                claimedAt INTEGER NOT NULL,
+                completedAt INTEGER)""",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_action_execution_state ON action_execution(state)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_action_execution_claimedAt ON action_execution(claimedAt)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_action_execution_completedAt ON action_execution(completedAt)")
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS notification_detail_cache (
+                detailId TEXT NOT NULL PRIMARY KEY,
+                canonId TEXT NOT NULL,
+                payloadJson TEXT NOT NULL,
+                originDevice TEXT NOT NULL,
+                receivedAt INTEGER NOT NULL,
+                updatedAt INTEGER NOT NULL,
+                cancelledAt INTEGER)""",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS index_notification_detail_cache_canonId " +
+                "ON notification_detail_cache(canonId)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_notification_detail_cache_cancelledAt " +
+                "ON notification_detail_cache(cancelledAt)",
+        )
+    }
+}
+
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
 
@@ -213,6 +264,7 @@ object NotificationDb {
             MIGRATION_5_6,
             MIGRATION_6_7,
             MIGRATION_7_8,
+            MIGRATION_8_9,
         ).build().also { instance = it }
     }
 }
@@ -231,8 +283,11 @@ object NotificationDb {
         UiActivityEvent::class,
         SnapshotStage::class,
         MaterializationRetry::class,
+        ActionInvocation::class,
+        ActionExecution::class,
+        NotificationDetailCache::class,
     ],
-    version = 8,
+    version = 9,
 )
 abstract class NotificationDbImpl : RoomDatabase() {
     abstract fun notificationMapDao(): NotificationMapDao
