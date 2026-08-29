@@ -73,7 +73,7 @@ Docker build context is the **repo root** with `dockerfile: relay/Dockerfile` (t
 
 `proto/` holds both generations. **v1** (`packet.schema.json`, `envelope-encrypted.schema.json` with `v:1`) is online-only passthrough: the relay forwards to a live peer or fails. **v2** (`inner-event-v2.schema.json`, `peer-receipt.schema.json`, `relay-control.schema.json`) adds an authenticated inner packet (`msg_id`, `canon_id`, `sequence`, `expires_at` inside the ciphertext), a durable relay mailbox, and end-to-end peer receipts.
 
-Current state: **the relay and Android both implement v1 + v2**. Android advertises `[2,1]` with `relay.hello`, sends durable v2 envelopes with `relay.put`, authenticates inner events, stores inbound/outbound state in Room version 5 under a route-neutral custody column (`custodyAcceptedAt`/`custodyRoute`), materializes desired notification/call state, and emits peer receipts. The deprecated DataStore replay guard and legacy outbound queue remain only for v1 compatibility/migration; do not route new reliable-delivery work through them.
+Current state: **the relay and Android both implement v1 + v2**. Android advertises `[2,1]` with `relay.hello`, sends durable v2 envelopes with `relay.put`, authenticates inner events, stores inbound/outbound state in Room version 8 under a route-neutral custody column (`custodyAcceptedAt`/`custodyRoute`), materializes desired notification/call state, and emits peer receipts. The deprecated DataStore replay guard and legacy outbound queue remain only for v1 compatibility/migration; do not route new reliable-delivery work through them.
 
 Frames (`relay/internal/server/relay_frame.go`): in — `relay.hello`, `relay.put`, `relay.ack`; out — `relay.accepted`, `relay.deliver`, `relay.rejected`, `relay.expired`, `relay.capabilities`, `relay.legacy_forwarded`. Once both devices advertise `[2,1]` the relay records a protocol floor of 2 per pair and refuses v1 frames for it, so a downgrade cannot be forced.
 
@@ -112,8 +112,8 @@ Kotlin flow: `TwinotifyNotificationListener` captures → filters → `OutboundQ
 - **`relay/internal/server/schemas/` is generated.** Never edit or commit it; edit `proto/` and re-run `make sync-proto`.
 - **Mirror-dismiss ordering:** `PendingPeerCancel.add` must run **before** `NotificationManager.cancel` in `MirrorDismisser`. Reversed, the listener's `onNotificationRemoved` misses the tombstone and emits a spurious `notif.cancel` back to the origin — an echo loop.
 - **`OutboundQueue.enqueue` goes through `enqueueCapped(@Transaction)`.** Bypassing it loses the atomic cap check.
-- **`SyncService.flushQueue` holds `flushMutex`.** Any new drain path must take the same mutex or messages send twice.
-- **Room is at version 5.** New entity → version 6 + an explicit `Migration(5,6)` registered in `NotificationDb.addMigrations(...)`, plus a committed `schemas/.../6.json`. Never `fallbackToDestructiveMigration()`; it wipes paired state.
+- **`TransportCoordinator.pump` is the single outbox drainer.** Exactly one granted route session (LAN or relay) owns `OutboxRepository.sendable` at a time; any new drain path must go through the coordinator or messages send twice. (`SyncService.flushQueue`/`flushMutex` no longer exist.)
+- **Room is at version 8.** New entity → version 9 + an explicit `Migration(8,9)` registered in `NotificationDb.addMigrations(...)`, plus a committed `schemas/.../9.json`. Never `fallbackToDestructiveMigration()`; it wipes paired state.
 - **Nonce counter is monotonic.** Reset only on `unpair()`/`regenerate()`. Reset + same random prefix = nonce reuse.
 - **libsodium JNA on Android is snake_case** (`sodium.crypto_box_easy`, `crypto_sign_detached`), and the Ed25519 secret key is **64 bytes** (seed‖pubkey), not 32.
 - **`ws.go` safety scaffolding** (`SetReadLimit`, pong handler + read deadlines, write mutex, ping goroutine) was clobbered once by a rewrite. Make surgical edits; don't regenerate the file.
