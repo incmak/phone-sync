@@ -1,5 +1,12 @@
+{
+	servers {
+		max_header_size 16KB
+	}
+}
+
 {$TWINOTIFY_DOMAIN} {
-	@relay path /health /pair/* /ws
+	@relay path /health /health/* /pair/* /ws
+	header -Server
 	handle @relay {
 		reverse_proxy relay:8080
 	}

@@ -5,6 +5,8 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 dev_file="$repo_root/deploy/docker-compose.yml"
 prod_file="$repo_root/deploy/docker-compose.prod.yml"
 domain=relay.example.test
+relay_image=ghcr.io/incmak/twinotify-relay@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+build_version=relay-v0.0.0-test
 assert_tmp=$(mktemp -d "${TMPDIR:-/tmp}/twinotify-deploy.XXXXXX")
 trap 'rm -rf "$assert_tmp"' EXIT HUP INT TERM
 GOCACHE=${GOCACHE:-/tmp/twinotify-go-cache}
@@ -15,13 +17,24 @@ test -f "$prod_file" || {
 	exit 1
 }
 
-if env -u TWINOTIFY_DOMAIN docker compose -f "$prod_file" config --format json >"$assert_tmp/missing-domain.json" 2>"$assert_tmp/missing-domain.err"; then
+if env -u TWINOTIFY_DOMAIN TWINOTIFY_RELAY_IMAGE="$relay_image" TWINOTIFY_BUILD_VERSION="$build_version" docker compose -f "$prod_file" config --format json >"$assert_tmp/missing-domain.json" 2>"$assert_tmp/missing-domain.err"; then
 	echo "production Compose accepted a missing TWINOTIFY_DOMAIN" >&2
 	exit 1
 fi
 
+if env -u TWINOTIFY_RELAY_IMAGE TWINOTIFY_DOMAIN="$domain" TWINOTIFY_BUILD_VERSION="$build_version" docker compose -f "$prod_file" config --format json >"$assert_tmp/missing-image.json" 2>"$assert_tmp/missing-image.err"; then
+	echo "production Compose accepted a missing TWINOTIFY_RELAY_IMAGE" >&2
+	exit 1
+fi
+
+if env -u TWINOTIFY_BUILD_VERSION TWINOTIFY_DOMAIN="$domain" TWINOTIFY_RELAY_IMAGE="$relay_image" docker compose -f "$prod_file" config --format json >"$assert_tmp/missing-version.json" 2>"$assert_tmp/missing-version.err"; then
+	echo "production Compose accepted a missing TWINOTIFY_BUILD_VERSION" >&2
+	exit 1
+fi
+
 docker compose -f "$dev_file" config --format json >"$assert_tmp/dev.json"
-TWINOTIFY_DOMAIN="$domain" docker compose -f "$prod_file" config --format json >"$assert_tmp/prod.json"
+TWINOTIFY_DOMAIN="$domain" TWINOTIFY_RELAY_IMAGE="$relay_image" TWINOTIFY_BUILD_VERSION="$build_version" \
+	docker compose -f "$prod_file" config --format json >"$assert_tmp/prod.json"
 
 (
 	cd "$repo_root/relay"

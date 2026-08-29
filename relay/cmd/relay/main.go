@@ -31,6 +31,8 @@ func run(arguments []string, getenv func(string) string) error {
 			return runBackupCommand(arguments[1:], time.Now)
 		case "restore":
 			return runRestoreCommand(arguments[1:])
+		case "healthcheck":
+			return runHealthcheckCommand(arguments[1:], nil)
 		default:
 			return fmt.Errorf("unknown relay command %q", arguments[0])
 		}

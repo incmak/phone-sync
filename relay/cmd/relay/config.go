@@ -14,6 +14,8 @@ const (
 	productionEnvironment  = "production"
 )
 
+var buildVersion = "dev"
+
 type runtimeConfig struct {
 	environment                 string
 	listenAddr                  string
@@ -45,7 +47,7 @@ func loadRuntimeConfig(getenv func(string) string) (runtimeConfig, error) {
 		listenAddr:         ":8080",
 		boltPath:           "/tmp/twinotify-relay.db",
 		maxOpenConnections: 1024,
-		buildVersion:       "dev",
+		buildVersion:       buildVersion,
 	}
 	if value := getenv("LISTEN_ADDR"); value != "" {
 		config.listenAddr = value

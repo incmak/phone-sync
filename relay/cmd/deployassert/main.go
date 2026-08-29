@@ -23,11 +23,49 @@ type composeNetwork struct {
 }
 
 type composeService struct {
-	Environment map[string]string    `json:"environment"`
-	Expose      []string             `json:"expose"`
-	Networks    map[string]any       `json:"networks"`
-	Ports       []composePort        `json:"ports"`
-	Volumes     []composeVolumeMount `json:"volumes"`
+	Build       json.RawMessage              `json:"build"`
+	CapAdd      []string                     `json:"cap_add"`
+	CapDrop     []string                     `json:"cap_drop"`
+	CPUs        json.RawMessage              `json:"cpus"`
+	DependsOn   map[string]composeDependency `json:"depends_on"`
+	Environment map[string]string            `json:"environment"`
+	Expose      []string                     `json:"expose"`
+	Healthcheck composeHealthcheck           `json:"healthcheck"`
+	Image       string                       `json:"image"`
+	Logging     composeLogging               `json:"logging"`
+	MemLimit    json.RawMessage              `json:"mem_limit"`
+	Networks    map[string]any               `json:"networks"`
+	PidsLimit   int                          `json:"pids_limit"`
+	Ports       []composePort                `json:"ports"`
+	ReadOnly    bool                         `json:"read_only"`
+	SecurityOpt []string                     `json:"security_opt"`
+	Tmpfs       []string                     `json:"tmpfs"`
+	Ulimits     map[string]composeUlimit     `json:"ulimits"`
+	User        string                       `json:"user"`
+	Volumes     []composeVolumeMount         `json:"volumes"`
+}
+
+type composeDependency struct {
+	Condition string `json:"condition"`
+	Required  bool   `json:"required"`
+}
+
+type composeHealthcheck struct {
+	Interval    string   `json:"interval"`
+	Retries     int      `json:"retries"`
+	StartPeriod string   `json:"start_period"`
+	Test        []string `json:"test"`
+	Timeout     string   `json:"timeout"`
+}
+
+type composeLogging struct {
+	Driver  string            `json:"driver"`
+	Options map[string]string `json:"options"`
+}
+
+type composeUlimit struct {
+	Hard int `json:"hard"`
+	Soft int `json:"soft"`
 }
 
 type composePort struct {
@@ -125,6 +163,28 @@ func validateComposeJSON(raw []byte, mode, domain string) error {
 	if relay.Environment["TRUST_PROXY_HEADERS"] != "true" {
 		return errors.New("production relay must enable trusted proxy headers")
 	}
+	for key, value := range map[string]string{
+		"TWINOTIFY_ENV":                  "production",
+		"REQUIRE_MUTUAL_PAIR_SIGNATURES": "true",
+		"MIN_FREE_DISK_BYTES":            "536870912",
+		"MAX_OPEN_CONNECTIONS":           "512",
+		"BACKUP_DIR":                     "/backups",
+		"BACKUP_INTERVAL":                "6h",
+		"BACKUP_RETENTION_COUNT":         "14",
+	} {
+		if relay.Environment[key] != value {
+			return fmt.Errorf("production relay %s = %q, want %q", key, relay.Environment[key], value)
+		}
+	}
+	if buildVersion := relay.Environment["BUILD_VERSION"]; buildVersion == "" || buildVersion == "dev" {
+		return errors.New("production relay must declare a non-development BUILD_VERSION")
+	}
+	if !digestPinnedImage(relay.Image) {
+		return errors.New("production relay image must use a full sha256 digest")
+	}
+	if hasBuild(relay.Build) {
+		return errors.New("production relay must consume a published image, not build locally")
+	}
 	if len(relay.Ports) != 0 {
 		return errors.New("production relay must not publish a host port")
 	}
@@ -133,6 +193,17 @@ func validateComposeJSON(raw []byte, mode, domain string) error {
 	}
 	if !sameStrings(mapKeys(relay.Networks), []string{"relay-internal"}) {
 		return fmt.Errorf("relay networks = %v, want [relay-internal]", mapKeys(relay.Networks))
+	}
+	if !hasVolumeTarget(relay.Volumes, "/backups", "volume", false) {
+		return errors.New("relay must persist a separate named volume at /backups")
+	}
+	if err := validateConstrainedService("relay", relay, true); err != nil {
+		return err
+	}
+	if !sameStrings(relay.Healthcheck.Test, []string{"CMD", "/relay", "healthcheck", "--url", "http://127.0.0.1:8080/health/ready"}) ||
+		relay.Healthcheck.Interval != "30s" || relay.Healthcheck.Timeout != "5s" ||
+		relay.Healthcheck.StartPeriod != "5s" || relay.Healthcheck.Retries != 3 {
+		return errors.New("relay must use the bounded exec-form readiness healthcheck")
 	}
 	internal, ok := config.Networks["relay-internal"]
 	if !ok || !internal.Internal {
@@ -152,6 +223,22 @@ func validateComposeJSON(raw []byte, mode, domain string) error {
 	if !hasVolumeTarget(caddy.Volumes, "/etc/caddy/Caddyfile", "bind", true) {
 		return errors.New("Caddy must mount its Caddyfile read-only")
 	}
+	const caddyImage = "caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794"
+	if caddy.Image != caddyImage {
+		return fmt.Errorf("Caddy image = %q, want %s", caddy.Image, caddyImage)
+	}
+	if err := validateConstrainedService("Caddy", caddy, false); err != nil {
+		return err
+	}
+	if !sameStrings(caddy.CapAdd, []string{"NET_BIND_SERVICE"}) {
+		return errors.New("Caddy must add only NET_BIND_SERVICE")
+	}
+	if dependency, ok := caddy.DependsOn["relay"]; !ok || dependency.Condition != "service_healthy" || !dependency.Required {
+		return errors.New("Caddy must wait for a healthy relay")
+	}
+	if !hasSecureTmpfs(caddy.Tmpfs, "/tmp") {
+		return errors.New("Caddy must mount a bounded noexec,nosuid tmpfs at /tmp")
+	}
 	if len(caddy.Ports) != 2 || !portSetEquals(caddy.Ports, [][2]string{{"80", "80"}, {"443", "443"}}) {
 		return errors.New("only Caddy TCP 80 and 443 may be published")
 	}
@@ -165,9 +252,11 @@ func validateComposeJSON(raw []byte, mode, domain string) error {
 
 func validateCaddyfile(raw []byte) error {
 	type caddyState struct {
-		site, matcher, relayHandle, fallback, proxy, fallback404 int
-		paths                                                    []string
-		stack                                                    []string
+		global, servers, headerLimit                      int
+		site, matcher, stripServer, relayHandle, fallback int
+		proxy, fallback404                                int
+		paths                                             []string
+		stack                                             []string
 	}
 	state := caddyState{}
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
@@ -180,6 +269,14 @@ func validateCaddyfile(raw []byte) error {
 		if len(fields) >= 2 && fields[0] == "tls" && fields[1] == "internal" {
 			return errors.New("Caddyfile must use public certificates, not tls internal")
 		}
+		if line == "{" {
+			if len(state.stack) != 0 || state.site != 0 || state.global != 0 {
+				return errors.New("global Caddy options must be the first and only root options block")
+			}
+			state.global++
+			state.stack = append(state.stack, "global")
+			continue
+		}
 		if line == "}" {
 			if len(state.stack) == 0 {
 				return errors.New("unmatched closing brace")
@@ -190,6 +287,9 @@ func validateCaddyfile(raw []byte) error {
 		if strings.HasSuffix(line, " {") {
 			header := strings.TrimSpace(strings.TrimSuffix(line, "{"))
 			switch {
+			case sameStrings(state.stack, []string{"global"}) && header == "servers":
+				state.servers++
+				state.stack = append(state.stack, "servers")
 			case len(state.stack) == 0 && header == "{$TWINOTIFY_DOMAIN}":
 				state.site++
 				state.stack = append(state.stack, "site")
@@ -205,9 +305,13 @@ func validateCaddyfile(raw []byte) error {
 			continue
 		}
 		switch {
+		case sameStrings(state.stack, []string{"global", "servers"}) && len(fields) == 2 && fields[0] == "max_header_size" && fields[1] == "16KB":
+			state.headerLimit++
 		case sameStrings(state.stack, []string{"site"}) && len(fields) >= 3 && fields[0] == "@relay" && fields[1] == "path":
 			state.matcher++
 			state.paths = append([]string(nil), fields[2:]...)
+		case sameStrings(state.stack, []string{"site"}) && len(fields) == 2 && fields[0] == "header" && fields[1] == "-Server":
+			state.stripServer++
 		case sameStrings(state.stack, []string{"site", "relay"}) && len(fields) == 2 && fields[0] == "reverse_proxy" && fields[1] == "relay:8080":
 			state.proxy++
 		case sameStrings(state.stack, []string{"site", "fallback"}) && len(fields) == 2 && fields[0] == "respond" && fields[1] == "404":
@@ -222,13 +326,85 @@ func validateCaddyfile(raw []byte) error {
 	if len(state.stack) != 0 {
 		return errors.New("unclosed Caddy block")
 	}
-	if state.site != 1 || state.matcher != 1 || state.relayHandle != 1 || state.fallback != 1 || state.proxy != 1 || state.fallback404 != 1 {
+	if state.global != 1 || state.servers != 1 || state.headerLimit != 1 || state.site != 1 || state.matcher != 1 ||
+		state.stripServer != 1 || state.relayHandle != 1 || state.fallback != 1 || state.proxy != 1 || state.fallback404 != 1 {
 		return fmt.Errorf("incomplete Caddy route graph: %+v", state)
 	}
-	if !sameStrings(state.paths, []string{"/health", "/pair/*", "/ws"}) {
+	if !sameStrings(state.paths, []string{"/health", "/health/*", "/pair/*", "/ws"}) {
 		return fmt.Errorf("allowed relay paths = %v", state.paths)
 	}
 	return nil
+}
+
+func validateConstrainedService(name string, service composeService, requireNonRoot bool) error {
+	if !service.ReadOnly {
+		return fmt.Errorf("%s root filesystem must be read-only", name)
+	}
+	if requireNonRoot && service.User != "65532:65532" {
+		return fmt.Errorf("%s user = %q, want 65532:65532", name, service.User)
+	}
+	if !sameStrings(service.CapDrop, []string{"ALL"}) {
+		return fmt.Errorf("%s must drop all capabilities", name)
+	}
+	if !sameStrings(service.SecurityOpt, []string{"no-new-privileges:true"}) {
+		return fmt.Errorf("%s must disable privilege escalation", name)
+	}
+	if service.PidsLimit != 128 || !numberEquals(service.MemLimit, 268435456) || !numberEquals(service.CPUs, 1) {
+		return fmt.Errorf("%s must use the approved PID, memory, and CPU bounds", name)
+	}
+	if nofile, ok := service.Ulimits["nofile"]; !ok || nofile.Soft != 4096 || nofile.Hard != 4096 || len(service.Ulimits) != 1 {
+		return fmt.Errorf("%s must bound nofile at 4096", name)
+	}
+	if service.Logging.Driver != "json-file" || service.Logging.Options["max-size"] != "10m" ||
+		service.Logging.Options["max-file"] != "3" || len(service.Logging.Options) != 2 {
+		return fmt.Errorf("%s must use bounded json-file logging", name)
+	}
+	return nil
+}
+
+func digestPinnedImage(image string) bool {
+	parts := strings.Split(image, "@sha256:")
+	if len(parts) != 2 || parts[0] == "" || len(parts[1]) != 64 {
+		return false
+	}
+	for _, character := range parts[1] {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasBuild(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) != 0 && !bytes.Equal(trimmed, []byte("null"))
+}
+
+func numberEquals(raw json.RawMessage, expected float64) bool {
+	var number float64
+	if json.Unmarshal(raw, &number) == nil {
+		return number == expected
+	}
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return false
+	}
+	number, err := strconv.ParseFloat(text, 64)
+	return err == nil && number == expected
+}
+
+func hasSecureTmpfs(mounts []string, target string) bool {
+	for _, mount := range mounts {
+		parts := strings.Split(mount, ":")
+		if len(parts) < 2 || parts[0] != target {
+			continue
+		}
+		options := strings.Join(parts[1:], ",")
+		if strings.Contains(options, "noexec") && strings.Contains(options, "nosuid") && strings.Contains(options, "size=") {
+			return true
+		}
+	}
+	return false
 }
 
 func hasVolumeTarget(volumes []composeVolumeMount, target, volumeType string, requireReadOnly bool) bool {

@@ -274,6 +274,10 @@ Commit: `feat(relay): automate consistent backup and restore`
 
 **Files:**
 - Modify: `relay/Dockerfile`
+- Modify: `relay/cmd/relay/main.go`
+- Modify: `relay/cmd/relay/config.go`
+- Create: `relay/cmd/relay/healthcheck.go`
+- Modify: `relay/cmd/relay/main_test.go`
 - Modify: `deploy/docker-compose.prod.yml`
 - Modify: `deploy/caddy/Caddyfile`
 - Modify: `relay/cmd/deployassert/main.go`
@@ -285,7 +289,7 @@ Commit: `feat(relay): automate consistent backup and restore`
 - Consumes: full digest-pinned `TWINOTIFY_RELAY_IMAGE`.
 - Produces: constrained relay and Caddy services plus relay binary healthcheck.
 
-- [ ] **Step 1: Extend deployment mutation tests and observe RED**
+- [x] **Step 1: Extend deployment mutation tests and observe RED**
 
 Require the production environment, backup volume, read-only root, non-root user, dropped capabilities, no-new-privileges, PID/memory/CPU/nofile bounds, log rotation, healthcheck, digest image, and Caddy `/health/*` route while rejecting `/metrics` and any extra public path.
 
@@ -293,11 +297,11 @@ Run: `make deployment-test`
 
 Expected: deployment assertion failure against the current Compose file.
 
-- [ ] **Step 2: Implement the hardened topology**
+- [x] **Step 2: Implement the hardened topology**
 
 The Dockerfile creates owned `/data` and `/backups`, embeds OCI labels and version variables, and keeps the distroless non-root final image. Compose uses `image: ${TWINOTIFY_RELAY_IMAGE:?...}`, a read-only root, named writable volumes, closed resource bounds, bounded logging, and exec-form `/relay healthcheck`.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run: `make deployment-test`
 

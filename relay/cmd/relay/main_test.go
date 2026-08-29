@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -45,6 +47,39 @@ func TestProductionLogHandlerEmitsStructuredJSON(t *testing.T) {
 	}
 	if record["msg"] != "relay_started" || record["status"] != "ready" {
 		t.Fatalf("structured record = %#v", record)
+	}
+}
+
+func TestRunHealthcheckRequiresReadyHTTP200(t *testing.T) {
+	requests := 0
+	healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodGet || r.URL.Path != "/health/ready" {
+			t.Errorf("health request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer healthServer.Close()
+
+	if err := runHealthcheckCommand([]string{"--url", healthServer.URL + "/health/ready"}, healthServer.Client()); err != nil {
+		t.Fatalf("ready healthcheck failed: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("health requests = %d, want 1", requests)
+	}
+
+	unreadyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer unreadyServer.Close()
+	if err := runHealthcheckCommand([]string{"--url", unreadyServer.URL + "/health/ready"}, unreadyServer.Client()); err == nil {
+		t.Fatal("unready endpoint passed healthcheck")
+	}
+	if err := runHealthcheckCommand([]string{"--url", "ftp://relay.invalid/health/ready"}, healthServer.Client()); err == nil {
+		t.Fatal("non-HTTP healthcheck URL was accepted")
+	}
+	if err := runHealthcheckCommand([]string{"--url", healthServer.URL, "extra"}, healthServer.Client()); err == nil {
+		t.Fatal("extra healthcheck argument was accepted")
 	}
 }
 
