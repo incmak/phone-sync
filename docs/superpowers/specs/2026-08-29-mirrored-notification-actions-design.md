@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-29 (revised same day after design review)
 
-**Status:** Draft for review
+**Status:** Approved
 
 **Scope:** Standalone per-notification mirrors with reconstructed actions (reply, mark-as-read, archive, …), secure origin-side action execution, and tap-to-open routing on the mirror phone.
 
@@ -36,10 +36,10 @@ Non-goals for this subproject: media/transport controls, call answer/decline con
 
 ### 2.3 Tap routing
 
-Decided at mirror post time; the content intent is always a **direct activity `PendingIntent`** (notification trampolines are banned since Android 12 — no broadcast-then-launch):
+The content intent is always an immutable, direct activity `PendingIntent` into a small Twinotify `NotificationRouterActivity`. Notification trampolines are banned since Android 12, but this activity is started directly by the notification, never through a broadcast or service intermediary. It resolves the destination **at tap time** from an opaque random `detail_id`:
 
-1. Source package resolvable to a launcher activity on the mirror phone (via a `<queries>` MAIN/LAUNCHER manifest declaration) → `PendingIntent.getActivity` on that launcher intent. This opens the app's front door; Android provides no portable deep link into another app's private notification destination, and we do not pretend otherwise.
-2. Otherwise → activity `PendingIntent` into Twinotify's notification-detail screen, addressed by an **opaque random `detail_id`** (route `notification/[detailId]`), never by `canon_id` — canonical IDs embed package and free-form tag content that must not pass through navigation state, and cancellation nulls `desiredPayloadJson` (`NotificationStateReducer`), so the detail screen reads from a dedicated snapshot cache (§5.3) that survives the auto-cancel race.
+1. If the cached source package currently resolves to a launcher activity on the mirror phone (via a `<queries>` MAIN/LAUNCHER manifest declaration), the router launches that front-door activity and finishes. Android provides no portable deep link into another app's private notification destination, and we do not pretend otherwise.
+2. If the package is absent, has no launcher, or launching it fails, the router remains in Twinotify and opens route `notification/[detailId]`. `canon_id` never enters navigation state because canonical IDs embed package and free-form tag content. Cancellation also nulls `desiredPayloadJson` (`NotificationStateReducer`), so the screen reads from a dedicated snapshot cache (§5.3) that is durable before the platform notification can be posted and survives the auto-cancel race.
 
 `setAutoCancel` mirrors the captured source flag. When a tap auto-cancels the mirror, the own-package removal path emits the normal `notif.cancel`, so both copies disappear exactly when the source would have. A non-auto-cancel source stays visible on both phones after a tap.
 
@@ -140,7 +140,7 @@ Added to the `type` enum in `proto/inner-event-v2.schema.json` and to `ProtocolJ
 - Both events are ordinary `OutboundMessage` rows: `requiresPeerReceipt = false` (the result *is* the application-level response for an invoke; a result is fire-and-forget), custody via `relay.accepted`/LAN as today.
 - The invoke row's local `expiresAt` is its 2-minute deadline, so `dao.expireLocal` stops retrying it and journals `EXPIRED` if custody was never obtained in time.
 - Transport-duplicate delivery is absorbed by the inbound journal (`msg_id` dedup); *semantic* at-most-once is enforced separately by the origin's durable execution journal (§6.2), because a re-send under a new `msg_id` must also never re-execute.
-- Skew note: `EnvelopeAuthenticator` allows +5 min past `expires_at`, which is wider than the 2-minute product window. The origin therefore applies its own strict check — `now ≤ invoked_at + 120_000 + 30_000` skew allowance — before executing anything. Transport-level expiry is a backstop, not the gate.
+- `EnvelopeAuthenticator` allows +5 min past `expires_at`, which is wider than the product window. The origin therefore applies its own strict origin-clock check, `now ≤ invoked_at + 120_000`, before executing anything. There is no extra execution grace: transport-level expiry is only a backstop, not the product gate. Clock skew may cause an early refusal, but never intentionally extends the documented window on the origin clock.
 
 ## 5. Persistent Data Models
 
@@ -177,7 +177,7 @@ ActionExecution
   completedAt: Long?
 ```
 
-This is the at-most-once mechanism *and* the redelivery answer sheet. `CLAIMED` is inserted before any execution; `COMPLETED` records the terminal status so a redelivered or re-sent invocation re-emits the same result instead of re-executing. Swept 24 h after `completedAt`. A `CLAIMED` row with no completion older than a 60-second grace window is finalized as `COMPLETED(outcome_unknown)` by a startup/redelivery sweep — never re-executed.
+This is the at-most-once mechanism *and* the redelivery answer sheet. `CLAIMED` is inserted before any execution; `COMPLETED` records the terminal status so a redelivered or re-sent invocation re-emits the same result instead of re-executing. Completed rows are swept 24 h after `completedAt`. A `CLAIMED` row with no completion older than a 60-second grace window is finalized as `COMPLETED(outcome_unknown)` by a persistent claim-recovery wake, startup recovery, or redelivery, and is never re-executed.
 
 ### 5.3 Mirror-side detail cache (new table `notification_detail_cache`)
 
@@ -189,18 +189,26 @@ NotificationDetailCache
   originDevice: String
   receivedAt: Long
   updatedAt: Long
+  cancelledAt: Long?                // starts the bounded post-cancel retention window
 ```
 
-Upserted on every mirror post/re-post (same transaction as materialization completion), **retained after cancellation** so an auto-cancel tap still lands on a populated detail screen — `desiredPayloadJson` is nulled by the cancel reduction and cannot serve this. Bounded at 500 rows (LRU by `updatedAt`) and swept 24 h after last update. `detailId` is the only identifier that enters intents and navigation.
+Allocated and upserted in the **same Room transaction that commits inbound canonical desired state**, before materialization can post the Android notification. The materializer therefore reads an already-durable `detailId` when it builds the content intent; a crash can leave an inert cache row, never a posted notification whose fallback is empty. `notif.update` refreshes the cached payload in the same state transaction. `notif.cancel` retains the last payload and sets `cancelledAt`, because `desiredPayloadJson` is nulled by the cancel reduction and cannot serve the tap race.
+
+Active rows are not age-evicted. Cancelled rows are swept 10 minutes after `cancelledAt` and bounded to the 500 most recently cancelled rows. This is enough for an in-flight tap or open detail screen without turning Twinotify into a day-long notification-history store. `detailId` is the only notification-content identifier that enters content intents and navigation.
 
 ### 5.4 Origin-side action registry (memory only)
 
 ```text
 ActionRegistry (in-memory, ConcurrentHashMap)
-  actionId → { canonId, sequence, sourceKey, packageName, Notification.Action }
+  canonId → ActionGeneration {
+    sequence,
+    sourceKey,
+    packageName,
+    handlesByActionId: immutable Map<actionId, Notification.Action>
+  }
 ```
 
-- Populated inside the capture coordinator lane when a sequence commits (`DurableCapturePersister`), atomically replacing all entries for that `canonId`; purged on `notif.cancel` capture, unpair, and mirroring-disable.
+- Populated inside the capture coordinator lane when a sequence commits (`DurableCapturePersister`), atomically replacing the single immutable generation value for that `canonId`; purged on `notif.cancel` capture, unpair, and mirroring-disable.
 - Never persisted. Listener rebind re-captures `activeNotifications`, which commits new sequences with fresh IDs and emits `notif.update`s (existing behavior, now also refreshing mirrors' actions).
 - Unknown/stale `actionId` or `sequence` mismatch → `action_gone`; `sourceKey` no longer in `activeNotifications` → `notification_gone`.
 
@@ -225,7 +233,9 @@ For `notif.action.invoke`, after `EnvelopeAuthenticator`:
 3. **Execution, outside Room:** `RemoteInput.addResultsToIntent` with the origin's own real result keys, then `PendingIntent.send(context, 0, fillIn)`; `CanceledException`/BAL denial → status `failed`. Activity-type intents opt in via `ActivityOptions…setPendingIntentBackgroundActivityStartMode`, still expecting possible denial.
 4. **Transaction C:** compare-and-set `CLAIMED → COMPLETED(dispatched | failed)` + enqueue result. If the row was already finalized (a racing sweep resolved it to `outcome_unknown`), the CAS loses and no second, contradictory result is sent — `outcome_unknown` truthfully covers "may have fired".
 
-A crash between the `CLAIMED` insert and Transaction C leaves a claim with no completion; step 1's `CLAIMED` branch and the §5.2 sweep both resolve it to `outcome_unknown` without re-execution. The `PendingIntent` fires **at most once** in every interleaving, at the deliberate cost that a crash immediately before dispatch reports `outcome_unknown` for an action that never ran — for side-effecting actions, at-most-once beats at-least-once.
+A successful Transaction A schedules a persistent wake for `claimedAt + 60_000` using the existing inexact `AlarmManager.setAndAllowWhileIdle` pattern plus an in-process earliest-wake job. Startup rehydrates the earliest outstanding wake. When it fires, a compare-and-set finalizes every still-`CLAIMED` due row as `COMPLETED(outcome_unknown)` and enqueues its result. Redelivery performs the same due-row transition. A startup inside the grace period therefore re-arms the remaining delay instead of stranding the claim.
+
+A crash between the `CLAIMED` insert and Transaction C leaves a claim with no completion; the scheduled, startup, and redelivery recovery paths resolve it to `outcome_unknown` without re-execution. The `PendingIntent` fires **at most once** in every interleaving, at the deliberate cost that a crash immediately before dispatch reports `outcome_unknown` for an action that never ran — for side-effecting actions, at-most-once beats at-least-once.
 
 The dispatcher never reads packages, components, class names, extras, or `RemoteInput` keys from the wire — the payload contains none, and any extra field is schema-rejected.
 
@@ -235,7 +245,7 @@ The dispatcher never reads packages, components, class names, extras, or `Remote
   - **Non-reply actions:** `FLAG_IMMUTABLE`.
   - **Reply actions:** `FLAG_MUTABLE` — required since Android 12 for the system to attach `RemoteInput` results — with the immutable data URI carrying identity and all identity-bearing extras ignored by the receiver. `RemoteInput("twinotify_reply")` with the source's `reply_label`.
   - All actions: `setAuthenticationRequired(true)`, `setAllowGeneratedReplies(false)`.
-- Content intent per §2.3 (fallback data URI `twinotify://notification/<detailId>`); `setAutoCancel(post.is_auto_cancel)` (default true when the field is absent — the current behavior — so old-origin payloads render unchanged); `FLAG_NO_CLEAR` logic unchanged.
+- Content intent per §2.3 is an immutable direct-activity intent to `NotificationRouterActivity` with data URI `twinotify://notification/<detailId>`; the router decides installed-app versus Twinotify fallback at tap time. `setAutoCancel(post.is_auto_cancel)` defaults true when the field is absent, preserving current old-origin behavior; `FLAG_NO_CLEAR` logic is unchanged.
 - Re-posts for invocation-state changes reuse the stable tag/id and must not disturb canonical sequencing: they re-render the *current* `desiredPayloadJson` plus invocation overlay, and are skipped if the canonical state is no longer `ACTIVE` at that sequence.
 
 ### 6.4 Mirror invoke flow (`ActionInvokeReceiver`, new)
@@ -244,14 +254,14 @@ The dispatcher never reads packages, components, class names, extras, or `Remote
 2. Reject if `KeyguardManager.isKeyguardLocked` (defense-in-depth behind `setAuthenticationRequired`).
 3. Read reply text from `RemoteInput.getResultsFromIntent`; enforce the 4,096-byte cap (over-long input → immediate local `FAILED` presentation, nothing transmitted).
 4. Drop silently if the canonical row is not `ACTIVE` (race with a cancel).
-5. One transaction: insert `ActionInvocation(PENDING)` + invoke `OutboundMessage`; then signal the transport (existing pump) and arm the 2-minute expiry alarm.
+5. One transaction: insert `ActionInvocation(PENDING)` + invoke `OutboundMessage`; then signal the coordinator-owned transport and arm the 2-minute expiry alarm.
 6. Re-post the mirror in Pending presentation.
 
 Results (`notif.action.result` branch, mirror side): journaled, then update the `ActionInvocation` row **only if still `PENDING`** — clearing `replyText` in the same transaction — and re-post the terminal presentation. A result arriving after local `EXPIRED` is journal-recorded but does not resurrect the UI state.
 
 ### 6.5 Route interaction
 
-Nothing route-specific. Invoke/result rows flow through `TransportCoordinator.pump` like any outbox row; LAN custody simply makes the round trip near-instant. No changes to `LanTransport`, `RelayTransport`, or custody semantics.
+Nothing route-specific. Invoke/result rows flow through the coordinator-granted outbox owner like any other row: non-self-draining sessions use `TransportCoordinator.pump`, while relay sessions use their existing self-drainer. LAN custody simply makes the round trip near-instant. No changes to `LanTransport`, `RelayTransport`, or custody semantics.
 
 ### 6.6 Sequences, snapshots, and ID rotation
 
@@ -276,7 +286,7 @@ New Expo Router route `app/notification/[detailId].tsx` reached from the fallbac
 - **Capability confinement:** original `PendingIntent`s never leave origin process memory; the wire carries only opaque random IDs bound (in the registry) to pair, `canon_id`, package, generation, and source key.
 - **No intent construction from remote data:** execution is registry lookup + original-handle send, full stop.
 - **At-most-once, durable:** the §6.2 claim protocol — `CLAIMED` committed before execution, `COMPLETED` with the stored result after, `outcome_unknown` for the gap — covers transport duplicates, fresh-`msg_id` replays, and process death.
-- **Freshness:** origin-clock 2-minute window (+30 s skew) > inner `expires_at` backstop > mirror-side local expiry. Three independent layers; any one refusing is terminal.
+- **Freshness:** strict origin-clock 2-minute window > inner `expires_at` backstop > mirror-side local expiry. Three independent layers; any one refusing is terminal. No execution grace extends the origin-clock window.
 - **Generation binding:** a source-notification update rotates `action_id`s with its new sequence; stale invokes fail closed as `action_gone`.
 - **Locked mirror:** `setAuthenticationRequired(true)` + keyguard check; nothing transmitted while locked.
 - **Receivers and intents:** `ActionInvokeReceiver` is non-exported and explicit-intent only. Reply `PendingIntent`s are necessarily `FLAG_MUTABLE` (Android's direct-reply contract), so their trusted identity lives entirely in the immutable data URI and every identity-bearing extra is ignored; non-reply and content intents are `FLAG_IMMUTABLE`.
@@ -291,13 +301,13 @@ Invoke redelivery → the execution journal re-emits the stored result, no re-ex
 
 ### 9.2 Origin offline
 
-- Offline < 2 min: invoke waits under relay custody, executes on drain within the window; the mirror may briefly show `EXPIRED` and then receive a late `dispatched` result within the ±30 s skew band — the journal records it, and the organic source-app update corrects visible state (documented, acceptable).
+- Offline < 2 min on the origin clock: invoke waits under relay custody and executes on drain within the window. A result arriving after the mirror has locally expired is journaled but does not resurrect its terminal UI; the organic source-app update may still converge visible state.
 - Offline > 2 min: origin's strict check rejects with `expired`; if delivery slips past `expires_at + 5 min`, `EnvelopeAuthenticator` refuses and the standard expiry path terminalizes the sender row. Either way nothing executes late.
 
 ### 9.3 Process death
 
-- Mirror dies after commit, before send: outbox row + `PENDING` row survive; pump resumes; the expiry alarm re-arms from persisted `expiresAt` on service start.
-- Origin dies with a `CLAIMED` row (any point between claim and completion): never re-executed; resolved to `outcome_unknown` by the sweep or the next delivery attempt (§6.2). Whether the intent fired is genuinely unknowable, and the status says so.
+- Mirror dies after commit, before send: outbox row + `PENDING` row survive; the coordinator-owned drainer resumes; the expiry alarm re-arms from persisted `expiresAt` on service start.
+- Origin dies with a `CLAIMED` row (any point between claim and completion): never re-executed; resolved to `outcome_unknown` by the persistent wake, startup recovery, or the next delivery attempt (§6.2). Whether the intent fired is genuinely unknowable, and the status says so.
 - Origin dies losing the registry: rebind re-capture rotates IDs under new sequences (§6.6); in-flight invokes against old IDs → `action_gone`.
 
 ### 9.4 Platform execution failure
@@ -327,10 +337,10 @@ Invoke/result rows obey existing outbox caps and are never compacted (they are "
 
 - Capture: actions + auto-cancel flag snapshotted immutably; >3 actions truncated; null-`PendingIntent` actions skipped; `action_id`s minted only with a newly committed sequence, including the CAS-retry path; snapshot items reuse the committed payload verbatim (no rotation).
 - Registry: register/replace/purge on capture, cancel, unpair, rebind; lookups fail closed on stale sequence and missing source key.
-- Claim protocol: `CLAIMED` precedes execution in one transaction with the journal; redelivery of `COMPLETED` re-emits the stored status without executing; redelivery of orphaned `CLAIMED` finalizes `outcome_unknown` without executing; the sweep finalizes stale claims; concurrent duplicate invokes execute exactly zero or one time.
+- Claim protocol: `CLAIMED` precedes execution in one transaction with the journal; redelivery of `COMPLETED` re-emits the stored status without executing; redelivery of orphaned `CLAIMED` finalizes `outcome_unknown` without executing; the persistent 60-second wake and startup rehydration finalize stale claims even without redelivery; concurrent duplicate invokes execute exactly zero or one time.
 - Origin validation: strict expiry math; reply bounds; reply-for-non-reply rejection; each terminal status; `failed` on `CanceledException`.
 - Mirror: invocation row + outbox row atomicity; keyguard rejection; identity parsed from data URI only (identity-bearing extras on a mutable intent are ignored); reply vs non-reply mutability flags; pending/terminal re-posts keep stable tag/id and never post over a `CANCELLED` canonical; late result does not resurrect; `replyText` nulled at terminal transition; expiry alarm rehydrates from Room.
-- Tap and detail: content-intent selection (installed vs fallback); auto-cancel propagation with the `user_click` label through the own-package path (no echo regression — `PendingPeerCancel` ordering untouched); detail cache populated on post, surviving cancel (the auto-cancel race test: tap → cancel commits → `getNotificationDetail` still returns full content); LRU bound and sweep.
+- Tap and detail: direct router activity selects installed app versus fallback at tap time, including uninstall-after-post and launch-failure cases; auto-cancel propagation with the `user_click` label through the own-package path (no echo regression — `PendingPeerCancel` ordering untouched); detail cache commits before platform post and survives cancel (the auto-cancel race test: tap → cancel commits → `getNotificationDetail` still returns full content); active-row retention plus 10-minute cancelled-row bound and sweep.
 - Compatibility: payload without new fields renders current behavior; unknown inner type on the receiver takes the quarantine path deterministically.
 
 ### 11.3 Go coverage
@@ -344,7 +354,7 @@ Only the fixture inventory/cross-layer additions; assert no relay runtime diff i
 - Origin offline 90 s → executes; origin offline 3 min → `expired` everywhere, never executes on reconnect.
 - Duplicate invoke delivery → single execution; origin process kill between claim and dispatch → `outcome_unknown`, no execution on restart; mirror process kill at each stage.
 - Update-then-invoke race → `action_gone`; cancel-then-invoke → dropped/`notification_gone`.
-- Tap on mirror with source app absent → detail deep link renders full content even when the tap auto-cancelled the mirror; auto-cancel tap dismisses both; non-auto-cancel tap dismisses neither.
+- Tap on mirror with source app absent, uninstalled after post, or failing to launch → router falls back to the detail route and renders full content even when the tap auto-cancelled the mirror; auto-cancel tap dismisses both; non-auto-cancel tap dismisses neither.
 
 ### 11.5 Physical two-phone matrix (release evidence)
 
@@ -360,7 +370,7 @@ The available hardware is **Xiaomi MI 11X and POCO F1** (MIUI/HyperOS — valuab
 | Origin process killed mid-invoke (between claim and dispatch) | `Outcome unknown` on mirror; no execution after restart |
 | Origin process killed; listener rebind | Fresh action IDs on mirrors; stale invoke → Action gone |
 | Tap mirror, app installed on both phones | App opens; auto-cancel semantics match source |
-| Tap mirror, app not installed | Twinotify detail screen with full content + working actions, including after auto-cancel |
+| Tap mirror, app missing or removed after post | Twinotify detail screen with full content + working actions, including after auto-cancel |
 | MIUI-shaped notification (system-modified actions) | Captured set matches what origin shade shows, or documented delta |
 | 50-action-day battery/loop sanity | No echo loops, no duplicate executions, battery gate held |
 
