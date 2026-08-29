@@ -107,13 +107,17 @@ func runRelay(getenv func(string) string) error {
 	return <-shutdownResult
 }
 
-func gracefulStop(beginShutdown func(), stopMaintenance context.CancelFunc, maintenanceDone <-chan struct{}, shutdownTimeout time.Duration, shutdown func(context.Context) error) error {
+func gracefulStop(beginShutdown func(), stopMaintenance context.CancelFunc, backgroundDone <-chan struct{}, shutdownTimeout time.Duration, shutdown func(context.Context) error) error {
 	beginShutdown()
 	stopMaintenance()
-	<-maintenanceDone
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	return shutdown(ctx)
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- shutdown(ctx)
+	}()
+	<-backgroundDone
+	return <-shutdownDone
 }
 
 func closedDoneChannel() <-chan struct{} {

@@ -11,29 +11,35 @@ import (
 	"time"
 )
 
-func TestGracefulStopCreatesFreshHTTPDeadlineAfterMaintenanceJoin(t *testing.T) {
-	maintenanceDone := make(chan struct{})
+func TestGracefulStopStartsHTTPShutdownWhileBackupIsBlocked(t *testing.T) {
+	backgroundDone := make(chan struct{})
 	beginCalled := make(chan struct{})
 	stopCalled := make(chan struct{})
-	shutdownCalled := false
-	done := make(chan struct{})
+	shutdownCalled := make(chan struct{})
+	result := make(chan error, 1)
 	go func() {
-		defer close(done)
-		_ = gracefulStop(func() { close(beginCalled) }, func() { close(stopCalled) }, maintenanceDone, 20*time.Millisecond, func(ctx context.Context) error {
-			shutdownCalled = true
-			if remaining := time.Until(deadline(t, ctx)); remaining < 15*time.Millisecond {
-				t.Errorf("HTTP shutdown received stale deadline with %s remaining", remaining)
-			}
+		result <- gracefulStop(func() { close(beginCalled) }, func() { close(stopCalled) }, backgroundDone, time.Second, func(ctx context.Context) error {
+			close(shutdownCalled)
 			return nil
 		})
 	}()
 	<-beginCalled
 	<-stopCalled
-	time.Sleep(30 * time.Millisecond)
-	close(maintenanceDone)
-	<-done
-	if !shutdownCalled {
-		t.Fatal("HTTP shutdown was not called")
+	select {
+	case <-shutdownCalled:
+	case <-time.After(100 * time.Millisecond):
+		close(backgroundDone)
+		<-result
+		t.Fatal("HTTP shutdown did not start while the backup worker was blocked")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("graceful stop returned before the backup worker joined: %v", err)
+	default:
+	}
+	close(backgroundDone)
+	if err := <-result; err != nil {
+		t.Fatalf("graceful stop returned %v", err)
 	}
 }
 
@@ -81,13 +87,4 @@ func TestRunHealthcheckRequiresReadyHTTP200(t *testing.T) {
 	if err := runHealthcheckCommand([]string{"--url", healthServer.URL, "extra"}, healthServer.Client()); err == nil {
 		t.Fatal("extra healthcheck argument was accepted")
 	}
-}
-
-func deadline(t *testing.T, ctx context.Context) time.Time {
-	t.Helper()
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		t.Fatal("shutdown context has no deadline")
-	}
-	return deadline
 }

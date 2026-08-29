@@ -56,3 +56,38 @@ func (s *Server) requireStorageCapacity(w http.ResponseWriter) bool {
 	http.Error(w, "server capacity unavailable", http.StatusServiceUnavailable)
 	return false
 }
+
+func (s *Server) rejectDuringShutdown(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.shuttingDown.Load() {
+			writeShutdownUnavailable(w)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) acquireMutationAdmission() (func(), bool) {
+	s.mutationMu.RLock()
+	if s.shuttingDown.Load() {
+		s.mutationMu.RUnlock()
+		return nil, false
+	}
+	return s.mutationMu.RUnlock, true
+}
+
+func (s *Server) acquirePairMutation(w http.ResponseWriter, stage pairStage) (func(), bool) {
+	if s.pairMutationBeforeStore != nil {
+		s.pairMutationBeforeStore(stage)
+	}
+	release, admitted := s.acquireMutationAdmission()
+	if !admitted {
+		writeShutdownUnavailable(w)
+	}
+	return release, admitted
+}
+
+func writeShutdownUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "server shutting down", http.StatusServiceUnavailable)
+}

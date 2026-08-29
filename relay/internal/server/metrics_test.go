@@ -21,6 +21,7 @@ func TestMetricsUseOnlyClosedLabelsAndNeverRenderIdentifiers(t *testing.T) {
 	server.metrics.recordPairMutation(pairStageInit, http.StatusOK)
 	server.metrics.recordPairMutation(pairStageComplete, http.StatusServiceUnavailable)
 	server.metrics.recordAuthRejected(authRejectReplay)
+	server.metrics.recordAuthRejected(authRejectRateLimited)
 	server.metrics.recordMaintenance(maintenanceMailbox, nil)
 	server.metrics.recordMaintenance(maintenanceJTI, errors.New("secret-storage-detail"))
 
@@ -43,6 +44,7 @@ func TestMetricsUseOnlyClosedLabelsAndNeverRenderIdentifiers(t *testing.T) {
 		`reason="invalid_frame"} 1`,
 		`stage="init",result="accepted"} 1`,
 		`reason="replay"} 1`,
+		`reason="rate_limited"} 1`,
 		`operation="mailbox_expiry",result="success"} 1`,
 		`operation="jti_expiry",result="failure"} 1`,
 	} {

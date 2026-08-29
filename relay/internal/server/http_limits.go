@@ -30,6 +30,22 @@ type PairingRateLimitConfig struct {
 	CleanupBatch   int
 }
 
+type AuthenticationRateLimitConfig struct {
+	IPBurst        int
+	DeviceBurst    int
+	RefillInterval time.Duration
+	IdleTTL        time.Duration
+	MaxEntries     int
+	CleanupBatch   int
+}
+
+func (c AuthenticationRateLimitConfig) limiterConfig() PairingRateLimitConfig {
+	return PairingRateLimitConfig{
+		IPBurst: c.IPBurst, TokenBurst: c.DeviceBurst, RefillInterval: c.RefillInterval,
+		IdleTTL: c.IdleTTL, MaxEntries: c.MaxEntries, CleanupBatch: c.CleanupBatch,
+	}
+}
+
 type limiterEntry struct {
 	key        string
 	tokens     float64
@@ -45,47 +61,88 @@ type pairingRateLimiter struct {
 }
 
 func newPairingRateLimiter(config PairingRateLimitConfig) *pairingRateLimiter {
-	if config.IPBurst <= 0 || config.TokenBurst <= 0 || config.RefillInterval <= 0 || config.IdleTTL <= 0 || config.MaxEntries <= 0 || config.CleanupBatch <= 0 {
+	if !validRateLimitConfig(config) {
 		panic("invalid pairing rate limits")
 	}
 	return &pairingRateLimiter{config: config, entries: make(map[string]*list.Element), oldest: list.New()}
 }
 
+func validRateLimitConfig(config PairingRateLimitConfig) bool {
+	return config.IPBurst > 0 && config.TokenBurst > 0 && config.RefillInterval > 0 && config.IdleTTL > 0 && config.MaxEntries > 0 && config.CleanupBatch > 0
+}
+
 func (l *pairingRateLimiter) allowIP(remoteAddr string, now time.Time) (bool, time.Duration) {
-	return l.allow("ip:"+normalizedRemoteIP(remoteAddr), l.config.IPBurst, now)
+	return l.allowAdmissions([]limiterAdmission{{key: "ip:" + normalizedRemoteIP(remoteAddr), burst: l.config.IPBurst}}, now)
 }
 
 func (l *pairingRateLimiter) allowToken(token string, now time.Time) (bool, time.Duration) {
-	return l.allow("token:"+token, l.config.TokenBurst, now)
+	return l.allowAdmissions([]limiterAdmission{{key: "token:" + token, burst: l.config.TokenBurst}}, now)
 }
 
-func (l *pairingRateLimiter) allow(key string, burst int, now time.Time) (bool, time.Duration) {
+func (l *pairingRateLimiter) allowIPAndDevice(remoteAddr, deviceID string, now time.Time) (bool, time.Duration) {
+	return l.allowAdmissions([]limiterAdmission{
+		{key: "ip:" + normalizedRemoteIP(remoteAddr), burst: l.config.IPBurst},
+		{key: "device:" + deviceID, burst: l.config.TokenBurst},
+	}, now)
+}
+
+type limiterAdmission struct {
+	key   string
+	burst int
+}
+
+func (l *pairingRateLimiter) allowAdmissions(admissions []limiterAdmission, now time.Time) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	element, exists := l.entries[key]
-	if !exists {
-		if len(l.entries) >= l.config.MaxEntries {
-			return false, l.config.IdleTTL
+	elements := make([]*list.Element, len(admissions))
+	missing := 0
+	for index, admission := range admissions {
+		if element, exists := l.entries[admission.key]; exists {
+			elements[index] = element
+		} else {
+			missing++
 		}
-		element = l.oldest.PushBack(&limiterEntry{key: key, tokens: float64(burst), lastRefill: now})
-		l.entries[key] = element
 	}
-	entry := element.Value.(*limiterEntry)
-	elapsed := now.Sub(entry.lastRefill)
-	if elapsed > 0 {
-		entry.tokens = math.Min(float64(burst), entry.tokens+float64(elapsed)/float64(l.config.RefillInterval))
-		entry.lastRefill = now
+	if len(l.entries)+missing > l.config.MaxEntries {
+		return false, l.config.IdleTTL
 	}
-	entry.lastSeen = now
-	l.oldest.MoveToBack(element)
-	if entry.tokens < 1 {
-		wait := time.Duration(math.Ceil((1 - entry.tokens) * float64(l.config.RefillInterval)))
-		if wait < time.Second {
-			wait = time.Second
+	retry := time.Duration(0)
+	for index, element := range elements {
+		if element == nil {
+			continue
 		}
-		return false, wait
+		entry := element.Value.(*limiterEntry)
+		elapsed := now.Sub(entry.lastRefill)
+		if elapsed > 0 {
+			entry.tokens = math.Min(float64(admissions[index].burst), entry.tokens+float64(elapsed)/float64(l.config.RefillInterval))
+			entry.lastRefill = now
+		}
+		entry.lastSeen = now
+		l.oldest.MoveToBack(element)
+		if entry.tokens < 1 {
+			wait := time.Duration(math.Ceil((1 - entry.tokens) * float64(l.config.RefillInterval)))
+			if wait < time.Second {
+				wait = time.Second
+			}
+			if wait > retry {
+				retry = wait
+			}
+		}
 	}
-	entry.tokens--
+	if retry > 0 {
+		return false, retry
+	}
+	for index, element := range elements {
+		if element == nil {
+			admission := admissions[index]
+			element = l.oldest.PushBack(&limiterEntry{
+				key: admission.key, tokens: float64(admission.burst), lastRefill: now, lastSeen: now,
+			})
+			l.entries[admission.key] = element
+			elements[index] = element
+		}
+		element.Value.(*limiterEntry).tokens--
+	}
 	return true, 0
 }
 
@@ -134,18 +191,22 @@ func normalizedRemoteIP(remoteAddr string) string {
 
 func (s *Server) pairIPRateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		remoteAddr := r.RemoteAddr
-		if s.trustProxyHeaders {
-			if forwardedIP := firstForwardedIP(r.Header.Values("X-Forwarded-For")); forwardedIP != "" {
-				remoteAddr = forwardedIP
-			}
-		}
-		if allowed, retry := s.pairLimiter.allowIP(remoteAddr, s.now()); !allowed {
+		if allowed, retry := s.pairLimiter.allowIP(s.requestRemoteAddr(r), s.now()); !allowed {
 			writeRateLimited(w, retry)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) requestRemoteAddr(r *http.Request) string {
+	remoteAddr := r.RemoteAddr
+	if s.trustProxyHeaders {
+		if forwardedIP := firstForwardedIP(r.Header.Values("X-Forwarded-For")); forwardedIP != "" {
+			remoteAddr = forwardedIP
+		}
+	}
+	return remoteAddr
 }
 
 func firstForwardedIP(values []string) string {
@@ -260,7 +321,12 @@ func (s *Server) runMaintenance(ctx context.Context, now time.Time) {
 	if !s.beforeMaintenanceUnit(ctx, "mailbox") {
 		return
 	}
+	release, admitted := s.acquireMutationAdmission()
+	if !admitted {
+		return
+	}
 	_, err := s.mailbox.ExpireBatch(now, s.mailboxExpiryBatch)
+	release()
 	s.metrics.recordMaintenance(maintenanceMailbox, err)
 	if err != nil {
 		slog.Error("maintenance_failed", "operation", "mailbox_expiry")
@@ -268,7 +334,12 @@ func (s *Server) runMaintenance(ctx context.Context, now time.Time) {
 	if !s.beforeMaintenanceUnit(ctx, "statuses") {
 		return
 	}
+	release, admitted = s.acquireMutationAdmission()
+	if !admitted {
+		return
+	}
 	_, err = s.mailbox.ExpireStatusesBatch(now, s.statusExpiryBatch)
+	release()
 	s.metrics.recordMaintenance(maintenanceStatuses, err)
 	if err != nil {
 		slog.Error("maintenance_failed", "operation", "status_expiry")
@@ -276,7 +347,12 @@ func (s *Server) runMaintenance(ctx context.Context, now time.Time) {
 	if !s.beforeMaintenanceUnit(ctx, "pairs") {
 		return
 	}
+	release, admitted = s.acquireMutationAdmission()
+	if !admitted {
+		return
+	}
 	_, err = s.pairStore.SweepExpired(now)
+	release()
 	s.metrics.recordMaintenance(maintenancePairs, err)
 	if err != nil {
 		slog.Error("maintenance_failed", "operation", "pair_expiry")
@@ -284,7 +360,12 @@ func (s *Server) runMaintenance(ctx context.Context, now time.Time) {
 	if !s.beforeMaintenanceUnit(ctx, "jti") {
 		return
 	}
+	release, admitted = s.acquireMutationAdmission()
+	if !admitted {
+		return
+	}
 	_, err = s.jtiCache.Cleanup(now)
+	release()
 	s.metrics.recordMaintenance(maintenanceJTI, err)
 	if err != nil {
 		slog.Error("maintenance_failed", "operation", "jti_expiry")
@@ -293,6 +374,7 @@ func (s *Server) runMaintenance(ctx context.Context, now time.Time) {
 		return
 	}
 	s.pairLimiter.cleanup(now)
+	s.authLimiter.cleanup(now)
 }
 
 func (s *Server) beforeMaintenanceUnit(ctx context.Context, unit string) bool {

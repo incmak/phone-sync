@@ -61,7 +61,13 @@ func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
 		ADisplayName: req.DisplayName,
 		CreatedAt:    s.now().Unix(),
 	}
-	if err := s.pairStore.PutPending(p); err != nil {
+	releaseMutation, admitted := s.acquirePairMutation(w, pairStageInit)
+	if !admitted {
+		return
+	}
+	err = s.pairStore.PutPending(p)
+	releaseMutation()
+	if err != nil {
 		if errors.Is(err, store.ErrPairConflict) {
 			http.Error(w, "pair transition conflict", http.StatusConflict)
 			return
@@ -107,7 +113,12 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pairTokenExpired(pending, s.now()) {
+		releaseMutation, admitted := s.acquirePairMutation(w, pairStageComplete)
+		if !admitted {
+			return
+		}
 		_ = s.pairStore.DeletePending(req.PairToken)
+		releaseMutation()
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return
 	}
@@ -158,8 +169,13 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	releaseMutation, admitted := s.acquirePairMutation(w, pairStageComplete)
+	if !admitted {
+		return
+	}
 	if len(responderSig) != 0 {
 		if err := s.pairStore.UpdatePendingResponderSig(req.PairToken, responderSig); err != nil {
+			releaseMutation()
 			if errors.Is(err, store.ErrPairConflict) {
 				http.Error(w, "pair transition conflict", http.StatusConflict)
 				return
@@ -191,6 +207,7 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		BDisplayName: bDisplayName,
 	}
 	confirmed, err := s.pairStore.ConfirmPending(req.PairToken, cp, sig)
+	releaseMutation()
 	if err != nil {
 		if errors.Is(err, store.ErrPairConflict) {
 			http.Error(w, "pair transition conflict", http.StatusConflict)

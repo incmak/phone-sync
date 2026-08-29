@@ -90,6 +90,30 @@ func (c *PersistentJTICache) CheckAndSet(jti string, now time.Time) error {
 			}
 			count--
 		}
+		cursor := expiry.Cursor()
+		for count >= uint64(c.config.MaxEntries) {
+			indexKey, indexedDigest := cursor.First()
+			if indexKey == nil {
+				break
+			}
+			expiresAt, err := persistentJTIExpiryTime(indexKey, indexedDigest)
+			if err != nil {
+				return err
+			}
+			if !now.After(time.Unix(0, expiresAt)) {
+				break
+			}
+			if count == 0 || !bytes.Equal(entries.Get(indexedDigest), encodeJTIExpiry(expiresAt)) {
+				return errors.New("persistent JTI expiry entry is orphaned")
+			}
+			if err := entries.Delete(indexedDigest); err != nil {
+				return err
+			}
+			if err := cursor.Delete(); err != nil {
+				return err
+			}
+			count--
+		}
 		if count >= uint64(c.config.MaxEntries) {
 			return ErrJTICapacity
 		}

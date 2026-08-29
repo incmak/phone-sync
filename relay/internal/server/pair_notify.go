@@ -43,7 +43,13 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pairTokenExpired(initial, s.now()) {
+		releaseMutation, admitted := s.acquireMutationAdmission()
+		if !admitted {
+			writeShutdownUnavailable(w)
+			return
+		}
 		_ = s.pairStore.DeletePending(pairToken)
+		releaseMutation()
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

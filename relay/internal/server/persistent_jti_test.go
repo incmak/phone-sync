@@ -171,3 +171,31 @@ func TestPersistentJTICapacityCleanupIsBoundedAndStoresOnlyDigests(t *testing.T)
 		t.Fatal(err)
 	}
 }
+
+func TestPersistentJTIAdmissionPurgesExpiredEntryAtCapacity(t *testing.T) {
+	bolt, err := store.OpenBolt(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bolt.Close() })
+	cache, err := OpenPersistentJTICache(bolt, JTICacheConfig{
+		TTL: time.Minute, MaxEntries: 2, CleanupBatch: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(30_000, 0)
+	if err := cache.CheckAndSet("first", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.CheckAndSet("second", now.Add(time.Nanosecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.CheckAndSet("replacement", now.Add(2*time.Minute+2*time.Nanosecond)); err != nil {
+		t.Fatalf("expired capacity was not reclaimed during admission: %v", err)
+	}
+	count, err := cache.EntryCount()
+	if err != nil || count != 2 {
+		t.Fatalf("entry count = %d, %v, want 2", count, err)
+	}
+}

@@ -49,7 +49,12 @@ func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pairTokenExpired(pending, s.now()) {
+		releaseMutation, admitted := s.acquirePairMutation(w, pairStageHello)
+		if !admitted {
+			return
+		}
 		_ = s.pairStore.DeletePending(req.PairToken)
+		releaseMutation()
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return
 	}
@@ -58,7 +63,13 @@ func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid public key", http.StatusBadRequest)
 		return
 	}
-	if err := s.pairStore.UpdatePendingB(req.PairToken, req.DeviceID, encPk, signPk, req.DisplayName); err != nil {
+	releaseMutation, admitted := s.acquirePairMutation(w, pairStageHello)
+	if !admitted {
+		return
+	}
+	err = s.pairStore.UpdatePendingB(req.PairToken, req.DeviceID, encPk, signPk, req.DisplayName)
+	releaseMutation()
+	if err != nil {
 		if errors.Is(err, store.ErrPairConflict) {
 			http.Error(w, "pair transition conflict", http.StatusConflict)
 			return
@@ -116,7 +127,12 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pairTokenExpired(pending, s.now()) {
+		releaseMutation, admitted := s.acquirePairMutation(w, pairStageSignature)
+		if !admitted {
+			return
+		}
 		_ = s.pairStore.DeletePending(req.PairToken)
+		releaseMutation()
 		http.Error(w, "token expired", http.StatusBadRequest)
 		return
 	}
@@ -149,7 +165,13 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Store sig + forward to Device B.
-	if err := s.pairStore.UpdatePendingSig(req.PairToken, sig); err != nil {
+	releaseMutation, admitted := s.acquirePairMutation(w, pairStageSignature)
+	if !admitted {
+		return
+	}
+	err = s.pairStore.UpdatePendingSig(req.PairToken, sig)
+	releaseMutation()
+	if err != nil {
 		if errors.Is(err, store.ErrPairConflict) {
 			http.Error(w, "pair transition conflict", http.StatusConflict)
 			return

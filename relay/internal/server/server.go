@@ -25,11 +25,13 @@ type Server struct {
 	bolt                        *store.Bolt
 	handoffs                    *durableHandoffs
 	pairLimiter                 *pairingRateLimiter
+	authLimiter                 *pairingRateLimiter
 	capacityCheck               CapacityCheck
 	buildVersion                string
 	shuttingDown                atomic.Bool
 	metrics                     *relayMetrics
 	now                         func() time.Time
+	mutationMu                  sync.RWMutex
 	maintenanceInterval         time.Duration
 	trustProxyHeaders           bool
 	mailboxExpiryBatch          int
@@ -48,7 +50,16 @@ type Server struct {
 	revokeAfterCommit           func(pairID string)
 	relayPutBeforeStore         func(deviceID, pairID, msgID string)
 	relayAckBeforeStore         func(deviceID, pairID, msgID string)
-	maintenanceBeforeUnit       func(unit string)
+	// pairMutationBeforeStore is a deterministic test barrier immediately
+	// before pairing handlers acquire shutdown-linearized write admission.
+	pairMutationBeforeStore func(stage pairStage)
+	// relayHelloBeforeMailboxStore is a deterministic test barrier before
+	// hello-triggered expiry and expiry-cursor mutations.
+	relayHelloBeforeMailboxStore func(operation string)
+	// authBeforeJTIStore is a deterministic test barrier immediately before
+	// persistent replay admission acquires shutdown-linearized write admission.
+	authBeforeJTIStore    func()
+	maintenanceBeforeUnit func(unit string)
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -69,6 +80,7 @@ type Config struct {
 	MailboxLimits               store.MailboxLimits
 	PendingPairLimits           store.PendingPairLimits
 	PairingRateLimits           PairingRateLimitConfig
+	AuthenticationRateLimits    AuthenticationRateLimitConfig
 	JTI                         JTICacheConfig
 	MaintenanceInterval         time.Duration
 	MailboxExpiryBatch          int
@@ -87,6 +99,10 @@ func DefaultConfig() Config {
 		PairingRateLimits: PairingRateLimitConfig{
 			IPBurst: 60, TokenBurst: 30, RefillInterval: time.Second, IdleTTL: 10 * time.Minute,
 			MaxEntries: 10_000, CleanupBatch: 256,
+		},
+		AuthenticationRateLimits: AuthenticationRateLimitConfig{
+			IPBurst: 2_000, DeviceBurst: 120, RefillInterval: time.Second, IdleTTL: 10 * time.Minute,
+			MaxEntries: 20_000, CleanupBatch: 256,
 		},
 		JTI:                 JTICacheConfig{TTL: 60 * time.Second, MaxEntries: 100_000, CleanupBatch: 256},
 		MaintenanceInterval: time.Minute,
@@ -110,7 +126,9 @@ func NewWithConfig(b *store.Bolt, config Config) *Server {
 // corruption and configuration mismatches are returned to the caller so normal
 // startup can fail closed without a constructor panic.
 func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
-	if config.Now == nil || config.CapacityCheck == nil || config.BuildVersion == "" || config.MaintenanceInterval <= 0 || config.MailboxExpiryBatch <= 0 || config.StatusExpiryBatch <= 0 {
+	authLimiterConfig := config.AuthenticationRateLimits.limiterConfig()
+	if config.Now == nil || config.CapacityCheck == nil || config.BuildVersion == "" || config.MaintenanceInterval <= 0 || config.MailboxExpiryBatch <= 0 || config.StatusExpiryBatch <= 0 ||
+		!validRateLimitConfig(config.PairingRateLimits) || !validRateLimitConfig(authLimiterConfig) {
 		return nil, errors.New("invalid server config")
 	}
 	v, err := NewValidator()
@@ -141,6 +159,7 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 		bolt:                        b,
 		handoffs:                    newDurableHandoffs(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes),
 		pairLimiter:                 newPairingRateLimiter(config.PairingRateLimits),
+		authLimiter:                 newPairingRateLimiter(authLimiterConfig),
 		capacityCheck:               config.CapacityCheck,
 		buildVersion:                config.BuildVersion,
 		metrics:                     newRelayMetrics(),
@@ -174,7 +193,10 @@ func New() *Server {
 func (s *Server) Handler() http.Handler { return s.router }
 
 func (s *Server) BeginShutdown() {
-	if s.shuttingDown.CompareAndSwap(false, true) {
+	s.mutationMu.Lock()
+	first := s.shuttingDown.CompareAndSwap(false, true)
+	s.mutationMu.Unlock()
+	if first {
 		s.clientHub.Drain(serviceRestartCloseCode, serviceRestartCloseReason)
 	}
 }
@@ -184,11 +206,11 @@ func (s *Server) routes() {
 	s.router.Get("/health/ready", s.handleReady)
 	s.router.Get("/health", s.handleReady)
 	s.router.Get("/metrics", s.handleMetrics)
-	s.router.With(s.observePairMutation(pairStageInit), s.pairIPRateLimit).Post("/pair/init", s.handlePairInit)
-	s.router.With(s.observePairMutation(pairStageHello), s.pairIPRateLimit).Post("/pair/hello", s.handlePairHello)
-	s.router.With(s.observePairMutation(pairStageSignature), s.pairIPRateLimit).Post("/pair/send_sig", s.handlePairSendSig)
-	s.router.With(s.observePairMutation(pairStageComplete), s.pairIPRateLimit).Post("/pair/complete", s.handlePairComplete)
-	s.router.With(s.pairIPRateLimit).Get("/pair/notify", s.handlePairNotify)
-	s.router.With(s.authMiddleware).Post("/pair/revoke", s.handlePairRevoke)
-	s.router.With(s.authMiddleware).Get("/ws", s.handleWebSocket)
+	s.router.With(s.observePairMutation(pairStageInit), s.rejectDuringShutdown, s.pairIPRateLimit).Post("/pair/init", s.handlePairInit)
+	s.router.With(s.observePairMutation(pairStageHello), s.rejectDuringShutdown, s.pairIPRateLimit).Post("/pair/hello", s.handlePairHello)
+	s.router.With(s.observePairMutation(pairStageSignature), s.rejectDuringShutdown, s.pairIPRateLimit).Post("/pair/send_sig", s.handlePairSendSig)
+	s.router.With(s.observePairMutation(pairStageComplete), s.rejectDuringShutdown, s.pairIPRateLimit).Post("/pair/complete", s.handlePairComplete)
+	s.router.With(s.rejectDuringShutdown, s.pairIPRateLimit).Get("/pair/notify", s.handlePairNotify)
+	s.router.With(s.rejectDuringShutdown, s.authMiddleware).Post("/pair/revoke", s.handlePairRevoke)
+	s.router.With(s.rejectDuringShutdown, requireWebSocketUpgrade, s.authMiddleware).Get("/ws", s.handleWebSocket)
 }

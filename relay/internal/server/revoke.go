@@ -18,7 +18,13 @@ func (s *Server) handlePairRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no pair id", http.StatusUnauthorized)
 		return
 	}
+	releaseMutation, admitted := s.acquireMutationAdmission()
+	if !admitted {
+		writeShutdownUnavailable(w)
+		return
+	}
 	pair, err := s.pairStore.RevokeBySession(deviceID, pairID)
+	releaseMutation()
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			http.Error(w, "unknown device", http.StatusUnauthorized)

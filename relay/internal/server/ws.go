@@ -32,6 +32,17 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+func requireWebSocketUpgrade(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !websocket.IsWebSocketUpgrade(r) {
+			w.Header().Set("Upgrade", "websocket")
+			http.Error(w, "WebSocket upgrade required", http.StatusUpgradeRequired)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	deviceID, ok := DeviceIDFromContext(r.Context())
 	if !ok || deviceID == "" {
@@ -227,7 +238,13 @@ func (s *Server) handleRelayAckForPair(deviceID, pairID string, ack RelayAck) er
 	if s.relayAckBeforeStore != nil {
 		s.relayAckBeforeStore(deviceID, pairID, ack.MsgID)
 	}
-	return s.mailbox.AckForPair(pairID, deviceID, ack.MsgID, ack.EnvelopeSHA256, time.Now())
+	releaseMutation, admitted := s.acquireMutationAdmission()
+	if !admitted {
+		return ErrServerCapacity
+	}
+	err := s.mailbox.AckForPair(pairID, deviceID, ack.MsgID, ack.EnvelopeSHA256, time.Now())
+	releaseMutation()
+	return err
 }
 
 func (s *Server) handleLegacyFrame(deviceID string, client *wsClient, protocol *connectionProtocol, raw []byte) error {
@@ -303,7 +320,13 @@ func (s *Server) handleRelayHelloForPair(
 		return err
 	}
 	priorPeerFrame := relayCapabilitiesSnapshot(priorPeerSelf, priorPeerView, priorPeerFloor)
-	if err := s.pairStore.UpdateCapabilitiesForPair(deviceID, pairID, hello.Protocols, hello.AppVersion); err != nil {
+	releaseMutation, admitted := s.acquireMutationAdmission()
+	if !admitted {
+		return ErrServerCapacity
+	}
+	err = s.pairStore.UpdateCapabilitiesForPair(deviceID, pairID, hello.Protocols, hello.AppVersion)
+	releaseMutation()
+	if err != nil {
 		return err
 	}
 	selfCapabilities, peerCapabilities, floor, err := s.pairStore.CapabilitiesForPair(deviceID, pairID)
@@ -328,10 +351,19 @@ func (s *Server) handleRelayHelloForPair(
 	}
 
 	now := time.Now()
-	if _, err := s.mailbox.ExpireForPair(pairID, deviceID, now); err != nil {
-		return err
+	if s.relayHelloBeforeMailboxStore != nil {
+		s.relayHelloBeforeMailboxStore("expiry")
 	}
-	statuses, err := s.mailbox.ExpiryStatusesForPair(pairID, deviceID, peerID, mailboxBatchSize, now)
+	releaseMutation, admitted = s.acquireMutationAdmission()
+	if !admitted {
+		return ErrServerCapacity
+	}
+	_, err = s.mailbox.ExpireForPair(pairID, deviceID, now)
+	var statuses []store.DeliveryStatus
+	if err == nil {
+		statuses, err = s.mailbox.ExpiryStatusesForPair(pairID, deviceID, peerID, mailboxBatchSize, now)
+	}
+	releaseMutation()
 	if err != nil {
 		return err
 	}
@@ -343,7 +375,16 @@ func (s *Server) handleRelayHelloForPair(
 		}
 	}
 	if len(statuses) > 0 {
-		if err := s.mailbox.AdvanceExpiryStatusCursorForPair(pairID, deviceID, peerID, statuses[len(statuses)-1].MsgID); err != nil {
+		if s.relayHelloBeforeMailboxStore != nil {
+			s.relayHelloBeforeMailboxStore("cursor")
+		}
+		releaseMutation, admitted = s.acquireMutationAdmission()
+		if !admitted {
+			return ErrServerCapacity
+		}
+		err = s.mailbox.AdvanceExpiryStatusCursorForPair(pairID, deviceID, peerID, statuses[len(statuses)-1].MsgID)
+		releaseMutation()
+		if err != nil {
 			return err
 		}
 	}
@@ -409,6 +450,10 @@ func (s *Server) handleRelayPutForPair(
 	reject := func(msgID, reason string) {
 		s.metrics.recordRelayPutRejected(reason)
 		_ = writeRejected(msgID, reason)
+	}
+	if s.shuttingDown.Load() {
+		reject(relayFrameMsgID(mustWrapEnvelope(put.Envelope)), "server_capacity")
+		return
 	}
 	var envelope encryptedEnvelopeHeader
 	if err := s.validator.ValidateEncryptedEnvelope(put.Envelope); err != nil {
@@ -478,6 +523,12 @@ func (s *Server) handleRelayPutForPair(
 	if s.relayPutBeforeStore != nil {
 		s.relayPutBeforeStore(deviceID, pairID, envelope.MsgID)
 	}
+	releaseMutation, admitted := s.acquireMutationAdmission()
+	if !admitted {
+		handoff.commitMu.Unlock()
+		reject(envelope.MsgID, "server_capacity")
+		return
+	}
 	result, err := s.mailbox.PutForPair(pairID, store.MailboxRecord{
 		RecipientDevice: peerID,
 		SenderDevice:    deviceID,
@@ -485,6 +536,7 @@ func (s *Server) handleRelayPutForPair(
 		EnvelopeSHA256:  hex.EncodeToString(digest[:]),
 		Envelope:        append([]byte(nil), put.Envelope...),
 	}, time.Now())
+	releaseMutation()
 	var notification *durableNotification
 	if err == nil && !result.Terminal {
 		var overflow bool
@@ -614,6 +666,8 @@ func relayAckErrorCode(err error) string {
 		return "digest_mismatch"
 	case errors.Is(err, store.ErrNotFound):
 		return "not_recipient"
+	case errors.Is(err, ErrServerCapacity):
+		return "server_capacity"
 	default:
 		return "invalid_frame"
 	}

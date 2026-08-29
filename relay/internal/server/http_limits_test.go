@@ -224,6 +224,28 @@ func TestPairRateLimiterGlobalBudgetFailsClosedWithoutRefreshingExhaustedKeys(t 
 	}
 }
 
+func TestAuthenticationRateLimiterConsumesIPAndDeviceBudgetsAtomically(t *testing.T) {
+	now := time.Unix(3550, 0)
+	limiter := newPairingRateLimiter(PairingRateLimitConfig{
+		IPBurst: 3, TokenBurst: 2, RefillInterval: time.Hour, IdleTTL: 10 * time.Minute,
+		MaxEntries: 8, CleanupBatch: 1,
+	})
+	for index := 0; index < 2; index++ {
+		if allowed, _ := limiter.allowIPAndDevice("192.0.2.10:1000", "device-a", now); !allowed {
+			t.Fatalf("device A admission %d was rejected", index+1)
+		}
+	}
+	if allowed, _ := limiter.allowIPAndDevice("192.0.2.10:1000", "device-a", now); allowed {
+		t.Fatal("exhausted device budget was admitted")
+	}
+	if allowed, _ := limiter.allowIPAndDevice("192.0.2.10:1000", "device-b", now); !allowed {
+		t.Fatal("device rejection consumed the shared IP token")
+	}
+	if allowed, _ := limiter.allowIPAndDevice("192.0.2.10:1000", "device-b", now); allowed {
+		t.Fatal("exhausted IP budget was admitted")
+	}
+}
+
 func TestPairRateLimiterCleanupIsBatchedAndAllowsConcurrentProgress(t *testing.T) {
 	now := time.Unix(3600, 0)
 	limiter := newPairingRateLimiter(PairingRateLimitConfig{
@@ -329,6 +351,110 @@ func TestMaintenanceStartIsSingleOwnerAndCancellationStopsBetweenUnits(t *testin
 	case <-first:
 	case <-time.After(time.Second):
 		t.Fatal("maintenance did not join after cancellation")
+	}
+}
+
+func TestShutdownLinearizesBeforeEveryMaintenanceStoreMutation(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		unit  string
+		setup func(*testing.T, *Server) func(*testing.T)
+	}{
+		{
+			unit: "mailbox",
+			setup: func(t *testing.T, server *Server) func(*testing.T) {
+				pair := registerMailboxTestPair(t, server)
+				msgID := "44444444-4444-4444-8444-444444444444"
+				putMailboxRecord(t, server, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, msgID), now.Add(-25*time.Hour))
+				return func(t *testing.T) {
+					pending, err := server.mailbox.PendingForPair(pair.pairID, pair.deviceB, 10)
+					if err != nil || len(pending) != 1 || pending[0].MsgID != msgID {
+						t.Fatalf("mailbox maintenance mutated after shutdown: %#v, %v", pending, err)
+					}
+				}
+			},
+		},
+		{
+			unit: "statuses",
+			setup: func(t *testing.T, server *Server) func(*testing.T) {
+				pair := registerMailboxTestPair(t, server)
+				msgID := "33333333-3333-4333-8333-333333333333"
+				putMailboxRecord(t, server, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, msgID), now.Add(-50*time.Hour))
+				if expired, err := server.mailbox.ExpireForPair(pair.pairID, pair.deviceA, now.Add(-25*time.Hour)); err != nil || len(expired) != 1 {
+					t.Fatalf("prepare expired status = %d, %v", len(expired), err)
+				}
+				return func(t *testing.T) {
+					statuses, err := server.mailbox.Statuses(pair.deviceA, time.UnixMilli(0))
+					if err != nil || len(statuses) != 1 || statuses[0].MsgID != msgID {
+						t.Fatalf("status maintenance mutated after shutdown: %#v, %v", statuses, err)
+					}
+				}
+			},
+		},
+		{
+			unit: "pairs",
+			setup: func(t *testing.T, server *Server) func(*testing.T) {
+				token := "shutdown-maintenance-pair"
+				if err := server.pairStore.PutPending(store.PendingPair{
+					PairToken: token, DeviceAID: "maintenance-a", AEncPubkey: bytes.Repeat([]byte{1}, 32),
+					ASignPubkey: bytes.Repeat([]byte{2}, 32), CreatedAt: now.Add(-10 * time.Minute).Unix(),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return func(t *testing.T) {
+					if _, err := server.pairStore.GetPending(token); err != nil {
+						t.Fatalf("pair maintenance mutated after shutdown: %v", err)
+					}
+				}
+			},
+		},
+		{
+			unit: "jti",
+			setup: func(t *testing.T, server *Server) func(*testing.T) {
+				if err := server.jtiCache.CheckAndSet("shutdown-maintenance-jti", now.Add(-3*time.Minute)); err != nil {
+					t.Fatal(err)
+				}
+				return func(t *testing.T) {
+					count, err := server.jtiCache.EntryCount()
+					if err != nil || count != 1 {
+						t.Fatalf("JTI maintenance mutated after shutdown: count=%d err=%v", count, err)
+					}
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.unit, func(t *testing.T) {
+			server := newConfiguredTestServer(t, DefaultConfig())
+			assertUnchanged := test.setup(t, server)
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			server.maintenanceBeforeUnit = func(unit string) {
+				if unit == test.unit {
+					once.Do(func() { close(entered); <-release })
+				}
+			}
+			done := make(chan struct{})
+			go func() {
+				server.runMaintenance(context.Background(), now)
+				close(done)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatalf("maintenance did not reach %s", test.unit)
+			}
+			server.BeginShutdown()
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatalf("maintenance did not stop after %s lost shutdown admission", test.unit)
+			}
+			assertUnchanged(t)
+		})
 	}
 }
 

@@ -22,6 +22,8 @@ The relay persists only the encrypted envelope and routing metadata needed to op
 
 TLS protects relay control frames and the metadata visible in transit. End-to-end encryption protects notification content from the relay.
 
+Authentication replay IDs are stored as SHA-256 digests in Bolt for twice the maximum JWT lifetime, survive process restarts, and reclaim expired capacity transactionally during admission. A valid request must also pass atomic per-device and normalized source-IP limits before it can consume replay-store capacity. Plain HTTP requests to `/ws` are rejected before authentication, so they do not spend a replay ID.
+
 ## Protocol compatibility
 
 Paired v2 clients start the authenticated WebSocket session with `relay.hello` and advertise supported protocols. The pair's protocol floor advances to v2 only after both devices advertise v2 support.

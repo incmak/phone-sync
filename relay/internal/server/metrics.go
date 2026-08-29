@@ -27,6 +27,7 @@ const (
 	authRejectClaims
 	authRejectReplay
 	authRejectStore
+	authRejectRateLimited
 	authRejectReasonCount
 )
 
@@ -53,7 +54,7 @@ var (
 	}
 	pairStageLabels   = [...]string{"init", "hello", "signature", "complete"}
 	pairResultLabels  = [...]string{"accepted", "rejected", "failure"}
-	authReasonLabels  = [...]string{"missing", "malformed", "unknown_device", "signature", "claims", "replay", "store"}
+	authReasonLabels  = [...]string{"missing", "malformed", "unknown_device", "signature", "claims", "replay", "store", "rate_limited"}
 	maintenanceLabels = [...]string{"mailbox_expiry", "status_expiry", "pair_expiry", "jti_expiry"}
 )
 

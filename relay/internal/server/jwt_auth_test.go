@@ -59,6 +59,23 @@ func TestJTICacheConcurrentUniqueFloodNeverExceedsBudget(t *testing.T) {
 	}
 }
 
+func TestJTICacheAdmissionPurgesExpiredEntryAtCapacity(t *testing.T) {
+	cache := NewJTICacheWithConfig(JTICacheConfig{TTL: time.Minute, MaxEntries: 2, CleanupBatch: 1})
+	now := time.Unix(5200, 0)
+	if err := cache.CheckAndSet("first", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.CheckAndSet("second", now.Add(time.Nanosecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.CheckAndSet("replacement", now.Add(2*time.Minute+2*time.Nanosecond)); err != nil {
+		t.Fatalf("expired capacity was not reclaimed during admission: %v", err)
+	}
+	if got := cache.EntryCount(); got != 2 {
+		t.Fatalf("entry count = %d, want 2", got)
+	}
+}
+
 // registerPair puts a confirmed pair directly into the PairStore and returns
 // device A's id + its Ed25519 private key for JWT minting in tests.
 func registerPair(t *testing.T, ps *store.PairStore) (string, ed25519.PrivateKey) {
@@ -175,6 +192,95 @@ func TestWebSocketRequiresAuth(t *testing.T) {
 	}
 	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got resp=%v err=%v", resp, err)
+	}
+}
+
+func TestWebSocketRejectsNonUpgradeBeforeConsumingJTI(t *testing.T) {
+	srv := newTestServer(t)
+	deviceID, privateKey := registerPair(t, srv.pairStore)
+	token := mintJWT(t, deviceID, privateKey, uuid.NewString())
+	request := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	request.RemoteAddr = "192.0.2.40:4000"
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUpgradeRequired {
+		t.Fatalf("non-upgrade WebSocket status = %d, want 426; body=%q", response.Code, response.Body.String())
+	}
+	count, err := srv.jtiCache.EntryCount()
+	if err != nil || count != 0 {
+		t.Fatalf("JTI count after non-upgrade request = %d, %v; want 0", count, err)
+	}
+	if status := authenticatedStatus(t, srv, token); status != http.StatusNoContent {
+		t.Fatalf("token was consumed by non-upgrade request: status = %d", status)
+	}
+}
+
+func TestAuthenticationRateLimitBoundsJTIConsumptionPerDevice(t *testing.T) {
+	config := DefaultConfig()
+	config.AuthenticationRateLimits = AuthenticationRateLimitConfig{
+		IPBurst: 10, DeviceBurst: 2, RefillInterval: time.Hour, IdleTTL: 10 * time.Minute,
+		MaxEntries: 16, CleanupBatch: 1,
+	}
+	srv := newTestServerWithConfig(t, config)
+	deviceID, privateKey := registerPair(t, srv.pairStore)
+	for index := 0; index < 3; index++ {
+		token := mintJWT(t, deviceID, privateKey, uuid.NewString())
+		request := httptest.NewRequest(http.MethodGet, "/authenticated", nil)
+		request.RemoteAddr = "192.0.2.50:5000"
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		srv.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})).ServeHTTP(response, request)
+		want := http.StatusNoContent
+		if index == 2 {
+			want = http.StatusTooManyRequests
+		}
+		if response.Code != want {
+			t.Fatalf("authentication %d status = %d, want %d; body=%q", index+1, response.Code, want, response.Body.String())
+		}
+		if index == 2 && response.Header().Get("Retry-After") == "" {
+			t.Fatal("authentication rate limit omitted Retry-After")
+		}
+	}
+	count, err := srv.jtiCache.EntryCount()
+	if err != nil || count != 2 {
+		t.Fatalf("JTI count after limited authentication = %d, %v; want 2", count, err)
+	}
+}
+
+func TestShutdownLinearizesBeforeInFlightJTICommit(t *testing.T) {
+	srv := newTestServer(t)
+	deviceID, privateKey := registerPair(t, srv.pairStore)
+	token := mintJWT(t, deviceID, privateKey, uuid.NewString())
+	beforeStore := make(chan struct{})
+	releaseStore := make(chan struct{})
+	srv.authBeforeJTIStore = func() {
+		close(beforeStore)
+		<-releaseStore
+	}
+	responseDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodGet, "/authenticated", nil)
+		request.RemoteAddr = "192.0.2.51:5001"
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		srv.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})).ServeHTTP(response, request)
+		responseDone <- response
+	}()
+	<-beforeStore
+	srv.BeginShutdown()
+	close(releaseStore)
+	response := <-responseDone
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("authentication status = %d, want 503; body=%q", response.Code, response.Body.String())
+	}
+	count, err := srv.jtiCache.EntryCount()
+	if err != nil || count != 0 {
+		t.Fatalf("JTI count after shutdown race = %d, %v; want 0", count, err)
 	}
 }
 

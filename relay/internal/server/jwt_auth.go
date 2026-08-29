@@ -70,6 +70,18 @@ func (c *JTICache) CheckAndSet(jti string, now time.Time) error {
 		delete(c.seen, jti)
 		c.oldest.Remove(element)
 	}
+	for len(c.seen) >= c.config.MaxEntries {
+		element := c.oldest.Front()
+		if element == nil {
+			break
+		}
+		entry := element.Value.(*jtiEntry)
+		if now.Sub(entry.seenAt) <= 2*c.config.TTL {
+			break
+		}
+		delete(c.seen, entry.jti)
+		c.oldest.Remove(element)
+	}
 	if len(c.seen) >= c.config.MaxEntries {
 		return ErrJTICapacity
 	}
@@ -190,7 +202,22 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			s.rejectAuthentication(w, authRejectClaims)
 			return
 		}
-		if err := s.jtiCache.CheckAndSet(jti, now); err != nil {
+		if allowed, retry := s.authLimiter.allowIPAndDevice(s.requestRemoteAddr(r), sub, now); !allowed {
+			s.metrics.recordAuthRejected(authRejectRateLimited)
+			writeRateLimited(w, retry)
+			return
+		}
+		if s.authBeforeJTIStore != nil {
+			s.authBeforeJTIStore()
+		}
+		releaseMutation, admitted := s.acquireMutationAdmission()
+		if !admitted {
+			writeShutdownUnavailable(w)
+			return
+		}
+		err = s.jtiCache.CheckAndSet(jti, now)
+		releaseMutation()
+		if err != nil {
 			reason := authRejectStore
 			if errors.Is(err, ErrJTIReplay) {
 				reason = authRejectReplay

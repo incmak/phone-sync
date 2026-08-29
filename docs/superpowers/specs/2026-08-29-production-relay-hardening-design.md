@@ -67,7 +67,7 @@ sig_B("twinotify-pair-confirm-b-v1\n" ||
 
 `POST /pair/complete` carries the existing `confirmation_sig` plus `responder_confirmation_sig`. The relay verifies both signatures before committing a new pair. The domain prefix separates B's approval from all other signatures, and including `sig_A` binds B's approval to A's exact approval.
 
-Production sets `REQUIRE_MUTUAL_PAIR_SIGNATURES=true` and refuses a missing responder signature. Development may leave the switch false to exercise older fixtures, but any supplied responder signature is always verified. New Android builds always send it. Existing confirmed pairs are not invalidated or rewritten.
+Production sets `REQUIRE_MUTUAL_PAIR_SIGNATURES=true` and refuses a missing responder signature. The published `pair-complete` schema and every new Android build always require and send it. Development may leave the switch false only for direct-handler migration fixtures that intentionally bypass schema validation; it is not a supported client compatibility mode. Any supplied responder signature is always verified. Existing confirmed pairs are not invalidated or rewritten.
 
 ### 3.2 Durable JWT replay protection
 
@@ -83,7 +83,7 @@ Authentication additionally requires:
 - at most 30 seconds of future clock skew for `iat`;
 - the existing pair generation still matching the authenticated session.
 
-Replay records remain for twice the 60-second token lifetime. Cleanup is expiry-indexed and bounded. Capacity failure rejects authentication; it never admits a token without recording it.
+Replay records remain for twice the 60-second token lifetime. Cleanup is expiry-indexed and bounded. When the replay budget is full, admission transactionally removes the oldest expired indexed record before rejecting for capacity, so routine maintenance lag cannot strand the relay in a global authentication outage. Non-upgrade `/ws` requests are rejected before authentication can consume a JTI. Valid authentication is also admitted atomically against bounded per-device and normalized source-IP token buckets before the JTI write, limiting how much of the global replay budget one pair or network source can consume. Capacity failure rejects authentication; it never admits a token without recording it.
 
 ### 3.3 Production configuration
 
@@ -133,10 +133,10 @@ On SIGINT or SIGTERM the process:
 
 1. marks readiness false;
 2. stops periodic maintenance and backup scheduling;
-3. stops accepting new HTTP connections;
+3. immediately starts HTTP shutdown, so new connections stop before any active backup worker is joined;
 4. closes active WebSockets with service-restart code 1012;
 5. waits up to 10 seconds for HTTP shutdown;
-6. closes Bolt only after all owned background workers have joined.
+6. serializes shutdown with the final Bolt write admission point, so a pairing mutation or relay put still decoding when shutdown wins the gate is rejected instead of committing; Bolt closes only after all owned background workers have joined.
 
 Clients retain their local outboxes and reconnect. Durable mailbox items remain in Bolt, so shutdown cannot create a false delivery acknowledgement.
 
