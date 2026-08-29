@@ -1,7 +1,10 @@
 package co.twinotify.core.detail
 
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class SourceAppLauncherTest {
     @Test
@@ -35,6 +38,19 @@ class SourceAppLauncherTest {
             SourceAppLauncher(FakeSourceAppPlatform(installed = true, hasLauncher = true, launchSucceeds = false))
                 .launch("com.example"),
         )
+    }
+
+    @Test
+    fun androidLauncherUsesTheVisibilityIndependentFrontDoorIntentSender() {
+        val source = File(
+            System.getProperty("user.dir"),
+            "src/main/java/co/twinotify/core/detail/SourceAppLauncher.kt",
+        ).readText()
+        val androidPlatform = source.substringAfter("class AndroidSourceAppPlatform")
+
+        assertTrue(androidPlatform.contains("getLaunchIntentSenderForPackage"))
+        assertFalse(androidPlatform.contains("getApplicationInfo"))
+        assertFalse(androidPlatform.contains("getLaunchIntentForPackage"))
     }
 
     private class FakeSourceAppPlatform(

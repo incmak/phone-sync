@@ -129,9 +129,13 @@ object NotificationStateReducer {
         )
     }
 
-    fun stableMirrorTag(canonId: String): String = "mirror-" + sha256(canonId).take(24)
+    fun stableMirrorTag(canonId: String): String = MIRROR_TAG_PREFIX + sha256(canonId).take(24)
+
+    fun isMirrorTag(tag: String?): Boolean = tag?.startsWith(MIRROR_TAG_PREFIX) == true
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+    private const val MIRROR_TAG_PREFIX = "mirror-"
 }

@@ -4,7 +4,9 @@ import co.twinotify.core.protocol.InnerEventV2
 import co.twinotify.core.storage.CanonicalNotificationState
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class NotificationStateReducerTest {
     private val allocator = object : LocalIdAllocator {
@@ -72,6 +74,13 @@ class NotificationStateReducerTest {
         assertEquals(first.mirrorLocalId, second.mirrorLocalId)
         assertEquals(first.mirrorLocalTag, second.mirrorLocalTag)
         assertEquals("mirror-" + first.mirrorLocalTag!!.removePrefix("mirror-"), first.mirrorLocalTag)
+    }
+
+    @Test
+    fun mirrorTagPredicateMatchesOnlyProductionMirrorTags() {
+        assertTrue(NotificationStateReducer.isMirrorTag(NotificationStateReducer.stableMirrorTag("canon")))
+        assertFalse(NotificationStateReducer.isMirrorTag("twinotify-mirror-stale"))
+        assertFalse(NotificationStateReducer.isMirrorTag(null))
     }
 
     @Test

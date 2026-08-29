@@ -81,6 +81,26 @@ class NotificationDetailCacheTest {
     }
 
     @Test
+    fun localMirrorDismissalAtomicallyStampsTheExistingDetailCache() = runBlocking {
+        val content = payload("dismiss locally")
+        dao.commitInboundDesired(inbound("notif.post", 1, 1_000), active(1, content, 1_000))
+        assertEquals(MaterializationResult.Completed, dao.completeMaterialization(CANON_ID, 1, 1_100, null))
+
+        assertEquals(
+            OutboundStateCommitResult.Committed(compacted = 0),
+            dao.commitCapturedState(
+                cancelled(2, 2_000).copy(materializedSequence = 2),
+                outboundCancel(sequence = 2, createdAt = 2_000),
+            ),
+        )
+
+        val cached = assertNotNull(dao.notificationDetailForCanon(CANON_ID))
+        assertEquals(content, cached.payloadJson)
+        assertEquals(2_000, cached.updatedAt)
+        assertEquals(2_000, cached.cancelledAt)
+    }
+
+    @Test
     fun activeRowsSurviveAgeSweepAndCancelledRowsExpireAfterTenMinutes() = runBlocking {
         dao.putNotificationDetail(detail("active", "active-canon", cancelledAt = null, updatedAt = 1))
         dao.putNotificationDetail(detail("young", "young-canon", cancelledAt = 400_001, updatedAt = 400_001))
@@ -188,6 +208,26 @@ class NotificationDetailCacheTest {
     )
 
     private fun payload(text: String) = """{"package_name":"com.example","text":"$text"}"""
+
+    private fun outboundCancel(sequence: Long, createdAt: Long) = OutboundMessage(
+        msgId = "outbound-cancel-$sequence",
+        canonId = CANON_ID,
+        sequence = sequence,
+        eventType = "notif.cancel",
+        protocolVersion = 2,
+        envelopeJson = "{}",
+        envelopeSha256 = sequence.toString().padStart(64, 'f'),
+        byteSize = 2,
+        createdAt = createdAt,
+        expiresAt = createdAt + 100_000,
+        custodyAcceptedAt = null,
+        custodyRoute = null,
+        attempts = 0,
+        nextAttemptAt = createdAt,
+        state = "NEW",
+        lastError = null,
+        requiresPeerReceipt = true,
+    )
 
     private fun detail(
         detailId: String,

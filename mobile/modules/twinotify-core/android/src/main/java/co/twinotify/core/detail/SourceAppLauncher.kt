@@ -1,8 +1,6 @@
 package co.twinotify.core.detail
 
 import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
 
 enum class SourceLaunchResult {
     Launched,
@@ -37,23 +35,21 @@ class AndroidSourceAppPlatform(context: Context) : SourceAppPlatform {
     private val appContext = context.applicationContext
     private val packageManager = appContext.packageManager
 
-    override fun isInstalled(packageName: String): Boolean = try {
-        packageManager.getApplicationInfo(
-            packageName,
-            PackageManager.ApplicationInfoFlags.of(0),
+    // The origin package is arbitrary peer data, so it cannot be enumerated in manifest <queries>.
+    // API 33's front-door IntentSender intentionally defers existence and launcher checks until
+    // send time and is not restricted by Android package visibility.
+    override fun isInstalled(packageName: String): Boolean = packageName.isNotBlank()
+
+    override fun hasLauncher(packageName: String): Boolean = packageName.isNotBlank()
+
+    override fun launch(packageName: String): Boolean = runCatching {
+        packageManager.getLaunchIntentSenderForPackage(packageName).sendIntent(
+            appContext,
+            0,
+            null,
+            null,
+            null,
         )
         true
-    } catch (_: PackageManager.NameNotFoundException) {
-        false
-    }
-
-    override fun hasLauncher(packageName: String): Boolean =
-        packageManager.getLaunchIntentForPackage(packageName)?.resolveActivity(packageManager) != null
-
-    override fun launch(packageName: String): Boolean {
-        val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return false
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        appContext.startActivity(intent)
-        return true
-    }
+    }.getOrDefault(false)
 }

@@ -1078,11 +1078,18 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 }
                 upsertActiveNotificationDetail(desired.canonId, desired.originDevice, payload, row.committedAt)
             }
-            "notif.cancel" -> if (existing != null) {
-                putNotificationDetail(existing.copy(updatedAt = row.committedAt, cancelledAt = row.committedAt))
-                sweepNotificationDetailCache(row.committedAt)
-            }
+            "notif.cancel" -> cancelNotificationDetailIfPresent(desired.canonId, row.committedAt, existing)
         }
+    }
+
+    private suspend fun cancelNotificationDetailIfPresent(
+        canonId: String,
+        cancelledAt: Long,
+        existing: NotificationDetailCache? = null,
+    ) {
+        val detail = existing ?: notificationDetailForCanon(canonId) ?: return
+        putNotificationDetail(detail.copy(updatedAt = cancelledAt, cancelledAt = cancelledAt))
+        sweepNotificationDetailCache(cancelledAt)
     }
 
     private suspend fun upsertActiveNotificationDetail(
@@ -1483,10 +1490,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         if (sequence != nextSequence) return OutboundStateCommitResult.Stale(nextSequence - 1L)
         putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
         val result = commitOutboundState(desired, incoming)
-        if (result is OutboundStateCommitResult.Committed && uiActivity != null) {
-            upsertUiActivity(uiActivity)
-            deleteUiActivityBefore(uiActivity.occurredAt - 30L * 24L * 60L * 60L * 1_000L)
-            trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+        if (result is OutboundStateCommitResult.Committed) {
+            if (incoming.eventType == "notif.cancel" && isNotificationSnapshotCanonical(canonId)) {
+                cancelNotificationDetailIfPresent(canonId, desired.updatedAt)
+            }
+            if (uiActivity != null) {
+                upsertUiActivity(uiActivity)
+                deleteUiActivityBefore(uiActivity.occurredAt - 30L * 24L * 60L * 60L * 1_000L)
+                trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+            }
         }
         return result
     }

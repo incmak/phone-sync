@@ -175,6 +175,10 @@ object SyncServiceStatus {
     fun setProtocolFloor(floor: Int) {
         require(floor > 0) { "protocol floor must be positive" }
         _health.value = _health.value.copy(protocolFloor = floor)
+        val route = _routeStatus.value
+        if (route.phase == RoutePhase.AUTHENTICATED) {
+            setState(route.toSyncState(floor))
+        }
     }
 
     fun setListenerHealth(connected: Boolean, permission: Boolean) {

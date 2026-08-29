@@ -151,7 +151,9 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             latestSequence = sequence,
             state = if (eventType == "notif.cancel") "CANCELLED" else "ACTIVE",
             desiredPayloadJson = if (eventType == "notif.cancel") null else payloadJson,
-            materializedSequence = current?.materializedSequence ?: 0L,
+            // Capture observes platform state after Android has already posted or removed it.
+            // Only peer-originated inbound state belongs in the materialization backlog.
+            materializedSequence = sequence,
             sourceNotificationKey = command.sourceKey.takeIf { it.isNotEmpty() }
                 ?: current?.sourceNotificationKey,
             mirrorLocalId = current?.mirrorLocalId,

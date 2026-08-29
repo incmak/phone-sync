@@ -102,6 +102,17 @@ class ServiceLifecycleTest {
     }
 
     @Test
+    fun mirrorCancellationRetainsAdvertisedActionsForThePendingIntentTtl() {
+        val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
+        val notificationPortSource = File(sourceRoot, "service/AndroidNotificationPort.kt").readText()
+        val cancelBlock = notificationPortSource
+            .substringAfter("override fun cancelMirror")
+            .substringBefore("override fun cancelSource")
+
+        assertFalse(cancelBlock.contains("ProcessMirrorAdvertisedActions.purge"))
+    }
+
+    @Test
     fun callCaptureAdmissionGenerationIsWiredFromModuleIntentThroughServiceRecovery() {
         val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
         val moduleSource = File(sourceRoot, "TwinotifyCoreModule.kt").readText()
@@ -559,6 +570,19 @@ class ServiceLifecycleTest {
         assertEquals(SyncState.LEGACY_ONLINE_ONLY, relay.toSyncState(protocolFloor = 1))
         assertEquals(SyncState.CONNECTED, relay.toSyncState(protocolFloor = 2))
         assertEquals(SyncState.CONNECTED, lan.toSyncState(protocolFloor = 1))
+    }
+
+    @Test
+    fun protocolFloorUpgradeReconcilesAlreadyAuthenticatedRelayHealth() {
+        val relay = SyncRouteStatus(RouteKind.RELAY, RoutePhase.AUTHENTICATED, 0)
+        SyncServiceStatus.setRouteStatus(relay)
+        SyncServiceStatus.setState(relay.toSyncState(protocolFloor = 1))
+
+        SyncServiceStatus.setProtocolFloor(2)
+
+        assertEquals(SyncState.CONNECTED, SyncServiceStatus.state.value)
+        assertEquals("connected", SyncServiceStatus.health.value.service)
+        assertEquals("online", SyncServiceStatus.health.value.transport)
     }
 
     @Test

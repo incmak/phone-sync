@@ -8,6 +8,7 @@ import co.twinotify.core.service.DefaultAndroidNotificationPort
 import co.twinotify.core.service.SyncService
 import co.twinotify.core.storage.ActionInvocation
 import co.twinotify.core.storage.ActionInvocationOutboxCommitResult
+import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.OutboundMessage
@@ -21,6 +22,25 @@ data class MirrorActionTarget(
     val localId: Int,
     val action: NotifActionJson,
 )
+
+internal fun resolveMirrorActionTarget(
+    identity: ActionInvokeIdentity,
+    canonId: String,
+    state: CanonicalNotificationState,
+    advertised: MirrorActionTarget?,
+): MirrorActionTarget? {
+    if (state.mirrorLocalTag != identity.mirrorTag || state.mirrorLocalId != identity.mirrorId) return null
+    advertised
+        ?.takeIf { it.canonId == canonId }
+        ?.let { return it }
+    if (state.state != "ACTIVE") return null
+    val post = state.desiredPayloadJson?.let { raw ->
+        runCatching { NotifPostJson.fromPayloadJson(raw) }.getOrNull()
+    } ?: return null
+    if (post.canon_id != canonId) return null
+    val action = post.actions.firstOrNull { it.action_id == identity.actionId } ?: return null
+    return MirrorActionTarget(canonId, state.latestSequence, identity.mirrorTag, identity.mirrorId, action)
+}
 
 fun interface MirrorActionTargetLoader {
     suspend fun load(identity: ActionInvokeIdentity): MirrorActionTarget?
@@ -129,15 +149,13 @@ class MirrorActionInvoker(
                     val canonId = dao.canonicalForMirrorIdentity(identity.mirrorTag, identity.mirrorId)
                         ?: return@MirrorActionTargetLoader null
                     val state = dao.canonical(canonId)
-                        ?.takeIf { it.state == "ACTIVE" && it.mirrorLocalTag == identity.mirrorTag && it.mirrorLocalId == identity.mirrorId }
                         ?: return@MirrorActionTargetLoader null
-                    val post = state.desiredPayloadJson?.let { raw ->
-                        runCatching { NotifPostJson.fromPayloadJson(raw) }.getOrNull()
-                    } ?: return@MirrorActionTargetLoader null
-                    if (post.canon_id != canonId) return@MirrorActionTargetLoader null
-                    val action = post.actions.firstOrNull { it.action_id == identity.actionId }
-                        ?: return@MirrorActionTargetLoader null
-                    MirrorActionTarget(canonId, state.latestSequence, identity.mirrorTag, identity.mirrorId, action)
+                    resolveMirrorActionTarget(
+                        identity,
+                        canonId,
+                        state,
+                        ProcessMirrorAdvertisedActions.lookup(identity),
+                    )
                 },
                 encode = ActionInvokeRowEncoder(ActionControlEncoder(app)::encodeInvoke),
                 commit = MirrorActionCommitter(dao::commitActionInvocationAndOutbound),

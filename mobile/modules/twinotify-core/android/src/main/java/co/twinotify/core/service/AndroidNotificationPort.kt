@@ -11,6 +11,7 @@ import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.call.CallStateMaterializer
 import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.ReliableDeliveryDao
+import co.twinotify.core.actions.ProcessMirrorAdvertisedActions
 
 sealed interface NotificationPostOutcome {
     data object Applied : NotificationPostOutcome
@@ -78,6 +79,13 @@ class DefaultAndroidNotificationPort(
                 state.latestSequence,
             ).orEmpty()
             NotifChannelSetup.ensureChannels(appContext)
+            ProcessMirrorAdvertisedActions.install(
+                state.canonId,
+                state.latestSequence,
+                tag,
+                id,
+                post.actions,
+            )
             NotificationManagerCompat.from(appContext).notify(
                 tag,
                 id,
