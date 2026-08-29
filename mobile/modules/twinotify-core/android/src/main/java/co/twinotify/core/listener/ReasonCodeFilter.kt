@@ -17,6 +17,7 @@ object ReasonCodeFilter {
         // Self-mirror path
         if (isOwnPackage) {
             return if (canonInPending) FilterResult.Suppress
+            else if (removalReason == 1) FilterResult.Emit("user_click")
             else FilterResult.Emit("user_swipe") // user dismissed our mirror locally
         }
         // Real notification path

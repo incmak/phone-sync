@@ -13,6 +13,13 @@
                    android:usesPermissionFlags="neverForLocation" />
   <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
+  <queries>
+    <intent>
+      <action android:name="android.intent.action.MAIN" />
+      <category android:name="android.intent.category.LAUNCHER" />
+    </intent>
+  </queries>
+
   <application>
     <service
       android:name="co.twinotify.core.listener.TwinotifyNotificationListener"
@@ -38,13 +45,12 @@
       </intent-filter>
     </receiver>
 
-    <receiver
-      android:name="co.twinotify.core.service.MirrorTapReceiver"
-      android:exported="false">
-      <intent-filter>
-        <action android:name="co.twinotify.MIRROR_TAP" />
-      </intent-filter>
-    </receiver>
+    <activity
+      android:name="co.twinotify.core.detail.NotificationRouterActivity"
+      android:excludeFromRecents="true"
+      android:exported="false"
+      android:noHistory="true"
+      android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
     <receiver
       android:name="co.twinotify.core.service.MaterializationRetryReceiver"

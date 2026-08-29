@@ -14,6 +14,7 @@ import androidx.core.net.toUri
 import co.twinotify.core.R
 import co.twinotify.core.actions.ActionInvokeReceiver
 import co.twinotify.core.actions.MirrorActionIntent
+import co.twinotify.core.detail.NotificationRouterActivity
 import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.ActionInvocation
@@ -26,6 +27,7 @@ object MirrorPoster {
         localId: Int,
         localTag: String = NotificationStateReducer.stableMirrorTag(post.canon_id),
         invocations: List<ActionInvocation> = emptyList(),
+        detailId: String? = null,
     ): Notification {
         require(localId > 0) { "local notification ID must be positive" }
         NotifChannelSetup.ensureChannels(ctx)
@@ -33,14 +35,15 @@ object MirrorPoster {
         val largeIcon = post.large_icon_png_b64?.let(::decodeBitmap)
         val sourceArtwork = largeIcon ?: smallIcon
 
-        val tapIntent = Intent("co.twinotify.MIRROR_TAP").apply {
-            putExtra("canon_id", post.canon_id)
-            setPackage(ctx.packageName)
+        val tapPi = detailId?.let {
+            val tapIntent = Intent(ctx, NotificationRouterActivity::class.java).apply {
+                data = "${NotificationRouterActivity.SCHEME}://${NotificationRouterActivity.NOTIFICATION_HOST}/$it".toUri()
+            }
+            PendingIntent.getActivity(
+                ctx, 0, tapIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
         }
-        val tapPi = PendingIntent.getBroadcast(
-            ctx, localId, tapIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
         val expandedText = post.big_text?.takeIf { it.isNotBlank() }
             ?: post.text?.takeIf { it.isNotBlank() }
             ?: post.title
@@ -51,9 +54,9 @@ object MirrorPoster {
             .setSubText(presentation.statusText ?: post.sub_text)
             .setVisibility(NotifVisibility.toAndroid(post.visibility))
             .setAutoCancel(post.is_auto_cancel)
-            .setContentIntent(tapPi)
             .setSmallIcon(R.drawable.ic_stat_twinotify)
             .apply {
+                tapPi?.let(::setContentIntent)
                 if (sourceArtwork != null) setLargeIcon(sourceArtwork)
                 if (!expandedText.isNullOrBlank()) setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
                 presentation.replyText?.let { setRemoteInputHistory(arrayOf(it)) }
@@ -86,8 +89,6 @@ object MirrorPoster {
             .also { if (!post.is_clearable) it.flags = it.flags or Notification.FLAG_NO_CLEAR }
     }
 
-    // The tap PendingIntent intentionally targets our receiver, which validates and forwards the URI.
-    @Suppress("LaunchActivityFromNotification")
     suspend fun post(ctx: Context, post: NotifPostJson) {
         val localId = stableLocalId(post.canon_id)
         val localTag = co.twinotify.core.service.NotificationStateReducer.stableMirrorTag(post.canon_id)

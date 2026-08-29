@@ -18,7 +18,7 @@ class ReasonCodeFilterTest {
         Case("ownPkg + pending + reason2 → Suppress", true,  true,  2,  FilterResult.Suppress),
         // ownPkg + NOT pending = user dismissed our mirror → Emit(user_swipe)
         Case("ownPkg + !pending → Emit(user_swipe)",  true,  false, 2,  FilterResult.Emit("user_swipe")),
-        Case("ownPkg + !pending + click → Emit(user_swipe)", true, false, 1, FilterResult.Emit("user_swipe")),
+        Case("ownPkg + !pending + click → Emit(user_click)", true, false, 1, FilterResult.Emit("user_click")),
         // NOT ownPkg + pending = Suppress (echo of cancel we triggered)
         Case("!ownPkg + pending → Suppress", false, true, 10, FilterResult.Suppress),
         Case("!ownPkg + pending + click → Suppress", false, true, 1, FilterResult.Suppress),

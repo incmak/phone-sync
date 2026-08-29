@@ -25,7 +25,11 @@ class MirrorActionNotificationTest {
             ),
             localId = 41,
             localTag = "mirror-tag",
+            detailId = DETAIL_ID,
         )
+
+        assertTrue(notification.contentIntent.isActivity)
+        assertTrue(notification.contentIntent.isImmutable)
 
         val reply = notification.actions[0]
         assertTrue(reply.isAuthenticationRequired)
@@ -55,6 +59,7 @@ class MirrorActionNotificationTest {
             localId = 41,
             localTag = "mirror-tag",
             invocations = listOf(invocation(REPLY_ID, "PENDING", "private reply")),
+            detailId = DETAIL_ID,
         )
 
         assertEquals("Sending\u2026", notification.extras.getString(Notification.EXTRA_SUB_TEXT))
@@ -82,6 +87,7 @@ class MirrorActionNotificationTest {
                 localId = 41,
                 localTag = "mirror-tag",
                 invocations = listOf(invocation(BUTTON_ID, state, null)),
+                detailId = DETAIL_ID,
             )
             assertEquals(label, notification.extras.getString(Notification.EXTRA_SUB_TEXT))
         }
@@ -123,5 +129,6 @@ class MirrorActionNotificationTest {
     private companion object {
         const val REPLY_ID = "33333333-3333-4333-8333-333333333333"
         const val BUTTON_ID = "44444444-4444-4444-8444-444444444444"
+        const val DETAIL_ID = "11111111-1111-4111-8111-111111111111"
     }
 }

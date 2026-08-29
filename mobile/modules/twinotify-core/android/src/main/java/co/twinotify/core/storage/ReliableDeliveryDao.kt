@@ -439,6 +439,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("SELECT * FROM notification_detail_cache WHERE canonId=:canonId")
     abstract suspend fun notificationDetailForCanon(canonId: String): NotificationDetailCache?
 
+    @Query("SELECT * FROM notification_detail_cache WHERE canonId=:canonId")
+    abstract fun notificationDetailForCanonNow(canonId: String): NotificationDetailCache?
+
     @Query("SELECT COUNT(*) FROM notification_detail_cache WHERE cancelledAt IS NOT NULL")
     abstract suspend fun cancelledNotificationDetailCount(): Int
 
