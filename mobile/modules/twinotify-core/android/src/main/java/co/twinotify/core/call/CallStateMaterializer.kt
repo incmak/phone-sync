@@ -2,6 +2,7 @@ package co.twinotify.core.call
 
 import android.app.Notification
 import android.content.Context
+import co.twinotify.core.R
 import co.twinotify.core.service.NotifChannelSetup
 import co.twinotify.core.storage.CanonicalNotificationState
 import org.json.JSONObject
@@ -38,7 +39,7 @@ object CallStateMaterializer {
         // explicitly deferred, so every supported API uses this action-free CATEGORY_CALL
         // fallback.
         return Notification.Builder(context, NotifChannelSetup.CHANNEL_CALLS)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_stat_twinotify)
             .setContentTitle(content.title)
             .setContentText(content.text)
             .setCategory(Notification.CATEGORY_CALL)

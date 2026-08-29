@@ -24,6 +24,7 @@ import co.twinotify.core.call.CallCapturePolicy
 import co.twinotify.core.call.CallCaptureStatus
 import co.twinotify.core.call.CallStatePersister
 import co.twinotify.core.call.CallStateMaterializer
+import co.twinotify.core.R
 import co.twinotify.core.call.CallShutdownConfigIntent
 import co.twinotify.core.call.GracefulCallShutdownGate
 import co.twinotify.core.call.GracefulCallShutdownResult
@@ -1149,7 +1150,7 @@ class SyncService : Service() {
         val notif: Notification = NotificationCompat.Builder(this, NotifChannelSetup.CHANNEL_FGS)
             .setContentTitle("Twinotify active")
             .setContentText(foregroundText(health))
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setSmallIcon(R.drawable.ic_stat_twinotify)
             .setOngoing(true)
             .build()
         startForeground(FGS_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)

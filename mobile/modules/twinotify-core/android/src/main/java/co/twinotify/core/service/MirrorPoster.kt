@@ -9,6 +9,7 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import co.twinotify.core.R
 import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.storage.NotificationDb
 
@@ -19,6 +20,7 @@ object MirrorPoster {
         NotifChannelSetup.ensureChannels(ctx)
         val smallIcon = post.small_icon_png_b64?.let(::decodeBitmap)
         val largeIcon = post.large_icon_png_b64?.let(::decodeBitmap)
+        val sourceArtwork = largeIcon ?: smallIcon
 
         val tapIntent = Intent("co.twinotify.MIRROR_TAP").apply {
             putExtra("canon_id", post.canon_id)
@@ -38,9 +40,9 @@ object MirrorPoster {
             .setVisibility(NotifVisibility.toAndroid(post.visibility))
             .setAutoCancel(true)
             .setContentIntent(tapPi)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_stat_twinotify)
             .apply {
-                if (largeIcon != null) setLargeIcon(largeIcon)
+                if (sourceArtwork != null) setLargeIcon(sourceArtwork)
                 if (!expandedText.isNullOrBlank()) setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
             }
             .build()

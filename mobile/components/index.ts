@@ -1,6 +1,7 @@
 export * from './tokens';
 export * from './Theme';
 export * from './primitives/TwLogo';
+export * from './primitives/TwinotifyMark';
 export * from './primitives/TwWordmark';
 export * from './primitives/TwStatusDot';
 export * from './primitives/TwDeviceChip';
