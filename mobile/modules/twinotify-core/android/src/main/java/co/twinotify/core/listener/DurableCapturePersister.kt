@@ -17,9 +17,41 @@ import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.OutboundStateCommitResult
 import co.twinotify.core.storage.PeerStore
+import co.twinotify.core.storage.UiActivityDirection
+import co.twinotify.core.storage.UiActivityEvent
+import co.twinotify.core.storage.UiActivityKind
+import co.twinotify.core.storage.UiActivityStatus
 import java.security.MessageDigest
 import java.util.UUID
 import org.json.JSONObject
+
+internal fun outboundUiActivity(
+    command: CaptureCommand,
+    previousPayloadJson: String?,
+    msgId: String,
+    now: Long,
+): UiActivityEvent {
+    val previousPayload = previousPayloadJson?.let { raw ->
+        runCatching { JSONObject(raw) }.getOrNull()
+    }
+    return UiActivityEvent(
+        eventId = "outbound:$msgId",
+        msgId = msgId,
+        packageName = when (command) {
+            is PostCommand -> command.snapshot.packageName
+            is RemoveCommand -> previousPayload?.optString("package_name")?.takeIf { it.isNotBlank() }
+        },
+        appName = when (command) {
+            is PostCommand -> command.snapshot.appName
+            is RemoveCommand -> previousPayload?.optString("app_name")?.takeIf { it.isNotBlank() }
+        },
+        direction = UiActivityDirection.SENT.name,
+        kind = if (command is RemoveCommand) UiActivityKind.DISMISSAL.name else UiActivityKind.NOTIFICATION.name,
+        status = UiActivityStatus.QUEUED.name,
+        route = null,
+        occurredAt = now,
+    )
+}
 
 /**
  * The application capture boundary. Preparation is independent of the listener lifecycle; the
@@ -123,7 +155,8 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             lastError = null,
             requiresPeerReceipt = true,
         )
-        when (val result = dao.commitCapturedState(desired, row)) {
+        val uiActivity = outboundUiActivity(command, current?.desiredPayloadJson, msgId, now)
+        when (val result = dao.commitCapturedState(desired, row, uiActivity)) {
             is OutboundStateCommitResult.Committed -> return CapturePersistResult(sequence, msgId)
             is OutboundStateCommitResult.Stale -> return persist(command)
             OutboundStateCommitResult.NotStateEvent -> error("capture produced unsupported event type")
@@ -224,13 +257,35 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             updatedAt = now,
         )
         if (expectedLocalOrigin == null) {
-            return when (val result = dao.commitCapturedState(desired, row)) {
+            val uiActivity = UiActivityEvent(
+                eventId = "outbound:$msgId",
+                msgId = msgId,
+                packageName = null,
+                appName = "Phone",
+                direction = UiActivityDirection.SENT.name,
+                kind = UiActivityKind.CALL.name,
+                status = UiActivityStatus.QUEUED.name,
+                route = null,
+                occurredAt = now,
+            )
+            return when (val result = dao.commitCapturedState(desired, row, uiActivity)) {
                 is OutboundStateCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, msgId)
                 is OutboundStateCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
                 OutboundStateCommitResult.NotStateEvent -> error("call capture produced unsupported event type")
             }
         }
-        return when (val result = dao.commitRecoveredCallState(desired, row, expectedLocalOrigin)) {
+        val uiActivity = UiActivityEvent(
+            eventId = "outbound:$msgId",
+            msgId = msgId,
+            packageName = null,
+            appName = "Phone",
+            direction = UiActivityDirection.SENT.name,
+            kind = UiActivityKind.CALL.name,
+            status = UiActivityStatus.QUEUED.name,
+            route = null,
+            occurredAt = now,
+        )
+        return when (val result = dao.commitRecoveredCallState(desired, row, expectedLocalOrigin, uiActivity)) {
             is CallRecoveryCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, msgId)
             is CallRecoveryCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
             CallRecoveryCommitResult.OwnershipLost -> CallStatePersistResult.OwnershipLost

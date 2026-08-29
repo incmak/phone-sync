@@ -50,6 +50,17 @@ import java.text.Normalizer
 import java.util.concurrent.CancellationException
 import expo.modules.interfaces.permissions.Permissions
 
+internal fun recentActivityLimit(limit: Int): Int = limit.coerceIn(1, 20)
+
+internal fun co.twinotify.core.storage.UiActivityEvent.toRecentActivityMap(): Map<String, Any?> = mapOf(
+    "appName" to appName,
+    "direction" to direction,
+    "kind" to kind,
+    "status" to status,
+    "route" to route,
+    "occurredAt" to occurredAt,
+)
+
 internal suspend fun persistRoutePreferenceThenNotifyService(
     preferLan: Boolean,
     persist: suspend (Boolean) -> Unit,
@@ -915,6 +926,20 @@ class TwinotifyCoreModule internal constructor(
                         "latencyMs"     to s.latencyMs,
                     ))
                 } catch (e: Throwable) { promise.reject("METRICS", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("getRecentActivity") { limit: Int, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val rows = co.twinotify.core.storage.NotificationDb
+                        .get(requireContext())
+                        .reliableDeliveryDao()
+                        .recentUiActivity(recentActivityLimit(limit))
+                    promise.resolve(rows.map { it.toRecentActivityMap() })
+                } catch (e: Throwable) {
+                    promise.reject("RECENT_ACTIVITY", "recent_activity_unavailable", e)
+                }
             }
         }
 

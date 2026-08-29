@@ -22,6 +22,14 @@ export type {
 export type KeyPair = { encPubkey: string; signPubkey: string };
 export type EncryptResult = { ciphertext: string; nonce: string };
 export type MetricsSnapshot = { mirroredToday: number; blockedToday: number; latencyMs: number };
+export type RecentActivityItem = {
+  appName: string | null;
+  direction: 'SENT' | 'RECEIVED';
+  kind: 'NOTIFICATION' | 'DISMISSAL' | 'CALL';
+  status: 'QUEUED' | 'APPLIED' | 'DELIVERED' | 'DISMISSED' | 'EXPIRED' | 'FAILED';
+  route: 'LAN' | 'RELAY' | null;
+  occurredAt: number;
+};
 
 export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'LEGACY_ONLINE_ONLY' | 'OFFLINE_QUEUED';
 
@@ -111,6 +119,7 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   removeFromDenylist(pkg: string): Promise<void>;
   // Home screen metrics
   getMetrics(): Promise<MetricsSnapshot>;
+  getRecentActivity(limit: number): Promise<RecentActivityItem[]>;
 }
 
 export default requireNativeModule<TwinotifyCoreModuleType>('TwinotifyCore');

@@ -8,6 +8,7 @@ import androidx.room.Transaction
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
 import co.twinotify.core.service.CallRejectionCommitResult
+import org.json.JSONObject
 
 internal fun isNotificationSnapshotCanonical(canonId: String): Boolean = !canonId.startsWith("call:")
 
@@ -199,6 +200,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
 
     @Query("DELETE FROM ui_activity_event WHERE occurredAt < :cutoff")
     abstract override suspend fun deleteUiActivityBefore(cutoff: Long): Int
+
+    @Query("DELETE FROM ui_activity_event WHERE msgId=:msgId")
+    protected abstract suspend fun deleteUiActivityForMessage(msgId: String): Int
 
     @Query(
         "DELETE FROM ui_activity_event WHERE eventId NOT IN " +
@@ -788,6 +792,38 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         val pending = pendingInbound(canonId, sequence)
         pending.forEach { markInboundApplied(it.msgId, appliedAt, receipt?.msgId) }
         putCanonical(state.copy(materializedSequence = sequence, updatedAt = appliedAt))
+        pending.maxByOrNull { it.committedAt }?.let { inbound ->
+            val payload = state.desiredPayloadJson?.let { raw ->
+                runCatching { JSONObject(raw) }.getOrNull()
+            }
+            upsertUiActivity(
+                UiActivityEvent(
+                    eventId = "inbound:${inbound.msgId}",
+                    msgId = inbound.msgId,
+                    packageName = payload?.optString("package_name")?.takeIf { it.isNotBlank() },
+                    appName = if (state.canonId.startsWith("call:")) {
+                        "Phone"
+                    } else {
+                        payload?.optString("app_name")?.takeIf { it.isNotBlank() }
+                    },
+                    direction = UiActivityDirection.RECEIVED.name,
+                    kind = when {
+                        state.canonId.startsWith("call:") -> UiActivityKind.CALL
+                        state.state == "CANCELLED" -> UiActivityKind.DISMISSAL
+                        else -> UiActivityKind.NOTIFICATION
+                    }.name,
+                    status = if (state.state == "CANCELLED") {
+                        UiActivityStatus.DISMISSED.name
+                    } else {
+                        UiActivityStatus.APPLIED.name
+                    },
+                    route = null,
+                    occurredAt = appliedAt,
+                ),
+            )
+            deleteUiActivityBefore(appliedAt - 30L * 24L * 60L * 60L * 1_000L)
+            trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+        }
         return MaterializationResult.Completed
     }
 
@@ -1031,7 +1067,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         val compacted = if (removable.isEmpty()) {
             0
         } else {
-            deleteOutboundIds(removable.map { it.msgId })
+            val removed = deleteOutboundIds(removable.map { it.msgId })
+            removable.forEach { deleteUiActivityForMessage(it.msgId) }
+            removed
         }
         putCanonical(desired)
         insertOutbound(incoming)
@@ -1047,6 +1085,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     open suspend fun commitCapturedState(
         desired: CanonicalNotificationState,
         incoming: OutboundMessage,
+        uiActivity: UiActivityEvent? = null,
     ): OutboundStateCommitResult {
         val sequence = requireNotNull(incoming.sequence)
         val canonId = incoming.canonId ?: return OutboundStateCommitResult.NotStateEvent
@@ -1058,7 +1097,13 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             ?: 1L
         if (sequence != nextSequence) return OutboundStateCommitResult.Stale(nextSequence - 1L)
         putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
-        return commitOutboundState(desired, incoming)
+        val result = commitOutboundState(desired, incoming)
+        if (result is OutboundStateCommitResult.Committed && uiActivity != null) {
+            upsertUiActivity(uiActivity)
+            deleteUiActivityBefore(uiActivity.occurredAt - 30L * 24L * 60L * 60L * 1_000L)
+            trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+        }
+        return result
     }
 
     /** Recovery commit fenced to the local call ownership selected before capture starts. */
@@ -1067,6 +1112,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         desired: CanonicalNotificationState,
         incoming: OutboundMessage,
         expectedLocalOrigin: String,
+        uiActivity: UiActivityEvent? = null,
     ): CallRecoveryCommitResult {
         val sequence = requireNotNull(incoming.sequence)
         val canonId = incoming.canonId ?: return CallRecoveryCommitResult.NotStateEvent
@@ -1084,7 +1130,14 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         if (sequence != nextSequence) return CallRecoveryCommitResult.Stale(nextSequence - 1L)
         putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
         return when (val result = commitOutboundState(desired, incoming)) {
-            is OutboundStateCommitResult.Committed -> CallRecoveryCommitResult.Committed(result.compacted)
+            is OutboundStateCommitResult.Committed -> {
+                if (uiActivity != null) {
+                    upsertUiActivity(uiActivity)
+                    deleteUiActivityBefore(uiActivity.occurredAt - 30L * 24L * 60L * 60L * 1_000L)
+                    trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+                }
+                CallRecoveryCommitResult.Committed(result.compacted)
+            }
             is OutboundStateCommitResult.Stale -> CallRecoveryCommitResult.Stale(result.latestSequence)
             OutboundStateCommitResult.NotStateEvent -> CallRecoveryCommitResult.NotStateEvent
         }
@@ -1312,6 +1365,20 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             }
         }
         insertActivity(activity)
+        uiActivityForMessage(msgId)?.let { ui ->
+            val terminalStatus = when (activity.status) {
+                "applied" -> UiActivityStatus.DELIVERED
+                "expired" -> UiActivityStatus.EXPIRED
+                else -> UiActivityStatus.FAILED
+            }
+            upsertUiActivity(
+                ui.copy(
+                    status = terminalStatus.name,
+                    route = outbound.custodyRoute ?: ui.route,
+                    occurredAt = activity.occurredAt,
+                ),
+            )
+        }
         deleteOutbound(msgId)
         return TerminalMovementResult.Moved
     }
