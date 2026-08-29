@@ -1586,6 +1586,7 @@ class SyncService : Service() {
     private suspend fun finalizeActionStop() {
         if (shuttingDown) return
         shuttingDown = true
+        co.twinotify.core.actions.ProcessNotificationActionRegistry.registry.clear()
         clearForegroundOwnership()
         transportJob?.cancelAndJoin()
         retentionJob?.cancelAndJoin()

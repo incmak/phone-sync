@@ -5,13 +5,24 @@ import android.content.Intent
 import android.util.Base64
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.Encrypter
+import co.twinotify.core.actions.ActionControlEncoder
+import co.twinotify.core.actions.ActionInvokeRequest
+import co.twinotify.core.actions.ActionInvocationProcessor
+import co.twinotify.core.actions.ActionProcessResult
+import co.twinotify.core.actions.ActionResultRowEncoder
+import co.twinotify.core.actions.DaoActionClaimJournal
+import co.twinotify.core.actions.PendingIntentActionExecutor
+import co.twinotify.core.actions.PersistentActionClaimWakeScheduler
+import co.twinotify.core.actions.ProcessNotificationActionRegistry
 import co.twinotify.core.call.CallDirection
 import co.twinotify.core.call.CallStateEvent
 import co.twinotify.core.call.CallStateReducer
 import co.twinotify.core.listener.NotifPostJson
+import co.twinotify.core.listener.NotificationListenerBridge
 import co.twinotify.core.protocol.AuthenticatedEnvelope
 import co.twinotify.core.protocol.EnvelopeAuthenticator
 import co.twinotify.core.protocol.PayloadDecryptor
+import co.twinotify.core.protocol.optNullableString
 import co.twinotify.core.protocol.ProtocolJson
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.InboundMessage
@@ -68,6 +79,76 @@ fun interface DirectControlJournal {
         row: InboundMessage,
         process: suspend () -> DirectControlProcessingResult,
     ): DirectControlCommitResult
+}
+
+sealed interface ActionInvokeRejectionCommitResult {
+    data object Committed : ActionInvokeRejectionCommitResult
+    data object Duplicate : ActionInvokeRejectionCommitResult
+    data object IdConflict : ActionInvokeRejectionCommitResult
+}
+
+fun interface ActionInvokeRejectionJournal {
+    suspend fun commit(row: InboundMessage): ActionInvokeRejectionCommitResult
+}
+
+fun interface AuthenticatedActionInvokeProcessor {
+    suspend fun process(request: ActionInvokeRequest): ActionProcessResult
+}
+
+internal suspend fun dispatchAuthenticatedActionInvoke(
+    inner: co.twinotify.core.protocol.InnerEventV2,
+    envelopeSha256: String,
+    committedAt: Long,
+    processor: AuthenticatedActionInvokeProcessor,
+    rejectionJournal: ActionInvokeRejectionJournal,
+): InboundDispatchResult {
+    require(inner.type == "notif.action.invoke")
+    val inbound = InboundMessage(
+        msgId = inner.msgId,
+        originDevice = inner.originDevice,
+        envelopeSha256 = envelopeSha256,
+        eventType = inner.type,
+        canonId = null,
+        sequence = null,
+        outcome = "APPLIED",
+        committedAt = committedAt,
+        appliedAt = committedAt,
+        receiptMsgId = null,
+        relayAckState = "READY",
+    )
+    val request = try {
+        val payload = inner.payloadObject()
+        ActionInvokeRequest(
+            inbound = inbound,
+            invocationId = payload.getString("invocation_id"),
+            canonId = payload.getString("canon_id"),
+            actionId = payload.getString("action_id"),
+            notificationSequence = payload.getLong("notification_sequence"),
+            replyText = payload.optNullableString("reply_text"),
+            invokedAt = payload.getLong("invoked_at"),
+        )
+    } catch (_: IllegalArgumentException) {
+        null
+    } catch (_: org.json.JSONException) {
+        null
+    }
+    if (request == null) {
+        return when (rejectionJournal.commit(inbound.copy(outcome = "REJECTED"))) {
+            ActionInvokeRejectionCommitResult.Committed ->
+                InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+            ActionInvokeRejectionCommitResult.Duplicate ->
+                InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+            ActionInvokeRejectionCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        }
+    }
+    return when (processor.process(request)) {
+        ActionProcessResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        ActionProcessResult.InFlight,
+        ActionProcessResult.CompletionLost,
+        is ActionProcessResult.Replayed,
+        is ActionProcessResult.Completed,
+        -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+    }
 }
 
 /** Requests a coalesced materialization pass after durable desired state exists. */
@@ -267,6 +348,18 @@ class InboundDispatcher internal constructor(
     private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao)) }
     private val stateMutex = Mutex()
     private val snapshots get() = snapshotCoordinator
+    private val actionProcessor by lazy {
+        val encoder = ActionControlEncoder(ctx.applicationContext)
+        ActionInvocationProcessor(
+            journal = DaoActionClaimJournal(reliableDao),
+            registryLookup = ProcessNotificationActionRegistry.registry::lookup,
+            sourceActive = { sourceKey -> sourceKey in NotificationListenerBridge.activeSources() },
+            supportsReply = PendingIntentActionExecutor::supportsReply,
+            executor = PendingIntentActionExecutor(ctx.applicationContext),
+            resultEncoder = ActionResultRowEncoder(encoder::encodeResult),
+            wakeScheduler = PersistentActionClaimWakeScheduler(ctx.applicationContext),
+        )
+    }
 
     /**
      * Relay callers may ignore the result; their acknowledgement semantics are
@@ -420,6 +513,20 @@ class InboundDispatcher internal constructor(
                     localDeviceId = localDeviceId,
                     retryScheduler = materializationStartupScheduler(ctx),
                 ).materializePending()
+            }
+            onAuthenticatedEvent(inner.type)
+            return result
+        }
+        if (inner.type == "notif.action.invoke") {
+            val result = dispatchAuthenticatedActionInvoke(
+                inner = inner,
+                envelopeSha256 = opened.envelopeSha256,
+                committedAt = System.currentTimeMillis(),
+                processor = AuthenticatedActionInvokeProcessor(actionProcessor::process),
+                rejectionJournal = ActionInvokeRejectionJournal(reliableDao::commitActionInvokeRejection),
+            )
+            if (result !is InboundDispatchResult.Rejected) {
+                SyncServiceStatus.setQueueStats(reliableDao.activeOutboundCount(), reliableDao.activeOutboundBytes())
             }
             onAuthenticatedEvent(inner.type)
             return result

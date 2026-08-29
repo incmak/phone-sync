@@ -10,6 +10,8 @@ import co.twinotify.core.protocol.EnvelopeAuthenticator
 import co.twinotify.core.protocol.InnerEventV2
 import co.twinotify.core.protocol.PayloadDecryptor
 import co.twinotify.core.protocol.ProtocolJson
+import co.twinotify.core.actions.ActionInvokeRequest
+import co.twinotify.core.actions.ActionProcessResult
 import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.InboundMessage
 import co.twinotify.core.storage.SnapshotBeginResult
@@ -31,6 +33,78 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class InboundDispatcherControlTest {
+    @Test
+    fun authenticatedActionInvokeUsesDedicatedProcessorAndWaitsForItsClaimCommit() = runTest {
+        val processorEntered = CompletableDeferred<Unit>()
+        val releaseClaimCommit = CompletableDeferred<Unit>()
+        var captured: ActionInvokeRequest? = null
+        val event = actionInvokeEvent()
+
+        val dispatch = async {
+            dispatchAuthenticatedActionInvoke(
+                inner = event,
+                envelopeSha256 = "a".repeat(64),
+                committedAt = 2_000,
+                processor = AuthenticatedActionInvokeProcessor { request ->
+                    captured = request
+                    processorEntered.complete(Unit)
+                    releaseClaimCommit.await()
+                    ActionProcessResult.Completed("dispatched")
+                },
+                rejectionJournal = ActionInvokeRejectionJournal { error("valid invoke must not reject") },
+            )
+        }
+        processorEntered.await()
+        assertFalse(dispatch.isCompleted, "route acknowledgement must wait for Transaction A")
+        releaseClaimCommit.complete(Unit)
+
+        assertEquals(
+            InboundDispatchResult.Accepted(event.msgId, "a".repeat(64)),
+            dispatch.await(),
+        )
+        assertEquals("origin:pkg:1:tag", captured?.canonId)
+        assertEquals(7, captured?.notificationSequence)
+        assertEquals("APPLIED", captured?.inbound?.outcome)
+        assertNull(captured?.inbound?.canonId)
+    }
+
+    @Test
+    fun malformedAuthenticatedActionInvokeIsJournaledAsRejected() = runTest {
+        var rejected: InboundMessage? = null
+        val malformed = actionInvokeEvent().copy(payloadJson = "{}")
+
+        val result = dispatchAuthenticatedActionInvoke(
+            inner = malformed,
+            envelopeSha256 = "b".repeat(64),
+            committedAt = 2_000,
+            processor = AuthenticatedActionInvokeProcessor { error("malformed invoke must not process") },
+            rejectionJournal = ActionInvokeRejectionJournal { row ->
+                rejected = row
+                ActionInvokeRejectionCommitResult.Committed
+            },
+        )
+
+        assertEquals(InboundDispatchResult.Accepted(malformed.msgId, "b".repeat(64)), result)
+        assertEquals("REJECTED", rejected?.outcome)
+        assertEquals("READY", rejected?.relayAckState)
+        assertEquals("notif.action.invoke", rejected?.eventType)
+    }
+
+    @Test
+    fun actionInvokeIdConflictIsAStableRouteRejection() = runTest {
+        val event = actionInvokeEvent()
+
+        val result = dispatchAuthenticatedActionInvoke(
+            inner = event,
+            envelopeSha256 = "c".repeat(64),
+            committedAt = 2_000,
+            processor = AuthenticatedActionInvokeProcessor { ActionProcessResult.IdConflict },
+            rejectionJournal = ActionInvokeRejectionJournal { error("valid invoke must not reject") },
+        )
+
+        assertEquals(InboundDispatchResult.Rejected("id_conflict"), result)
+    }
+
     @Test
     fun notificationRequesterRunsAfterItsDurableCommitReleasesStateMutex() = runTest {
         val stateMutex = Mutex()
@@ -197,7 +271,29 @@ class InboundDispatcherControlTest {
         val onCreate = serviceSource.substringAfter("override fun onCreate()").substringBefore("override fun onStartCommand")
         assertTrue(onCreate.contains("materializationRequester = MaterializationRequester"))
         assertTrue(onCreate.contains("requestPendingMaterialization(MaterializationTrigger.ROUTINE)"))
+        assertTrue(serviceSource.contains("ProcessNotificationActionRegistry.registry.clear()"))
+        assertTrue(dispatcherSource.contains("if (inner.type == \"notif.action.invoke\")"))
+        assertTrue(dispatcherSource.indexOf("if (inner.type == \"notif.action.invoke\")") <
+            dispatcherSource.indexOf("if (inner.type !in setOf(\"notif.post\", \"notif.update\", \"notif.cancel\"))"))
     }
+
+    private fun actionInvokeEvent() = InnerEventV2(
+        msgId = "11111111-1111-4111-8111-111111111111",
+        originDevice = "mirror-device",
+        type = "notif.action.invoke",
+        canonId = null,
+        sequence = null,
+        createdAt = 1_000,
+        expiresAt = 121_000,
+        payloadJson = """{
+          "invocation_id":"22222222-2222-4222-8222-222222222222",
+          "canon_id":"origin:pkg:1:tag",
+          "action_id":"33333333-3333-4333-8333-333333333333",
+          "notification_sequence":7,
+          "reply_text":"private reply",
+          "invoked_at":1000
+        }""".trimIndent(),
+    )
 
     @Test
     fun supersessionPreparationCreatesOneRejectedReceiptPerStoredInboundInOrder() = runTest {

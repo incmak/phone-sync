@@ -72,6 +72,27 @@ class NotificationActionDaoTest {
     }
 
     @Test
+    fun retentionRemovesOnlyCompletedActionExecutionsAfterTwentyFourHours() = runBlocking {
+        val oldCompleted = execution(INVOCATION_ID, claimedAt = 1).copy(
+            state = "COMPLETED",
+            resultStatus = "dispatched",
+            completedAt = 2,
+        )
+        val liveClaim = execution("11111111-1111-4111-8111-111111111111", claimedAt = 1)
+        dao.insertActionExecution(oldCompleted)
+        dao.insertActionExecution(liveClaim)
+
+        dao.sweepRetention(
+            now = 24 * 60 * 60 * 1_000L + 3,
+            activityRetentionMs = 24 * 60 * 60 * 1_000L,
+            tombstoneRetentionMs = 24 * 60 * 60 * 1_000L,
+        )
+
+        assertNull(dao.actionExecution(INVOCATION_ID))
+        assertEquals("CLAIMED", dao.actionExecution(liveClaim.invocationId)?.state)
+    }
+
+    @Test
     fun detailCacheRoundTripsByOpaqueAndCanonicalIdentity() = runBlocking {
         val row = NotificationDetailCache(
             detailId = DETAIL_ID,
@@ -88,6 +109,16 @@ class NotificationActionDaoTest {
         assertEquals(row, dao.notificationDetail(DETAIL_ID))
         assertEquals(row, dao.notificationDetailForCanon(CANON_ID))
     }
+
+    private fun execution(id: String, claimedAt: Long) = ActionExecution(
+        invocationId = id,
+        canonId = CANON_ID,
+        actionId = ACTION_ID,
+        state = "CLAIMED",
+        resultStatus = null,
+        claimedAt = claimedAt,
+        completedAt = null,
+    )
 
     private companion object {
         const val INVOCATION_ID = "fd2fb70b-829a-4701-8956-61611bc9c701"

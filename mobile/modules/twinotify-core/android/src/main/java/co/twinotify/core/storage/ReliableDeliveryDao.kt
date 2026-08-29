@@ -9,6 +9,7 @@ import co.twinotify.core.actions.ActionClaimDecision
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
 import co.twinotify.core.service.CallRejectionCommitResult
+import co.twinotify.core.service.ActionInvokeRejectionCommitResult
 import org.json.JSONObject
 
 internal fun isNotificationSnapshotCanonical(canonId: String): Boolean = !canonId.startsWith("call:")
@@ -404,6 +405,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("DELETE FROM outbound_message WHERE state IN ('TERMINAL','EXPIRED') AND createdAt < :cutoff")
     protected abstract suspend fun deleteTerminalOutboundBefore(cutoff: Long): Int
 
+    @Query("DELETE FROM action_execution WHERE state='COMPLETED' AND completedAt < :cutoff")
+    protected abstract suspend fun deleteCompletedActionExecutionsBefore(cutoff: Long): Int
+
     /** Bounded, idempotent maintenance for terminal history and persisted cancellation tombstones. */
     @Transaction
     open suspend fun sweepRetention(now: Long, activityRetentionMs: Long, tombstoneRetentionMs: Long): Int {
@@ -414,6 +418,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         removed += deleteActivityBefore(now - activityRetentionMs)
         removed += deleteInboundBefore(now - activityRetentionMs)
         removed += deleteTerminalOutboundBefore(now - activityRetentionMs)
+        removed += deleteCompletedActionExecutionsBefore(now - ACTION_EXECUTION_RETENTION_MS)
         removed += deleteCancelledBefore(now - tombstoneRetentionMs)
         removed += deleteOrphanMaterializationRetries()
         removed += expireSnapshotStages(now - SNAPSHOT_TTL_MS)
@@ -539,6 +544,23 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insertInbound(row: InboundMessage)
+
+    @Transaction
+    open suspend fun commitActionInvokeRejection(row: InboundMessage): ActionInvokeRejectionCommitResult {
+        require(row.eventType == "notif.action.invoke")
+        require(row.canonId == null && row.sequence == null)
+        require(row.outcome == "REJECTED" && row.appliedAt != null && row.relayAckState == "READY")
+        val existing = inbound(row.msgId)
+        if (existing != null) {
+            return if (existing.envelopeSha256 == row.envelopeSha256) {
+                ActionInvokeRejectionCommitResult.Duplicate
+            } else {
+                ActionInvokeRejectionCommitResult.IdConflict
+            }
+        }
+        insertInbound(row)
+        return ActionInvokeRejectionCommitResult.Committed
+    }
 
     @Transaction
     open suspend fun commitInboundRejection(
@@ -1617,6 +1639,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         const val MAX_SNAPSHOT_ITEMS = 4_096
         const val MAX_SNAPSHOT_ITEM_BYTES = 512 * 1024
         const val SNAPSHOT_TTL_MS = 10 * 60 * 1_000L
+        const val ACTION_EXECUTION_RETENTION_MS = 24 * 60 * 60 * 1_000L
 
         private data class SnapshotBeginMarker(val originDevice: String, val expectedDigest: String?)
 
