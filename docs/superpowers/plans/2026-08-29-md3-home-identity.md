@@ -94,7 +94,7 @@
 - Produces: `MaterialColorScheme`, `fixedSeamScheme(dark: boolean)`, `resolveMaterialScheme(input)`, and `Theme.colors` with MD3 role names.
 - Consumes: React Native `PlatformColor`, `useColorScheme`, and the current `ThemeProvider` boundary.
 
-- [ ] **Step 1: Write failing scheme tests**
+- [x] **Step 1: Write failing scheme tests**
 
 ```tsx
 it('uses the full dynamic scheme only when every required role resolves', () => {
@@ -114,7 +114,7 @@ it('maps the switch to MD3 52 by 32 geometry and a 48 dp target', () => {
 });
 ```
 
-- [ ] **Step 2: Run focused tests and observe failure**
+- [x] **Step 2: Run focused tests and observe failure**
 
 Run:
 
@@ -125,7 +125,7 @@ npm test -- --runInBand components/__tests__/materialTheme.test.tsx components/p
 
 Expected: FAIL because `MaterialColorScheme`, atomic resolution, and the MD3 switch contract do not exist.
 
-- [ ] **Step 3: Implement fixed and dynamic Material roles**
+- [x] **Step 3: Implement fixed and dynamic Material roles**
 
 Define every required role as a `ColorValue`, retain semantic status pairs, and keep a compatibility projection for untouched secondary screens during this plan:
 
@@ -176,11 +176,11 @@ export function resolveMaterialScheme({ dark, dynamic }: {
 
 Use Android system accent/neutral tonal resources through `PlatformColor` and select the complete light or dark role map inside `ThemeProvider`. Preserve literal Seam colors for Jest and atomic fallback.
 
-- [ ] **Step 4: Revise shared switch and button primitives**
+- [x] **Step 4: Revise shared switch and button primitives**
 
 Use exact Material roles and state layers. The switch is `52 x 32`, its thumb is `24` when checked and `16` when unchecked, and its outer press target is at least `48`. Buttons use primary, secondary-container, surface, and error roles without hover lift or broad shadows.
 
-- [ ] **Step 5: Run focused tests and static gates**
+- [x] **Step 5: Run focused tests and static gates**
 
 Run:
 
@@ -193,7 +193,7 @@ npm run lint
 
 Expected: all focused tests PASS; typecheck and lint exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add mobile/components/tokens.ts mobile/components/Theme.tsx mobile/components/__tests__/materialTheme.test.tsx mobile/components/primitives/TwSwitch.tsx mobile/components/primitives/TwButton.tsx mobile/components/primitives/__tests__/TwSwitch.test.tsx mobile/components/primitives/__tests__/TwButton.test.tsx
@@ -223,7 +223,7 @@ git commit -m "feat(mobile/ui): add Material 3 dynamic color roles"
 - Produces: `TwinotifyMark({size, color})`, final launcher/splash paths, and `R.drawable.ic_stat_twinotify`.
 - Consumes: `Theme.colors.onSurface`, captured `small_icon_png_b64`, and captured `large_icon_png_b64`.
 
-- [ ] **Step 1: Write failing brand and notification-resource tests**
+- [x] **Step 1: Write failing brand and notification-resource tests**
 
 ```tsx
 test('wordmark composes one bare Seam mark and the product name', () => {
@@ -243,7 +243,7 @@ test('wordmark composes one bare Seam mark and the product name', () => {
 
 Add source assertions that `SyncService` and `CallStateMaterializer` reference `R.drawable.ic_stat_twinotify`, and that no production file uses `android.R.drawable.ic_dialog_info` or `stat_sys_data_bluetooth`.
 
-- [ ] **Step 2: Run focused tests and observe failure**
+- [x] **Step 2: Run focused tests and observe failure**
 
 Run:
 
@@ -256,7 +256,7 @@ cd android
 
 Expected: FAIL because the Seam component/resource and new artwork fallback do not exist.
 
-- [ ] **Step 3: Implement the canonical mark and in-app wordmark**
+- [x] **Step 3: Implement the canonical mark and in-app wordmark**
 
 Use the approved joined-message path once in `TwinotifyMark` and once in the canonical SVG source. The component uses `currentColor`, exposes no accessibility node of its own, and never adds a tile:
 
@@ -272,7 +272,7 @@ export function TwinotifyMark({ size = 24, color }: TwinotifyMarkProps) {
 }
 ```
 
-- [ ] **Step 4: Generate and wire deterministic brand assets**
+- [x] **Step 4: Generate and wire deterministic brand assets**
 
 Render the canonical SVG into the required PNG sizes using an existing project-capable rasterizer or a narrowly installed development tool only if none exists. Keep the mark inside Android adaptive safe zones, use the approved Seam fallback surface, and configure:
 
@@ -291,7 +291,7 @@ Render the canonical SVG into the required PNG sizes using an existing project-c
 
 Configure the splash plugin to use `./assets/brand/splash.png`. Remove old template assets only after `rg` proves they are unreferenced.
 
-- [ ] **Step 5: Implement the Android notification resource and builders**
+- [x] **Step 5: Implement the Android notification resource and builders**
 
 Create a white, opaque, transparent-background vector resource. Reference it through the module `R` class in mirrors, calls, and the foreground service. In `MirrorPoster`, use:
 
@@ -304,7 +304,7 @@ return NotificationCompat.Builder(ctx, NotifChannelSetup.CHANNEL_MIRRORS)
 
 Keep full-notification colorization off and retain all existing content visibility, category, ongoing, and clearability behavior.
 
-- [ ] **Step 6: Verify assets and focused tests**
+- [x] **Step 6: Verify assets and focused tests**
 
 Run:
 
@@ -319,7 +319,7 @@ cd android
 
 Expected: tests PASS; Expo config prints only new brand paths; Android assembly exits 0; source scan finds no generic production notification icons.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add mobile/components mobile/assets/brand mobile/app.json mobile/modules/twinotify-core/android/src/main/res/drawable/ic_stat_twinotify.xml mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/MirrorPoster.kt mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/SyncService.kt mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/call/CallStateMaterializer.kt mobile/modules/twinotify-core/android/src/test
@@ -341,7 +341,7 @@ git commit -m "feat(mobile/brand): add Seam identity and notification icons"
 - Produces: `UiActivityEvent`, `UiActivityKind`, `UiActivityDirection`, `UiActivityStatus`, `UiActivityJournal.recordQueued`, `recordApplied`, `markTerminal`, and `recent(limit)`.
 - Consumes: message ID, package/app name, route, and timestamp only; accepts no payload JSON.
 
-- [ ] **Step 1: Write failing pure journal tests**
+- [x] **Step 1: Write failing pure journal tests**
 
 ```kotlin
 @Test fun eventSurfaceCannotCarryNotificationContent() {
@@ -358,7 +358,7 @@ git commit -m "feat(mobile/brand): add Seam identity and notification icons"
 }
 ```
 
-- [ ] **Step 2: Run the focused JVM test and observe failure**
+- [x] **Step 2: Run the focused JVM test and observe failure**
 
 Run:
 
@@ -369,7 +369,7 @@ cd mobile/android
 
 Expected: FAIL because the UI activity entity and journal do not exist.
 
-- [ ] **Step 3: Implement the isolated entity and journal**
+- [x] **Step 3: Implement the isolated entity and journal**
 
 ```kotlin
 @Entity(
@@ -391,15 +391,15 @@ data class UiActivityEvent(
 
 DAO transactions upsert by message ID, delete rows older than 30 days, and delete everything outside the newest 500 rows. `recent(limit)` clamps to `1..20` before reaching SQL.
 
-- [ ] **Step 4: Add migration 7 to 8 and clearing**
+- [x] **Step 4: Add migration 7 to 8 and clearing**
 
 Create `ui_activity_event`, both indices, register `MIGRATION_7_8`, add the entity, bump version to 8, and include `clearUiActivityEvents()` in `clearReliableState()`.
 
-- [ ] **Step 5: Add migration test and export schema 8**
+- [x] **Step 5: Add migration test and export schema 8**
 
 The instrumented test creates version 7 with existing paired/protocol rows, runs `MIGRATION_7_8`, validates version 8, proves old rows remain, and proves the new table accepts a privacy-bounded row.
 
-- [ ] **Step 6: Run focused tests and schema generation**
+- [x] **Step 6: Run focused tests and schema generation**
 
 Run:
 
@@ -410,7 +410,7 @@ cd mobile/android
 
 Expected: JVM tests PASS and `schemas/.../8.json` exists. Run the migration test on the connected emulator in Task 7.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/storage mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/storage mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/storage/ReliableDeliveryMigrationTest.kt mobile/modules/twinotify-core/android/schemas/co.twinotify.core.storage.NotificationDbImpl/8.json
@@ -432,7 +432,7 @@ git commit -m "feat(mobile/storage): add privacy-bounded activity journal"
 - Produces: `RecentActivityItem` and `getRecentActivity(limit: number): Promise<RecentActivityItem[]>`.
 - Consumes: Task 3 `UiActivityJournal`; uses only already-authenticated and committed lifecycle points.
 
-- [ ] **Step 1: Write failing lifecycle tests**
+- [x] **Step 1: Write failing lifecycle tests**
 
 ```kotlin
 @Test fun outboundCaptureAndReceiptProduceOneDeliveredUiEvent() = runTest {
@@ -450,7 +450,7 @@ git commit -m "feat(mobile/storage): add privacy-bounded activity journal"
 
 Add an unpair test proving zero UI rows afterward and a module test proving requests over 20 are clamped.
 
-- [ ] **Step 2: Run focused lifecycle tests and observe failure**
+- [x] **Step 2: Run focused lifecycle tests and observe failure**
 
 Run:
 
@@ -461,13 +461,13 @@ cd mobile/android
 
 Expected: FAIL because delivery paths do not call the journal and the module API does not exist.
 
-- [ ] **Step 3: Wire journal calls only after durable state transitions**
+- [x] **Step 3: Wire journal calls only after durable state transitions**
 
 Outbound creation and its queued UI row share the same Room transaction. Receipt/expiry/rejection updates happen inside or immediately after the existing terminal transaction using the retained message ID. Inbound mirror and dismissal rows are inserted only after platform application succeeds. Duplicate and replay branches do not insert a second event.
 
 Do not pass `NotifPostJson` or raw payload JSON into `UiActivityJournal`; extract only `app_name` and `package_name` at the authenticated boundary.
 
-- [ ] **Step 4: Add native and TypeScript contracts**
+- [x] **Step 4: Add native and TypeScript contracts**
 
 ```ts
 export type RecentActivityItem = {
@@ -495,7 +495,7 @@ AsyncFunction("getRecentActivity") { limit: Int, promise: Promise ->
 
 Resolve the source app label/icon locally and bound raster artwork dimensions and encoded bytes. Return no raw `detailCode`.
 
-- [ ] **Step 5: Run focused native tests and TypeScript check**
+- [x] **Step 5: Run focused native tests and TypeScript check**
 
 Run:
 
@@ -508,7 +508,7 @@ npm run typecheck
 
 Expected: tests PASS and TypeScript exits 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core mobile/modules/twinotify-core/android/src/test mobile/modules/twinotify-core/src/TwinotifyCoreModule.ts
@@ -528,7 +528,7 @@ git commit -m "feat(mobile/activity): connect recent activity to delivery"
 - Produces: `useRecentActivity(limit)`, `presentRecentActivity(item, peerName, now)`, and `RecentActivitySection`.
 - Consumes: Task 4 `getRecentActivity`; accepts peer display name but never peer device ID.
 
-- [ ] **Step 1: Write failing hook and component tests**
+- [x] **Step 1: Write failing hook and component tests**
 
 ```tsx
 it('distinguishes loading, empty, failure, and populated activity', async () => {
@@ -545,7 +545,7 @@ it('never renders content-like fields from an unexpected native object', () => {
 });
 ```
 
-- [ ] **Step 2: Run tests and observe failure**
+- [x] **Step 2: Run tests and observe failure**
 
 Run:
 
@@ -556,15 +556,15 @@ npm test -- --runInBand hooks/__tests__/useRecentActivity.test.ts components/hom
 
 Expected: FAIL because the hook and components do not exist.
 
-- [ ] **Step 3: Implement the focus-aware hook**
+- [x] **Step 3: Implement the focus-aware hook**
 
 Refresh on mount/focus and every five seconds while focused. Clamp to five for Home. Preserve the previous success during a transient failure; expose a retry only when no successful snapshot exists. Cancel timers and ignore late promises on blur/unmount.
 
-- [ ] **Step 4: Implement presentation and four UI states**
+- [x] **Step 4: Implement presentation and four UI states**
 
 Map only typed enum fields to approved copy. Use app name, falling back to package label then `Source app`. Dismissal rows use the bare Seam dismissal glyph. Source artwork is decorative. `See all` renders only when the native result indicates more than five; if no detail screen is in this plan, query exactly five and omit `See all` rather than ship a dead control.
 
-- [ ] **Step 5: Run focused tests, typecheck, and lint**
+- [x] **Step 5: Run focused tests, typecheck, and lint**
 
 Run:
 
@@ -577,7 +577,7 @@ npm run lint
 
 Expected: all PASS and static gates exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add mobile/hooks/useRecentActivity.ts mobile/hooks/__tests__/useRecentActivity.test.ts mobile/components/home
@@ -602,7 +602,7 @@ git commit -m "feat(mobile/home): add real recent activity presentation"
 - Produces: the final home composition.
 - Consumes: Tasks 1, 2, and 5 plus existing `presentRoute`, `useSyncStatus`, `useRouteStatus`, and `useMetrics`.
 
-- [ ] **Step 1: Replace the placeholder assertions with failing live-control-center tests**
+- [x] **Step 1: Replace the placeholder assertions with failing live-control-center tests**
 
 ```tsx
 it('renders a real activity section and no permanent placeholder', async () => {
@@ -624,7 +624,7 @@ it.each(['direct', 'relay', 'reconnecting', 'queued', 'paused', 'unpaired'])
 
 Add tests for Settings, retry, pair, filter navigation, toggle rollback, disabled unpaired switch, no device ID fragment, and 320 dp/200% font-scale layouts.
 
-- [ ] **Step 2: Run focused home tests and observe failure**
+- [x] **Step 2: Run focused home tests and observe failure**
 
 Run:
 
@@ -635,19 +635,19 @@ npm test -- --runInBand app/__tests__/homeHandoffTrace.test.tsx components/home/
 
 Expected: FAIL because the new components and real activity surface are absent.
 
-- [ ] **Step 3: Implement focused home components**
+- [x] **Step 3: Implement focused home components**
 
 `ConnectionSurface` owns the only large tonal surface and receives already-presented route data. `HomeMetrics` uses one responsive flex/grid structure with reserved label/value slots. `HomeTopAppBar` uses the bare Seam wordmark and a conventional Material Settings symbol in one state-layer icon button. `HomeFilterAction` is a working list action named `Choose mirrored apps`.
 
-- [ ] **Step 4: Refine Handoff Trace without changing its truth contract**
+- [x] **Step 4: Refine Handoff Trace without changing its truth contract**
 
 Keep geometry pure and accessibility-hidden. Use semantic colors passed from the connection surface. Preserve exact six-state geometry tests. Never start content or route endpoints at opacity zero.
 
-- [ ] **Step 5: Reduce `home.tsx` to orchestration**
+- [x] **Step 5: Reduce `home.tsx` to orchestration**
 
 The screen loads pair/relay state, owns toggle/retry callbacks, derives `presentRoute`, and composes the five focused units. It contains no brand path, activity-copy switch, or hardcoded Material colors. Use `Unknown device`, never a sliced device ID.
 
-- [ ] **Step 6: Run the complete JS gate**
+- [x] **Step 6: Run the complete JS gate**
 
 Run:
 
@@ -661,7 +661,7 @@ npx expo-doctor
 
 Expected: all Jest suites PASS; typecheck/lint/doctor exit 0.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add mobile/app/home.tsx mobile/app/__tests__/homeHandoffTrace.test.tsx mobile/components/home mobile/components/HandoffTrace.tsx mobile/components/__tests__/HandoffTrace.test.tsx mobile/components/index.ts
@@ -678,7 +678,7 @@ git commit -m "feat(mobile/home): rebuild the live control center"
 - Consumes: all earlier tasks.
 - Produces: verified debug and release APKs with preserved pairing state.
 
-- [ ] **Step 1: Generate a clean native project**
+- [x] **Step 1: Generate a clean native project**
 
 Run:
 
@@ -689,7 +689,7 @@ npm run prebuild
 
 Expected: clean Android project generation exits 0 and preserves source-controlled module resources/schema inputs.
 
-- [ ] **Step 2: Run the Room 7-to-8 migration test on the emulator**
+- [x] **Step 2: Run the Room 7-to-8 migration test on the emulator**
 
 Run:
 
@@ -700,7 +700,7 @@ cd mobile/android
 
 Expected: migration suite PASS with version-7 data preserved and `ui_activity_event` validated.
 
-- [ ] **Step 3: Run the complete owned Android gate**
+- [x] **Step 3: Run the complete owned Android gate**
 
 Run:
 
@@ -711,7 +711,7 @@ cd mobile/android
 
 Expected: owned Kotlin lint, all native JVM tests, app lint, and debug assembly execute successfully through the repository's fail-closed Gradle wiring.
 
-- [ ] **Step 4: Build the release APK and audit the artifact**
+- [x] **Step 4: Build the release APK and audit the artifact**
 
 Run:
 
@@ -722,7 +722,7 @@ cd mobile/android
 
 Expected: release assembly exits 0. Verify target SDK 36, non-debuggable manifest, absence of debug probes/traces, and presence of the Seam drawable and new launcher resources.
 
-- [ ] **Step 5: Route any gate defect back to its owning task**
+- [x] **Step 5: Route any gate defect back to its owning task**
 
 If and only if a gate exposes a defect, stop Task 7, return to the task that owns the failing file, add the regression test named by that task, repeat that task's focused test command, and use that task's exact `git add` paths with a `fix(mobile/home): correct release verification defect` commit. Then restart Task 7 from Step 1. Do not bundle unrelated gate fixes.
 
@@ -735,35 +735,35 @@ If and only if a gate exposes a defect, stop Task 7, return to the task that own
 - Consumes: Task 7 release APK and the already-paired Mi 11X and POCO F1.
 - Produces: physical evidence for every non-owner-only acceptance criterion.
 
-- [ ] **Step 1: Preserve settings and install release on both phones**
+- [x] **Step 1: Preserve settings and install release on both phones**
 
 Record each device's current font scale and night-mode setting without exposing device identifiers in the final report. Install with `adb install -r` so paired data remains intact. Launch Twinotify and verify both devices recover their route without toggling mirroring.
 
-- [ ] **Step 2: Verify launcher and notification identity**
+- [x] **Step 2: Verify launcher and notification identity**
 
 On both phones inspect normal launcher icon, themed launcher icon, splash, foreground-service notification, mirrored notification, and call notification when the user performs the controlled real-call step. Confirm the Seam small icon is optically centered and Android renders it as an opaque monochrome silhouette.
 
-- [ ] **Step 3: Verify Monet and fixed hierarchy**
+- [x] **Step 3: Verify Monet and fixed hierarchy**
 
 Capture bounded screenshots in light and dark modes with the current wallpaper palette. Change the system palette or wallpaper, recreate the app, and verify every home semantic role changes coherently with no mixed fallback values. Confirm the Seam mark remains `onSurface` and contrast stays readable.
 
-- [ ] **Step 4: Verify real activity in both directions**
+- [x] **Step 4: Verify real activity in both directions**
 
 Send one controlled notification Mi 11X to POCO F1 and one POCO F1 to Mi 11X. Use privacy-safe parsers only to confirm delivery. Verify exactly one matching activity row per direction and no title/body text on Home. Dismiss each and verify exactly one synchronized dismissal row.
 
-- [ ] **Step 5: Verify restart and route-state stability**
+- [x] **Step 5: Verify restart and route-state stability**
 
 Force-stop/relaunch each phone one at a time. Confirm both recover Direct on Wi-Fi and stay connected past the former 15-second failure window. Safely induce reconnecting/queued/paused states where possible and confirm the connection surface does not jump or expose dead actions.
 
-- [ ] **Step 6: Verify physical controls and accessibility matrix**
+- [x] **Step 6: Verify physical controls and accessibility matrix**
 
 Tap Settings, mirroring switch, retry when available, paired phone, and Choose mirrored apps. Test both phones at font scales 0.85, 1.0, and 2.0 in light and dark modes. Scroll every screen to the bottom and confirm no clipping, edge contact, inaccessible control, off-center mark, or misaligned metric row. Restore each device's exact original font/night setting.
 
-- [ ] **Step 7: Re-read and audit the complete anti-slop law**
+- [x] **Step 7: Re-read and audit the complete anti-slop law**
 
 Inspect implementation and screenshots point by point. Specifically verify: no pill eyebrow, gradient text, blue-purple gradient, icon tiles used as generic decoration, all-around shadows, clipped content, fake app logos, dead controls, hard seams, default hero stack, ragged parallel metrics, invisible entrance content, off-center mark, generic notification icons, or unreadable dynamic color pairing. Fix every confirmed issue before completion.
 
-- [ ] **Step 8: Run final clean-tree verification**
+- [x] **Step 8: Run final clean-tree verification**
 
 Run:
 
