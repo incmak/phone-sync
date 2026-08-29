@@ -52,8 +52,11 @@ import expo.modules.interfaces.permissions.Permissions
 
 internal fun recentActivityLimit(limit: Int): Int = limit.coerceIn(1, 20)
 
-internal fun co.twinotify.core.storage.UiActivityEvent.toRecentActivityMap(): Map<String, Any?> = mapOf(
+internal fun co.twinotify.core.storage.UiActivityEvent.toRecentActivityMap(
+    artworkDataUri: String? = null,
+): Map<String, Any?> = mapOf(
     "appName" to appName,
+    "artworkDataUri" to artworkDataUri,
     "direction" to direction,
     "kind" to kind,
     "status" to status,
@@ -936,7 +939,10 @@ class TwinotifyCoreModule internal constructor(
                         .get(requireContext())
                         .reliableDeliveryDao()
                         .recentUiActivity(recentActivityLimit(limit))
-                    promise.resolve(rows.map { it.toRecentActivityMap() })
+                    val context = requireContext()
+                    promise.resolve(rows.map { row ->
+                        row.toRecentActivityMap(sourceAppArtworkDataUri(context, row.packageName))
+                    })
                 } catch (e: Throwable) {
                     promise.reject("RECENT_ACTIVITY", "recent_activity_unavailable", e)
                 }

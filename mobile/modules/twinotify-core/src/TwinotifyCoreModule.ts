@@ -24,6 +24,7 @@ export type EncryptResult = { ciphertext: string; nonce: string };
 export type MetricsSnapshot = { mirroredToday: number; blockedToday: number; latencyMs: number };
 export type RecentActivityItem = {
   appName: string | null;
+  artworkDataUri: string | null;
   direction: 'SENT' | 'RECEIVED';
   kind: 'NOTIFICATION' | 'DISMISSAL' | 'CALL';
   status: 'QUEUED' | 'APPLIED' | 'DELIVERED' | 'DISMISSED' | 'EXPIRED' | 'FAILED';

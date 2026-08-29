@@ -34,6 +34,7 @@ jest.mock('expo-router', () => ({
   Stack: ({ children }) => mockReact.createElement(mockView, null, children),
   useLocalSearchParams: () => mockLocalSearchParams,
   useNavigation: () => ({ addListener: jest.fn(() => jest.fn()) }),
+  useFocusEffect: (callback) => mockReact.useEffect(callback, [callback]),
 }));
 
 let activeOfflineStatusListener = null;
@@ -97,6 +98,7 @@ const mockTwinotifyCore = {
   })),
   openAppSettings: jest.fn(async () => {}),
   getMetrics: jest.fn(async () => ({ mirroredToday: 0, blockedToday: 0, latencyMs: 0 })),
+  getRecentActivity: jest.fn(async () => []),
   unpair: jest.fn(),
 };
 
