@@ -11,6 +11,9 @@ on:
       - 'mobile/package-lock.json'
       - 'scripts/verify-offline-pairing-evidence.sh'
       - 'scripts/verify-release-evidence.sh'
+      - 'scripts/verify-notification-action-evidence.sh'
+      - 'scripts/verify-notification-action-evidence_test.sh'
+      - 'docs/release-evidence/notification-actions-schema.json'
       - 'scripts/verify-standalone-android.sh'
       - 'scripts/verify-android-release-workflow.sh'
       - 'scripts/verify-android-release_test.sh'
@@ -40,6 +43,8 @@ jobs:
         run: cd e2e && go vet ./...
       - name: Verify direct LAN product host contract
         run: ./e2e/scripts/lan_product_target_test.sh
+      - name: Verify notification action host contract
+        run: ./e2e/scripts/notification_action_target_test.sh
       - name: Validate emulator workflow contract
         run: ./e2e/scripts/validate-workflow.sh
       - name: Run emulator preflight self-test
@@ -48,6 +53,8 @@ jobs:
         run: ./scripts/verify-offline-pairing-evidence.sh --self-test
       - name: Verify release evidence verifier
         run: ./scripts/verify-release-evidence.sh --self-test
+      - name: Verify notification action evidence verifier
+        run: ./scripts/verify-notification-action-evidence_test.sh
       - name: Verify protected Android release contracts
         run: ./scripts/verify-android-release_test.sh
       - name: Verify host workflow contracts

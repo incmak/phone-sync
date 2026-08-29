@@ -410,10 +410,12 @@ require_approved_run_commands() {
       approved["cd e2e && go test ./... -race -count=1"] = 1
       approved["cd e2e && go vet ./..."] = 1
       approved["./e2e/scripts/lan_product_target_test.sh"] = 1
+      approved["./e2e/scripts/notification_action_target_test.sh"] = 1
       approved["./e2e/scripts/validate-workflow.sh"] = 1
       approved["./e2e/scripts/preflight_test.sh"] = 1
       approved["./scripts/verify-offline-pairing-evidence.sh --self-test"] = 1
       approved["./scripts/verify-release-evidence.sh --self-test"] = 1
+      approved["./scripts/verify-notification-action-evidence_test.sh"] = 1
       approved["./scripts/verify-android-release_test.sh"] = 1
       approved["./scripts/verify-host-workflows.sh"] = 1
       approved["./scripts/verify-host-workflows_test.sh"] = 1
@@ -480,16 +482,18 @@ require_host_verify_recipe() {
       expected[5] = "cd e2e && go test ./... -race -count=1"
       expected[6] = "cd e2e && go vet ./..."
 	  expected[7] = "./e2e/scripts/lan_product_target_test.sh"
-	  expected[8] = "./e2e/scripts/validate-workflow.sh"
-	  expected[9] = "./e2e/scripts/preflight_test.sh"
-	  expected[10] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
-	  expected[11] = "./scripts/verify-release-evidence.sh --self-test"
-	  expected[12] = "./scripts/verify-project-docs.sh"
-	  expected[13] = "./scripts/verify-project-docs_test.sh"
-	  expected[14] = "./scripts/verify-android-release_test.sh"
-	  expected[15] = "./scripts/verify-host-workflows.sh"
-	  expected[16] = "./scripts/verify-host-workflows_test.sh"
-	  expected[17] = "./scripts/verify-generated-clean.sh"
+	  expected[8] = "./e2e/scripts/notification_action_target_test.sh"
+	  expected[9] = "./e2e/scripts/validate-workflow.sh"
+	  expected[10] = "./e2e/scripts/preflight_test.sh"
+	  expected[11] = "./scripts/verify-offline-pairing-evidence.sh --self-test"
+	  expected[12] = "./scripts/verify-release-evidence.sh --self-test"
+	  expected[13] = "./scripts/verify-notification-action-evidence_test.sh"
+	  expected[14] = "./scripts/verify-project-docs.sh"
+	  expected[15] = "./scripts/verify-project-docs_test.sh"
+	  expected[16] = "./scripts/verify-android-release_test.sh"
+	  expected[17] = "./scripts/verify-host-workflows.sh"
+	  expected[18] = "./scripts/verify-host-workflows_test.sh"
+	  expected[19] = "./scripts/verify-generated-clean.sh"
     }
     $0 ~ /^host-verify:[ \t]*proto-test[ \t]*$/ {
       target_count++
@@ -505,11 +509,11 @@ require_host_verify_recipe() {
         recipe = trim($0)
         if (recipe == "" || recipe ~ /^#/) next
         observed++
-		if (observed > 17 || recipe != expected[observed]) invalid = 1
+		if (observed > 19 || recipe != expected[observed]) invalid = 1
       }
     }
     END {
-	  if (target_count != 1 || observed != 17) invalid = 1
+	  if (target_count != 1 || observed != 19) invalid = 1
       exit invalid ? 1 : 0
     }
   ' "$makefile" || {
@@ -829,6 +833,9 @@ for release_path in \
   'scripts/verify-host-workflows.sh' \
   'scripts/verify-host-workflows_test.sh' \
   'scripts/verify-lan-product-evidence.sh' \
+  'scripts/verify-notification-action-evidence.sh' \
+  'scripts/verify-notification-action-evidence_test.sh' \
+  'docs/release-evidence/notification-actions-schema.json' \
   '.github/workflows/e2e-host.yml' \
   '.github/workflows/mobile.yml' \
   '.github/workflows/android-release.yml'; do
@@ -840,10 +847,12 @@ for command in \
   'cd e2e && go test ./... -race -count=1' \
   'cd e2e && go vet ./...' \
   './e2e/scripts/lan_product_target_test.sh' \
+  './e2e/scripts/notification_action_target_test.sh' \
   './e2e/scripts/validate-workflow.sh' \
   './e2e/scripts/preflight_test.sh' \
   './scripts/verify-offline-pairing-evidence.sh --self-test' \
   './scripts/verify-release-evidence.sh --self-test' \
+  './scripts/verify-notification-action-evidence_test.sh' \
   './scripts/verify-android-release_test.sh' \
   './scripts/verify-host-workflows_test.sh'; do
   require_literal "$E2E_WORKFLOW" "$command" "E2E host workflow is missing required command: $command"

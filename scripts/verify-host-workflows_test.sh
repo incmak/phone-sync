@@ -354,6 +354,14 @@ sed -i.bak '/lan_product_target_test\.sh/d' "$tmp/Makefile"
 expect_rejection 'host Make target omits LAN product contract test'
 
 copy_workflows
+sed -i.bak '/notification_action_target_test\.sh/d' "$tmp/Makefile"
+expect_rejection 'host Make target omits notification action contract test'
+
+copy_workflows
+sed -i.bak '/verify-notification-action-evidence_test\.sh/d' "$tmp/Makefile"
+expect_rejection 'host Make target omits notification action evidence verifier test'
+
+copy_workflows
 sed -i.bak '/lan_product_target_test\.sh/d' "$tmp/.github/workflows/e2e-host.yml"
 expect_rejection 'E2E host workflow omits LAN product contract test'
 
