@@ -67,6 +67,34 @@ class SnapshotCoordinatorTest {
     }
 
     @Test
+    fun repairSnapshotReusesCommittedPayloadVerbatim() = runTest {
+        val snapshot = sourceSnapshot()
+        val canon = notificationCanon(snapshot)
+        val committedPayload = payload(canon).replace("}", ",\"actions\":[{\"action_id\":\"stable\"}]}")
+        val store = FakeSnapshotStore(
+            states = mutableListOf(state(canon, 9).copy(desiredPayloadJson = committedPayload)),
+        )
+        val emitted = mutableListOf<Any>()
+        val source = object : SnapshotSource {
+            override fun active(originDevice: String): List<SourceNotificationSnapshot> = listOf(snapshot)
+            override fun payloadJson(originDevice: String, snapshot: SourceNotificationSnapshot): String =
+                error("snapshot must not rebuild a committed payload")
+        }
+        val coordinator = SnapshotCoordinator(
+            store = store,
+            emitter = SnapshotEmitter { emitted += it },
+            clock = { 10_000L },
+            source = source,
+            localOriginDevice = ORIGIN,
+        )
+
+        val result = coordinator.onDigest(StateDigest(ORIGIN, 0, emptyDigest()), force = true)
+
+        assertIs<SnapshotConvergence.RepairStarted>(result)
+        assertEquals(committedPayload, emitted.filterIsInstance<SnapshotItemEvent>().single().payloadJson)
+    }
+
+    @Test
     fun callOnlyOriginHasEmptyNotificationDigest() = runTest {
         val store = FakeSnapshotStore(states = mutableListOf(callState(sequence = 3)))
 

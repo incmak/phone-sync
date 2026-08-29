@@ -2,6 +2,10 @@ package co.twinotify.core.listener
 
 import android.content.Context
 import android.util.Base64
+import android.app.Notification
+import co.twinotify.core.actions.ActionDescriptorFactory
+import co.twinotify.core.actions.ActionGenerationCommitter
+import co.twinotify.core.actions.ProcessNotificationActionRegistry
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.Encrypter
 import co.twinotify.core.crypto.NonceSource
@@ -60,6 +64,10 @@ internal fun outboundUiActivity(
 class DurableCapturePersister(context: Context) : CapturePersister {
     private val appContext = context.applicationContext
     private val dao = NotificationDb.get(appContext).reliableDeliveryDao()
+    private val actionDescriptorFactory = ActionDescriptorFactory()
+    private val actionCommitter = ActionGenerationCommitter<Notification.Action>(
+        ProcessNotificationActionRegistry.registry,
+    )
 
     override suspend fun persist(command: CaptureCommand): CapturePersistResult {
         val peer = PeerStore.load(appContext)
@@ -79,10 +87,25 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             is PostCommand -> command.snapshot.postTime.coerceAtLeast(0L)
         }.coerceAtLeast(System.currentTimeMillis())
         val expiresAt = now + RETENTION_MS
+        val preparedActions = when (command) {
+            is PostCommand -> actionDescriptorFactory.prepare(
+                sourceKey = command.sourceKey,
+                packageName = command.snapshot.packageName,
+                sequence = sequence,
+                candidates = command.snapshot.actions,
+            )
+            is RemoveCommand -> null
+        }
         val payloadJson = captureValidated {
             when (command) {
                 is PostCommand -> NotifPostBuilder.toPayloadJson(
-                    NotifPostBuilder.build(command.snapshot, appContext, originDevice, eventType),
+                    NotifPostBuilder.build(
+                        command.snapshot,
+                        appContext,
+                        originDevice,
+                        eventType,
+                        preparedActions?.descriptors.orEmpty(),
+                    ),
                 )
                 is RemoveCommand -> JSONObject().apply {
                     put("reason", command.reason)
@@ -157,7 +180,17 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         )
         val uiActivity = outboundUiActivity(command, current?.desiredPayloadJson, msgId, now)
         when (val result = dao.commitCapturedState(desired, row, uiActivity)) {
-            is OutboundStateCommitResult.Committed -> return CapturePersistResult(sequence, msgId)
+            is OutboundStateCommitResult.Committed -> {
+                when (command) {
+                    is PostCommand -> actionCommitter.afterPostCommit(
+                        command.canonId,
+                        requireNotNull(preparedActions).generation,
+                        result,
+                    )
+                    is RemoveCommand -> actionCommitter.afterCancelCommit(command.canonId, result)
+                }
+                return CapturePersistResult(sequence, msgId)
+            }
             is OutboundStateCommitResult.Stale -> return persist(command)
             OutboundStateCommitResult.NotStateEvent -> error("capture produced unsupported event type")
         }

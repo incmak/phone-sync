@@ -31,6 +31,7 @@ object UnpairOps {
             db.notificationMapDao().clearAll()
             db.notificationMapDao().sweepExpired(Long.MAX_VALUE)
             db.reliableDeliveryDao().clearReliableState()
+            co.twinotify.core.actions.ProcessNotificationActionRegistry.registry.clear()
             db.outboundEventDao().clearAll()
             // The SyncService has already been cancelled and joined by UnpairWorkflow.
             // Delete LAN TLS material before rotating application identity.

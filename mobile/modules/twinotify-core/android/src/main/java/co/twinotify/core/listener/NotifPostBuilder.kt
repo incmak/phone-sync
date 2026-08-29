@@ -10,6 +10,7 @@ import android.service.notification.StatusBarNotification
 import android.util.Base64
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
+import co.twinotify.core.actions.ActionCandidate
 import java.io.ByteArrayOutputStream
 import java.util.UUID
 
@@ -175,6 +176,19 @@ object NotifPostBuilder {
             ?: extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT)?.toString()?.takeIf { it.isNotBlank() }
             ?: extras.getCharSequence(Notification.EXTRA_INFO_TEXT)?.toString()?.takeIf { it.isNotBlank() }
 
+        val actions = notif.actions.orEmpty().mapNotNull { action ->
+            if (action.actionIntent == null) return@mapNotNull null
+            val actionTitle = action.title?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val remoteInput = action.remoteInputs?.firstOrNull { it.allowFreeFormInput }
+            ActionCandidate(
+                title = actionTitle.truncateCodePoints(64),
+                semantic = action.semanticAction.coerceIn(0, 12),
+                reply = remoteInput != null,
+                replyLabel = remoteInput?.label?.toString()?.truncateCodePoints(64),
+                handle = action,
+            )
+        }.take(3)
+
         return SourceNotificationSnapshot(
             sourceKey = sbn.key,
             packageName = pkg,
@@ -194,6 +208,8 @@ object NotifPostBuilder {
             bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString(),
             smallIcon = notif.smallIcon,
             largeIcon = notif.getLargeIcon(),
+            isAutoCancel = (notif.flags and Notification.FLAG_AUTO_CANCEL) != 0,
+            actions = actions,
         )
     }
 
@@ -203,6 +219,7 @@ object NotifPostBuilder {
         ctx: Context,
         originDevice: String,
         eventType: String,
+        actionDescriptors: List<NotifActionJson> = emptyList(),
     ): NotifPostJson {
         require(eventType == "notif.post" || eventType == "notif.update") {
             "notification event type must be notif.post or notif.update"
@@ -227,6 +244,8 @@ object NotifPostBuilder {
             large_icon_png_b64 = snapshot.largeIconPngB64
                 ?: drawableToPngB64(snapshot.largeIcon?.loadDrawable(ctx), LARGE_ICON_PX),
             ts = snapshot.postTime,
+            is_auto_cancel = snapshot.isAutoCancel,
+            actions = actionDescriptors,
         )
     }
 
@@ -305,5 +324,11 @@ object NotifPostBuilder {
         bm.compress(Bitmap.CompressFormat.PNG, 100, stream)
         bm.recycle()
         return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+    }
+
+    private fun String.truncateCodePoints(maxCodePoints: Int): String {
+        val count = codePointCount(0, length)
+        if (count <= maxCodePoints) return this
+        return substring(0, offsetByCodePoints(0, maxCodePoints))
     }
 }

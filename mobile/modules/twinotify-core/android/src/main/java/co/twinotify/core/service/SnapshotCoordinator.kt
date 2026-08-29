@@ -251,8 +251,9 @@ class SnapshotCoordinator(
             .associateBy { it.canonId }
         val items = snapshots.mapNotNull { snapshot ->
             val canonId = CanonIdBuilder.build(localOrigin, snapshot.packageName, snapshot.id, snapshot.tag)
-            val payload = snapshotSource.payloadJson(localOrigin, snapshot)
-            val sequence = states[canonId]?.latestSequence ?: 1L
+            val state = states[canonId] ?: return@mapNotNull null
+            val payload = state.desiredPayloadJson ?: return@mapNotNull null
+            val sequence = state.latestSequence
             SnapshotItemEvent(snapshotId, localOrigin, canonId, sequence, payload)
         }
         val oversized = items.any { it.payloadJson.toByteArray(Charsets.UTF_8).size > MAX_ITEM_PAYLOAD_BYTES }

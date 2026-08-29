@@ -1,6 +1,8 @@
 package co.twinotify.core.listener
 
+import android.app.Notification
 import android.graphics.drawable.Icon
+import co.twinotify.core.actions.ActionCandidate
 
 /**
  * Immutable input captured at the notification-listener boundary.  In particular, this type
@@ -29,6 +31,8 @@ data class SourceNotificationSnapshot(
     /** Already-encoded icons are used by compatibility callers that already built a payload. */
     val smallIconPngB64: String? = null,
     val largeIconPngB64: String? = null,
+    val isAutoCancel: Boolean = true,
+    val actions: List<ActionCandidate<Notification.Action>> = emptyList(),
 ) {
     companion object {
         fun fromPost(post: NotifPostJson): SourceNotificationSnapshot = SourceNotificationSnapshot(
@@ -56,6 +60,7 @@ data class SourceNotificationSnapshot(
             largeIcon = null,
             smallIconPngB64 = post.small_icon_png_b64,
             largeIconPngB64 = post.large_icon_png_b64,
+            isAutoCancel = post.is_auto_cancel,
         )
     }
 }
