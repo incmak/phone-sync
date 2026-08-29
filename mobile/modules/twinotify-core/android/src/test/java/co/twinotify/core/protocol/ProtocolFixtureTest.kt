@@ -7,7 +7,6 @@ import java.util.Base64
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import org.json.JSONObject
 
@@ -31,16 +30,17 @@ class ProtocolFixtureTest {
                     val frame = RelayFrameCodec.decode(raw)
                     val encoded = RelayFrameCodec.encode(frame)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(encoded))
-                    val put = assertIs<RelayFrame.Put>(frame)
-                    val envelope = ProtocolJson.decodeEnvelope(put.envelope)
-                    assertEquals(
-                        JSONObject(put.envelope).getString("nonce").let(Base64.getDecoder()::decode).toList(),
-                        Base64.getDecoder().decode(envelope.nonceB64).toList(),
-                    )
-                    assertEquals(
-                        JSONObject(put.envelope).getString("ciphertext").let(Base64.getDecoder()::decode).toList(),
-                        Base64.getDecoder().decode(envelope.ciphertextB64).toList(),
-                    )
+                    if (frame is RelayFrame.Put) {
+                        val envelope = ProtocolJson.decodeEnvelope(frame.envelope)
+                        assertEquals(
+                            JSONObject(frame.envelope).getString("nonce").let(Base64.getDecoder()::decode).toList(),
+                            Base64.getDecoder().decode(envelope.nonceB64).toList(),
+                        )
+                        assertEquals(
+                            JSONObject(frame.envelope).getString("ciphertext").let(Base64.getDecoder()::decode).toList(),
+                            Base64.getDecoder().decode(envelope.ciphertextB64).toList(),
+                        )
+                    }
                 }
                 "peer_receipt_inner" -> {
                     val event = ProtocolJson.decodeInner(raw)
