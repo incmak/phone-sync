@@ -1,10 +1,13 @@
 package co.twinotify.core.pairing.lan
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.os.Build
 import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -221,6 +224,7 @@ class OfflinePairingLoopbackTest {
     }
 
     private suspend fun wifiNetworkLease(): WifiNetworkLease {
+        grantRequiredWifiPermissions()
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
@@ -236,6 +240,18 @@ class OfflinePairingLoopbackTest {
                 continuation.invokeOnCancellation { runCatching { connectivity.unregisterNetworkCallback(callback) } }
                 connectivity.registerNetworkCallback(request, callback)
             }
+        }
+    }
+
+    private fun grantRequiredWifiPermissions() {
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        val permissions = buildList {
+            if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            if (Build.VERSION.SDK_INT >= 36) add("android.permission.ACCESS_LOCAL_NETWORK")
+        }
+        permissions.forEach { permission ->
+            automation.grantRuntimePermission(context.packageName, permission)
+            assertEquals(PackageManager.PERMISSION_GRANTED, context.checkSelfPermission(permission))
         }
     }
 
