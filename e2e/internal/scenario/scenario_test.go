@@ -94,6 +94,16 @@ func validObservationPayloadForTest() map[string]any {
 		"route_evidence":  map[string]any{"route": "lan", "phase": "authenticated", "route_generation": 1.0, "queued_count": 0.0, "queued_bytes": 0.0, "receipt_at_ms": 0.0, "error_code": ""},
 		"outbox_bytes":    0.0, "active_outbox": 0.0, "active_inbound": 0.0, "pending_materialization": 0.0,
 		"canonical": []any{}, "activity": []any{},
+		"notification_action_fixture": map[string]any{
+			"available": true, "reply_dispatch_count": 0.0, "mark_read_dispatch_count": 0.0,
+			"last_fixture_generation": 0.0, "last_terminal_status": "none",
+		},
+		"notification_action_observations": map[string]any{
+			"invocation_pending": 0.0, "invocation_dispatched": 0.0, "invocation_outcome_unknown": 0.0,
+			"invocation_failed": 0.0, "invocation_action_gone": 0.0, "invocation_notification_gone": 0.0,
+			"invocation_expired": 0.0, "execution_claimed": 0.0, "execution_completed": 0.0,
+			"detail_active": 0.0, "detail_cancelled": 0.0, "latest_terminal_status": "none",
+		},
 		"product_observations": map[string]any{
 			"paired":             true,
 			"custody_counts":     map[string]any{"lan": counts, "relay": cloneMap(counts)},
@@ -102,6 +112,28 @@ func validObservationPayloadForTest() map[string]any {
 			"unpair_outcome": "none", "active_queue_count": 0.0, "active_queue_bytes": 0.0,
 			"peak_queue_count": 0.0, "peak_queue_bytes": 0.0,
 		},
+	}
+}
+
+func TestParseObservationReadsContentFreeNotificationActionEvidence(t *testing.T) {
+	payload := validObservationPayloadForTest()
+	payload["notification_action_fixture"].(map[string]any)["reply_dispatch_count"] = 2.0
+	payload["notification_action_observations"].(map[string]any)["invocation_dispatched"] = 3.0
+	encoded, _ := json.Marshal(payload)
+	state, err := scenario.ParseObservation(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.FixtureReplyCount != 2 || state.ActionInvocationCounts["DISPATCHED"] != 3 {
+		t.Fatalf("state=%+v", state)
+	}
+	for _, forbidden := range []string{"reply_text", "title", "text", "canon_id", "action_id"} {
+		broken := cloneJSONMap(t, payload)
+		broken["notification_action_observations"].(map[string]any)[forbidden] = "secret"
+		raw, _ := json.Marshal(broken)
+		if _, err := scenario.ParseObservation(raw); err == nil {
+			t.Fatalf("accepted forbidden notification field %s", forbidden)
+		}
 	}
 }
 

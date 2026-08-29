@@ -8,6 +8,7 @@ import co.twinotify.core.crypto.Encrypter
 import co.twinotify.core.actions.ActionControlEncoder
 import co.twinotify.core.actions.ActionInvokeRequest
 import co.twinotify.core.actions.ActionInvocationProcessor
+import co.twinotify.core.actions.ActionDispatchGate
 import co.twinotify.core.actions.ActionProcessResult
 import co.twinotify.core.actions.ActionResultRowEncoder
 import co.twinotify.core.actions.ActionResultJournal
@@ -400,6 +401,7 @@ class InboundDispatcher internal constructor(
             executor = PendingIntentActionExecutor(ctx.applicationContext),
             resultEncoder = ActionResultRowEncoder(encoder::encodeResult),
             wakeScheduler = PersistentActionClaimWakeScheduler(ctx.applicationContext),
+            beforeDispatch = ActionDispatchGate::awaitIfArmed,
         )
     }
     private val actionResultProcessor by lazy {

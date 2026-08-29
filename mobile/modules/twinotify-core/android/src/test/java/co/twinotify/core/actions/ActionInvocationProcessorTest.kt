@@ -27,6 +27,24 @@ class ActionInvocationProcessorTest {
     }
 
     @Test
+    fun debugPauseRunsAfterDurableClaimAndValidationButBeforeDispatch() = runBlocking {
+        val events = mutableListOf<String>()
+        val store = FakeStore(events)
+        val processor = processor(
+            store = store,
+            events = events,
+            beforeDispatch = { events += "before-dispatch" },
+        )
+
+        assertEquals(ActionProcessResult.Completed("dispatched"), processor.process(request()))
+
+        assertEquals(
+            listOf("claim", "schedule", "active", "before-dispatch", "execute", "complete:dispatched"),
+            events,
+        )
+    }
+
+    @Test
     fun completedInvocationReplaysStoredResultWithoutExecuting() = runBlocking {
         val store = FakeStore(claimDecision = ActionClaimDecision.Replay("action_gone"))
         val executor = CountingExecutor()
@@ -198,6 +216,7 @@ class ActionInvocationProcessorTest {
         sourceKey: String = "source-key",
         sourceActive: Boolean = true,
         supportsReply: Boolean = true,
+        beforeDispatch: suspend () -> Unit = {},
     ): ActionInvocationProcessor<String> {
         val found = lookup ?: ActionLookup.Found(
             ActionGeneration(
@@ -216,6 +235,7 @@ class ActionInvocationProcessorTest {
             executor = executor ?: CountingExecutor(events = events),
             resultEncoder = ActionResultRowEncoder { input -> resultRow(input.status) },
             wakeScheduler = ActionClaimWakeScheduler { events += "schedule" },
+            beforeDispatch = beforeDispatch,
             clock = { now },
         )
     }

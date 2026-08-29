@@ -102,6 +102,7 @@ class ActionInvocationProcessor<T>(
     private val executor: RegisteredActionExecutor<T>,
     private val resultEncoder: ActionResultRowEncoder,
     private val wakeScheduler: ActionClaimWakeScheduler,
+    private val beforeDispatch: suspend () -> Unit = {},
     private val clock: () -> Long = { System.currentTimeMillis().coerceAtLeast(0L) },
 ) {
     suspend fun process(request: ActionInvokeRequest): ActionProcessResult {
@@ -140,6 +141,7 @@ class ActionInvocationProcessor<T>(
         if (validation is Validation.Failed) return complete(request, validation.status, clock())
 
         val found = validation as Validation.Ready<T>
+        beforeDispatch()
         val dispatched = try {
             executor.dispatch(found.handle, request.replyText)
         } catch (cancellation: CancellationException) {

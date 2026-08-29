@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,46 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestNotificationFixtureCommandIsClosedAndExact(t *testing.T) {
+	command, err := control.NewNotificationFixtureCommand("request-fixture", "reply", "post")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.RequestID != "request-fixture" || command.Name != "NOTIFICATION_FIXTURE" ||
+		!reflect.DeepEqual(command.Params, map[string]string{"fixture": "reply", "operation": "post"}) {
+		t.Fatalf("command=%+v", command)
+	}
+	for _, tc := range [][2]string{{"arbitrary", "post"}, {"reply", "arbitrary"}, {"", "post"}} {
+		if _, err := control.NewNotificationFixtureCommand("request-fixture", tc[0], tc[1]); err == nil {
+			t.Fatalf("accepted fixture=%q operation=%q", tc[0], tc[1])
+		}
+	}
+}
+
+func TestNotificationMirrorCommandCarriesNoContentOrIdentity(t *testing.T) {
+	for _, operation := range []string{"invoke_reply", "invoke_mark_read", "replay_last_invoke", "arm_reply", "arm_mark_read", "invoke_armed", "tap"} {
+		command, err := control.NewNotificationMirrorCommand("request-mirror", operation)
+		if err != nil {
+			t.Fatalf("%s: %v", operation, err)
+		}
+		if command.Name != "NOTIFICATION_MIRROR" || !reflect.DeepEqual(command.Params, map[string]string{"operation": operation}) {
+			t.Fatalf("command=%+v", command)
+		}
+		encoded, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"reply_text", "canon_id", "action_id", "package_name", "component"} {
+			if strings.Contains(strings.ToLower(string(encoded)), forbidden) {
+				t.Fatalf("command leaked %s: %s", forbidden, encoded)
+			}
+		}
+	}
+	if _, err := control.NewNotificationMirrorCommand("request-mirror", "arbitrary"); err == nil {
+		t.Fatal("accepted an arbitrary mirror operation")
+	}
 }
 
 func TestExecuteSecretCleansAllPrivateBucketsOnEveryExit(t *testing.T) {

@@ -29,6 +29,51 @@ type Command struct {
 	Params    map[string]string
 }
 
+var notificationFixtures = map[string]bool{
+	"reply": true, "mark_read": true, "auto_cancel": true, "persistent": true,
+}
+
+var notificationFixtureOperations = map[string]bool{
+	"post": true, "update": true, "cancel": true, "reset_counters": true,
+}
+
+var notificationMirrorOperations = map[string]bool{
+	"invoke_reply": true, "invoke_mark_read": true, "replay_last_invoke": true,
+	"arm_reply": true, "arm_mark_read": true, "invoke_armed": true, "tap": true,
+}
+
+// NewNotificationFixtureCommand is the only host-side constructor for the
+// dedicated fixture APK. It cannot carry notification content or components.
+func NewNotificationFixtureCommand(requestID, fixture, operation string) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("fixture request ID is required")
+	}
+	if !notificationFixtures[fixture] || !notificationFixtureOperations[operation] {
+		return Command{}, errors.New("fixture command is outside the closed contract")
+	}
+	return Command{
+		RequestID: requestID,
+		Name:      "NOTIFICATION_FIXTURE",
+		Params:    map[string]string{"fixture": fixture, "operation": operation},
+	}, nil
+}
+
+// NewNotificationMirrorCommand addresses only the newest or previously armed
+// mirrored fixture action. Identity and reply content stay inside Android.
+func NewNotificationMirrorCommand(requestID, operation string) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("mirror request ID is required")
+	}
+	if !notificationMirrorOperations[operation] {
+		return Command{}, errors.New("mirror command is outside the closed contract")
+	}
+	return Command{
+		RequestID: requestID,
+		Name:      "NOTIFICATION_MIRROR",
+		Params:    map[string]string{"operation": operation},
+	}, nil
+}
+
 type Result struct {
 	RequestID string          `json:"request_id"`
 	Code      string          `json:"code"`

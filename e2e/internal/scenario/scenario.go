@@ -214,6 +214,9 @@ func PlanWithBurstCount(name string, burstCount int) (ScenarioPlan, error) {
 		}
 		return ScenarioPlan{Name: name, Steps: steps}, nil
 	}
+	if plan, ok := notificationActionPlan(name); ok {
+		return plan, nil
+	}
 	if name == "core-correctness" {
 		children := make([]ScenarioPlan, 0, 5)
 		for _, child := range []string{"post", "update", "dismiss-origin", "rapid-post-update-cancel", "offline"} {
@@ -318,6 +321,20 @@ type Observation struct {
 	CanonicalSequences             map[string]int              `json:"-"`
 	CanonicalSemanticStates        map[string]string           `json:"-"`
 	CanonicalMaterializedSequences map[string]int              `json:"-"`
+	CanonicalMirrorIdentityHashes  map[string]string           `json:"-"`
+	CanonicalActionSetHashes       map[string]string           `json:"-"`
+	FixtureAvailable               bool                        `json:"fixture_available,omitempty"`
+	FixtureReplyCount              int64                       `json:"fixture_reply_count,omitempty"`
+	FixtureMarkReadCount           int64                       `json:"fixture_mark_read_count,omitempty"`
+	FixtureGeneration              int                         `json:"fixture_generation,omitempty"`
+	FixtureStatus                  string                      `json:"fixture_status,omitempty"`
+	ActionInvocationCounts         map[string]int64            `json:"action_invocation_counts,omitempty"`
+	ActionExecutionClaimed         int64                       `json:"action_execution_claimed,omitempty"`
+	ActionExecutionCompleted       int64                       `json:"action_execution_completed,omitempty"`
+	DetailActive                   int64                       `json:"detail_active,omitempty"`
+	DetailCancelled                int64                       `json:"detail_cancelled,omitempty"`
+	LatestActionTerminal           string                      `json:"latest_action_terminal,omitempty"`
+	ForegroundPackage              string                      `json:"foreground_package,omitempty"`
 }
 
 func ParseObservation(payload []byte) (Observation, error) {
@@ -329,7 +346,8 @@ func ParseObservation(payload []byte) (Observation, error) {
 		"offline_pairing": true, "health": true, "route": true, "route_evidence": true,
 		"outbox_bytes": true, "active_outbox": true, "active_inbound": true,
 		"pending_materialization": true, "canonical": true, "activity": true,
-		"product_observations": true,
+		"product_observations": true, "notification_action_fixture": true,
+		"notification_action_observations": true,
 	}
 	for key := range root {
 		if !allowedRoot[key] {
@@ -368,7 +386,9 @@ func ParseObservation(payload []byte) (Observation, error) {
 		Activity               []struct {
 			EventType string `json:"event_type"`
 		} `json:"activity"`
-		Product json.RawMessage `json:"product_observations"`
+		Product             json.RawMessage `json:"product_observations"`
+		NotificationFixture json.RawMessage `json:"notification_action_fixture"`
+		NotificationActions json.RawMessage `json:"notification_action_observations"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return Observation{}, fmt.Errorf("decode E2E state: %w", err)
@@ -377,6 +397,14 @@ func ParseObservation(payload []byte) (Observation, error) {
 		return Observation{}, errors.New("E2E state missing health.service")
 	}
 	product, err := parseProductObservations(raw.Product)
+	if err != nil {
+		return Observation{}, err
+	}
+	fixture, err := parseNotificationFixture(raw.NotificationFixture)
+	if err != nil {
+		return Observation{}, err
+	}
+	actions, err := parseNotificationActionObservations(raw.NotificationActions)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -412,6 +440,14 @@ func ParseObservation(payload []byte) (Observation, error) {
 		CanonicalSequences:             map[string]int{},
 		CanonicalSemanticStates:        map[string]string{},
 		CanonicalMaterializedSequences: map[string]int{},
+		CanonicalMirrorIdentityHashes:  map[string]string{},
+		CanonicalActionSetHashes:       map[string]string{},
+		FixtureAvailable:               fixture.Available, FixtureReplyCount: fixture.ReplyCount,
+		FixtureMarkReadCount: fixture.MarkReadCount, FixtureGeneration: fixture.Generation,
+		FixtureStatus: fixture.Status, ActionInvocationCounts: actions.InvocationCounts,
+		ActionExecutionClaimed: actions.ExecutionClaimed, ActionExecutionCompleted: actions.ExecutionCompleted,
+		DetailActive: actions.DetailActive, DetailCancelled: actions.DetailCancelled,
+		LatestActionTerminal: actions.LatestTerminal,
 	}
 	for _, encoded := range raw.Canonical {
 		item, err := parseCanonicalObservation(encoded)
@@ -421,6 +457,12 @@ func ParseObservation(payload []byte) (Observation, error) {
 		state.Canonical[item.CanonIDHash] = item.State
 		state.CanonicalSequences[item.CanonIDHash] = item.Sequence
 		state.CanonicalMaterializedSequences[item.CanonIDHash] = item.Materialized
+		if item.MirrorIdentityHash != "" {
+			state.CanonicalMirrorIdentityHashes[item.CanonIDHash] = item.MirrorIdentityHash
+		}
+		if item.ActionSetHash != "" {
+			state.CanonicalActionSetHashes[item.CanonIDHash] = item.ActionSetHash
+		}
 		if item.SemanticState != "" {
 			state.CanonicalSemanticStates[item.CanonIDHash] = item.SemanticState
 		}
@@ -440,12 +482,14 @@ func ParseObservation(payload []byte) (Observation, error) {
 }
 
 type canonicalObservation struct {
-	CanonIDHash      string  `json:"canon_id_hash"`
-	State            string  `json:"state"`
-	Sequence         int     `json:"sequence"`
-	Materialized     int     `json:"materialized_sequence"`
-	SemanticStateRaw *string `json:"semantic_state,omitempty"`
-	SemanticState    string  `json:"-"`
+	CanonIDHash        string  `json:"canon_id_hash"`
+	State              string  `json:"state"`
+	Sequence           int     `json:"sequence"`
+	Materialized       int     `json:"materialized_sequence"`
+	SemanticStateRaw   *string `json:"semantic_state,omitempty"`
+	SemanticState      string  `json:"-"`
+	MirrorIdentityHash string  `json:"mirror_identity_hash,omitempty"`
+	ActionSetHash      string  `json:"action_set_hash,omitempty"`
 }
 
 var canonicalHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -458,6 +502,7 @@ func parseCanonicalObservation(payload json.RawMessage) (canonicalObservation, e
 	allowed := map[string]bool{
 		"canon_id_hash": true, "state": true, "sequence": true,
 		"materialized_sequence": true, "semantic_state": true,
+		"mirror_identity_hash": true, "action_set_hash": true,
 	}
 	for key := range fields {
 		if !allowed[key] {
@@ -477,6 +522,10 @@ func parseCanonicalObservation(payload json.RawMessage) (canonicalObservation, e
 		item.Materialized < 0 || item.Materialized > item.Sequence {
 		return canonicalObservation{}, errors.New("E2E state malformed canonical observation")
 	}
+	if (item.MirrorIdentityHash != "" && !canonicalHashPattern.MatchString(item.MirrorIdentityHash)) ||
+		(item.ActionSetHash != "" && !canonicalHashPattern.MatchString(item.ActionSetHash)) {
+		return canonicalObservation{}, errors.New("E2E state malformed canonical action hashes")
+	}
 	if item.SemanticStateRaw != nil {
 		semantic := *item.SemanticStateRaw
 		valid := (item.State == "ACTIVE" && (semantic == "RINGING" || semantic == "ACTIVE")) ||
@@ -487,6 +536,83 @@ func parseCanonicalObservation(payload json.RawMessage) (canonicalObservation, e
 		item.SemanticState = semantic
 	}
 	return item, nil
+}
+
+type notificationFixtureObservation struct {
+	Available                 bool
+	ReplyCount, MarkReadCount int64
+	Generation                int
+	Status                    string
+}
+
+func parseNotificationFixture(payload []byte) (notificationFixtureObservation, error) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil || len(fields) != 5 {
+		return notificationFixtureObservation{}, errors.New("E2E state malformed notification_action_fixture")
+	}
+	allowed := map[string]bool{"available": true, "reply_dispatch_count": true, "mark_read_dispatch_count": true, "last_fixture_generation": true, "last_terminal_status": true}
+	for key, value := range fields {
+		if !allowed[key] || string(value) == "null" {
+			return notificationFixtureObservation{}, errors.New("E2E state malformed notification_action_fixture")
+		}
+	}
+	var raw struct {
+		Available  bool   `json:"available"`
+		Reply      int64  `json:"reply_dispatch_count"`
+		Mark       int64  `json:"mark_read_dispatch_count"`
+		Generation int    `json:"last_fixture_generation"`
+		Status     string `json:"last_terminal_status"`
+	}
+	if json.Unmarshal(payload, &raw) != nil || raw.Reply < 0 || raw.Reply > 1_000_000_000 || raw.Mark < 0 || raw.Mark > 1_000_000_000 || raw.Generation < 0 || raw.Generation > 1_000_000_000 || !map[string]bool{"none": true, "posted": true, "updated": true, "cancelled": true, "counters_reset": true, "reply_dispatched": true, "mark_read_dispatched": true}[raw.Status] {
+		return notificationFixtureObservation{}, errors.New("E2E state malformed notification_action_fixture")
+	}
+	return notificationFixtureObservation{raw.Available, raw.Reply, raw.Mark, raw.Generation, raw.Status}, nil
+}
+
+type notificationActionObservation struct {
+	InvocationCounts                                                    map[string]int64
+	ExecutionClaimed, ExecutionCompleted, DetailActive, DetailCancelled int64
+	LatestTerminal                                                      string
+}
+
+func parseNotificationActionObservations(payload []byte) (notificationActionObservation, error) {
+	keys := map[string]string{"invocation_pending": "PENDING", "invocation_dispatched": "DISPATCHED", "invocation_outcome_unknown": "OUTCOME_UNKNOWN", "invocation_failed": "FAILED", "invocation_action_gone": "ACTION_GONE", "invocation_notification_gone": "NOTIFICATION_GONE", "invocation_expired": "EXPIRED"}
+	allowed := map[string]bool{"execution_claimed": true, "execution_completed": true, "detail_active": true, "detail_cancelled": true, "latest_terminal_status": true}
+	for key := range keys {
+		allowed[key] = true
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil || len(fields) != len(allowed) {
+		return notificationActionObservation{}, errors.New("E2E state malformed notification_action_observations")
+	}
+	read := func(key string) (int64, bool) {
+		var v int64
+		raw, ok := fields[key]
+		return v, ok && string(raw) != "null" && json.Unmarshal(raw, &v) == nil && v >= 0 && v <= 1_000_000_000
+	}
+	counts := map[string]int64{}
+	for key, state := range keys {
+		value, ok := read(key)
+		if !ok {
+			return notificationActionObservation{}, errors.New("E2E state malformed notification_action_observations")
+		}
+		counts[state] = value
+	}
+	claimed, ok1 := read("execution_claimed")
+	completed, ok2 := read("execution_completed")
+	active, ok3 := read("detail_active")
+	cancelled, ok4 := read("detail_cancelled")
+	var terminal string
+	ok5 := json.Unmarshal(fields["latest_terminal_status"], &terminal) == nil && map[string]bool{"none": true, "PENDING": true, "DISPATCHED": true, "OUTCOME_UNKNOWN": true, "FAILED": true, "ACTION_GONE": true, "NOTIFICATION_GONE": true, "EXPIRED": true}[terminal]
+	for key := range fields {
+		if !allowed[key] {
+			return notificationActionObservation{}, errors.New("E2E state malformed notification_action_observations")
+		}
+	}
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 {
+		return notificationActionObservation{}, errors.New("E2E state malformed notification_action_observations")
+	}
+	return notificationActionObservation{counts, claimed, completed, active, cancelled, terminal}, nil
 }
 
 var productEventKeys = map[string]bool{

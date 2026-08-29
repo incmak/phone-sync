@@ -26,6 +26,11 @@ const (
 	actionLanAvailability
 	actionControl
 	actionBurstStart
+	actionNotificationFixture
+	actionNotificationMirror
+	actionNotificationOrigin
+	actionDelay
+	actionFixtureApp
 	actionUnsupported
 )
 
@@ -66,12 +71,53 @@ func (a action) eventID() string {
 		return "control:" + a.device + ":" + strings.ToLower(strings.ReplaceAll(a.command, "_", "-"))
 	case actionBurstStart:
 		return fmt.Sprintf("burst-start:%s:%d", a.device, a.count)
+	case actionNotificationFixture:
+		return "fixture:" + a.device + ":" + a.tag + ":" + a.command
+	case actionNotificationMirror:
+		return "mirror:" + a.device + ":" + a.command
+	case actionNotificationOrigin:
+		return "origin:" + a.device + ":" + a.command
+	case actionDelay:
+		return fmt.Sprintf("wait:%ds", a.count)
+	case actionFixtureApp:
+		return "fixture-app:" + a.device + ":" + a.command
 	default:
 		return "unsupported"
 	}
 }
 
 func parseAction(raw string) (action, error) {
+	segments := strings.Split(raw, ":")
+	if len(segments) == 4 && (segments[0] == "A.fixture" || segments[0] == "B.fixture") {
+		if !notificationFixtures[segments[1]] || !notificationFixtureOperations[segments[2]] || segments[3] != "" {
+			return action{}, fmt.Errorf("invalid scenario action %q", raw)
+		}
+	}
+	if len(segments) == 3 && (segments[0] == "A.fixture" || segments[0] == "B.fixture") {
+		if !notificationFixtures[segments[1]] || !notificationFixtureOperations[segments[2]] {
+			return action{}, fmt.Errorf("invalid scenario action %q", raw)
+		}
+		return action{kind: actionNotificationFixture, device: raw[:1], tag: segments[1], command: segments[2], original: raw}, nil
+	}
+	if len(segments) == 2 && (segments[0] == "A.mirror" || segments[0] == "B.mirror") {
+		if !notificationMirrorOperations[segments[1]] {
+			return action{}, fmt.Errorf("invalid scenario action %q", raw)
+		}
+		return action{kind: actionNotificationMirror, device: raw[:1], command: segments[1], delivery: strings.HasPrefix(segments[1], "invoke"), original: raw}, nil
+	}
+	if len(segments) == 2 && segments[0] == "A.origin" && segments[1] == "pause_after_claim" {
+		return action{kind: actionNotificationOrigin, device: "A", command: segments[1], original: raw}, nil
+	}
+	if len(segments) == 2 && segments[0] == "wait" {
+		seconds := map[string]int{"65s": 65, "90s": 90, "125s": 125}[segments[1]]
+		if seconds == 0 {
+			return action{}, fmt.Errorf("invalid scenario action %q", raw)
+		}
+		return action{kind: actionDelay, count: seconds, original: raw}, nil
+	}
+	if len(segments) == 2 && segments[0] == "B.fixture-app" && (segments[1] == "install" || segments[1] == "uninstall") {
+		return action{kind: actionFixtureApp, device: "B", command: segments[1], original: raw}, nil
+	}
 	if strings.HasPrefix(raw, "A.burst.start:") {
 		count, err := strconv.Atoi(strings.TrimPrefix(raw, "A.burst.start:"))
 		if err != nil || count < MinBurstCount || count > MaxBurstCount {
@@ -159,6 +205,9 @@ func splitAction(raw string) []string {
 }
 
 func knownPredicate(predicate string) bool {
+	if knownNotificationActionPredicate(predicate) {
+		return true
+	}
 	if _, _, ok := parseTrackedSequencePredicate(predicate); ok {
 		return true
 	}
@@ -191,6 +240,31 @@ func knownPredicate(predicate string) bool {
 	default:
 		return false
 	}
+}
+
+func knownNotificationActionPredicate(predicate string) bool {
+	if predicate == "A.health.connected" || predicate == "A.health.offline" ||
+		predicate == "both.tracked.cancelled" || predicate == "both.tracked.active" ||
+		predicate == "B.tracked.action-set-rotated" || predicate == "B.tracked.mirror-identity-stable" || predicate == "B.detail.active" {
+		return true
+	}
+	if predicate == "B.detail.cancelled.delta:1" || predicate == "A.execution.claimed.delta:1" ||
+		predicate == "A.execution.completed.delta:1" || predicate == "B.action.pending.delta:1" {
+		return true
+	}
+	for _, value := range []string{
+		"A.fixture.reply.zero", "A.fixture.reply.delta:1", "A.fixture.reply.unchanged",
+		"A.fixture.mark_read.zero", "A.fixture.mark_read.delta:1", "A.fixture.mark_read.unchanged",
+		"B.foreground:co.twinotify.fixture", "B.foreground:com.twinotify.app",
+		"B.action.terminal:DISPATCHED", "B.action.terminal:EXPIRED",
+		"B.action.terminal:OUTCOME_UNKNOWN", "B.action.terminal:ACTION_GONE",
+		"B.action.terminal:ACTION_GONE_OR_NOTIFICATION_GONE",
+	} {
+		if predicate == value {
+			return true
+		}
+	}
+	return false
 }
 
 func parseTrackedSequencePredicate(predicate string) (device string, want int, ok bool) {
@@ -286,6 +360,11 @@ type Bridge interface {
 	Snapshot(context.Context, string) (Observation, error)
 }
 
+type notificationFixtureAppBridge interface {
+	InstallFixture(context.Context, string) error
+	UninstallFixture(context.Context, string) error
+}
+
 type Executor struct {
 	bridge                Bridge
 	stepTimeout           time.Duration
@@ -296,10 +375,13 @@ type Executor struct {
 	trackedHash           string
 	trackedTag            string
 	trackedHashes         map[string]bool
+	trackedActionSetHash  string
+	trackedMirrorIdentity string
 	direct                bool
 	unpairedStableSamples int
 	burstCancel           context.CancelFunc
 	burstDone             <-chan error
+	fixtureUninstalled    bool
 }
 
 func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
@@ -345,9 +427,12 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.trackedHash = ""
 		e.trackedTag = ""
 		e.trackedHashes = map[string]bool{}
+		e.trackedActionSetHash = ""
+		e.trackedMirrorIdentity = ""
 		e.unpairedStableSamples = 0
 		e.burstCancel = nil
 		e.burstDone = nil
+		e.fixtureUninstalled = false
 		e.direct = strings.HasPrefix(plan.Name, "lan-direct-") || plan.Name == "lan-restart-persistence"
 	}
 	if err := ValidateExecutablePlan(plan); err != nil {
@@ -358,6 +443,16 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		return e.runAggregate(ctx, plan)
 	}
 	defer func() {
+		if e.fixtureUninstalled {
+			if fixtureBridge, ok := e.bridge.(notificationFixtureAppBridge); ok {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
+				err := fixtureBridge.InstallFixture(cleanupCtx, "B")
+				cancel()
+				if runErr == nil && err != nil {
+					runErr = fmt.Errorf("restore fixture app: %w", err)
+				}
+			}
+		}
 		if err := e.stopActiveBurst(ctx); runErr == nil && err != nil {
 			runErr = err
 		}
@@ -414,7 +509,11 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 				return result, err
 			}
 			result.Events = append(result.Events, a.eventID())
-			actionCtx, cancel := context.WithTimeout(ctx, e.stepTimeout)
+			actionTimeout := e.stepTimeout
+			if a.kind == actionDelay {
+				actionTimeout = time.Duration(a.count)*time.Second + 5*time.Second
+			}
+			actionCtx, cancel := context.WithTimeout(ctx, actionTimeout)
 			routeEvent, err := e.action(actionCtx, step.Action)
 			cancel()
 			if err != nil {
@@ -479,6 +578,9 @@ func cloneObservation(value Observation) Observation {
 	value.CanonicalSequences = cloneIntMap(value.CanonicalSequences)
 	value.CanonicalSemanticStates = cloneCanonical(value.CanonicalSemanticStates)
 	value.CanonicalMaterializedSequences = cloneIntMap(value.CanonicalMaterializedSequences)
+	value.CanonicalMirrorIdentityHashes = cloneCanonical(value.CanonicalMirrorIdentityHashes)
+	value.CanonicalActionSetHashes = cloneCanonical(value.CanonicalActionSetHashes)
+	value.ActionInvocationCounts = cloneInt64Map(value.ActionInvocationCounts)
 	sourceCustodyCounts := value.CustodyCounts
 	value.CustodyCounts = map[string]map[string]int64{}
 	for route, counts := range sourceCustodyCounts {
@@ -489,6 +591,14 @@ func cloneObservation(value Observation) Observation {
 		value.CustodyCounts[route] = copyCounts
 	}
 	return value
+}
+
+func cloneInt64Map(value map[string]int64) map[string]int64 {
+	clone := make(map[string]int64, len(value))
+	for key, item := range value {
+		clone[key] = item
+	}
+	return clone
 }
 
 func cloneIntMap(value map[string]int) map[string]int {
@@ -601,6 +711,75 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 			return "", err
 		}
 		return routeEvent, e.startActiveBurst(ctx, a)
+	case actionNotificationFixture:
+		response, err := e.bridge.Control(ctx, a.device, "NOTIFICATION_FIXTURE", map[string]string{"fixture": a.tag, "operation": a.command})
+		if err != nil {
+			return "", err
+		}
+		if response.Code != "ok" {
+			return "", oracleFailure("fixture_control_rejected")
+		}
+		return "", nil
+	case actionNotificationMirror:
+		if strings.HasPrefix(a.command, "arm_") && e.trackedHash != "" {
+			state, snapshotErr := e.bridge.Snapshot(ctx, a.device)
+			if snapshotErr != nil {
+				return "", snapshotErr
+			}
+			e.trackedActionSetHash = state.CanonicalActionSetHashes[e.trackedHash]
+			e.trackedMirrorIdentity = state.CanonicalMirrorIdentityHashes[e.trackedHash]
+		}
+		response, err := e.bridge.Control(ctx, a.device, "NOTIFICATION_MIRROR", map[string]string{"operation": a.command})
+		if err != nil {
+			return "", err
+		}
+		if response.Code != "ok" {
+			return "", oracleFailure("mirror_control_rejected")
+		}
+		return "", nil
+	case actionNotificationOrigin:
+		response, err := e.bridge.Control(ctx, a.device, "NOTIFICATION_ORIGIN", map[string]string{"operation": a.command})
+		if err != nil {
+			return "", err
+		}
+		if response.Code != "ok" {
+			return "", oracleFailure("origin_control_rejected")
+		}
+		return "", nil
+	case actionDelay:
+		remaining := time.Duration(a.count) * time.Second
+		deadline := time.Now().Add(remaining)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-ticker.C:
+				fmt.Printf("notification action wait: %s remaining\n", time.Until(deadline).Round(time.Second))
+			case <-timer.C:
+				return "", nil
+			}
+		}
+	case actionFixtureApp:
+		fixtureBridge, ok := e.bridge.(notificationFixtureAppBridge)
+		if !ok {
+			return "", fmt.Errorf("%w: fixture app management", ErrUnsupportedEnvironment)
+		}
+		if a.command == "install" {
+			err := fixtureBridge.InstallFixture(ctx, a.device)
+			if err == nil {
+				e.fixtureUninstalled = false
+			}
+			return "", err
+		}
+		err := fixtureBridge.UninstallFixture(ctx, a.device)
+		if err == nil {
+			e.fixtureUninstalled = true
+		}
+		return "", err
 	case actionUnsupported:
 		return "", fmt.Errorf("%w: %s", ErrUnsupportedEnvironment, raw)
 	default:
@@ -745,6 +924,83 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 		}
 		return state.Canonical[e.trackedHash] == "ACTIVE" && state.CanonicalSequences[e.trackedHash] == want &&
 			state.CanonicalMaterializedSequences[e.trackedHash] == want
+	}
+	if predicate == "A.health.connected" {
+		return a.Health == "connected"
+	}
+	if predicate == "A.health.offline" {
+		return a.Health == "offline"
+	}
+	if predicate == "both.tracked.active" {
+		return e.trackedHash != "" && a.Canonical[e.trackedHash] == "ACTIVE" && b.Canonical[e.trackedHash] == "ACTIVE"
+	}
+	if predicate == "both.tracked.cancelled" {
+		return e.trackedHash != "" && a.Canonical[e.trackedHash] == "CANCELLED" && b.Canonical[e.trackedHash] == "CANCELLED"
+	}
+	if predicate == "B.tracked.action-set-rotated" {
+		return e.trackedHash != "" && e.trackedActionSetHash != "" && b.CanonicalActionSetHashes[e.trackedHash] != "" &&
+			b.CanonicalActionSetHashes[e.trackedHash] != e.trackedActionSetHash
+	}
+	if predicate == "B.tracked.mirror-identity-stable" {
+		return e.trackedHash != "" && e.trackedMirrorIdentity != "" && b.CanonicalMirrorIdentityHashes[e.trackedHash] == e.trackedMirrorIdentity
+	}
+	if predicate == "B.detail.active" {
+		return b.DetailActive > e.baselineState["B"].DetailActive
+	}
+	if predicate == "B.detail.cancelled.delta:1" {
+		return b.DetailCancelled-e.baselineState["B"].DetailCancelled >= 1
+	}
+	if predicate == "A.execution.claimed.delta:1" {
+		return a.ActionExecutionClaimed-e.baselineState["A"].ActionExecutionClaimed >= 1
+	}
+	if predicate == "A.execution.completed.delta:1" {
+		return a.ActionExecutionCompleted-e.baselineState["A"].ActionExecutionCompleted >= 1
+	}
+	if predicate == "B.action.pending.delta:1" {
+		return b.ActionInvocationCounts["PENDING"]-e.baselineState["B"].ActionInvocationCounts["PENDING"] >= 1
+	}
+	if strings.HasPrefix(predicate, "B.foreground:") {
+		return b.ForegroundPackage == strings.TrimPrefix(predicate, "B.foreground:")
+	}
+	if strings.HasPrefix(predicate, "B.action.terminal:") {
+		want := strings.TrimPrefix(predicate, "B.action.terminal:")
+		if want == "ACTION_GONE_OR_NOTIFICATION_GONE" {
+			return (b.LatestActionTerminal == "ACTION_GONE" && b.ActionInvocationCounts["ACTION_GONE"] > e.baselineState["B"].ActionInvocationCounts["ACTION_GONE"]) ||
+				(b.LatestActionTerminal == "NOTIFICATION_GONE" && b.ActionInvocationCounts["NOTIFICATION_GONE"] > e.baselineState["B"].ActionInvocationCounts["NOTIFICATION_GONE"])
+		}
+		return b.LatestActionTerminal == want && b.ActionInvocationCounts[want] > e.baselineState["B"].ActionInvocationCounts[want]
+	}
+	if strings.HasPrefix(predicate, "A.fixture.reply.") {
+		before := e.baselineState["A"].FixtureReplyCount
+		switch strings.TrimPrefix(predicate, "A.fixture.reply.") {
+		case "zero":
+			if a.FixtureReplyCount == 0 {
+				base := e.baselineState["A"]
+				base.FixtureReplyCount = 0
+				e.baselineState["A"] = base
+				return true
+			}
+		case "delta:1":
+			return a.FixtureReplyCount-before >= 1
+		case "unchanged":
+			return a.FixtureReplyCount == before
+		}
+	}
+	if strings.HasPrefix(predicate, "A.fixture.mark_read.") {
+		before := e.baselineState["A"].FixtureMarkReadCount
+		switch strings.TrimPrefix(predicate, "A.fixture.mark_read.") {
+		case "zero":
+			if a.FixtureMarkReadCount == 0 {
+				base := e.baselineState["A"]
+				base.FixtureMarkReadCount = 0
+				e.baselineState["A"] = base
+				return true
+			}
+		case "delta:1":
+			return a.FixtureMarkReadCount-before >= 1
+		case "unchanged":
+			return a.FixtureMarkReadCount == before
+		}
 	}
 	if strings.HasPrefix(predicate, "B.burst.unique:") {
 		want, err := strconv.Atoi(strings.TrimPrefix(predicate, "B.burst.unique:"))
@@ -1007,6 +1263,7 @@ type ADBBridge struct {
 	A, B       *control.Client
 	ADBA, ADBB *adb.Client
 	Package    string
+	FixtureAPK string
 }
 
 func (b ADBBridge) client(device string) (*control.Client, *adb.Client, error) {
@@ -1069,5 +1326,44 @@ func (b ADBBridge) Snapshot(ctx context.Context, device string) (Observation, er
 	if err != nil {
 		return Observation{}, err
 	}
-	return ParseObservation(result.Payload)
+	state, err := ParseObservation(result.Payload)
+	if err != nil {
+		return Observation{}, err
+	}
+	_, a, err := b.client(device)
+	if err != nil {
+		return Observation{}, err
+	}
+	foreground, err := a.ForegroundPackage(ctx)
+	if err != nil {
+		return Observation{}, err
+	}
+	switch foreground {
+	case "co.twinotify.fixture", b.Package:
+		state.ForegroundPackage = foreground
+	case "":
+		state.ForegroundPackage = "none"
+	default:
+		state.ForegroundPackage = "other"
+	}
+	return state, nil
+}
+
+func (b ADBBridge) InstallFixture(ctx context.Context, device string) error {
+	_, client, err := b.client(device)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(b.FixtureAPK) == "" {
+		return errors.New("fixture APK path is required")
+	}
+	return client.Install(ctx, b.FixtureAPK)
+}
+
+func (b ADBBridge) UninstallFixture(ctx context.Context, device string) error {
+	_, client, err := b.client(device)
+	if err != nil {
+		return err
+	}
+	return client.Uninstall(ctx, "co.twinotify.fixture")
 }

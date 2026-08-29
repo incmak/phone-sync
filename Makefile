@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify e2e-emulator e2e-emulator-run e2e-lan-delivery e2e-lan-product e2e-offline-pairing release-audit clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify e2e-emulator e2e-emulator-run e2e-lan-delivery e2e-lan-product e2e-notification-actions e2e-offline-pairing release-audit clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -47,6 +47,7 @@ host-verify: proto-test
 	cd e2e && go test ./... -race -count=1
 	cd e2e && go vet ./...
 	./e2e/scripts/lan_product_target_test.sh
+	./e2e/scripts/notification_action_target_test.sh
 	./e2e/scripts/validate-workflow.sh
 	./e2e/scripts/preflight_test.sh
 	./scripts/verify-offline-pairing-evidence.sh --self-test
@@ -76,6 +77,12 @@ e2e-lan-product:
 	@test -n "$(E2E_LAN_PRODUCT_EVIDENCE_DIR)" || { echo "E2E_LAN_PRODUCT_EVIDENCE_DIR is required" >&2; exit 2; }
 	cd e2e && go run ./cmd/twinotify-e2e -scenario lan-product-correctness -serial-a "$(E2E_DEVICE_A)" -serial-b "$(E2E_DEVICE_B)" -scenario-evidence-dir "$(abspath $(E2E_LAN_PRODUCT_EVIDENCE_DIR))" $(if $(E2E_LAN_BURST_COUNT),-burst-count "$(E2E_LAN_BURST_COUNT)",)
 	./scripts/verify-lan-product-evidence.sh "$(abspath $(E2E_LAN_PRODUCT_EVIDENCE_DIR))"
+
+e2e-notification-actions:
+	@test -n "$(E2E_DEVICE_A)" -a -n "$(E2E_DEVICE_B)" -a "$(E2E_DEVICE_A)" != "$(E2E_DEVICE_B)" || { echo "two explicit distinct E2E_DEVICE_A/E2E_DEVICE_B serials are required" >&2; exit 2; }
+	@test -n "$(E2E_NOTIFICATION_ACTION_EVIDENCE_DIR)" || { echo "E2E_NOTIFICATION_ACTION_EVIDENCE_DIR is required" >&2; exit 2; }
+	@test -n "$(E2E_NOTIFICATION_ACTION_FIXTURE_APK)" -a -f "$(E2E_NOTIFICATION_ACTION_FIXTURE_APK)" || { echo "E2E_NOTIFICATION_ACTION_FIXTURE_APK must name the built fixture APK" >&2; exit 2; }
+	cd e2e && go run ./cmd/twinotify-e2e -scenario notification-actions-correctness -serial-a "$(E2E_DEVICE_A)" -serial-b "$(E2E_DEVICE_B)" -fixture-apk "$(abspath $(E2E_NOTIFICATION_ACTION_FIXTURE_APK))" -scenario-evidence-dir "$(abspath $(E2E_NOTIFICATION_ACTION_EVIDENCE_DIR))"
 
 e2e-offline-pairing:
 	@test -n "$(E2E_DEVICE_A)" -a -n "$(E2E_DEVICE_B)" -a "$(E2E_DEVICE_A)" != "$(E2E_DEVICE_B)" || { echo "two explicit distinct E2E_DEVICE_A/E2E_DEVICE_B serials are required" >&2; exit 2; }

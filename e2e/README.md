@@ -5,6 +5,31 @@ content-free route, custody, receipt, queue, sequence, and materialization
 state. It rejects phone, contact, notification content, network identifiers,
 credentials, and raw protocol material.
 
+## Mirrored notification actions gate
+
+`notification-actions-correctness` runs the thirteen action, reply, expiry,
+process-death, update, cancel, tap-routing, and auto-cancel scenarios in a fixed
+fail-fast order. The dedicated fixture APK owns all notification content. The
+host passes only closed operation enums; reply text is generated inside the
+debug Android process and never enters ADB arguments or retained evidence.
+
+From the repository root, provide two distinct already-paired targets, the
+freshly built fixture APK, and a private evidence directory:
+
+```sh
+E2E_DEVICE_A='<serial-a>' \
+E2E_DEVICE_B='<serial-b>' \
+E2E_NOTIFICATION_ACTION_FIXTURE_APK='mobile/android/notification-action-fixture/build/outputs/apk/debug/notification-action-fixture-debug.apk' \
+E2E_NOTIFICATION_ACTION_EVIDENCE_DIR='/private/path/notification-actions' \
+make e2e-notification-actions
+```
+
+The fallback-tap child temporarily uninstalls only the repository-owned fixture
+from device B and reinstalls it even after a failed run. Offline children change
+airplane mode. On physical phones, pause and obtain explicit operator approval
+immediately before those radio changes. The harness never clears package data,
+unpairs devices, or installs/uninstalls third-party apps.
+
 ## Complete direct-LAN product gate
 
 `lan-product-correctness` runs eleven children in this exact order:

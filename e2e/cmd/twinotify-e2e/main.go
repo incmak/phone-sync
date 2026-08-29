@@ -34,6 +34,7 @@ func main() {
 	dnsEvidenceHash := flag.String("dns-evidence-sha256", "", "SHA-256 of operator-captured DNS evidence")
 	internetBlocked := flag.Bool("internet-blocked", false, "assert operator-controlled internet isolation is active")
 	burstCount := flag.Int("burst-count", scenario.DefaultBurstCount, "bounded item count for direct LAN stress scenarios (2..1000)")
+	fixtureAPK := flag.String("fixture-apk", "", "path to the dedicated notification-action fixture APK")
 	flag.Parse()
 	if *scenarioFlag == "" {
 		fmt.Fprintln(os.Stderr, "-scenario must not be empty")
@@ -48,6 +49,7 @@ func main() {
 	options.dnsEvidenceHash = *dnsEvidenceHash
 	options.internetBlocked = *internetBlocked
 	options.burstCount = *burstCount
+	options.fixtureAPK = *fixtureAPK
 	if err := runWithOptions(context.Background(), options); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -55,7 +57,7 @@ func main() {
 }
 
 type options struct {
-	scenario, serialA, serialB, packageName, relayURL                     string
+	scenario, serialA, serialB, packageName, relayURL, fixtureAPK         string
 	evidenceDir, scenarioEvidenceDir, packetEvidenceHash, dnsEvidenceHash string
 	internetBlocked                                                       bool
 	relayPort                                                             int
@@ -89,6 +91,9 @@ func runWithOptions(ctx context.Context, cfg options) error {
 	}
 	if cfg.timeout <= 0 {
 		return errors.New("timeout must be positive")
+	}
+	if (cfg.scenario == "notification-actions-correctness" || cfg.scenario == "action-tap-fallback") && strings.TrimSpace(cfg.fixtureAPK) == "" {
+		return errors.New("-fixture-apk is required for notification action fixture reinstall")
 	}
 	if cfg.scenario == "pair" && strings.TrimSpace(cfg.relayURL) == "" {
 		if cfg.relayPort <= 0 {
@@ -131,7 +136,7 @@ func runWithOptions(ctx context.Context, cfg options) error {
 		return control.NewController(a, b, cfg.timeout).Pair(ctx, control.PairOptions{RelayURL: cfg.relayURL, DisplayNameA: "emulator-a", DisplayNameB: "emulator-b"})
 	}
 	if cfg.scenario != "status" {
-		bridge := scenario.ADBBridge{A: a, B: b, ADBA: adbA, ADBB: adbB, Package: cfg.packageName}
+		bridge := scenario.ADBBridge{A: a, B: b, ADBA: adbA, ADBB: adbB, Package: cfg.packageName, FixtureAPK: cfg.fixtureAPK}
 		result, runErr := scenario.NewExecutor(bridge, cfg.timeout).RunResultWithBurstCount(ctx, cfg.scenario, cfg.burstCount)
 		if cfg.scenarioEvidenceDir != "" {
 			if evidenceErr := scenario.WriteEvidenceArtifacts(cfg.scenarioEvidenceDir, result); evidenceErr != nil {

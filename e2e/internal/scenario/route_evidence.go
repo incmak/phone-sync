@@ -140,6 +140,11 @@ func inspectClosedWorldScenario(root map[string]any) error {
 		"unpair_inbound_count": true, "unpair_outcome": true,
 		"active_queue_count": true, "active_queue_bytes": true,
 		"peak_queue_count": true, "peak_queue_bytes": true,
+		"fixture_available": true, "fixture_reply_count": true, "fixture_mark_read_count": true,
+		"fixture_generation": true, "fixture_status": true, "action_invocation_counts": true,
+		"action_execution_claimed": true, "action_execution_completed": true,
+		"detail_active": true, "detail_cancelled": true, "latest_action_terminal": true,
+		"foreground_package": true,
 	}
 	for _, groupName := range []string{"before", "after"} {
 		group, ok := root[groupName].(map[string]any)
@@ -255,6 +260,50 @@ func validateObservationShape(value map[string]any) error {
 			number, ok := raw.(float64)
 			if !ok || number < 0 || number > 1_000_000_000 || number != float64(int64(number)) {
 				return fmt.Errorf("%s must be a bounded nonnegative integer", key)
+			}
+		}
+	}
+	for _, key := range []string{"fixture_reply_count", "fixture_mark_read_count", "fixture_generation", "action_execution_claimed", "action_execution_completed", "detail_active", "detail_cancelled"} {
+		if raw, present := value[key]; present {
+			number, ok := raw.(float64)
+			if !ok || number < 0 || number > 1_000_000_000 || number != float64(int64(number)) {
+				return fmt.Errorf("%s must be a bounded nonnegative integer", key)
+			}
+		}
+	}
+	if raw, present := value["fixture_available"]; present {
+		if _, ok := raw.(bool); !ok {
+			return errors.New("fixture_available must be boolean")
+		}
+	}
+	if raw, present := value["fixture_status"]; present {
+		status, ok := raw.(string)
+		if !ok || !map[string]bool{"none": true, "posted": true, "updated": true, "cancelled": true, "counters_reset": true, "reply_dispatched": true, "mark_read_dispatched": true}[status] {
+			return errors.New("fixture_status is invalid")
+		}
+	}
+	if raw, present := value["latest_action_terminal"]; present {
+		status, ok := raw.(string)
+		if !ok || !map[string]bool{"none": true, "PENDING": true, "DISPATCHED": true, "OUTCOME_UNKNOWN": true, "FAILED": true, "ACTION_GONE": true, "NOTIFICATION_GONE": true, "EXPIRED": true}[status] {
+			return errors.New("latest_action_terminal is invalid")
+		}
+	}
+	if raw, present := value["foreground_package"]; present {
+		name, ok := raw.(string)
+		if !ok || !map[string]bool{"none": true, "other": true, "co.twinotify.fixture": true, "com.twinotify.app": true}[name] {
+			return errors.New("foreground_package is invalid")
+		}
+	}
+	if raw, present := value["action_invocation_counts"]; present {
+		counts, ok := raw.(map[string]any)
+		allowed := map[string]bool{"PENDING": true, "DISPATCHED": true, "OUTCOME_UNKNOWN": true, "FAILED": true, "ACTION_GONE": true, "NOTIFICATION_GONE": true, "EXPIRED": true}
+		if !ok || len(counts) != len(allowed) {
+			return errors.New("action_invocation_counts is invalid")
+		}
+		for state, numberRaw := range counts {
+			number, valid := numberRaw.(float64)
+			if !allowed[state] || !valid || number < 0 || number > 1_000_000_000 || number != float64(int64(number)) {
+				return errors.New("action_invocation_counts is invalid")
 			}
 		}
 	}

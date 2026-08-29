@@ -84,6 +84,7 @@ class E2eStateProvider : ContentProvider() {
             root.put("canonical", canonical(database))
             root.put("activity", activity(database))
             root.put("notification_action_fixture", NotificationActionFixture.snapshot(context))
+            root.put("notification_action_observations", notificationActionObservations(database))
             root.toString()
         }
 
@@ -100,7 +101,7 @@ class E2eStateProvider : ContentProvider() {
         private fun canonical(database: androidx.sqlite.db.SupportSQLiteDatabase): JSONArray {
             val result = JSONArray()
             database.query(
-                "SELECT canonId, latestSequence, state, materializedSequence, desiredPayloadJson " +
+                "SELECT canonId, latestSequence, state, materializedSequence, desiredPayloadJson, mirrorLocalTag, mirrorLocalId " +
                     "FROM canonical_notification_state ORDER BY updatedAt LIMIT 200",
             ).use { cursor ->
                 while (cursor.moveToNext()) {
@@ -113,10 +114,43 @@ class E2eStateProvider : ContentProvider() {
                     callSemanticState(canonId, cursor.getString(2), cursor.getString(4))?.let {
                         row.put("semantic_state", it)
                     }
+                    cursor.getString(5)?.let { tag ->
+                        if (!cursor.isNull(6)) row.put("mirror_identity_hash", sha256Hex("$tag:${cursor.getInt(6)}"))
+                    }
+                    cursor.getString(4)?.let { payload ->
+                        runCatching { JSONObject(payload).optJSONArray("actions")?.toString() }.getOrNull()?.let {
+                            row.put("action_set_hash", sha256Hex(it))
+                        }
+                    }
                     result.put(row)
                 }
             }
             return result
+        }
+
+        private fun notificationActionObservations(
+            database: androidx.sqlite.db.SupportSQLiteDatabase,
+        ): JSONObject {
+            val result = JSONObject()
+            for ((state, key) in mapOf(
+                "PENDING" to "invocation_pending",
+                "DISPATCHED" to "invocation_dispatched",
+                "OUTCOME_UNKNOWN" to "invocation_outcome_unknown",
+                "FAILED" to "invocation_failed",
+                "ACTION_GONE" to "invocation_action_gone",
+                "NOTIFICATION_GONE" to "invocation_notification_gone",
+                "EXPIRED" to "invocation_expired",
+            )) {
+                result.put(key, scalar(database, "SELECT COUNT(*) FROM action_invocation WHERE state='$state'"))
+            }
+            result.put("execution_claimed", scalar(database, "SELECT COUNT(*) FROM action_execution WHERE state='CLAIMED'"))
+            result.put("execution_completed", scalar(database, "SELECT COUNT(*) FROM action_execution WHERE state='COMPLETED'"))
+            result.put("detail_active", scalar(database, "SELECT COUNT(*) FROM notification_detail_cache WHERE cancelledAt IS NULL"))
+            result.put("detail_cancelled", scalar(database, "SELECT COUNT(*) FROM notification_detail_cache WHERE cancelledAt IS NOT NULL"))
+            val latest = database.query(
+                "SELECT state FROM action_invocation WHERE state!='PENDING' ORDER BY updatedAt DESC, invocationId DESC LIMIT 1",
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else "none" }
+            return result.put("latest_terminal_status", latest)
         }
 
         internal fun callSemanticState(canonId: String, durableState: String, payloadJson: String?): String? {

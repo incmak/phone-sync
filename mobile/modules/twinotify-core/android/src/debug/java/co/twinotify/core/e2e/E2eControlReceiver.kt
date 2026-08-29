@@ -162,6 +162,7 @@ class E2eControlReceiver internal constructor(
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
             "SET_LAN_AVAILABLE",
             "NOTIFICATION_FIXTURE",
+            "NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN",
             "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR",
             "OFFLINE_PAIR_START", "OFFLINE_PAIR_JOIN", "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL", "OFFLINE_PAIR_QUERY",
         )
@@ -402,6 +403,13 @@ class E2eControlReceiver internal constructor(
             command.param("fixture").orEmpty(),
             command.param("operation").orEmpty(),
         ).toResult(requestId)
+        "NOTIFICATION_MIRROR" -> NotificationActionControl.execute(
+            context,
+            command.param("operation").orEmpty(),
+        ).toResult(requestId)
+        "NOTIFICATION_ORIGIN" -> NotificationActionControl.origin(
+            command.param("operation").orEmpty(),
+        ).toResult(requestId)
         "RECONCILE" -> {
             val relayUrl = ServiceConfigStore.read(context).relayUrl
                 ?: return E2eCommandResult(requestId, "invalid", "relay URL is not configured")
@@ -520,6 +528,7 @@ class E2eControlReceiver internal constructor(
             "OFFLINE_PAIR_QUERY" -> emptySet()
             "SET_LAN_AVAILABLE" -> setOf("available")
             "NOTIFICATION_FIXTURE" -> setOf("fixture", "operation")
+            "NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN" -> setOf("operation")
             "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR" -> emptySet()
             else -> return null
         }
@@ -533,6 +542,14 @@ class E2eControlReceiver internal constructor(
                 return "operation must be post, update, cancel, or reset_counters"
             }
         }
+        if (command.name == "NOTIFICATION_MIRROR" && command.param("operation") !in setOf(
+                "invoke_reply", "invoke_mark_read", "replay_last_invoke", "arm_reply", "arm_mark_read", "invoke_armed", "tap",
+            )
+        ) return "invalid mirror operation"
+        if (command.name == "NOTIFICATION_ORIGIN" && command.param("operation") !in setOf(
+                "pause_after_claim", "release_claim_pause",
+            )
+        ) return "invalid origin operation"
         return null
     }
 

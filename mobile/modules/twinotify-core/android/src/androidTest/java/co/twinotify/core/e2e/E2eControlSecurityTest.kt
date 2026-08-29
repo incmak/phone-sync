@@ -157,6 +157,28 @@ class E2eControlSecurityTest {
     }
 
     @Test
+    fun notificationActionObservationBlockIsClosedBoundedAndContentFree() {
+        val observation = JSONObject(E2eStateProvider.snapshotJson(context))
+            .getJSONObject("notification_action_observations")
+        assertEquals(
+            setOf(
+                "invocation_pending", "invocation_dispatched", "invocation_outcome_unknown",
+                "invocation_failed", "invocation_action_gone", "invocation_notification_gone",
+                "invocation_expired", "execution_claimed", "execution_completed",
+                "detail_active", "detail_cancelled", "latest_terminal_status",
+            ),
+            observation.keys().asSequence().toSet(),
+        )
+        observation.keys().asSequence().filterNot { it == "latest_terminal_status" }.forEach {
+            assertTrue(observation.getLong(it) in 0..1_000_000_000, it)
+        }
+        val serialized = observation.toString()
+        for (forbidden in listOf("reply_text", "title", "text", "canon_id", "action_id", "package", "component")) {
+            assertFalse(serialized.contains(forbidden, ignoreCase = true), forbidden)
+        }
+    }
+
+    @Test
     fun callCanonicalSemanticStateIsClosedWorldBoundedAndContentFree() {
         val session = "11111111-1111-4111-8111-111111111111"
         val ringing = JSONObject()
@@ -258,6 +280,39 @@ class E2eControlSecurityTest {
                     E2eCommand("fixture-invalid", "NOTIFICATION_FIXTURE", token = token, params = params),
                 ).code,
             )
+        }
+    }
+
+    @Test
+    fun notificationActionControlsAreClosedWorldAndContentFree() {
+        val receiver = E2eControlReceiver()
+        val token = E2eSessionToken.forTest(context, "notification-action-controls")
+        for (operation in listOf("invoke_reply", "invoke_mark_read", "replay_last_invoke", "arm_reply", "arm_mark_read", "invoke_armed", "tap")) {
+            val result = receiver.executeForTest(
+                context,
+                E2eCommand("mirror-$operation", "NOTIFICATION_MIRROR", token, mapOf("operation" to operation)),
+            )
+            assertTrue(result.code in setOf("ok", "unavailable", "not_found"), result.toJson().toString())
+        }
+        for (operation in listOf("pause_after_claim", "release_claim_pause")) {
+            val result = receiver.executeForTest(
+                context,
+                E2eCommand("origin-$operation", "NOTIFICATION_ORIGIN", token, mapOf("operation" to operation)),
+            )
+            assertTrue(result.code in setOf("ok", "unavailable"), result.toJson().toString())
+        }
+        for (name in listOf("NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN")) {
+            for (forbidden in listOf("title", "text", "reply_text", "canon_id", "action_id", "package", "component")) {
+                val operation = if (name == "NOTIFICATION_MIRROR") "tap" else "pause_after_claim"
+                assertEquals(
+                    "invalid",
+                    receiver.executeForTest(
+                        context,
+                        E2eCommand("$name-$forbidden", name, token, mapOf("operation" to operation, forbidden to "arbitrary")),
+                    ).code,
+                    "$name $forbidden",
+                )
+            }
         }
     }
 

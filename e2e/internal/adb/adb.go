@@ -103,8 +103,31 @@ func adbOperation(args []string) string {
 }
 
 func (c *Client) Install(ctx context.Context, apk string) error {
+	if strings.TrimSpace(apk) == "" {
+		return errors.New("APK path is required")
+	}
 	_, err := c.run(ctx, "install", "-r", apk)
 	return err
+}
+
+func (c *Client) Uninstall(ctx context.Context, packageName string) error {
+	if err := ValidateComponentName(packageName); err != nil {
+		return err
+	}
+	_, err := c.run(ctx, "uninstall", packageName)
+	return err
+}
+
+func (c *Client) ForegroundPackage(ctx context.Context) (string, error) {
+	out, err := c.run(ctx, "shell", "dumpsys", "activity", "activities")
+	if err != nil {
+		return "", err
+	}
+	match := regexp.MustCompile(`(?m)mResumedActivity:.*? ([A-Za-z0-9_.]+)/`).FindSubmatch(out)
+	if len(match) != 2 {
+		return "", nil
+	}
+	return string(match[1]), nil
 }
 
 func (c *Client) Grant(ctx context.Context, permission string) error {
