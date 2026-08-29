@@ -15,27 +15,26 @@ import (
 )
 
 func main() {
-	addr := os.Getenv("LISTEN_ADDR")
-	if addr == "" {
-		addr = ":8080"
+	runtimeConfig, err := loadRuntimeConfig(os.Getenv)
+	if err != nil {
+		log.Fatalf("load relay config: %v", err)
 	}
-	boltPath := os.Getenv("BOLT_PATH")
-	if boltPath == "" {
-		boltPath = "/tmp/twinotify-relay.db"
-	}
-	b, err := store.OpenBolt(boltPath)
+	b, err := store.OpenBolt(runtimeConfig.boltPath)
 	if err != nil {
 		log.Fatalf("open bolt: %v", err)
 	}
 	defer b.Close()
 
 	config := server.DefaultConfig()
-	config.TrustProxyHeaders = os.Getenv("TRUST_PROXY_HEADERS") == "true"
+	config.TrustProxyHeaders = runtimeConfig.trustProxyHeaders
+	config.RequireMutualPairSignatures = runtimeConfig.requireMutualPairSignatures
+	config.CapacityCheck = server.NewDiskCapacityCheck(runtimeConfig.boltPath, runtimeConfig.minFreeDiskBytes)
+	config.BuildVersion = runtimeConfig.buildVersion
 	app, err := server.NewWithConfigChecked(b, config)
 	if err != nil {
 		log.Fatalf("initialize relay: %v", err)
 	}
-	srv := server.NewHTTPServer(addr, app.Handler())
+	srv := server.NewHTTPServer(runtimeConfig.listenAddr, app.Handler())
 	maintenanceContext, stopMaintenance := context.WithCancel(context.Background())
 	maintenanceDone := app.StartMaintenance(maintenanceContext)
 
@@ -50,7 +49,7 @@ func main() {
 		close(done)
 	}()
 
-	log.Printf("relay listening on %s", addr)
+	log.Printf("relay listening on %s", runtimeConfig.listenAddr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

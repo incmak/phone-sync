@@ -81,7 +81,7 @@
       "properties": {
         "v": { "const": 2 }, "type": { "const": "relay.rejected" },
         "msg_id": { "$ref": "#/$defs/msg_id" },
-        "reason": { "type": "string", "enum": ["mailbox_full", "id_conflict", "digest_mismatch", "not_recipient", "peer_legacy", "invalid_frame"] }
+        "reason": { "type": "string", "enum": ["mailbox_full", "id_conflict", "digest_mismatch", "not_recipient", "peer_legacy", "server_capacity", "invalid_frame"] }
       },
       "additionalProperties": false
     },

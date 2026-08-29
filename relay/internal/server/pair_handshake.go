@@ -25,6 +25,9 @@ type pairHelloReq struct {
 // handlePairHello is called by Device B. It stores B's pubkeys and pushes
 // a peer.hello frame to Device A's /pair/notify?role=A subscription.
 func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
+	if !s.requireStorageCapacity(w) {
+		return
+	}
 	var req pairHelloReq
 	if !decodePairJSON(w, r, &req) {
 		return
@@ -93,6 +96,9 @@ type pairSendSigReq struct {
 // the ed25519 signature over the 5-field canonical message. The relay verifies the
 // sig against A's stored pubkey, stores it, and pushes pair.sig to Device B.
 func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireStorageCapacity(w) {
+		return
+	}
 	var req pairSendSigReq
 	if !decodePairJSON(w, r, &req) {
 		return

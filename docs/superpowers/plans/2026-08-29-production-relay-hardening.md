@@ -157,6 +157,7 @@ Commit: `feat(relay): persist authentication replay state`
 - Modify: `relay/internal/server/ws.go`
 - Modify: `proto/relay-control.schema.json`
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/RelayFrameCodec.kt`
+- Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/storage/ReliableDeliveryDao.kt`
 - Test: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/RelayFrameCodecTest.kt`
 
 **Interfaces:**
@@ -164,23 +165,23 @@ Commit: `feat(relay): persist authentication replay state`
 - Produces: `CapacityCheck func() error`, `Server.BeginShutdown()`, and readiness routes.
 - Adds stable rejection reason `server_capacity`.
 
-- [ ] **Step 1: Write failing config, readiness, and backpressure tests**
+- [x] **Step 1: Write failing config, readiness, and backpressure tests**
 
 Table-test every required production variable and unsafe path. Inject `CapacityCheck` returning `ErrServerCapacity`; assert `/health/live` is 200, `/health/ready` and `/health` are 503, pairing mutation is 503 with `Retry-After`, and a valid v2 put returns `server_capacity` without increasing mailbox count. Assert `BeginShutdown` changes readiness to 503.
 
-- [ ] **Step 2: Observe RED**
+- [x] **Step 2: Observe RED**
 
 Run: `make sync-proto && cd relay && go test ./cmd/relay ./internal/server -run 'TestProductionConfig|TestHealth|TestServerCapacity' -race -count=1`
 
 Expected: missing APIs and wrong health/backpressure results.
 
-- [ ] **Step 3: Implement fail-closed config and admission**
+- [x] **Step 3: Implement fail-closed config and admission**
 
 Production values are exactly those in the approved design. Implement the disk check with `unix.Statfs`, comparing `Bavail * Bsize` to `MIN_FREE_DISK_BYTES`. Keep the check injectable in tests. Apply it only to new pair state and new mailbox puts, never ACK, revoke, or expiry cleanup.
 
 Add `server_capacity` to Go schema fixtures and Android's closed rejection set.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run focused Go tests, `make proto-test`, `make relay-test`, the focused Kotlin codec test, and `cd mobile && npm run typecheck`.
 

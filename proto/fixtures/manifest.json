@@ -7,6 +7,12 @@
       "valid": true
     },
     {
+      "file": "v2-valid/relay-rejected-server-capacity.json",
+      "scope": "server",
+      "type": "relay_control",
+      "valid": true
+    },
+    {
       "file": "v2-valid/peer-receipt-inner.json",
       "scope": "cross_layer",
       "type": "peer_receipt_inner",

@@ -21,6 +21,7 @@ class RelayFrameCodecTest {
             RelayFrame.LegacyForwarded(id),
             RelayFrame.Deliver(1000, envelope),
             RelayFrame.Rejected(id, "mailbox_full"),
+            RelayFrame.Rejected(id, "server_capacity"),
             RelayFrame.Expired(id, 2000),
             RelayFrame.Capabilities(listOf(2, 1), listOf(2), 2),
         )

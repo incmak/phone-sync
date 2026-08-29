@@ -30,6 +30,9 @@ type pairCompleteReq struct {
 }
 
 func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
+	if !s.requireStorageCapacity(w) {
+		return
+	}
 	var req pairInitReq
 	if !decodePairJSON(w, r, &req) {
 		return
@@ -76,6 +79,9 @@ func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireStorageCapacity(w) {
+		return
+	}
 	var req pairCompleteReq
 	if !decodePairJSON(w, r, &req) {
 		return

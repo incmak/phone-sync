@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,8 +22,12 @@ type Server struct {
 	pairHub                     *PairHub
 	clientHub                   *ClientHub
 	mailbox                     *store.MailboxStore
+	bolt                        *store.Bolt
 	handoffs                    *durableHandoffs
 	pairLimiter                 *pairingRateLimiter
+	capacityCheck               CapacityCheck
+	buildVersion                string
+	shuttingDown                atomic.Bool
 	now                         func() time.Time
 	maintenanceInterval         time.Duration
 	trustProxyHeaders           bool
@@ -69,6 +74,8 @@ type Config struct {
 	StatusExpiryBatch           int
 	TrustProxyHeaders           bool
 	RequireMutualPairSignatures bool
+	CapacityCheck               CapacityCheck
+	BuildVersion                string
 	Now                         func() time.Time
 }
 
@@ -84,6 +91,8 @@ func DefaultConfig() Config {
 		MaintenanceInterval: time.Minute,
 		MailboxExpiryBatch:  256,
 		StatusExpiryBatch:   256,
+		CapacityCheck:       noCapacityLimit,
+		BuildVersion:        "dev",
 		Now:                 time.Now,
 	}
 }
@@ -100,7 +109,7 @@ func NewWithConfig(b *store.Bolt, config Config) *Server {
 // corruption and configuration mismatches are returned to the caller so normal
 // startup can fail closed without a constructor panic.
 func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
-	if config.Now == nil || config.MaintenanceInterval <= 0 || config.MailboxExpiryBatch <= 0 || config.StatusExpiryBatch <= 0 {
+	if config.Now == nil || config.CapacityCheck == nil || config.BuildVersion == "" || config.MaintenanceInterval <= 0 || config.MailboxExpiryBatch <= 0 || config.StatusExpiryBatch <= 0 {
 		return nil, errors.New("invalid server config")
 	}
 	v, err := NewValidator()
@@ -128,8 +137,11 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 		pairHub:                     NewPairHub(),
 		clientHub:                   clientHub,
 		mailbox:                     mailbox,
+		bolt:                        b,
 		handoffs:                    newDurableHandoffs(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes),
 		pairLimiter:                 newPairingRateLimiter(config.PairingRateLimits),
+		capacityCheck:               config.CapacityCheck,
+		buildVersion:                config.BuildVersion,
 		now:                         config.Now,
 		maintenanceInterval:         config.MaintenanceInterval,
 		trustProxyHeaders:           config.TrustProxyHeaders,
@@ -158,8 +170,14 @@ func New() *Server {
 
 func (s *Server) Handler() http.Handler { return s.router }
 
+func (s *Server) BeginShutdown() {
+	s.shuttingDown.Store(true)
+}
+
 func (s *Server) routes() {
-	s.router.Get("/health", s.handleHealth)
+	s.router.Get("/health/live", s.handleLive)
+	s.router.Get("/health/ready", s.handleReady)
+	s.router.Get("/health", s.handleReady)
 	s.router.With(s.pairIPRateLimit).Post("/pair/init", s.handlePairInit)
 	s.router.With(s.pairIPRateLimit).Post("/pair/hello", s.handlePairHello)
 	s.router.With(s.pairIPRateLimit).Post("/pair/send_sig", s.handlePairSendSig)

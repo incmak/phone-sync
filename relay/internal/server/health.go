@@ -1,9 +1,31 @@
 package server
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	"go.etcd.io/bbolt"
+)
+
+type healthResponse struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
+}
+
+func (s *Server) handleLive(w http.ResponseWriter, _ *http.Request) {
+	s.writeHealth(w, http.StatusOK, "live")
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
+	if s.shuttingDown.Load() || s.bolt.View(func(*bbolt.Tx) error { return nil }) != nil || s.capacityCheck() != nil {
+		s.writeHealth(w, http.StatusServiceUnavailable, "not_ready")
+		return
+	}
+	s.writeHealth(w, http.StatusOK, "ready")
+}
+
+func (s *Server) writeHealth(w http.ResponseWriter, statusCode int, status string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(healthResponse{Status: status, Version: s.buildVersion})
 }

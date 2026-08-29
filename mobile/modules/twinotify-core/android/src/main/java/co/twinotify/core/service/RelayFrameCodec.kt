@@ -66,7 +66,7 @@ object RelayFrameCodec {
     const val MAX_FRAME_BYTES = ProtocolJson.MAX_ENVELOPE_BYTES + 4 * 1024
     private val digestPattern = Regex("^[0-9a-f]{64}$")
     private val rejectionReasons = setOf(
-        "mailbox_full", "id_conflict", "digest_mismatch", "not_recipient", "peer_legacy", "invalid_frame",
+        "mailbox_full", "id_conflict", "digest_mismatch", "not_recipient", "peer_legacy", "server_capacity", "invalid_frame",
     )
 
     fun encode(frame: RelayFrame): String = when (frame) {

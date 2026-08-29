@@ -25,7 +25,7 @@ func TestHealthEndpoint(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	expected := `{"status":"ok"}`
+	expected := "{\"status\":\"ready\",\"version\":\"dev\"}\n"
 	if rec.Body.String() != expected {
 		t.Fatalf("expected body %q, got %q", expected, rec.Body.String())
 	}

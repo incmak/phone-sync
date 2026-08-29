@@ -453,6 +453,10 @@ func (s *Server) handleRelayPutForPair(
 		_ = writeRejected(envelope.MsgID, "peer_legacy")
 		return
 	}
+	if err := s.capacityCheck(); err != nil {
+		_ = writeRejected(envelope.MsgID, "server_capacity")
+		return
+	}
 
 	digest := sha256.Sum256(put.Envelope)
 	handoff := s.handoffs.acquire(peerID)

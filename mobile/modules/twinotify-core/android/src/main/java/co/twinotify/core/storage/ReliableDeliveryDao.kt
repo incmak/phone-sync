@@ -1362,7 +1362,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         } else {
             co.twinotify.core.service.RelayRejectionResult.Missing
         }
-        if (reason == "mailbox_full" || reason == "peer_legacy") {
+        if (reason == "mailbox_full" || reason == "peer_legacy" || reason == "server_capacity") {
             updateRelayRetry(msgId, retryAt, reason)
             return co.twinotify.core.service.RelayRejectionResult.Retained
         }
