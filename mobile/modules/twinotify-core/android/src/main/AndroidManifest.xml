@@ -53,5 +53,13 @@
     <receiver
       android:name="co.twinotify.core.actions.ActionClaimRecoveryReceiver"
       android:exported="false" />
+
+    <receiver
+      android:name="co.twinotify.core.actions.ActionInvokeReceiver"
+      android:exported="false" />
+
+    <receiver
+      android:name="co.twinotify.core.actions.ActionInvocationExpiryReceiver"
+      android:exported="false" />
   </application>
 </manifest>

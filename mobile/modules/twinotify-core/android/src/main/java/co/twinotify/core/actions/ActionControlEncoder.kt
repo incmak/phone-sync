@@ -21,7 +21,11 @@ data class ActionInvokeInput(
     val actionId: String,
     val notificationSequence: Long,
     val replyText: String?,
-)
+) {
+    override fun toString(): String =
+        "ActionInvokeInput(invocationId=$invocationId, canonId=$canonId, actionId=$actionId, " +
+            "notificationSequence=$notificationSequence, replyText=${if (replyText == null) "null" else "<redacted>"})"
+}
 
 data class ActionResultInput(
     val invocationId: String,

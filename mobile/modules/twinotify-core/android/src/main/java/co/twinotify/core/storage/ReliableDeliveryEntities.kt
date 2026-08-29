@@ -157,6 +157,11 @@ data class ActionInvocation(
         require(state in ACTION_INVOCATION_STATES)
     }
 
+    override fun toString(): String =
+        "ActionInvocation(invocationId=$invocationId, canonId=$canonId, actionId=$actionId, " +
+            "notificationSequence=$notificationSequence, replyText=${if (replyText == null) "null" else "<redacted>"}, " +
+            "state=$state, createdAt=$createdAt, expiresAt=$expiresAt, updatedAt=$updatedAt)"
+
     private companion object {
         val ACTION_INVOCATION_STATES = setOf(
             "PENDING",

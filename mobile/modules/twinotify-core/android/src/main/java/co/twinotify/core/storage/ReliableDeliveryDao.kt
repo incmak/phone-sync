@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import co.twinotify.core.actions.ActionClaimDecision
+import co.twinotify.core.actions.ActionExpiryCommitResult
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
 import co.twinotify.core.service.CallRejectionCommitResult
@@ -183,6 +184,35 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         state: String,
         now: Long,
     ): Int
+
+    @Query(
+        "SELECT * FROM action_invocation WHERE state='PENDING' AND expiresAt <= :now " +
+            "ORDER BY expiresAt, invocationId",
+    )
+    abstract suspend fun dueActionInvocations(now: Long): List<ActionInvocation>
+
+    @Query("SELECT MIN(expiresAt) FROM action_invocation WHERE state='PENDING'")
+    abstract suspend fun earliestPendingActionInvocationAt(): Long?
+
+    @Transaction
+    open suspend fun expireActionInvocation(
+        expected: ActionInvocation,
+        now: Long,
+    ): ActionExpiryCommitResult {
+        val current = actionInvocation(expected.invocationId) ?: return ActionExpiryCommitResult.Lost
+        if (current != expected || current.state != "PENDING" || current.expiresAt > now) {
+            return ActionExpiryCommitResult.Lost
+        }
+        if (terminalizeActionInvocation(current.invocationId, "EXPIRED", now) != 1) {
+            return ActionExpiryCommitResult.Lost
+        }
+        val canonical = canonical(current.canonId)
+        return ActionExpiryCommitResult.Expired(
+            repost = canonical?.state == "ACTIVE" &&
+                canonical.latestSequence == current.notificationSequence &&
+                canonical.mirrorLocalTag != null && canonical.mirrorLocalId != null,
+        )
+    }
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insertActionExecution(row: ActionExecution)

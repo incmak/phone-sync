@@ -9,13 +9,22 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
+import androidx.core.net.toUri
 import co.twinotify.core.R
+import co.twinotify.core.actions.ActionInvokeReceiver
+import co.twinotify.core.actions.MirrorActionIntent
 import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.storage.NotificationDb
 
 object MirrorPoster {
     @SuppressLint("LaunchActivityFromNotification")
-    fun buildNotification(ctx: Context, post: NotifPostJson, localId: Int): Notification {
+    fun buildNotification(
+        ctx: Context,
+        post: NotifPostJson,
+        localId: Int,
+        localTag: String = NotificationStateReducer.stableMirrorTag(post.canon_id),
+    ): Notification {
         require(localId > 0) { "local notification ID must be positive" }
         NotifChannelSetup.ensureChannels(ctx)
         val smallIcon = post.small_icon_png_b64?.let(::decodeBitmap)
@@ -38,12 +47,36 @@ object MirrorPoster {
             .setContentText(post.text ?: "")
             .setSubText(post.sub_text)
             .setVisibility(NotifVisibility.toAndroid(post.visibility))
-            .setAutoCancel(true)
+            .setAutoCancel(post.is_auto_cancel)
             .setContentIntent(tapPi)
             .setSmallIcon(R.drawable.ic_stat_twinotify)
             .apply {
                 if (sourceArtwork != null) setLargeIcon(sourceArtwork)
                 if (!expandedText.isNullOrBlank()) setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+                post.actions.take(3).forEach { action ->
+                    val invokeIntent = Intent(ctx, ActionInvokeReceiver::class.java).apply {
+                        data = MirrorActionIntent.dataUri(localTag, localId, action.action_id).toUri()
+                    }
+                    val pending = PendingIntent.getBroadcast(
+                        ctx,
+                        0,
+                        invokeIntent,
+                        MirrorActionIntent.pendingIntentFlags(action.reply),
+                    )
+                    val builder = NotificationCompat.Action.Builder(0, action.title, pending)
+                        .setSemanticAction(action.semantic)
+                        .setAllowGeneratedReplies(false)
+                        .setAuthenticationRequired(true)
+                    if (action.reply) {
+                        builder.addRemoteInput(
+                            RemoteInput.Builder(MirrorActionIntent.REMOTE_INPUT_KEY)
+                                .setLabel(action.reply_label ?: action.title)
+                                .setAllowFreeFormInput(true)
+                                .build(),
+                        )
+                    }
+                    addAction(builder.build())
+                }
             }
             .build()
             .also { if (!post.is_clearable) it.flags = it.flags or Notification.FLAG_NO_CLEAR }
@@ -56,7 +89,7 @@ object MirrorPoster {
         val localTag = co.twinotify.core.service.NotificationStateReducer.stableMirrorTag(post.canon_id)
         val notificationManager = NotificationManagerCompat.from(ctx)
         if (notificationManager.areNotificationsEnabled()) {
-            notificationManager.notify(localTag, localId, buildNotification(ctx, post, localId))
+            notificationManager.notify(localTag, localId, buildNotification(ctx, post, localId, localTag))
         }
 
         val dao = NotificationDb.get(ctx).notificationMapDao()

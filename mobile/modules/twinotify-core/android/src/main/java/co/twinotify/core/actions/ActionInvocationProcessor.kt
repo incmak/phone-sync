@@ -15,7 +15,12 @@ data class ActionInvokeRequest(
     val notificationSequence: Long,
     val replyText: String?,
     val invokedAt: Long,
-)
+) {
+    override fun toString(): String =
+        "ActionInvokeRequest(inbound=$inbound, invocationId=$invocationId, canonId=$canonId, " +
+            "actionId=$actionId, notificationSequence=$notificationSequence, " +
+            "replyText=${if (replyText == null) "null" else "<redacted>"}, invokedAt=$invokedAt)"
+}
 
 sealed interface ActionClaimDecision {
     data object Execute : ActionClaimDecision

@@ -11,6 +11,19 @@ import org.json.JSONObject
 
 class ActionControlEncoderTest {
     @Test
+    fun invokeInputDebugStringNeverContainsReplyContent() {
+        val input = ActionInvokeInput(
+            invocationId = "22222222-2222-4222-8222-222222222222",
+            canonId = "origin:pkg:1:tag",
+            actionId = "33333333-3333-4333-8333-333333333333",
+            notificationSequence = 7,
+            replyText = "private reply",
+        )
+
+        assertFalse(input.toString().contains("private reply"))
+    }
+
+    @Test
     fun invokeUsesTwoMinuteControlLaneEnvelopeWithoutPeerReceipt() = runTest {
         val captured = mutableListOf<InnerEventV2>()
         val encoder = ActionControlEncoder(

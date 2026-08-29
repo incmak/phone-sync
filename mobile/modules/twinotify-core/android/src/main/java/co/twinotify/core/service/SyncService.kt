@@ -1023,6 +1023,9 @@ class SyncService : Service() {
         scope.launch {
             co.twinotify.core.actions.ActionClaimRecoveryRuntime.recover(applicationContext)
         }
+        scope.launch {
+            co.twinotify.core.actions.ActionInvocationExpiryRuntime.expire(applicationContext)
+        }
         routePreferenceJob = scope.launch { routePreferenceRestarter.run() }
     }
 

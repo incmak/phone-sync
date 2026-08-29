@@ -5,6 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import org.junit.After
 import org.junit.Before
@@ -108,6 +110,51 @@ class NotificationActionDaoTest {
 
         assertEquals(row, dao.notificationDetail(DETAIL_ID))
         assertEquals(row, dao.notificationDetailForCanon(CANON_ID))
+    }
+
+    @Test
+    fun dueInvocationExpiresClearsReplyAndRequestsRepostOnlyForMatchingActiveGeneration() = runBlocking {
+        val active = CanonicalNotificationState(
+            canonId = CANON_ID,
+            originDevice = "origin-device",
+            latestSequence = 7,
+            state = "ACTIVE",
+            desiredPayloadJson = "{}",
+            materializedSequence = 7,
+            sourceNotificationKey = null,
+            mirrorLocalId = 41,
+            mirrorLocalTag = "mirror-tag",
+            peerCancelPending = false,
+            updatedAt = 1_000,
+        )
+        dao.putCanonical(active)
+        val invocation = ActionInvocation(
+            invocationId = INVOCATION_ID,
+            canonId = CANON_ID,
+            actionId = ACTION_ID,
+            notificationSequence = 7,
+            replyText = "private reply",
+            state = "PENDING",
+            createdAt = 1_000,
+            expiresAt = 121_000,
+            updatedAt = 1_000,
+        )
+        dao.insertActionInvocation(invocation)
+
+        assertEquals(emptyList(), dao.dueActionInvocations(120_999))
+        assertEquals(listOf(invocation), dao.dueActionInvocations(121_000))
+        val result = assertIs<co.twinotify.core.actions.ActionExpiryCommitResult.Expired>(
+            dao.expireActionInvocation(invocation, 121_000),
+        )
+        assertEquals(true, result.repost)
+        val expired = assertNotNull(dao.actionInvocation(INVOCATION_ID))
+        assertEquals("EXPIRED", expired.state)
+        assertNull(expired.replyText)
+        assertNull(dao.earliestPendingActionInvocationAt())
+        assertEquals(
+            co.twinotify.core.actions.ActionExpiryCommitResult.Lost,
+            dao.expireActionInvocation(invocation, 121_001),
+        )
     }
 
     private fun execution(id: String, claimedAt: Long) = ActionExecution(

@@ -75,7 +75,7 @@ class DefaultAndroidNotificationPort(
             NotificationManagerCompat.from(appContext).notify(
                 tag,
                 id,
-                MirrorPoster.buildNotification(appContext, post, id),
+                MirrorPoster.buildNotification(appContext, post, id, tag),
             )
             NotificationPostOutcome.Applied
         }.getOrDefault(NotificationPostOutcome.RetryableFailure)
