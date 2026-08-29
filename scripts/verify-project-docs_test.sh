@@ -24,7 +24,7 @@ write_valid_fixture() {
   printf '%s\n' \
     '# Agent guidance' \
     'Mobile uses Expo SDK 57 / React Native 0.86.' \
-    'Room is at version 7. A new entity means version 8, explicit Migration(7,8), registration in NotificationDb.addMigrations(...), and committed schema 8.json. Never use fallbackToDestructiveMigration().' \
+    'Room is at version 9. A new entity means version 10, explicit Migration(9,10), registration in NotificationDb.addMigrations(...), and committed schema 10.json. Never use fallbackToDestructiveMigration().' \
     'Direct-LAN Tasks 1-9 implementation and host automation are complete; named hardware checks remain pending physical two-phone run.' \
     'advisor-plans/README.md tracks Plans 001-030. Plan 004 is externally blocked on owner-controlled EAS project, signing, token, certificate, and attestation inputs. Plan 015 source is complete and only PHY-CALL-01 physical proof is deferred.' \
     'Local APKs are QA artifacts, not protected release candidates.' \
@@ -68,7 +68,7 @@ write_wrapped_agent_fixture() {
   printf '%s\n' \
     '# Agent guidance' \
     'Mobile uses Expo SDK 57 / React Native 0.86.' \
-    'Room is at version 7. A new entity means version 8, explicit Migration(7,8), registration in NotificationDb.addMigrations(...), and committed schema 8.json. Never use fallbackToDestructiveMigration().' \
+    'Room is at version 9. A new entity means version 10, explicit Migration(9,10), registration in NotificationDb.addMigrations(...), and committed schema 10.json. Never use fallbackToDestructiveMigration().' \
     'Direct-LAN Tasks 1-9 implementation and host' \
     'automation are complete; named hardware checks remain pending physical two-phone run.' \
     '' \
@@ -113,7 +113,7 @@ sed -i.bak 's/Expo SDK 57/Expo SDK 54/' "$tmp/docs/AGENTS.md"
 expect_rejection 'stale Expo SDK guidance'
 
 write_valid_fixture
-sed -i.bak -e 's/Room is at version 7/Room is at version 5/' -e 's/Migration(7,8)/Migration(5,6)/' "$tmp/docs/AGENTS.md"
+sed -i.bak -e 's/Room is at version 9/Room is at version 5/' -e 's/Migration(9,10)/Migration(5,6)/' "$tmp/docs/AGENTS.md"
 expect_rejection 'stale Room migration guidance'
 
 write_valid_fixture

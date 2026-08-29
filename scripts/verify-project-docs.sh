@@ -58,9 +58,9 @@ done
 
 require_literal "$ROOT_AGENTS" 'Expo SDK 57 / React Native 0.86' 'root AGENTS.md must name Expo SDK 57 and React Native 0.86'
 reject_pattern "$ROOT_AGENTS" 'Expo[[:space:]]+SDK[[:space:]]+54' 'root AGENTS.md must not retain stale Expo SDK 54 guidance'
-require_pattern "$ROOT_AGENTS" 'Room[[:space:]]+(is[[:space:]]+at[[:space:]]+)?version[[:space:]]+7' 'root AGENTS.md must name Room version 7'
-require_literal "$ROOT_AGENTS" 'Migration(7,8)' 'root AGENTS.md must require the next Room Migration(7,8)'
-require_pattern "$ROOT_AGENTS" 'schemas?[^0-9]*8\.json' 'root AGENTS.md must require the next committed Room schema 8.json'
+require_pattern "$ROOT_AGENTS" 'Room[[:space:]]+(is[[:space:]]+at[[:space:]]+)?version[[:space:]]+9' 'root AGENTS.md must name Room version 9'
+require_literal "$ROOT_AGENTS" 'Migration(9,10)' 'root AGENTS.md must require the next Room Migration(9,10)'
+require_pattern "$ROOT_AGENTS" 'schemas?[^0-9]*10\.json' 'root AGENTS.md must require the next committed Room schema 10.json'
 reject_pattern "$ROOT_AGENTS" 'Room[[:space:]]+(is[[:space:]]+at[[:space:]]+)?version[[:space:]]+5|Migration\(5,6\)' 'root AGENTS.md must not retain stale Room 5-to-6 guidance'
 require_paragraph_pattern "$ROOT_AGENTS" 'tasks[[:space:]]+1-9.*implementation and host automation.*complete' 'root AGENTS.md must record direct-LAN Tasks 1-9 source and host completion'
 require_literal "$ROOT_AGENTS" 'pending physical two-phone run' 'root AGENTS.md must preserve pending physical two-phone direct-LAN evidence'
