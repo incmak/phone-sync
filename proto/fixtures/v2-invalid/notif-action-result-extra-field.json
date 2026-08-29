@@ -1,0 +1,14 @@
+{
+  "v": 2,
+  "msg_id": "a2145c77-f377-4c39-80b0-71892400756b",
+  "origin_device": "origin-device",
+  "type": "notif.action.result",
+  "created_at": 1788267350000,
+  "expires_at": 1788267950000,
+  "payload": {
+    "invocation_id": "fd2fb70b-829a-4701-8956-61611bc9c701",
+    "canon_id": "origin-device:com.example.chat:42:thread-7",
+    "status": "failed",
+    "error": "source exception details"
+  }
+}

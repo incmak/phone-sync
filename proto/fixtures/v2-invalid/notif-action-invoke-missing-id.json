@@ -1,0 +1,14 @@
+{
+  "v": 2,
+  "msg_id": "22e0f92b-04b7-4aef-8a63-154daf6840b9",
+  "origin_device": "mirror-device",
+  "type": "notif.action.invoke",
+  "created_at": 1788267348000,
+  "expires_at": 1788267468000,
+  "payload": {
+    "canon_id": "origin-device:com.example.chat:42:thread-7",
+    "action_id": "b6d3142a-e936-4d7d-b15a-bdf318bb0539",
+    "notification_sequence": 17,
+    "invoked_at": 1788267348000
+  }
+}

@@ -7,7 +7,7 @@
     "v": { "const": 2 },
     "msg_id": { "type": "string", "format": "uuid" },
     "origin_device": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "call.state", "peer.receipt", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
+    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "notif.action.invoke", "notif.action.result", "call.state", "peer.receipt", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
     "canon_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
     "sequence": { "type": "integer", "minimum": 1 },
     "created_at": { "type": "integer", "minimum": 0 },
@@ -32,6 +32,46 @@
               "call_session_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
               "state": { "type": "string", "enum": ["ringing", "active", "idle"] },
               "direction": { "type": "string", "enum": ["incoming", "outgoing", "unknown"] }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "notif.action.invoke" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["invocation_id", "canon_id", "action_id", "notification_sequence", "invoked_at"],
+            "properties": {
+              "invocation_id": { "type": "string", "format": "uuid" },
+              "canon_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+              "action_id": { "type": "string", "format": "uuid" },
+              "notification_sequence": { "type": "integer", "minimum": 1 },
+              "reply_text": { "type": "string", "maxLength": 4096 },
+              "invoked_at": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "notif.action.result" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["invocation_id", "canon_id", "status"],
+            "properties": {
+              "invocation_id": { "type": "string", "format": "uuid" },
+              "canon_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
+              "status": {
+                "type": "string",
+                "enum": ["dispatched", "outcome_unknown", "action_gone", "notification_gone", "expired", "failed"]
+              }
             },
             "additionalProperties": false
           }

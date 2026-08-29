@@ -101,13 +101,13 @@ func validateFixtureDeclaration(fixture protocolFixture) error {
 			return fmt.Errorf("unsupported server fixture code %q", fixture.ExpectedCode)
 		}
 	case "cross_layer":
-		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" {
+		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" && fixture.Type != "notif_action_invoke" && fixture.Type != "notif_action_result" {
 			return fmt.Errorf("unknown cross-layer fixture type %q", fixture.Type)
 		}
 		if !fixture.Valid && fixture.Type == "outer_inner_pair" && fixture.ExpectedCode != "outer_inner_id_mismatch" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
-		if !fixture.Valid && (fixture.Type == "call_state" || fixture.Type == "notif_post_payload") && fixture.ExpectedCode != "invalid_frame" {
+		if !fixture.Valid && (fixture.Type == "call_state" || fixture.Type == "notif_post_payload" || fixture.Type == "notif_action_invoke" || fixture.Type == "notif_action_result") && fixture.ExpectedCode != "invalid_frame" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
 	default:
@@ -338,6 +338,24 @@ func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []b
 		return nil
 	case "notif_post_payload":
 		if err := validator.ValidateNotifPostPayload(raw); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		return nil
+	case "notif_action_invoke", "notif_action_result":
+		if err := validateJSON(validator.innerV2, raw); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		var inner struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		expectedType := map[string]string{
+			"notif_action_invoke": "notif.action.invoke",
+			"notif_action_result": "notif.action.result",
+		}[fixtureType]
+		if inner.Type != expectedType {
 			return fixtureCodeError("invalid_frame")
 		}
 		return nil

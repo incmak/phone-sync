@@ -31,6 +31,18 @@
       "valid": true
     },
     {
+      "file": "v2-valid/notif-action-invoke-valid.json",
+      "scope": "cross_layer",
+      "type": "notif_action_invoke",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/notif-action-result-valid.json",
+      "scope": "cross_layer",
+      "type": "notif_action_result",
+      "valid": true
+    },
+    {
       "file": "v2-invalid/relay-ack-bad-digest.json",
       "scope": "server",
       "type": "relay_control",
@@ -112,6 +124,42 @@
       "file": "v2-invalid/notif-post-remote-input-key.json",
       "scope": "cross_layer",
       "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-action-invoke-long-reply.json",
+      "scope": "cross_layer",
+      "type": "notif_action_invoke",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-action-invoke-missing-id.json",
+      "scope": "cross_layer",
+      "type": "notif_action_invoke",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-action-invoke-extra-field.json",
+      "scope": "cross_layer",
+      "type": "notif_action_invoke",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-action-invoke-bad-action-id.json",
+      "scope": "cross_layer",
+      "type": "notif_action_invoke",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-action-result-bad-status.json",
+      "scope": "cross_layer",
+      "type": "notif_action_result",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-action-result-extra-field.json",
+      "scope": "cross_layer",
+      "type": "notif_action_result",
       "expected_code": "invalid_frame"
     }
   ]

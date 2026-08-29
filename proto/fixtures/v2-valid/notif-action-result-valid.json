@@ -1,0 +1,13 @@
+{
+  "v": 2,
+  "msg_id": "7ddc4c03-951f-4e7b-ad09-6c5b1c1df6f5",
+  "origin_device": "origin-device",
+  "type": "notif.action.result",
+  "created_at": 1788267350000,
+  "expires_at": 1788267950000,
+  "payload": {
+    "invocation_id": "fd2fb70b-829a-4701-8956-61611bc9c701",
+    "canon_id": "origin-device:com.example.chat:42:thread-7",
+    "status": "dispatched"
+  }
+}
