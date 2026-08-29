@@ -1,5 +1,6 @@
 package co.twinotify.core.protocol
 
+import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.service.RelayFrame
 import co.twinotify.core.service.RelayFrameCodec
 import java.util.Base64
@@ -50,6 +51,14 @@ class ProtocolFixtureTest {
                     assertEquals("call.state", event.type)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
                 }
+                "notif_action_invoke", "notif_action_result" -> {
+                    val event = ProtocolJson.decodeInner(raw)
+                    assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
+                }
+                "notif_post_payload" -> {
+                    val post = NotifPostJson.fromPayloadJson(raw)
+                    assertTrue(post.canon_id.isNotEmpty())
+                }
                 else -> error("unsupported valid fixture type ${entry.getString("type")}")
             }
         }
@@ -92,6 +101,14 @@ class ProtocolFixtureTest {
                     val error = assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
                     assertEquals(expectedCode, observedFixtureCode(error))
                 }
+                "notif_action_invoke", "notif_action_result" -> {
+                    val error = assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
+                    assertEquals(expectedCode, observedFixtureCode(error))
+                }
+                "notif_post_payload" -> {
+                    val error = assertFailsWith<IllegalArgumentException> { NotifPostJson.fromPayloadJson(raw) }
+                    assertEquals(expectedCode, observedFixtureCode(error))
+                }
                 else -> error("unsupported invalid fixture type $type")
             }
         }
@@ -104,6 +121,10 @@ class ProtocolFixtureTest {
             "outer_inner_id_mismatch"
         error is IllegalArgumentException && error.message == "invalid SHA-256 digest" -> "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("call.state") == true ->
+            "invalid_frame"
+        error is IllegalArgumentException && error.message?.contains("notif.action") == true ->
+            "invalid_frame"
+        error is IllegalArgumentException && error.message?.contains("notification payload") == true ->
             "invalid_frame"
         error is IllegalArgumentException && error.message == "inner event sequence must be positive" ->
             "invalid_frame"

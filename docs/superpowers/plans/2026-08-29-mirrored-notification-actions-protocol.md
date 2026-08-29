@@ -228,7 +228,7 @@ git commit -m "feat(mobile/protocol): validate notification action controls"
 
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/listener/NotifPostBuilder.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/InboundDispatcherControlTest.kt`
-- Create: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/NotifPostJsonTest.kt`
+- Create: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/listener/NotifPostJsonTest.kt`
 
 ### Step 1: Specify the data model with failing tests
 
@@ -250,7 +250,7 @@ data class NotifPostJson(
 )
 ```
 
-Verify a legacy payload produces `true` and an empty list. Verify a current payload preserves source order, caps at three, rejects forbidden action keys, and rejects over-long labels/titles and bad UUIDs.
+Verify a legacy payload produces `true` and an empty list. Verify a current payload preserves source order and rejects more than three actions, forbidden action keys, over-long labels/titles, and bad UUIDs.
 
 Run `NotifPostJsonTest`. Expected: FAIL because the fields do not exist.
 
@@ -272,7 +272,7 @@ Expected: PASS, including the legacy payload case.
 Commit:
 
 ```bash
-git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/listener/NotifPostBuilder.kt mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service
+git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/listener/NotifPostBuilder.kt mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/listener/NotifPostJsonTest.kt mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/InboundDispatcherControlTest.kt
 git commit -m "feat(mobile/protocol): parse mirrored action descriptors"
 ```
 

@@ -11,6 +11,15 @@ import android.util.Base64
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
 import java.io.ByteArrayOutputStream
+import java.util.UUID
+
+data class NotifActionJson(
+    val action_id: String,
+    val title: String,
+    val semantic: Int,
+    val reply: Boolean,
+    val reply_label: String?,
+)
 
 data class NotifPostJson(
     val v: Int = 1,
@@ -31,6 +40,8 @@ data class NotifPostJson(
     val small_icon_png_b64: String?,       // Phase 3: always inline; icon-hash-elide is Phase 7
     val large_icon_png_b64: String?,
     val ts: Long,
+    val is_auto_cancel: Boolean = true,
+    val actions: List<NotifActionJson> = emptyList(),
 ) {
     companion object {
         fun fromPayloadJson(raw: String): NotifPostJson {
@@ -41,8 +52,18 @@ data class NotifPostJson(
             require(type == "notif.post" || type == "notif.update") {
                 "notification payload type must be notif.post or notif.update"
             }
+            val version = o.optInt("v", 1)
+            require(version == 1) { "notification payload must use version 1" }
+            val actions = if (!o.has("actions")) {
+                emptyList()
+            } else {
+                val array = o.get("actions") as? org.json.JSONArray
+                    ?: throw IllegalArgumentException("notification payload actions must be an array")
+                require(array.length() <= 3) { "notification payload actions must contain at most 3 items" }
+                List(array.length()) { index -> parseAction(array.get(index), index) }
+            }
             return NotifPostJson(
-                v = o.optInt("v", 1),
+                v = version,
                 type = type,
                 canon_id = o.getString("canon_id"),
                 app_name = nullable("app_name"),
@@ -60,7 +81,53 @@ data class NotifPostJson(
                 small_icon_png_b64 = nullable("small_icon_png_b64"),
                 large_icon_png_b64 = nullable("large_icon_png_b64"),
                 ts = o.optLong("ts", 0L),
+                is_auto_cancel = o.optBoolean("is_auto_cancel", true),
+                actions = actions,
             )
+        }
+
+        private fun parseAction(value: Any, index: Int): NotifActionJson {
+            val action = value as? org.json.JSONObject
+                ?: throw IllegalArgumentException("notification payload action $index must be an object")
+            val allowed = setOf("action_id", "title", "semantic", "reply", "reply_label")
+            val unknown = action.keys().asSequence().filterNot(allowed::contains).toList()
+            require(unknown.isEmpty()) {
+                "notification payload action $index contains unknown fields: ${unknown.joinToString()}"
+            }
+            val actionId = action.get("action_id") as? String
+                ?: throw IllegalArgumentException("notification payload action $index action_id must be a string")
+            val parsedUuid = runCatching { UUID.fromString(actionId) }.getOrElse {
+                throw IllegalArgumentException("notification payload action $index action_id must be a UUID", it)
+            }
+            require(parsedUuid.toString().equals(actionId, ignoreCase = true)) {
+                "notification payload action $index action_id must be a canonical UUID"
+            }
+            val title = action.get("title") as? String
+                ?: throw IllegalArgumentException("notification payload action $index title must be a string")
+            require(title.isNotEmpty() && title.codePointCount(0, title.length) <= 64) {
+                "notification payload action $index title must be 1..64 characters"
+            }
+            val semanticNumber = action.get("semantic") as? Number
+                ?: throw IllegalArgumentException("notification payload action $index semantic must be an integer")
+            val semantic = semanticNumber.toInt()
+            require(semanticNumber.toDouble() == semantic.toDouble() && semantic in 0..12) {
+                "notification payload action $index semantic must be an integer from 0 to 12"
+            }
+            val reply = action.get("reply") as? Boolean
+                ?: throw IllegalArgumentException("notification payload action $index reply must be a boolean")
+            val replyLabel = when {
+                !action.has("reply_label") || action.isNull("reply_label") -> null
+                else -> action.get("reply_label") as? String
+                    ?: throw IllegalArgumentException(
+                        "notification payload action $index reply_label must be a string or null",
+                    )
+            }
+            replyLabel?.let {
+                require(it.codePointCount(0, it.length) <= 64) {
+                    "notification payload action $index reply_label must be at most 64 characters"
+                }
+            }
+            return NotifActionJson(actionId, title, semantic, reply, replyLabel)
         }
     }
 }
@@ -196,6 +263,18 @@ object NotifPostBuilder {
         put("small_icon_png_b64", post.small_icon_png_b64 ?: org.json.JSONObject.NULL)
         put("large_icon_png_b64", post.large_icon_png_b64 ?: org.json.JSONObject.NULL)
         put("ts", post.ts)
+        put("is_auto_cancel", post.is_auto_cancel)
+        put("actions", org.json.JSONArray().apply {
+            post.actions.forEach { action ->
+                put(org.json.JSONObject().apply {
+                    put("action_id", action.action_id)
+                    put("title", action.title)
+                    put("semantic", action.semantic)
+                    put("reply", action.reply)
+                    action.reply_label?.let { put("reply_label", it) }
+                })
+            }
+        })
     }.toString()
 
     private fun visibilityString(v: Int): String = when (v) {
