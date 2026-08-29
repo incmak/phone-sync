@@ -370,7 +370,7 @@ Commit: `ci(relay): publish and deploy verified images`
 - Consumes: all prior task commits.
 - Produces: fresh automated evidence and a Sol/High `ship`, `fix-first`, or `rethink` verdict.
 
-- [ ] **Step 1: Run the complete host gates**
+- [x] **Step 1: Run the complete host gates**
 
 Run:
 
@@ -383,9 +383,23 @@ git diff --check
 
 Record exact exit codes and test counts. Do not claim Android instrumentation, physical devices, public TLS, or off-host backup evidence unless actually run.
 
-- [ ] **Step 2: Perform manual artifact inspection**
+Fresh committed-head evidence at `d1b98c6` on 2026-08-29:
+
+- `make relay-verify`: exit 0; workflow/shell contracts, `go vet`, four Go packages under `-race -count=1`, and the Docker build passed.
+- A separate JSON race run recorded 203 top-level tests and 408 total test/subtest pass events across four packages, with zero skips and zero failures.
+- `make deployment-test`: exit 0.
+- `cd mobile && npm run typecheck`: exit 0.
+- `git diff --check`: exit 0.
+- Actionlint 1.7.7 and ShellCheck 0.11.0: exit 0.
+- A final AMD64/ARM64 OCI export with BuildKit maximum provenance and SBOM completed at manifest-list digest `sha256:ea7c909bf1d5f846c7d120339c7e2a3ec61b7789e2cce09b2ce509612e8b7659`; the local OCI archive SHA-256 is `1bf0a065c65aa66d4ebd6670858a34488a940ec7b262308ade2f170e047f8e95`.
+
+- [x] **Step 2: Perform manual artifact inspection**
 
 Inspect the full diff, generated-schema cleanliness, Compose-resolved configuration, image user, read-only mounts, exposed ports, health state, backup file permissions, restore recovery copy, workflow action pins, and privacy scan.
+
+The isolated production-Compose audit reported relay user `65532:65532`, read-only root, `cap_drop: [ALL]`, `no-new-privileges`, no host port binding, and only `/data` plus `/backups` writable. Readiness was healthy. The startup snapshot was owned by `65532:65532` with mode `0600`; an offline restore created a separate mode-`0600` recovery copy and returned healthy. Only Caddy resolves public ports 80/443. The exact pinned Caddy image validated the production Caddyfile. Generated schemas/fixtures remain ignored and untracked. All workflow actions use full commit SHAs, and the relay log scan found only static event names and bounded static labels.
+
+Evidence limits remain explicit: no GHCR publication, public DNS/TLS request, real off-host backup transfer, production monitoring alert, Android instrumentation, protected EAS build, or physical two-phone scenario was run in this host audit.
 
 - [ ] **Step 3: Obtain the fresh read-only Sol/High audit**
 

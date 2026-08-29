@@ -20,6 +20,14 @@ reverse-direction, restart/failover, battery, and real-call proof. Never convert
 those pending items into a pass without the corresponding private device
 evidence.
 
+The Go relay production-hardening lane is source- and host-verified through
+`d1b98c6`: mutual pairing confirmation, persistent JWT replay state,
+fail-closed capacity/readiness, graceful drain, private aggregate metrics,
+validated backups/restores, hardened digest-only Compose, and verified image
+publication/deployment automation are implemented. This is not live-host
+evidence. GHCR publication, public DNS/TLS, off-host backup transfer, monitoring
+alerts, and a real deployment remain operator-controlled launch steps.
+
 The protected Android producer remains externally blocked on the intended EAS
 project link and owner-controlled signing, token, certificate, and attestation
 inputs. Plan 029 moved the source tree to Expo 57 and closed the Expo 54/Metro
