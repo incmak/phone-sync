@@ -35,13 +35,8 @@ export function NotificationSourceHeader({
           source={{ uri: detail.sourceAppIconDataUri }}
           accessibilityElementsHidden
           importantForAccessibility="no"
-          style={[
-            styles.icon,
-            {
-              borderColor: theme.colors.outlineVariant,
-              borderRadius: theme.radius.sm,
-            },
-          ]}
+          resizeMode="contain"
+          style={styles.icon}
         />
       ) : null}
       <View style={styles.copy}>
@@ -81,7 +76,6 @@ const styles = StyleSheet.create({
   icon: {
     width: 44,
     height: 44,
-    borderWidth: StyleSheet.hairlineWidth,
   },
   copy: {
     flexShrink: 1,

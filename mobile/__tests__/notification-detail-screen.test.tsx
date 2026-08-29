@@ -108,7 +108,10 @@ describe('notification detail screen', () => {
     expect(screen.getByText('Active')).toBeTruthy();
     expect(screen.getByText('Are we still meeting at 9?')).toBeTruthy();
     expect(screen.getByText('Are we still meeting at 9? I can bring the notes.')).toBeTruthy();
-    expect(screen.getByTestId('notification-source-icon', { includeHiddenElements: true }).props.accessibilityElementsHidden).toBe(true);
+    const sourceIcon = screen.getByTestId('notification-source-icon', { includeHiddenElements: true });
+    expect(sourceIcon.props.accessibilityElementsHidden).toBe(true);
+    expect(ReactNative.StyleSheet.flatten(sourceIcon.props.style).borderWidth).toBeUndefined();
+    expect(ReactNative.StyleSheet.flatten(sourceIcon.props.style).backgroundColor).toBeUndefined();
     expect(screen.queryByTestId('notification-content-card')).toBeNull();
   });
 

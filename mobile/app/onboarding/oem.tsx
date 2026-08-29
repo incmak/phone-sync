@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import Svg, { Path, Rect, Circle } from 'react-native-svg';
+import Svg, { Rect } from 'react-native-svg';
 import { useTheme, TwButton } from '../../components';
 import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 
