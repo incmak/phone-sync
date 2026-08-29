@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 dev_file="$repo_root/deploy/docker-compose.yml"
 prod_file="$repo_root/deploy/docker-compose.prod.yml"
 domain=relay.example.test
