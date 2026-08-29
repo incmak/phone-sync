@@ -15,6 +15,10 @@ type Bolt struct {
 	db *bbolt.DB
 }
 
+// boltAllocSize pins the file-growth increment that mailbox capacity admission
+// reserves. Keep the database setting and reservation derived from one value.
+const boltAllocSize = 16 * 1024 * 1024
+
 // Snapshot writes a transactionally consistent Bolt copy to path and installs
 // it atomically only after the temporary copy passes a full Bolt check.
 func (b *Bolt) Snapshot(path string) error {
@@ -101,6 +105,7 @@ func OpenBolt(path string) (*Bolt, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.AllocSize = boltAllocSize
 	return &Bolt{db: db}, nil
 }
 

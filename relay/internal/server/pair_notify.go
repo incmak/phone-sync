@@ -14,11 +14,9 @@ import (
 const pairNotifyMaxDuration = 5 * time.Minute
 
 const (
-	pairNotifyDeviceIDHeader       = "X-Twinotify-Device-ID"
-	pairNotifySignatureHeader      = "X-Twinotify-Pair-Signature"
-	pairNotifyDeviceIDMaxBytes     = 256
-	pairNotifySignatureBase64Bytes = 88
-	pairNotifyProofDomain          = "twinotify-pair-notify-v1\n"
+	pairNotifyDeviceIDHeader  = "X-Twinotify-Device-ID"
+	pairNotifySignatureHeader = "X-Twinotify-Pair-Signature"
+	pairNotifyProofDomain     = "twinotify-pair-notify-v1\n"
 )
 
 // handlePairNotify accepts signing-key-authenticated WebSocket subscriptions during pairing.
@@ -28,7 +26,7 @@ const (
 func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 	pairToken := r.URL.Query().Get("token")
 	role := r.URL.Query().Get("role")
-	if pairToken == "" || (role != "A" && role != "B") {
+	if !validPairToken(pairToken) || (role != "A" && role != "B") || !pairNotifyIdentifiersWithinBounds(r) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -74,6 +72,8 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	s.metrics.connectionOpened()
+	defer s.metrics.connectionClosed()
 
 	conn.SetReadLimit(256)
 	expiresAt := time.Unix(initial.CreatedAt, 0).Add(pairNotifyMaxDuration)
@@ -169,16 +169,13 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 }
 
 func authorizePairNotify(r *http.Request, pending *store.PendingPair, pairToken, role string) bool {
+	if !validPairNotifyHeaders(r) {
+		return false
+	}
 	deviceIDs := r.Header.Values(pairNotifyDeviceIDHeader)
 	signatures := r.Header.Values(pairNotifySignatureHeader)
-	if len(deviceIDs) != 1 || len(signatures) != 1 {
-		return false
-	}
 	deviceID := deviceIDs[0]
 	signatureBase64 := signatures[0]
-	if deviceID == "" || len(deviceID) > pairNotifyDeviceIDMaxBytes || len(signatureBase64) != pairNotifySignatureBase64Bytes {
-		return false
-	}
 
 	var expectedDeviceID string
 	var publicKey []byte
@@ -201,6 +198,22 @@ func authorizePairNotify(r *http.Request, pending *store.PendingPair, pairToken,
 	}
 	canonical := []byte(pairNotifyProofDomain + pairToken + "\n" + role + "\n" + deviceID)
 	return ed25519.Verify(ed25519.PublicKey(publicKey), canonical, signature)
+}
+
+func validPairNotifyHeaders(r *http.Request) bool {
+	deviceIDs := r.Header.Values(pairNotifyDeviceIDHeader)
+	signatures := r.Header.Values(pairNotifySignatureHeader)
+	return len(deviceIDs) == 1 && len(signatures) == 1 &&
+		validPairDeviceID(deviceIDs[0]) && validEncodedPairSignature(signatures[0])
+}
+
+func pairNotifyIdentifiersWithinBounds(r *http.Request) bool {
+	for _, deviceID := range r.Header.Values(pairNotifyDeviceIDHeader) {
+		if !validPairDeviceID(deviceID) {
+			return false
+		}
+	}
+	return true
 }
 
 type pairTransitionFrame struct {

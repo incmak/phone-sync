@@ -4,7 +4,9 @@ import (
 	"container/list"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,7 +21,14 @@ import (
 	"unicode/utf8"
 )
 
-const pairingBodyLimit = 64 << 10
+const (
+	pairingBodyLimit             = 4 << 10
+	pairingTokenMaxBytes         = 128
+	pairingDeviceIDMaxBytes      = 128
+	pairingDisplayNameMaxBytes   = 64
+	pairingEncodedPublicKeyBytes = 44 // standard Base64 encoding of a 32-byte public key
+	pairingEncodedSignatureBytes = 88 // standard Base64 encoding of a 64-byte Ed25519 signature
+)
 
 type PairingRateLimitConfig struct {
 	IPBurst        int
@@ -76,14 +85,19 @@ func (l *pairingRateLimiter) allowIP(remoteAddr string, now time.Time) (bool, ti
 }
 
 func (l *pairingRateLimiter) allowToken(token string, now time.Time) (bool, time.Duration) {
-	return l.allowAdmissions([]limiterAdmission{{key: "token:" + token, burst: l.config.TokenBurst}}, now)
+	return l.allowAdmissions([]limiterAdmission{{key: pairingLimiterKey("token", token), burst: l.config.TokenBurst}}, now)
 }
 
 func (l *pairingRateLimiter) allowIPAndDevice(remoteAddr, deviceID string, now time.Time) (bool, time.Duration) {
 	return l.allowAdmissions([]limiterAdmission{
 		{key: "ip:" + normalizedRemoteIP(remoteAddr), burst: l.config.IPBurst},
-		{key: "device:" + deviceID, burst: l.config.TokenBurst},
+		{key: pairingLimiterKey("device", deviceID), burst: l.config.TokenBurst},
 	}, now)
+}
+
+func pairingLimiterKey(namespace, value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return namespace + ":" + hex.EncodeToString(digest[:])
 }
 
 type limiterAdmission struct {
@@ -267,7 +281,23 @@ func writePairJSONError(w http.ResponseWriter, err error) {
 }
 
 func validDisplayName(name string) bool {
-	return utf8.ValidString(name) && len([]byte(name)) <= 64
+	return utf8.ValidString(name) && len([]byte(name)) <= pairingDisplayNameMaxBytes
+}
+
+func validPairToken(token string) bool {
+	return utf8.ValidString(token) && token != "" && len([]byte(token)) <= pairingTokenMaxBytes
+}
+
+func validPairDeviceID(deviceID string) bool {
+	return utf8.ValidString(deviceID) && deviceID != "" && len([]byte(deviceID)) <= pairingDeviceIDMaxBytes
+}
+
+func validEncodedPairPublicKey(key string) bool {
+	return utf8.ValidString(key) && len(key) == pairingEncodedPublicKeyBytes
+}
+
+func validEncodedPairSignature(signature string) bool {
+	return utf8.ValidString(signature) && len(signature) == pairingEncodedSignatureBytes
 }
 
 func decodePairPublicKeys(encodedEncryptionKey, encodedSigningKey string) ([]byte, []byte, error) {

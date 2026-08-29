@@ -4,12 +4,12 @@
   "type": "object",
   "required": ["pair_token", "device_id", "enc_pubkey", "sign_pubkey", "confirmation_sig", "responder_confirmation_sig"],
   "properties": {
-    "pair_token": { "type": "string" },
-    "device_id": { "type": "string" },
-    "enc_pubkey": { "type": "string", "contentEncoding": "base64" },
-    "sign_pubkey": { "type": "string", "contentEncoding": "base64" },
-    "confirmation_sig": { "type": "string", "contentEncoding": "base64", "minLength": 1 },
-    "responder_confirmation_sig": { "type": "string", "contentEncoding": "base64", "minLength": 1 },
+    "pair_token": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "device_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "enc_pubkey": { "type": "string", "contentEncoding": "base64", "minLength": 44, "maxLength": 44 },
+    "sign_pubkey": { "type": "string", "contentEncoding": "base64", "minLength": 44, "maxLength": 44 },
+    "confirmation_sig": { "type": "string", "contentEncoding": "base64", "minLength": 88, "maxLength": 88 },
+    "responder_confirmation_sig": { "type": "string", "contentEncoding": "base64", "minLength": 88, "maxLength": 88 },
     "display_name": { "type": "string", "maxLength": 64 }
   },
   "additionalProperties": false

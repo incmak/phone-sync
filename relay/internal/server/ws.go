@@ -67,6 +67,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("websocket_upgrade_failed")
 		return
 	}
+	s.metrics.connectionOpened()
+	defer s.metrics.connectionClosed()
 	defer conn.Close()
 
 	conn.SetReadLimit(maxRelayControlFrameSize)
@@ -111,7 +113,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.clientHub.Unregister(client)
 		return
 	}
-	s.metrics.connectionOpened()
 	connectionLifetime := make(chan struct{})
 	stopPinger := make(chan struct{})
 	var connectionWorkers sync.WaitGroup
@@ -121,7 +122,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		client.stop()
 		_ = conn.Close()
 		connectionWorkers.Wait()
-		s.metrics.connectionClosed()
 		s.clientHub.Unregister(client)
 	}()
 	connectionWorkers.Add(1)
@@ -542,11 +542,6 @@ func (s *Server) handleRelayPutForPair(
 		reject(envelope.MsgID, "peer_legacy")
 		return
 	}
-	if err := s.capacityCheck(); err != nil {
-		reject(envelope.MsgID, "server_capacity")
-		return
-	}
-
 	digest := sha256.Sum256(put.Envelope)
 	handoff := s.handoffs.acquire(peerID)
 	defer s.handoffs.release(peerID, handoff)
@@ -560,13 +555,13 @@ func (s *Server) handleRelayPutForPair(
 		reject(envelope.MsgID, "server_capacity")
 		return
 	}
-	result, err := s.mailbox.PutForPair(pairID, store.MailboxRecord{
+	result, err := s.mailbox.PutForPairWithAdmission(pairID, store.MailboxRecord{
 		RecipientDevice: peerID,
 		SenderDevice:    deviceID,
 		MsgID:           envelope.MsgID,
 		EnvelopeSHA256:  hex.EncodeToString(digest[:]),
 		Envelope:        append([]byte(nil), put.Envelope...),
-	}, time.Now())
+	}, time.Now(), store.MailboxPutAdmission(s.capacityCheck))
 	releaseMutation()
 	var notification *durableNotification
 	if err == nil && !result.Terminal {
@@ -686,6 +681,8 @@ func relayPutErrorCode(err error) string {
 		return "mailbox_full"
 	case errors.Is(err, store.ErrMessageIDConflict):
 		return "id_conflict"
+	case errors.Is(err, ErrServerCapacity):
+		return "server_capacity"
 	default:
 		return "invalid_frame"
 	}

@@ -13,7 +13,7 @@ var ErrServerCapacity = errors.New("server capacity unavailable")
 
 const capacityRetryAfterSeconds = "30"
 
-type CapacityCheck func() error
+type CapacityCheck func(requiredWriteBytes uint64) error
 
 type statfsFunc func(string, *unix.Statfs_t) error
 
@@ -23,7 +23,7 @@ func NewDiskCapacityCheck(databasePath string, minimumFreeBytes uint64) Capacity
 
 func newDiskCapacityCheck(databasePath string, minimumFreeBytes uint64, statfs statfsFunc) CapacityCheck {
 	directory := filepath.Dir(databasePath)
-	return func() error {
+	return func(requiredWriteBytes uint64) error {
 		if minimumFreeBytes == 0 {
 			return nil
 		}
@@ -35,8 +35,12 @@ func newDiskCapacityCheck(databasePath string, minimumFreeBytes uint64, statfs s
 			return fmt.Errorf("%w: invalid filesystem block size", ErrServerCapacity)
 		}
 		blockSize := uint64(status.Bsize)
-		requiredBlocks := minimumFreeBytes / blockSize
-		if minimumFreeBytes%blockSize != 0 {
+		if requiredWriteBytes > ^uint64(0)-minimumFreeBytes {
+			return ErrServerCapacity
+		}
+		totalRequiredBytes := minimumFreeBytes + requiredWriteBytes
+		requiredBlocks := totalRequiredBytes / blockSize
+		if totalRequiredBytes%blockSize != 0 {
 			requiredBlocks++
 		}
 		if uint64(status.Bavail) < requiredBlocks {
@@ -46,10 +50,10 @@ func newDiskCapacityCheck(databasePath string, minimumFreeBytes uint64, statfs s
 	}
 }
 
-func noCapacityLimit() error { return nil }
+func noCapacityLimit(uint64) error { return nil }
 
 func (s *Server) requireStorageCapacity(w http.ResponseWriter) bool {
-	if err := s.capacityCheck(); err == nil {
+	if err := s.capacityCheck(0); err == nil {
 		return true
 	}
 	w.Header().Set("Retry-After", capacityRetryAfterSeconds)

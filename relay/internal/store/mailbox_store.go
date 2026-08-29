@@ -34,6 +34,9 @@ const (
 	bucketMailboxItemExpiry        = "mailbox_item_expiry"
 	bucketMailboxStatusExpiry      = "mailbox_status_expiry"
 	statusRetention                = 24 * time.Hour
+	// Reserve the explicitly configured bbolt file-growth step in addition to
+	// the logical mailbox write so a commit cannot consume the free-space floor.
+	mailboxBoltGrowthAllowance uint64 = boltAllocSize
 )
 
 var statusIndexesVersionKey = []byte("status_indexes_v2")
@@ -67,6 +70,13 @@ type PutResult struct {
 	Duplicate          bool
 	Terminal           bool
 }
+
+// MailboxPutAdmission runs inside the same Bolt write transaction that will
+// persist a new mailbox record. requiredBytes includes the JSON-encoded record,
+// every mailbox/index mutation (including legacy order migration), and the
+// pinned bbolt file-growth allowance. Returning an error aborts the transaction
+// without mutation.
+type MailboxPutAdmission func(requiredBytes uint64) error
 
 type DeliveryStatus struct {
 	SenderDevice     string `json:"sender_device"`
@@ -115,14 +125,18 @@ func OpenMailboxStore(b *Bolt, limits MailboxLimits) (*MailboxStore, error) {
 }
 
 func (s *MailboxStore) Put(rec MailboxRecord, now time.Time) (PutResult, error) {
-	return s.putForPair("", rec, now)
+	return s.putForPair("", rec, now, nil)
 }
 
 func (s *MailboxStore) PutForPair(pairID string, rec MailboxRecord, now time.Time) (PutResult, error) {
-	return s.putForPair(pairID, rec, now)
+	return s.putForPair(pairID, rec, now, nil)
 }
 
-func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now time.Time) (PutResult, error) {
+func (s *MailboxStore) PutForPairWithAdmission(pairID string, rec MailboxRecord, now time.Time, admit MailboxPutAdmission) (PutResult, error) {
+	return s.putForPair(pairID, rec, now, admit)
+}
+
+func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now time.Time, admit MailboxPutAdmission) (PutResult, error) {
 	if err := validateMailboxRecord(rec); err != nil {
 		return PutResult{}, err
 	}
@@ -211,7 +225,7 @@ func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now 
 		if s.limits.MaxItems <= 0 || count >= uint64(s.limits.MaxItems) || rec.ByteSize > s.limits.MaxBytes || bytes > s.limits.MaxBytes-rec.ByteSize {
 			return ErrMailboxFull
 		}
-		sequence, err := allocateAcceptanceSequence(tx, rec.RecipientDevice, items, order)
+		sequence, sequenceMutationBytes, err := allocateAcceptanceSequence(tx, rec.RecipientDevice, items, order)
 		if err != nil {
 			return err
 		}
@@ -221,6 +235,26 @@ func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now 
 		if err != nil {
 			return fmt.Errorf("marshal mailbox record: %w", err)
 		}
+		itemExpiryKey := maintenanceExpiryKey(rec.ExpiresAt, key)
+		mailboxOrderKey := orderKey(rec.RecipientDevice, rec.AcceptanceSequence, rec.MsgID)
+		if admit != nil {
+			logicalBytes := sequenceMutationBytes
+			for _, size := range []uint64{
+				uint64(len(key)), uint64(len(encoded)),
+				uint64(len(itemExpiryKey)), uint64(len(key)),
+				uint64(len(mailboxOrderKey)), uint64(len(rec.RecipientDevice)), 16,
+			} {
+				if err := addMailboxReservation(&logicalBytes, size); err != nil {
+					return err
+				}
+			}
+			if err := addMailboxReservation(&logicalBytes, mailboxBoltGrowthAllowance); err != nil {
+				return errors.New("mailbox capacity reservation overflow")
+			}
+			if err := admit(logicalBytes); err != nil {
+				return err
+			}
+		}
 		if err := items.Put(key, encoded); err != nil {
 			return err
 		}
@@ -228,10 +262,10 @@ func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now 
 		if itemExpiry == nil {
 			return errors.New("missing mailbox expiry index")
 		}
-		if err := itemExpiry.Put(maintenanceExpiryKey(rec.ExpiresAt, key), key); err != nil {
+		if err := itemExpiry.Put(itemExpiryKey, key); err != nil {
 			return err
 		}
-		if err := order.Put(orderKey(rec.RecipientDevice, rec.AcceptanceSequence, rec.MsgID), nil); err != nil {
+		if err := order.Put(mailboxOrderKey, nil); err != nil {
 			return err
 		}
 		return stats.Put([]byte(rec.RecipientDevice), encodeMailboxStats(count+1, bytes+rec.ByteSize))
@@ -1323,17 +1357,18 @@ func recipientPrefix(recipient string) []byte {
 	return []byte(recipient + "\x00")
 }
 
-func allocateAcceptanceSequence(tx *bbolt.Tx, recipient string, items, order *bbolt.Bucket) (uint64, error) {
+func allocateAcceptanceSequence(tx *bbolt.Tx, recipient string, items, order *bbolt.Bucket) (uint64, uint64, error) {
 	sequences, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxSequence))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	rawCounter := sequences.Get([]byte(recipient))
 	var current uint64
+	var mutationBytes uint64
 	if len(rawCounter) == 8 {
 		current = binary.BigEndian.Uint64(rawCounter)
 	} else if len(rawCounter) != 0 {
-		return 0, errors.New("invalid mailbox acceptance sequence")
+		return 0, 0, errors.New("invalid mailbox acceptance sequence")
 	} else {
 		type orderEntry struct {
 			key   []byte
@@ -1345,48 +1380,72 @@ func allocateAcceptanceSequence(tx *bbolt.Tx, recipient string, items, order *bb
 		for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), string(prefix)); key, _ = cursor.Next() {
 			_, msgID, ok := parseOrderKey(key)
 			if !ok {
-				return 0, errors.New("invalid mailbox order key")
+				return 0, 0, errors.New("invalid mailbox order key")
 			}
 			entries = append(entries, orderEntry{key: append([]byte(nil), key...), msgID: msgID})
 		}
 		for _, entry := range entries {
+			if err := addMailboxReservation(&mutationBytes, uint64(len(entry.key))); err != nil {
+				return 0, 0, err
+			}
 			if err := order.Delete(entry.key); err != nil {
-				return 0, err
+				return 0, 0, err
 			}
 		}
 		for index, entry := range entries {
 			raw := items.Get(itemKey(recipient, entry.msgID))
 			if raw == nil {
-				return 0, errors.New("mailbox item missing for order migration")
+				return 0, 0, errors.New("mailbox item missing for order migration")
 			}
 			var rec MailboxRecord
 			if err := json.Unmarshal(raw, &rec); err != nil {
-				return 0, fmt.Errorf("unmarshal mailbox item: %w", err)
+				return 0, 0, fmt.Errorf("unmarshal mailbox item: %w", err)
 			}
 			rec.AcceptanceSequence = uint64(index + 1)
 			encoded, err := json.Marshal(rec)
 			if err != nil {
-				return 0, fmt.Errorf("marshal mailbox item: %w", err)
+				return 0, 0, fmt.Errorf("marshal mailbox item: %w", err)
 			}
-			if err := items.Put(itemKey(recipient, rec.MsgID), encoded); err != nil {
-				return 0, err
+			migratedItemKey := itemKey(recipient, rec.MsgID)
+			migratedOrderKey := orderKey(recipient, rec.AcceptanceSequence, rec.MsgID)
+			for _, size := range []uint64{uint64(len(migratedItemKey)), uint64(len(encoded)), uint64(len(migratedOrderKey))} {
+				if err := addMailboxReservation(&mutationBytes, size); err != nil {
+					return 0, 0, err
+				}
 			}
-			if err := order.Put(orderKey(recipient, rec.AcceptanceSequence, rec.MsgID), nil); err != nil {
-				return 0, err
+			if err := items.Put(migratedItemKey, encoded); err != nil {
+				return 0, 0, err
+			}
+			if err := order.Put(migratedOrderKey, nil); err != nil {
+				return 0, 0, err
 			}
 		}
 		current = uint64(len(entries))
 	}
 	if current == ^uint64(0) {
-		return 0, errors.New("mailbox acceptance sequence exhausted")
+		return 0, 0, errors.New("mailbox acceptance sequence exhausted")
 	}
 	next := current + 1
 	var encoded [8]byte
 	binary.BigEndian.PutUint64(encoded[:], next)
-	if err := sequences.Put([]byte(recipient), encoded[:]); err != nil {
-		return 0, err
+	if err := addMailboxReservation(&mutationBytes, uint64(len(recipient))); err != nil {
+		return 0, 0, err
 	}
-	return next, nil
+	if err := addMailboxReservation(&mutationBytes, uint64(len(encoded))); err != nil {
+		return 0, 0, err
+	}
+	if err := sequences.Put([]byte(recipient), encoded[:]); err != nil {
+		return 0, 0, err
+	}
+	return next, mutationBytes, nil
+}
+
+func addMailboxReservation(total *uint64, size uint64) error {
+	if total == nil || size > ^uint64(0)-*total {
+		return errors.New("mailbox capacity reservation overflow")
+	}
+	*total += size
+	return nil
 }
 
 func mailboxOrderValue(rec MailboxRecord) uint64 {

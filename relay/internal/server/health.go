@@ -25,7 +25,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) isReady() bool {
-	return !s.shuttingDown.Load() && s.bolt.View(func(*bbolt.Tx) error { return nil }) == nil && s.capacityCheck() == nil
+	return !s.shuttingDown.Load() && s.bolt.View(func(*bbolt.Tx) error { return nil }) == nil && s.capacityCheck(0) == nil
 }
 
 func (s *Server) writeHealth(w http.ResponseWriter, statusCode int, status string) {

@@ -4,9 +4,10 @@
   "type": "object",
   "required": ["pair_token", "device_id", "enc_pubkey", "sign_pubkey"],
   "properties": {
-    "pair_token": { "type": "string", "minLength": 16 },
-    "device_id": { "type": "string", "minLength": 1 },
-    "enc_pubkey": { "type": "string", "contentEncoding": "base64" },
-    "sign_pubkey": { "type": "string", "contentEncoding": "base64" }
+    "pair_token": { "type": "string", "minLength": 16, "maxLength": 128 },
+    "device_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "enc_pubkey": { "type": "string", "contentEncoding": "base64", "minLength": 44, "maxLength": 44 },
+    "sign_pubkey": { "type": "string", "contentEncoding": "base64", "minLength": 44, "maxLength": 44 },
+    "display_name": { "type": "string", "maxLength": 64 }
   }
 }

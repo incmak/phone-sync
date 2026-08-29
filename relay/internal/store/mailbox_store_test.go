@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,6 +185,169 @@ func TestMailboxRejectsCapacityWithoutEviction(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].MsgID != "11111111-1111-4111-8111-111111111111" {
 		t.Fatalf("mailbox was evicted: %#v", got)
+	}
+}
+
+func TestConcurrentMailboxPutsSerializeCapacityAdmissionThroughCommit(t *testing.T) {
+	b := openTestBolt(t)
+	pairs := NewPairStore(b)
+	for _, pair := range []ConfirmedPair{
+		{PairID: "capacity-pair-1", DeviceA: "capacity-sender-1", DeviceB: "capacity-recipient-1"},
+		{PairID: "capacity-pair-2", DeviceA: "capacity-sender-2", DeviceB: "capacity-recipient-2"},
+	} {
+		if err := pairs.Confirm(pair); err != nil {
+			t.Fatalf("confirm %s: %v", pair.PairID, err)
+		}
+	}
+
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	records := []struct {
+		pairID string
+		record MailboxRecord
+	}{
+		{pairID: "capacity-pair-1", record: MailboxRecord{
+			RecipientDevice: "capacity-recipient-1", SenderDevice: "capacity-sender-1",
+			MsgID: "11111111-1111-4111-8111-111111111111", EnvelopeSHA256: strings.Repeat("a", 64),
+			Envelope: bytes.Repeat([]byte("a"), 4096),
+		}},
+		{pairID: "capacity-pair-2", record: MailboxRecord{
+			RecipientDevice: "capacity-recipient-2", SenderDevice: "capacity-sender-2",
+			MsgID: "22222222-2222-4222-8222-222222222222", EnvelopeSHA256: strings.Repeat("b", 64),
+			Envelope: bytes.Repeat([]byte("b"), 4096),
+		}},
+	}
+
+	capacityErr := errors.New("capacity unavailable")
+	firstAdmission := make(chan struct{})
+	releaseFirstAdmission := make(chan struct{})
+	secondAttempted := make(chan struct{})
+	secondAdmission := make(chan struct{})
+	var admissionCalls atomic.Int32
+	admit := func(requiredBytes uint64) error {
+		if requiredBytes == 0 {
+			return errors.New("capacity reservation is empty")
+		}
+		switch admissionCalls.Add(1) {
+		case 1:
+			close(firstAdmission)
+			<-releaseFirstAdmission
+			return nil
+		case 2:
+			close(secondAdmission)
+			return capacityErr
+		default:
+			return errors.New("unexpected capacity admission")
+		}
+	}
+
+	results := make(chan error, len(records))
+	go func() {
+		_, err := mailbox.PutForPairWithAdmission(records[0].pairID, records[0].record, time.UnixMilli(1000), admit)
+		results <- err
+	}()
+	select {
+	case <-firstAdmission:
+	case <-time.After(time.Second):
+		t.Fatal("first capacity admission did not start")
+	}
+	go func() {
+		close(secondAttempted)
+		_, err := mailbox.PutForPairWithAdmission(records[1].pairID, records[1].record, time.UnixMilli(1000), admit)
+		results <- err
+	}()
+	<-secondAttempted
+	select {
+	case <-secondAdmission:
+		t.Fatal("second capacity admission ran before the first Bolt commit was released")
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(releaseFirstAdmission)
+
+	accepted := 0
+	rejected := 0
+	for range records {
+		switch err := <-results; {
+		case err == nil:
+			accepted++
+		case errors.Is(err, capacityErr):
+			rejected++
+		default:
+			t.Fatalf("put error = %v", err)
+		}
+	}
+	if accepted != 1 || rejected != 1 {
+		t.Fatalf("accepted/rejected = %d/%d, want 1/1", accepted, rejected)
+	}
+	persisted := 0
+	for _, candidate := range records {
+		pending, err := mailbox.PendingForPair(candidate.pairID, candidate.record.RecipientDevice, 10)
+		if err != nil {
+			t.Fatalf("pending %s: %v", candidate.record.RecipientDevice, err)
+		}
+		if len(pending) > 1 {
+			t.Fatalf("recipient %s persisted %d records", candidate.record.RecipientDevice, len(pending))
+		}
+		persisted += len(pending)
+	}
+	if persisted != 1 {
+		t.Fatalf("persisted records = %d, want exactly 1", persisted)
+	}
+}
+
+func TestMailboxCapacityReservationIncludesLegacySequenceMigration(t *testing.T) {
+	b := openTestBolt(t)
+	mailbox := NewMailboxStore(b, MailboxLimits{MaxItems: 4, MaxBytes: 1 << 20, Retention: time.Hour})
+	legacyRecords := []MailboxRecord{
+		testMailboxRecord("33333333-3333-4333-8333-333333333333", "a"),
+		testMailboxRecord("44444444-4444-4444-8444-444444444444", "b"),
+	}
+	var legacyEnvelopeBytes uint64
+	for index := range legacyRecords {
+		legacyRecords[index].Envelope = bytes.Repeat([]byte{byte('a' + index)}, 4096)
+		legacyRecords[index].AcceptedAt = int64(index + 1)
+		legacyRecords[index].ExpiresAt = int64(index+1) + int64(time.Hour/time.Millisecond)
+		legacyRecords[index].ByteSize = uint64(len(legacyRecords[index].Envelope))
+		legacyEnvelopeBytes += legacyRecords[index].ByteSize
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		items, order, stats, _, err := mailboxBuckets(tx)
+		if err != nil {
+			return err
+		}
+		for _, record := range legacyRecords {
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				return err
+			}
+			if err := items.Put(itemKey(record.RecipientDevice, record.MsgID), encoded); err != nil {
+				return err
+			}
+			if err := order.Put(orderKey(record.RecipientDevice, uint64(record.AcceptedAt), record.MsgID), nil); err != nil {
+				return err
+			}
+		}
+		return stats.Put([]byte(legacyRecords[0].RecipientDevice), encodeMailboxStats(uint64(len(legacyRecords)), legacyEnvelopeBytes))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotMailboxBuckets(t, b)
+
+	newRecord := testMailboxRecord("55555555-5555-4555-8555-555555555555", "c")
+	capacityErr := errors.New("capacity unavailable")
+	var requiredBytes uint64
+	_, err := mailbox.putForPair("", newRecord, time.UnixMilli(3000), func(required uint64) error {
+		requiredBytes = required
+		return capacityErr
+	})
+	if !errors.Is(err, capacityErr) {
+		t.Fatalf("put error = %v, want capacity unavailable", err)
+	}
+	minimumReservation := mailboxBoltGrowthAllowance + legacyEnvelopeBytes + uint64(len(newRecord.Envelope))
+	if requiredBytes < minimumReservation {
+		t.Fatalf("capacity reservation = %d, want at least %d including legacy rewrites", requiredBytes, minimumReservation)
+	}
+	if after := snapshotMailboxBuckets(t, b); !reflect.DeepEqual(after, before) {
+		t.Fatalf("capacity-rejected legacy migration mutated mailbox\nbefore=%#v\nafter=%#v", before, after)
 	}
 }
 

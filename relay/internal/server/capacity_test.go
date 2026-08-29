@@ -18,7 +18,7 @@ import (
 func TestServerCapacityControlsHealthAndPairMutation(t *testing.T) {
 	config := DefaultConfig()
 	config.BuildVersion = "test-build"
-	config.CapacityCheck = func() error { return ErrServerCapacity }
+	config.CapacityCheck = func(uint64) error { return ErrServerCapacity }
 	server := newTestServerWithConfig(t, config)
 
 	assertHealthStatus(t, server, "/health/live", http.StatusOK, `"status":"live"`)
@@ -70,7 +70,7 @@ func TestShutdownRejectsNewPairMutationWithoutPersistence(t *testing.T) {
 
 func TestServerCapacityRejectsRelayPutWithoutPersistence(t *testing.T) {
 	config := DefaultConfig()
-	config.CapacityCheck = func() error { return ErrServerCapacity }
+	config.CapacityCheck = func(uint64) error { return ErrServerCapacity }
 	server := newTestServerWithConfig(t, config)
 	pair := registerMailboxTestPair(t, server)
 	msgID := "99999999-9999-4999-8999-999999999999"
@@ -86,6 +86,45 @@ func TestServerCapacityRejectsRelayPutWithoutPersistence(t *testing.T) {
 	})
 	if rejection != "server_capacity" {
 		t.Fatalf("rejection = %q, want server_capacity", rejection)
+	}
+	pending, err := server.mailbox.PendingForPair(pair.pairID, pair.deviceB, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("capacity-rejected put persisted %d mailbox records", len(pending))
+	}
+}
+
+func TestRelayPutCapacityAdmissionReservesEncodedMailboxBytes(t *testing.T) {
+	config := DefaultConfig()
+	var reservedBytes uint64
+	config.CapacityCheck = func(requiredBytes uint64) error {
+		if requiredBytes == 0 {
+			return nil
+		}
+		reservedBytes = requiredBytes
+		return ErrServerCapacity
+	}
+	server := newTestServerWithConfig(t, config)
+	pair := registerMailboxTestPair(t, server)
+	msgID := "67676767-6767-4767-8767-676767676767"
+	envelope := validMailboxEnvelope(pair.deviceA, msgID)
+	var rejection string
+	server.handleRelayPutForPair(pair.deviceA, pair.pairID, RelayPut{
+		V: 2, Type: "relay.put", Envelope: envelope,
+	}, func(any) error {
+		t.Fatal("capacity-rejected put was accepted")
+		return nil
+	}, func(_ string, reason string) error {
+		rejection = reason
+		return nil
+	})
+	if rejection != "server_capacity" {
+		t.Fatalf("rejection = %q, want server_capacity", rejection)
+	}
+	if reservedBytes <= uint64(len(envelope)) {
+		t.Fatalf("capacity reservation = %d, want more than raw envelope bytes %d", reservedBytes, len(envelope))
 	}
 	pending, err := server.mailbox.PendingForPair(pair.pairID, pair.deviceB, 10)
 	if err != nil {
@@ -446,7 +485,7 @@ func TestDiskCapacityCheckUsesAvailableBlocksAndFailsClosed(t *testing.T) {
 		stat.Bavail = 9
 		return nil
 	})
-	if err := check(); !errors.Is(err, ErrServerCapacity) {
+	if err := check(0); !errors.Is(err, ErrServerCapacity) {
 		t.Fatalf("low disk error = %v, want ErrServerCapacity", err)
 	}
 
@@ -455,14 +494,17 @@ func TestDiskCapacityCheckUsesAvailableBlocksAndFailsClosed(t *testing.T) {
 		stat.Bavail = 10
 		return nil
 	})
-	if err := check(); err != nil {
+	if err := check(0); err != nil {
 		t.Fatalf("sufficient disk rejected: %v", err)
+	}
+	if err := check(1); !errors.Is(err, ErrServerCapacity) {
+		t.Fatalf("write reservation crossed free-space floor: %v, want ErrServerCapacity", err)
 	}
 
 	check = newDiskCapacityCheck("/srv/data/relay.db", 1, func(string, *unix.Statfs_t) error {
 		return errors.New("statfs unavailable")
 	})
-	if err := check(); !errors.Is(err, ErrServerCapacity) {
+	if err := check(0); !errors.Is(err, ErrServerCapacity) {
 		t.Fatalf("statfs failure = %v, want ErrServerCapacity", err)
 	}
 }

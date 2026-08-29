@@ -36,11 +36,11 @@ func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
-	if !s.allowPairToken(w, req.PairToken) {
+	if !validPairToken(req.PairToken) || !validPairDeviceID(req.DeviceID) || !validEncodedPairPublicKey(req.EncPubkey) || !validEncodedPairPublicKey(req.SignPubkey) || !validDisplayName(req.DisplayName) {
+		http.Error(w, "invalid pairing fields", http.StatusBadRequest)
 		return
 	}
-	if !validDisplayName(req.DisplayName) {
-		http.Error(w, "display_name too long", http.StatusBadRequest)
+	if !s.allowPairToken(w, req.PairToken) {
 		return
 	}
 	pending, err := s.pairStore.GetPending(req.PairToken)
@@ -116,6 +116,10 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PairToken == "" || req.ConfirmationSig == "" {
 		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+	if !validPairToken(req.PairToken) || !validEncodedPairSignature(req.ConfirmationSig) {
+		http.Error(w, "invalid pairing fields", http.StatusBadRequest)
 		return
 	}
 	if !s.allowPairToken(w, req.PairToken) {

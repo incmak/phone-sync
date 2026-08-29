@@ -665,9 +665,10 @@ func TestPairNotifyRequiresRoleSpecificSigningProofBeforeUpgrade(t *testing.T) {
 		token   string
 		role    string
 		headers http.Header
+		status  int
 	}{
 		{name: "missing device", token: pairToken, role: "A", headers: withoutPairNotifyHeader(validA, "X-Twinotify-Device-ID")},
-		{name: "oversized device", token: pairToken, role: "A", headers: signedPairNotifyHeaders(pairToken, "A", strings.Repeat("d", 257), aSignSk)},
+		{name: "oversized device", token: pairToken, role: "A", headers: signedPairNotifyHeaders(pairToken, "A", strings.Repeat("d", 257), aSignSk), status: http.StatusBadRequest},
 		{name: "duplicate device", token: pairToken, role: "A", headers: withDuplicatePairNotifyHeader(validA, "X-Twinotify-Device-ID", deviceA)},
 		{name: "missing signature", token: pairToken, role: "A", headers: withoutPairNotifyHeader(validA, "X-Twinotify-Pair-Signature")},
 		{name: "oversized signature", token: pairToken, role: "A", headers: withPairNotifyHeader(validA, "X-Twinotify-Pair-Signature", strings.Repeat("A", 89))},
@@ -681,9 +682,64 @@ func TestPairNotifyRequiresRoleSpecificSigningProofBeforeUpgrade(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assertPairNotifyRejected(t, ts.URL, tt.token, tt.role, tt.headers, http.StatusUnauthorized)
+			if tt.status == http.StatusBadRequest {
+				assertPairNotifyInvalidRequest(t, ts.URL, tt.token, tt.role, tt.headers)
+				return
+			}
+			wantStatus := tt.status
+			if wantStatus == 0 {
+				wantStatus = http.StatusUnauthorized
+			}
+			assertPairNotifyRejected(t, ts.URL, tt.token, tt.role, tt.headers, wantStatus)
 		})
 	}
+}
+
+func TestPairNotifyRejectsOversizedIdentifiersBeforeTokenLimiterAdmission(t *testing.T) {
+	config := DefaultConfig()
+	config.PairingRateLimits.TokenBurst = 1
+	srv := newTestServerWithConfig(t, config)
+	encPublicKey, signPublicKey, signPrivateKey := ed25519Keypair(t)
+	const pairToken = "tok-bounded-pair-notify"
+	const deviceID = "devA-bounded-pair-notify"
+	if err := srv.pairStore.PutPending(store.PendingPair{
+		PairToken:   pairToken,
+		DeviceAID:   deviceID,
+		AEncPubkey:  encPublicKey,
+		ASignPubkey: signPublicKey,
+		CreatedAt:   srv.now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+
+	oversizedToken := strings.Repeat("t", 129)
+	assertPairNotifyInvalidRequest(
+		t,
+		httpServer.URL,
+		oversizedToken,
+		"A",
+		signedPairNotifyHeaders(oversizedToken, "A", deviceID, signPrivateKey),
+	)
+	if got := srv.pairLimiter.entryCount(); got != 1 {
+		t.Fatalf("limiter entries after oversized token = %d, want only the IP entry", got)
+	}
+
+	oversizedDeviceID := strings.Repeat("d", 129)
+	assertPairNotifyInvalidRequest(
+		t,
+		httpServer.URL,
+		pairToken,
+		"A",
+		signedPairNotifyHeaders(pairToken, "A", oversizedDeviceID, signPrivateKey),
+	)
+	if got := srv.pairLimiter.entryCount(); got != 1 {
+		t.Fatalf("limiter entries after oversized device ID = %d, want only the IP entry", got)
+	}
+
+	connection := dialPairNotify(t, httpServer.URL, pairToken, "A", deviceID, signPrivateKey)
+	connection.Close()
 }
 
 func TestPairNotifyRejectsRoleBBeforeHello(t *testing.T) {
@@ -800,6 +856,28 @@ func assertPairNotifyRejected(t *testing.T, baseURL, token, role string, headers
 	}
 	if string(body) != "unauthorized\n" {
 		t.Fatalf("pair notify rejection body = %q, want bounded generic response", body)
+	}
+}
+
+func assertPairNotifyInvalidRequest(t *testing.T, baseURL, token, role string, headers http.Header) {
+	t.Helper()
+	connection, response, err := websocket.DefaultDialer.Dial(pairNotifyURL(baseURL, token, role), headers)
+	if connection != nil {
+		connection.Close()
+	}
+	if err == nil {
+		t.Fatal("pair notify unexpectedly upgraded")
+	}
+	if response == nil {
+		t.Fatalf("pair notify rejection had no HTTP response: %v", err)
+	}
+	defer response.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 65))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if response.StatusCode != http.StatusBadRequest || string(body) != "invalid request\n" {
+		t.Fatalf("pair notify rejection = status %d body %q, want bounded 400", response.StatusCode, body)
 	}
 }
 

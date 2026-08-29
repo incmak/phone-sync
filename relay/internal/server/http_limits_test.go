@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,14 +18,14 @@ import (
 	"github.com/twinotify/relay/internal/store"
 )
 
-func TestPairBodyLimitRejects65KiB(t *testing.T) {
+func TestPairBodyLimitRejectsFourKiBPlusOne(t *testing.T) {
 	srv := newConfiguredTestServer(t, DefaultConfig())
 	body := validPairInitBody("body-limit")
-	body["display_name"] = strings.Repeat("a", 65<<10)
+	body["display_name"] = strings.Repeat("a", 4<<10)
 
 	response := pairRequest(t, srv, http.MethodPost, "/pair/init", body, "192.0.2.1:1000")
 	if response.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("65 KiB pairing body status = %d, want 413; body=%q", response.Code, response.Body.String())
+		t.Fatalf("4 KiB plus one pairing body status = %d, want 413; body=%q", response.Code, response.Body.String())
 	}
 }
 
@@ -97,6 +98,110 @@ func TestPairDisplayNameLimitCountsUTF8Bytes(t *testing.T) {
 				t.Fatalf("status = %d, want %d; body=%q", response.Code, test.want, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestPairingPOSTRejectsOversizedProtocolFieldsBeforeTokenAdmission(t *testing.T) {
+	const maxPairTokenBytes = 128
+	const maxDeviceIDBytes = 128
+	const maxEncodedPublicKeyBytes = 44
+	const maxEncodedSignatureBytes = 88
+
+	validCompleteBody := func(token string) map[string]any {
+		body := validPairInitBody(token)
+		body["confirmation_sig"] = encodedKey(64)
+		body["responder_confirmation_sig"] = encodedKey(64)
+		return body
+	}
+	tests := []struct {
+		name string
+		path string
+		body map[string]any
+	}{
+		{name: "init pair token", path: "/pair/init", body: validPairInitBody(strings.Repeat("t", maxPairTokenBytes+1))},
+		{name: "hello pair token", path: "/pair/hello", body: validPairInitBody(strings.Repeat("t", maxPairTokenBytes+1))},
+		{name: "send signature pair token", path: "/pair/send_sig", body: map[string]any{"pair_token": strings.Repeat("t", maxPairTokenBytes+1), "confirmation_sig": encodedKey(64)}},
+		{name: "complete pair token", path: "/pair/complete", body: validCompleteBody(strings.Repeat("t", maxPairTokenBytes+1))},
+		{name: "init device id", path: "/pair/init", body: func() map[string]any {
+			body := validPairInitBody("bounded-init-device")
+			body["device_id"] = strings.Repeat("d", maxDeviceIDBytes+1)
+			return body
+		}()},
+		{name: "hello device id", path: "/pair/hello", body: func() map[string]any {
+			body := validPairInitBody("bounded-hello-device")
+			body["device_id"] = strings.Repeat("d", maxDeviceIDBytes+1)
+			return body
+		}()},
+		{name: "complete device id", path: "/pair/complete", body: func() map[string]any {
+			body := validCompleteBody("bounded-complete-device")
+			body["device_id"] = strings.Repeat("d", maxDeviceIDBytes+1)
+			return body
+		}()},
+		{name: "init encryption key", path: "/pair/init", body: func() map[string]any {
+			body := validPairInitBody("bounded-init-key")
+			body["enc_pubkey"] = strings.Repeat("a", maxEncodedPublicKeyBytes+1)
+			return body
+		}()},
+		{name: "hello signing key", path: "/pair/hello", body: func() map[string]any {
+			body := validPairInitBody("bounded-hello-key")
+			body["sign_pubkey"] = strings.Repeat("a", maxEncodedPublicKeyBytes+1)
+			return body
+		}()},
+		{name: "complete confirmation signature", path: "/pair/complete", body: func() map[string]any {
+			body := validCompleteBody("bounded-complete-signature")
+			body["confirmation_sig"] = strings.Repeat("a", maxEncodedSignatureBytes+1)
+			return body
+		}()},
+		{name: "send signature confirmation signature", path: "/pair/send_sig", body: map[string]any{"pair_token": "bounded-send-signature", "confirmation_sig": strings.Repeat("a", maxEncodedSignatureBytes+1)}},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := newConfiguredTestServer(t, DefaultConfig())
+			response := pairRequest(t, srv, http.MethodPost, test.path, test.body, "192.0.2."+strconv.Itoa(index+1)+":1000")
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%q", response.Code, response.Body.String())
+			}
+			if got := srv.pairLimiter.entryCount(); got != 1 {
+				t.Fatalf("limiter entries = %d, want only the IP admission after invalid request", got)
+			}
+		})
+	}
+}
+
+func TestPairRateLimiterStoresFixedLengthDigestKeys(t *testing.T) {
+	limiter := newPairingRateLimiter(PairingRateLimitConfig{
+		IPBurst: 1, TokenBurst: 1, RefillInterval: time.Hour, IdleTTL: time.Hour,
+		MaxEntries: 3, CleanupBatch: 1,
+	})
+	token := strings.Repeat("sensitive-token-material", 100)
+	if allowed, _ := limiter.allowToken(token, time.Unix(1, 0)); !allowed {
+		t.Fatal("token was unexpectedly rejected")
+	}
+	deviceID := strings.Repeat("sensitive-device-material", 100)
+	if allowed, _ := limiter.allowIPAndDevice("192.0.2.1:1", deviceID, time.Unix(1, 0)); !allowed {
+		t.Fatal("device was unexpectedly rejected")
+	}
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	for _, expected := range []struct {
+		prefix string
+		value  string
+	}{
+		{prefix: "token:", value: token},
+		{prefix: "device:", value: deviceID},
+	} {
+		key := pairingLimiterKey(strings.TrimSuffix(expected.prefix, ":"), expected.value)
+		if _, found := limiter.entries[key]; !found {
+			t.Fatalf("missing %s limiter key", expected.prefix)
+		}
+		if strings.Contains(key, expected.value) {
+			t.Fatalf("%s limiter key retains raw value: %q", expected.prefix, key)
+		}
+		if got, want := len(key), len(expected.prefix)+64; got != want {
+			t.Fatalf("%s limiter key length = %d, want %d", expected.prefix, got, want)
+		}
 	}
 }
 

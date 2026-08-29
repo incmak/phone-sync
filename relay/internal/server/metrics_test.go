@@ -174,6 +174,9 @@ func TestBeginShutdownClosesWebSocketAdmittedBeforeRelayHubRegistration(t *testi
 	case <-time.After(time.Second):
 		t.Fatal("WebSocket did not reach the relay registration barrier")
 	}
+	if got := server.metrics.activeConnections(); got != 1 {
+		t.Fatalf("active WebSocket metric before relay registration = %d, want 1", got)
+	}
 
 	drainDone := server.BeginShutdown()
 	select {
@@ -193,5 +196,51 @@ func TestBeginShutdownClosesWebSocketAdmittedBeforeRelayHubRegistration(t *testi
 	case <-drainDone:
 	case <-time.After(time.Second):
 		t.Fatal("WebSocket drain did not complete after relay registration was released")
+	}
+	if got := server.metrics.activeConnections(); got != 0 {
+		t.Fatalf("active WebSocket metric after relay cleanup = %d, want 0", got)
+	}
+}
+
+func TestPairNotifyCountsUpgradedWebSocketUntilJoinedCleanup(t *testing.T) {
+	server := newTestServer(t)
+	readerStarted := make(chan struct{})
+	var startedOnce sync.Once
+	server.pairNotifyReaderStarted = func() {
+		startedOnce.Do(func() { close(readerStarted) })
+	}
+
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	encPublicKey, signPublicKey, signPrivateKey := ed25519Keypair(t)
+	const pairToken = "tok-pair-notify-metric"
+	const deviceID = "devA-pair-notify-metric"
+	initPair(t, httpServer.URL, pairToken, deviceID, encPublicKey, signPublicKey)
+	connection := dialPairNotify(t, httpServer.URL, pairToken, "A", deviceID, signPrivateKey)
+	defer connection.Close()
+
+	select {
+	case <-readerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("pair-notify reader did not start")
+	}
+	if got := server.metrics.activeConnections(); got != 1 {
+		t.Fatalf("active WebSocket metric for pair notify = %d, want 1", got)
+	}
+
+	drainDone := server.BeginShutdown()
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err := connection.ReadMessage()
+	var closeError *websocket.CloseError
+	if !errors.As(err, &closeError) || closeError.Code != websocket.CloseServiceRestart {
+		t.Fatalf("pair-notify shutdown close = %v, want WebSocket code %d", err, websocket.CloseServiceRestart)
+	}
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("pair-notify drain did not join cleanup")
+	}
+	if got := server.metrics.activeConnections(); got != 0 {
+		t.Fatalf("active WebSocket metric after pair-notify cleanup = %d, want 0", got)
 	}
 }

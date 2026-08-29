@@ -41,11 +41,11 @@ func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
-	if !s.allowPairToken(w, req.PairToken) {
+	if !validPairToken(req.PairToken) || !validPairDeviceID(req.DeviceID) || !validEncodedPairPublicKey(req.EncPubkey) || !validEncodedPairPublicKey(req.SignPubkey) || !validDisplayName(req.DisplayName) {
+		http.Error(w, "invalid pairing fields", http.StatusBadRequest)
 		return
 	}
-	if !validDisplayName(req.DisplayName) {
-		http.Error(w, "display_name too long", http.StatusBadRequest)
+	if !s.allowPairToken(w, req.PairToken) {
 		return
 	}
 	encPk, signPk, err := decodePairPublicKeys(req.EncPubkey, req.SignPubkey)
@@ -100,11 +100,11 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing responder confirmation signature", http.StatusBadRequest)
 		return
 	}
-	if !s.allowPairToken(w, req.PairToken) {
+	if !validPairToken(req.PairToken) || !validPairDeviceID(req.DeviceID) || !validEncodedPairPublicKey(req.EncPubkey) || !validEncodedPairPublicKey(req.SignPubkey) || !validEncodedPairSignature(req.ConfirmationSig) || (req.ResponderConfirmationSig != "" && !validEncodedPairSignature(req.ResponderConfirmationSig)) || !validDisplayName(req.DisplayName) {
+		http.Error(w, "invalid pairing fields", http.StatusBadRequest)
 		return
 	}
-	if !validDisplayName(req.DisplayName) {
-		http.Error(w, "display_name too long", http.StatusBadRequest)
+	if !s.allowPairToken(w, req.PairToken) {
 		return
 	}
 	pending, err := s.pairStore.GetPending(req.PairToken)
