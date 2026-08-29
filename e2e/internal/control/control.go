@@ -453,6 +453,10 @@ func decodeSignature(raw json.RawMessage) (string, error) {
 }
 
 func (c *Controller) waitForReciprocalPeers(ctx context.Context, aID, bID string) error {
+	aHash := sha256.Sum256([]byte(aID))
+	bHash := sha256.Sum256([]byte(bID))
+	expectedA := hex.EncodeToString(aHash[:])
+	expectedB := hex.EncodeToString(bHash[:])
 	return waitValueErr(ctx, c.timeout, func(ctx context.Context) (bool, error) {
 		a, err := c.execute(ctx, c.a, "STATUS", nil)
 		if err != nil {
@@ -463,8 +467,8 @@ func (c *Controller) waitForReciprocalPeers(ctx context.Context, aID, bID string
 			return false, err
 		}
 		var as, bs struct {
-			DeviceID   string `json:"device_id"`
-			PairedPeer string `json:"paired_peer"`
+			DeviceIDHash   string `json:"device_id_hash"`
+			PairedPeerHash string `json:"paired_peer_hash"`
 		}
 		if err := json.Unmarshal(a.Payload, &as); err != nil {
 			return false, err
@@ -472,7 +476,8 @@ func (c *Controller) waitForReciprocalPeers(ctx context.Context, aID, bID string
 		if err := json.Unmarshal(b.Payload, &bs); err != nil {
 			return false, err
 		}
-		return as.DeviceID == aID && as.PairedPeer == bID && bs.DeviceID == bID && bs.PairedPeer == aID, nil
+		return as.DeviceIDHash == expectedA && as.PairedPeerHash == expectedB &&
+			bs.DeviceIDHash == expectedB && bs.PairedPeerHash == expectedA, nil
 	})
 }
 

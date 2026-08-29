@@ -91,6 +91,10 @@ internal interface E2eProductionControls {
     suspend fun localUnpair(context: Context): E2eControlOutcome
 }
 
+internal interface E2eNetworkControl {
+    suspend fun setExpected(context: Context, expected: String): E2eControlOutcome
+}
+
 internal fun cancelMirrorAsUser(
     persistedTag: String,
     persistedId: Int,
@@ -143,9 +147,31 @@ private object DefaultE2eProductionControls : E2eProductionControls {
 
 }
 
+private object DefaultE2eNetworkControl : E2eNetworkControl {
+    override suspend fun setExpected(context: Context, expected: String): E2eControlOutcome {
+        context.getSharedPreferences("e2e-control", Context.MODE_PRIVATE).edit {
+            putString("network_expected", expected)
+        }
+        if (expected == "offline") {
+            context.stopService(Intent(context, SyncService::class.java))
+            return E2eControlOutcome("ok", "transport_offline")
+        }
+
+        val config = ServiceConfigStore.read(context)
+        if (!config.enabled) return E2eControlOutcome("unavailable", "sync_disabled")
+        val relayUrl = config.relayUrl ?: return E2eControlOutcome("unavailable", "relay_not_configured")
+        context.startForegroundService(Intent(context, SyncService::class.java).apply {
+            action = SyncService.ACTION_START
+            putExtra(SyncService.EXTRA_RELAY_URL, relayUrl)
+        })
+        return E2eControlOutcome("ok", "transport_online")
+    }
+}
+
 /** Debug-only command bridge. Every command is authenticated by the install-scoped token. */
 class E2eControlReceiver internal constructor(
     private val controls: E2eProductionControls = DefaultE2eProductionControls,
+    private val networkControl: E2eNetworkControl = DefaultE2eNetworkControl,
 ) : BroadcastReceiver() {
     companion object {
         const val ACTION_CONTROL = "co.twinotify.e2e.CONTROL"
@@ -380,12 +406,7 @@ class E2eControlReceiver internal constructor(
             E2eCommandResult(requestId, "ok")
         }
         "SET_NETWORK_EXPECTED" -> {
-            val expected = command.param("expected") ?: return E2eCommandResult(requestId, "invalid", "expected required")
-            require(expected == "online" || expected == "offline") { "expected must be online or offline" }
-            context.getSharedPreferences("e2e-control", Context.MODE_PRIVATE).edit {
-                putString("network_expected", expected)
-            }
-            E2eCommandResult(requestId, "ok")
+            networkControl.setExpected(context, command.param("expected").orEmpty()).toResult(requestId)
         }
         "SET_LAN_AVAILABLE" -> {
             val available = command.param("available") ?: return E2eCommandResult(requestId, "invalid", "available required")
@@ -526,6 +547,7 @@ class E2eControlReceiver internal constructor(
             "OFFLINE_PAIR_JOIN" -> setOf("display_name", "secret_input_id")
             "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL" -> setOf("secret_input_id")
             "OFFLINE_PAIR_QUERY" -> emptySet()
+            "SET_NETWORK_EXPECTED" -> setOf("expected")
             "SET_LAN_AVAILABLE" -> setOf("available")
             "NOTIFICATION_FIXTURE" -> setOf("fixture", "operation")
             "NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN" -> setOf("operation")
@@ -534,6 +556,9 @@ class E2eControlReceiver internal constructor(
         }
         if (command.params.keys.any { it !in allowed }) return "unexpected parameter"
         if (command.params.values.any { it.encodeToByteArray().size > MAX_SECRET_BYTES }) return "parameter too large"
+        if (command.name == "SET_NETWORK_EXPECTED" && command.param("expected") !in setOf("online", "offline")) {
+            return "expected must be online or offline"
+        }
         if (command.name == "NOTIFICATION_FIXTURE") {
             if (command.param("fixture") !in setOf("reply", "mark_read", "auto_cancel", "persistent")) {
                 return "fixture must be reply, mark_read, auto_cancel, or persistent"

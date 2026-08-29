@@ -288,6 +288,7 @@ func stepsWithTag(steps []Step, tag string) []Step {
 
 type Observation struct {
 	Health                         string                      `json:"health"`
+	Transport                      string                      `json:"transport,omitempty"`
 	CallCaptureEnabled             bool                        `json:"call_capture_enabled"`
 	CallCaptureHealthCode          string                      `json:"call_capture_health_code,omitempty"`
 	Outbox                         int                         `json:"outbox"`
@@ -343,6 +344,7 @@ func ParseObservation(payload []byte) (Observation, error) {
 		return Observation{}, fmt.Errorf("decode E2E state: %w", err)
 	}
 	allowedRoot := map[string]bool{
+		"device_id_hash": true, "paired_peer_hash": true,
 		"offline_pairing": true, "health": true, "route": true, "route_evidence": true,
 		"outbox_bytes": true, "active_outbox": true, "active_inbound": true,
 		"pending_materialization": true, "canonical": true, "activity": true,
@@ -354,14 +356,30 @@ func ParseObservation(payload []byte) (Observation, error) {
 			return Observation{}, fmt.Errorf("E2E state unknown field %q", key)
 		}
 	}
-	for key := range allowedRoot {
+	for _, key := range []string{
+		"offline_pairing", "health", "route", "route_evidence",
+		"outbox_bytes", "active_outbox", "active_inbound", "pending_materialization",
+		"canonical", "activity", "product_observations", "notification_action_fixture",
+		"notification_action_observations",
+	} {
 		if raw, ok := root[key]; !ok || string(raw) == "null" {
 			return Observation{}, fmt.Errorf("E2E state missing %s", key)
+		}
+	}
+	for _, key := range []string{"device_id_hash", "paired_peer_hash"} {
+		raw, ok := root[key]
+		if !ok || string(raw) == "null" {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil || !validHash(value) {
+			return Observation{}, fmt.Errorf("E2E state malformed %s", key)
 		}
 	}
 	var raw struct {
 		Health struct {
 			Service               string `json:"service"`
+			Transport             string `json:"transport"`
 			CallCaptureEnabled    bool   `json:"callCaptureEnabled"`
 			CallCaptureHealthCode string `json:"callCaptureHealthCode"`
 		} `json:"health"`
@@ -396,6 +414,9 @@ func ParseObservation(payload []byte) (Observation, error) {
 	if raw.Health.Service == "" {
 		return Observation{}, errors.New("E2E state missing health.service")
 	}
+	if !map[string]bool{"offline": true, "connecting": true, "online": true}[raw.Health.Transport] {
+		return Observation{}, errors.New("E2E state malformed health.transport")
+	}
 	product, err := parseProductObservations(raw.Product)
 	if err != nil {
 		return Observation{}, err
@@ -410,6 +431,7 @@ func ParseObservation(payload []byte) (Observation, error) {
 	}
 	state := Observation{
 		Health:                         raw.Health.Service,
+		Transport:                      raw.Health.Transport,
 		CallCaptureEnabled:             raw.Health.CallCaptureEnabled,
 		CallCaptureHealthCode:          raw.Health.CallCaptureHealthCode,
 		Outbox:                         raw.ActiveOutbox,

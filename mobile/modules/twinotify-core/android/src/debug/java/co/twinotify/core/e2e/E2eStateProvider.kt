@@ -56,6 +56,8 @@ class E2eStateProvider : ContentProvider() {
             E2eSessionToken.ensure(context)
             val db = NotificationDb.get(context)
             val database = db.openHelper.readableDatabase
+            val deviceId = DeviceIdentity.getOrCreate(context)
+            val peer = PeerStore.load(context)
             val offline = E2eOfflinePairingControl.publicStatus(context)
             val health = SyncServiceStatus.health.value
             val route = SyncServiceStatus.routeStatus.value
@@ -65,6 +67,8 @@ class E2eStateProvider : ContentProvider() {
             require(outboxBytes in 0..134_217_728L) { "active queue bytes exceed production bound" }
             ProductObservationTracker.recordQueue(activeOutbox, outboxBytes)
             val root = JSONObject()
+                .put("device_id_hash", sha256Hex(deviceId))
+                .put("paired_peer_hash", peer?.let { sha256Hex(it.deviceId) } ?: JSONObject.NULL)
                 .put("offline_pairing", offline)
                 .put("health", JSONObject(health.toEventMap()))
                 .put("route", JSONObject(route.toPublicMap()))

@@ -243,9 +243,9 @@ func (d *controllerDevice) ReadResult(_ context.Context, requestID string) ([]by
 		result.Payload = json.RawMessage(`{"relay_url":"http://10.0.2.2:8090","device_id":"a","enc_pubkey":"enc-a","sign_pubkey":"sign-a","pair_token":"pair-token"}`)
 	case "STATUS":
 		if d.deviceID == "a" {
-			result.Payload = json.RawMessage(`{"device_id":"a","paired_peer":"b","peer_hello":{"device_id":"b","confirmation_sig":"sig"},"health":{"service":"connected","protocolFloor":2}}`)
+			result.Payload = json.RawMessage(`{"device_id_hash":"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb","paired_peer_hash":"3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d","health":{"service":"connected","protocolFloor":2}}`)
 		} else {
-			result.Payload = json.RawMessage(`{"device_id":"b","paired_peer":"a","health":{"service":"connected","protocolFloor":2}}`)
+			result.Payload = json.RawMessage(`{"device_id_hash":"3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d","paired_peer_hash":"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb","health":{"service":"connected","protocolFloor":2}}`)
 		}
 	case "AWAIT_PEER_HELLO":
 		result.Payload = json.RawMessage(`{"device_id":"b","enc_pubkey":"enc-b","sign_pubkey":"sign-b"}`)

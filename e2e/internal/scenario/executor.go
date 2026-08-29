@@ -371,6 +371,7 @@ type Executor struct {
 	baseline              map[string]map[string]string
 	baselineState         map[string]Observation
 	lanFaulted            map[string]bool
+	networkFaulted        map[string]bool
 	deliveryRoute         *RouteEvidence
 	trackedHash           string
 	trackedTag            string
@@ -389,7 +390,7 @@ func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
 	if bridge == nil || stepTimeout <= 0 {
 		panic("scenario bridge and positive timeout are required")
 	}
-	return &Executor{bridge: bridge, stepTimeout: stepTimeout, baseline: map[string]map[string]string{}, baselineState: map[string]Observation{}, lanFaulted: map[string]bool{}}
+	return &Executor{bridge: bridge, stepTimeout: stepTimeout, baseline: map[string]map[string]string{}, baselineState: map[string]Observation{}, lanFaulted: map[string]bool{}, networkFaulted: map[string]bool{}}
 }
 
 func (e *Executor) Run(ctx context.Context, name string) error {
@@ -424,6 +425,7 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.baseline = map[string]map[string]string{}
 		e.baselineState = map[string]Observation{}
 		e.lanFaulted = map[string]bool{}
+		e.networkFaulted = map[string]bool{}
 		e.deliveryRoute = nil
 		e.trackedHash = ""
 		e.trackedTag = ""
@@ -477,6 +479,16 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 				cancel()
 				if runErr == nil && err != nil {
 					runErr = fmt.Errorf("restore LAN fault %s: %w", device, err)
+				}
+			}
+		}
+		for device, faulted := range e.networkFaulted {
+			if faulted {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
+				err := e.bridge.SetNetwork(cleanupCtx, device, true)
+				cancel()
+				if runErr == nil && err != nil {
+					runErr = fmt.Errorf("restore network %s: %w", device, err)
 				}
 			}
 		}
@@ -669,7 +681,14 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 		}
 		return routeEvent, e.bridge.Cancel(ctx, a.device, a.tag)
 	case actionNetwork:
-		return "", e.bridge.SetNetwork(ctx, a.device, a.enabled)
+		if !a.enabled {
+			e.networkFaulted[a.device] = true
+		}
+		err := e.bridge.SetNetwork(ctx, a.device, a.enabled)
+		if err == nil && a.enabled {
+			e.networkFaulted[a.device] = false
+		}
+		return "", err
 	case actionForceStop:
 		err := e.bridge.ForceStop(ctx, a.device)
 		if err == nil && a.device == "A" {
@@ -927,7 +946,8 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 		if e.trackedHash == "" {
 			candidate := ""
 			for hash, sequence := range state.CanonicalSequences {
-				if sequence == want && e.baselineState[device].CanonicalSequences[hash] != sequence && !e.trackedHashes[hash] {
+				baselineSequence := e.baselineState[device].CanonicalSequences[hash]
+				if sequence-baselineSequence == want && !e.trackedHashes[hash] {
 					if candidate != "" {
 						return false
 					}
@@ -943,14 +963,15 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 			}
 			e.trackedHashes[candidate] = true
 		}
-		return state.Canonical[e.trackedHash] == "ACTIVE" && state.CanonicalSequences[e.trackedHash] == want &&
-			state.CanonicalMaterializedSequences[e.trackedHash] == want
+		expected := e.baselineState[device].CanonicalSequences[e.trackedHash] + want
+		return state.Canonical[e.trackedHash] == "ACTIVE" && state.CanonicalSequences[e.trackedHash] == expected &&
+			state.CanonicalMaterializedSequences[e.trackedHash] == expected
 	}
 	if predicate == "A.health.connected" {
-		return a.Health == "connected"
+		return a.Health == "connected" && a.Transport == "online"
 	}
 	if predicate == "A.health.offline" {
-		return a.Health == "offline"
+		return a.Transport == "offline"
 	}
 	if predicate == "both.tracked.active" {
 		return e.trackedHash != "" && a.Canonical[e.trackedHash] == "ACTIVE" && b.Canonical[e.trackedHash] == "ACTIVE"
@@ -1250,9 +1271,9 @@ func predicateSatisfied(name, predicate string, a, b Observation) bool {
 	case predicate == "B.no-resurrection:n1":
 		return !b.Mirror && b.Terminal
 	case predicate == "B.health.connected":
-		return b.Health == "connected"
+		return b.Health == "connected" && b.Transport == "online"
 	case predicate == "B.health.offline":
-		return b.Health == "offline"
+		return b.Transport == "offline"
 	case predicate == "A.source.absent:n1":
 		return !a.Mirror
 	case strings.HasPrefix(predicate, "A.route."):
@@ -1318,11 +1339,44 @@ func (b ADBBridge) Cancel(ctx context.Context, device, tag string) error {
 	return a.CancelNotification(ctx, tag)
 }
 func (b ADBBridge) SetNetwork(ctx context.Context, device string, enabled bool) error {
-	_, a, err := b.client(device)
+	c, a, err := b.client(device)
 	if err != nil {
 		return err
 	}
-	return a.SetAirplaneMode(ctx, !enabled)
+	hardware, err := a.IsHardware(ctx)
+	if err != nil {
+		return err
+	}
+	plan := networkMutationPlan(hardware, enabled)
+	if plan.useRadio {
+		return a.SetAirplaneMode(ctx, plan.airplaneMode)
+	}
+	result, err := c.Execute(ctx, control.Command{
+		RequestID: fmt.Sprintf("scenario-network-%d", time.Now().UnixNano()),
+		Name:      "SET_NETWORK_EXPECTED",
+		Params:    map[string]string{"expected": plan.expected},
+	})
+	if err != nil {
+		return err
+	}
+	if result.Code != "ok" {
+		return fmt.Errorf("emulator network control rejected with %s", result.Code)
+	}
+	return nil
+}
+
+type networkMutation struct {
+	useRadio     bool
+	airplaneMode bool
+	expected     string
+}
+
+func networkMutationPlan(hardware, enabled bool) networkMutation {
+	expected := "offline"
+	if enabled {
+		expected = "online"
+	}
+	return networkMutation{useRadio: hardware, airplaneMode: !enabled, expected: expected}
 }
 func (b ADBBridge) ForceStop(ctx context.Context, device string) error {
 	_, a, err := b.client(device)

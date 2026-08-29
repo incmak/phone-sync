@@ -22,7 +22,7 @@ type ScenarioResult struct {
 	After     map[string]Observation `json:"after"`
 	ErrorCode string                 `json:"error_code,omitempty"`
 	// Route records which path actually carried the scenario.
-	Route RouteEvidence `json:"route,omitzero"`
+	Route RouteEvidence `json:"route"`
 	// Children are persisted as independent artifact subtrees rather than nested
 	// into the aggregate JSON, keeping the closed-world evidence schema stable.
 	Children []ScenarioResult `json:"-"`

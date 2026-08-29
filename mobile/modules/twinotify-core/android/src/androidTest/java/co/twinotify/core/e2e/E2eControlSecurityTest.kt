@@ -28,6 +28,42 @@ class E2eControlSecurityTest {
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test
+    fun emulatorNetworkFaultControlIsAuthenticatedClosedAndDelegated() {
+        val calls = mutableListOf<String>()
+        val receiver = E2eControlReceiver(
+            networkControl = object : E2eNetworkControl {
+                override suspend fun setExpected(context: Context, expected: String): E2eControlOutcome {
+                    calls += expected
+                    return E2eControlOutcome("ok", "transport_$expected")
+                }
+            },
+        )
+        val token = E2eSessionToken.forTest(context, "network-fault-control")
+
+        assertEquals("unauthorized", receiver.executeForTest(
+            context,
+            E2eCommand("network-unauthorized", "SET_NETWORK_EXPECTED", token = "wrong", params = mapOf("expected" to "offline")),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context,
+            E2eCommand("network-extra", "SET_NETWORK_EXPECTED", token = token, params = mapOf("expected" to "offline", "relay_url" to "forbidden")),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context,
+            E2eCommand("network-invalid", "SET_NETWORK_EXPECTED", token = token, params = mapOf("expected" to "degraded")),
+        ).code)
+
+        for (expected in listOf("offline", "online")) {
+            val result = receiver.executeForTest(
+                context,
+                E2eCommand("network-$expected", "SET_NETWORK_EXPECTED", token = token, params = mapOf("expected" to expected)),
+            )
+            assertEquals("ok", result.code)
+        }
+        assertEquals(listOf("offline", "online"), calls)
+    }
+
+    @Test
     fun userDismissStimulusCancelsPersistedIdentityWithoutPlantingPeerTombstone() {
         PendingPeerCancel.clearForTest()
         val cancelled = mutableListOf<Pair<String, Int>>()
@@ -440,6 +476,10 @@ class E2eControlSecurityTest {
             })
             assertFalse(root.has("device_id"))
             assertFalse(root.has("paired_peer"))
+            assertTrue(root.getString("device_id_hash").matches(Regex("[0-9a-f]{64}")))
+            if (!root.isNull("paired_peer_hash")) {
+                assertTrue(root.getString("paired_peer_hash").matches(Regex("[0-9a-f]{64}")))
+            }
             assertFalse(state.contains("tls_pin", ignoreCase = true))
             assertEquals(
                 setOf("route", "phase", "route_generation", "queued_count", "queued_bytes", "receipt_at_ms", "error_code"),

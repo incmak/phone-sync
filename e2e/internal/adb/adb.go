@@ -92,6 +92,18 @@ func (c *Client) runWithInput(ctx context.Context, input []byte, args ...string)
 	return nil, fmt.Errorf("adb private run-as %s failed: %w", adbOperation(args), err)
 }
 
+// runShellWithInput uses the shell-v2 transport with PTY allocation disabled.
+// Current ADB releases can keep exec-out stdin open after the host reader reaches
+// EOF, which deadlocks remote `cat` handoffs. Quoting every remote argument keeps
+// the command argument-based while shell -T supplies reliable EOF propagation.
+func (c *Client) runShellWithInput(ctx context.Context, input []byte, remoteArgs ...string) ([]byte, error) {
+	quoted := make([]string, len(remoteArgs))
+	for index, arg := range remoteArgs {
+		quoted[index] = shellQuote(arg)
+	}
+	return c.runWithInput(ctx, input, "shell", "-T", strings.Join(quoted, " "))
+}
+
 func adbOperation(args []string) string {
 	if len(args) == 0 {
 		return "command"
@@ -123,7 +135,7 @@ func (c *Client) ForegroundPackage(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	match := regexp.MustCompile(`(?m)mResumedActivity:.*? ([A-Za-z0-9_.]+)/`).FindSubmatch(out)
+	match := regexp.MustCompile(`(?m)(?:mResumedActivity:|topResumedActivity=).*? ([A-Za-z0-9_.]+)/`).FindSubmatch(out)
 	if len(match) != 2 {
 		return "", nil
 	}
@@ -240,8 +252,8 @@ func (c *Client) WriteRunAsPrivate(ctx context.Context, packageName, bucket, req
 	if len(value) == 0 || len(value) > 4096 {
 		return errors.New("private run-as input must be 1..4096 bytes")
 	}
-	const script = `set -eu; umask 077; dir="$1"; name="$2"; uid=$(id -u); test ! -L "$dir"; mkdir -p "$dir"; test -d "$dir"; test "$(stat -c %u "$dir")" = "$uid"; chmod 700 "$dir"; test "$(stat -c %a "$dir")" = 700; target="$dir/$name"; test ! -e "$target"; test ! -L "$target"; tmp=$(mktemp "$dir/.$name.tmp.XXXXXX"); trap 'rm -f "$tmp"' EXIT HUP INT TERM; test "$(stat -c %u "$tmp")" = "$uid"; chmod 600 "$tmp"; test "$(stat -c %a "$tmp")" = 600; cat > "$tmp"; ln "$tmp" "$target"; rm -f "$tmp"`
-	_, err = c.runWithInput(ctx, value, "exec-out", "run-as", packageName, "sh", "-c", script, "sh", directory, requestID)
+	const script = `set -eu; umask 077; dir="$1"; name="$2"; uid=$(id -u); test ! -L "$dir"; mkdir -p "$dir"; test -d "$dir"; test "$(stat -c %u "$dir")" = "$uid"; chmod 700 "$dir"; test "$(stat -c %a "$dir")" = 700; target="$dir/$name"; test ! -e "$target"; test ! -L "$target"; tmp=$(mktemp "$dir/.$name.tmp.XXXXXX"); trap 'rm -f "$tmp"' EXIT HUP INT TERM; test "$(stat -c %u "$tmp")" = "$uid"; chmod 600 "$tmp"; test "$(stat -c %a "$tmp")" = 600; cat > "$tmp"; mv -n "$tmp" "$target"; test ! -e "$tmp"`
+	_, err = c.runShellWithInput(ctx, value, "run-as", packageName, "sh", "-c", script, "sh", directory, requestID)
 	return err
 }
 
@@ -256,7 +268,7 @@ func (c *Client) ReadRunAsPrivateOnce(ctx context.Context, packageName, bucket, 
 		return nil, errors.New("private run-as read bound must be 1..4096 bytes")
 	}
 	const script = `set -eu; dir="$1"; uid=$(id -u); test ! -L "$dir"; test -d "$dir"; test "$(stat -c %u "$dir")" = "$uid"; test "$(stat -c %a "$dir")" = 700; target="$dir/$2"; trap 'rm -f "$target"' EXIT HUP INT TERM; test ! -L "$target"; test -f "$target"; test "$(stat -c %u "$target")" = "$uid"; test "$(stat -c %a "$target")" = 600; size=$(wc -c < "$target"); test "$size" -le "$3"; cat "$target"`
-	out, err := c.runWithInput(ctx, nil, "exec-out", "run-as", packageName, "sh", "-c", script, "sh", directory, requestID, fmt.Sprint(maxBytes))
+	out, err := c.runShellWithInput(ctx, nil, "run-as", packageName, "sh", "-c", script, "sh", directory, requestID, fmt.Sprint(maxBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +284,7 @@ func (c *Client) DeleteRunAsPrivate(ctx context.Context, packageName, bucket, re
 		return err
 	}
 	const script = `set -eu; dir="$1"; test ! -L "$dir"; if test ! -e "$dir"; then exit 0; fi; test -d "$dir"; test "$(stat -c %u "$dir")" = "$(id -u)"; rm -f "$dir/$2" "$dir/.$2.tmp" "$dir/.$2.tmp."*`
-	_, err = c.runWithInput(ctx, nil, "exec-out", "run-as", packageName, "sh", "-c", script, "sh", directory, requestID)
+	_, err = c.runShellWithInput(ctx, nil, "run-as", packageName, "sh", "-c", script, "sh", directory, requestID)
 	return err
 }
 

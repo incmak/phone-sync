@@ -71,6 +71,48 @@ func TestRoutePredicatesReadTheNamedDeviceOnly(t *testing.T) {
 	}
 }
 
+func TestHealthPredicatesUseTransportReachability(t *testing.T) {
+	online := Observation{Health: "connected", Transport: "online"}
+	offline := Observation{Health: "degraded", Transport: "offline"}
+	stopped := Observation{Health: "stopped", Transport: "offline"}
+	executor := &Executor{baselineState: map[string]Observation{"A": {}, "B": {}}}
+
+	if !executor.predicateSatisfied("actions", "A.health.offline", offline, online) {
+		t.Fatal("an offline transport must satisfy the offline predicate even while service state is degraded")
+	}
+	if !executor.predicateSatisfied("actions", "A.health.offline", stopped, online) {
+		t.Fatal("a stopped transport must satisfy the offline predicate")
+	}
+	if executor.predicateSatisfied("actions", "A.health.offline", online, offline) {
+		t.Fatal("A.health.offline must not read device B or treat an online transport as offline")
+	}
+	if !executor.predicateSatisfied("actions", "A.health.connected", online, offline) {
+		t.Fatal("connected health requires the named device's online transport")
+	}
+	if executor.predicateSatisfied("actions", "A.health.connected", Observation{Health: "connected", Transport: "offline"}, online) {
+		t.Fatal("a stale connected service label must not override offline transport evidence")
+	}
+}
+
+func TestNetworkMutationPlanUsesPhysicalRadioAndEmulatorDebugFault(t *testing.T) {
+	physicalOffline := networkMutationPlan(true, false)
+	if !physicalOffline.airplaneMode || physicalOffline.expected != "offline" {
+		t.Fatalf("physical offline plan=%+v", physicalOffline)
+	}
+	physicalOnline := networkMutationPlan(true, true)
+	if physicalOnline.airplaneMode || physicalOnline.expected != "online" {
+		t.Fatalf("physical online plan=%+v", physicalOnline)
+	}
+	emulatorOffline := networkMutationPlan(false, false)
+	if emulatorOffline.useRadio || emulatorOffline.expected != "offline" {
+		t.Fatalf("emulator offline plan=%+v", emulatorOffline)
+	}
+	emulatorOnline := networkMutationPlan(false, true)
+	if emulatorOnline.useRadio || emulatorOnline.expected != "online" {
+		t.Fatalf("emulator online plan=%+v", emulatorOnline)
+	}
+}
+
 func TestLanDirectDeliveryScenarioIsExecutable(t *testing.T) {
 	plan, err := Plan("lan-direct-delivery")
 	if err != nil {
@@ -148,6 +190,23 @@ func TestDirectionalTrackedSequenceReadsNamedRecipientOnly(t *testing.T) {
 	}
 	if !executor.predicateSatisfied("forward", "B.tracked.sequence:1", Observation{}, active(1)) {
 		t.Fatal("B predicate rejected exact materialization on B")
+	}
+}
+
+func TestTrackedSequenceIsRelativeToEachScenarioBaseline(t *testing.T) {
+	hash := "reused-fixture"
+	executor := &Executor{baselineState: map[string]Observation{
+		"A": {CanonicalSequences: map[string]int{}},
+		"B": {CanonicalSequences: map[string]int{hash: 3}},
+	}, trackedHashes: map[string]bool{}}
+	active := Observation{
+		Canonical:                      map[string]string{hash: "ACTIVE"},
+		CanonicalSequences:             map[string]int{hash: 4},
+		CanonicalMaterializedSequences: map[string]int{hash: 4},
+	}
+
+	if !executor.predicateSatisfied("reused", "B.tracked.sequence:1", Observation{}, active) {
+		t.Fatal("reused fixture did not satisfy the first transition relative to its baseline")
 	}
 }
 

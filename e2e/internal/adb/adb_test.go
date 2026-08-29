@@ -28,6 +28,21 @@ func (f *fakeRunner) RunWithInput(_ context.Context, input []byte, args ...strin
 	return f.output, f.err
 }
 
+func TestForegroundPackageAcceptsAndroid37TopResumedActivityLabel(t *testing.T) {
+	runner := &fakeRunner{output: []byte(
+		"topResumedActivity=ActivityRecord{249466892 u0 co.twinotify.fixture/.FixtureActivity t124}\n",
+	)}
+	client := adb.New(runner, "emulator-5556")
+
+	got, err := client.ForegroundPackage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "co.twinotify.fixture" {
+		t.Fatalf("foreground package=%q want=%q", got, "co.twinotify.fixture")
+	}
+}
+
 func TestPrivateRunAsHandoffKeepsSecretOutOfArgvAndUsesBoundedOneTimeFiles(t *testing.T) {
 	runner := &fakeRunner{output: []byte("private-result")}
 	client := adb.New(runner, "physical-a")
@@ -50,6 +65,13 @@ func TestPrivateRunAsHandoffKeepsSecretOutOfArgvAndUsesBoundedOneTimeFiles(t *te
 	if len(runner.inputs) < 1 || string(runner.inputs[0]) != string(sentinel) {
 		t.Fatalf("stdin handoff=%q", runner.inputs)
 	}
+	wantTransportPrefix := []string{"-s", "physical-a", "shell", "-T"}
+	if len(runner.args[0]) != 5 || !reflect.DeepEqual(runner.args[0][:4], wantTransportPrefix) {
+		t.Fatalf("private stdin transport=%q want prefix=%q and one quoted remote command", runner.args[0], wantTransportPrefix)
+	}
+	if !strings.Contains(runner.args[0][4], "'run-as' 'com.twinotify.app' 'sh' '-c'") {
+		t.Fatalf("private stdin command is not remote-shell quoted: %q", runner.args[0][4])
+	}
 	if !strings.Contains(strings.Join(runner.args[0], " "), "umask 077") || !strings.Contains(strings.Join(runner.args[1], " "), "trap") {
 		t.Fatalf("private file ownership/cleanup contract missing: %q", runner.args)
 	}
@@ -58,10 +80,13 @@ func TestPrivateRunAsHandoffKeepsSecretOutOfArgvAndUsesBoundedOneTimeFiles(t *te
 	}
 	writeScript := strings.Join(runner.args[0], " ")
 	readScript := strings.Join(runner.args[1], " ")
-	for _, contract := range []string{"mktemp", "ln \"$tmp\" \"$target\"", "stat -c %u", "stat -c %a"} {
+	for _, contract := range []string{"mktemp", "mv -n \"$tmp\" \"$target\"", "test ! -e \"$tmp\"", "stat -c %u", "stat -c %a"} {
 		if !strings.Contains(writeScript, contract) {
 			t.Fatalf("atomic ownership contract %q missing from write: %q", contract, runner.args[0])
 		}
+	}
+	if strings.Contains(writeScript, "ln \"$tmp\" \"$target\"") {
+		t.Fatalf("SELinux-incompatible hard link returned to private write: %q", runner.args[0])
 	}
 	for _, contract := range []string{"stat -c %u", "stat -c %a", "rm -f \"$target\""} {
 		if !strings.Contains(readScript, contract) {

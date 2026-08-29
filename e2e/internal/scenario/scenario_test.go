@@ -89,7 +89,7 @@ func validObservationPayloadForTest() map[string]any {
 	counts := map[string]any{"notif_post": 0.0, "notif_update": 0.0, "notif_cancel": 0.0, "call_state": 0.0, "state_digest": 0.0, "state_snapshot_begin": 0.0, "state_snapshot_item": 0.0, "state_snapshot_end": 0.0, "unpair": 0.0, "peer_receipt": 0.0}
 	return map[string]any{
 		"offline_pairing": map[string]any{},
-		"health":          map[string]any{"service": "connected", "callCaptureEnabled": false, "callCaptureHealthCode": "call_capture_disabled"},
+		"health":          map[string]any{"service": "connected", "transport": "online", "callCaptureEnabled": false, "callCaptureHealthCode": "call_capture_disabled"},
 		"route":           map[string]any{"route": "lan", "phase": "authenticated"},
 		"route_evidence":  map[string]any{"route": "lan", "phase": "authenticated", "route_generation": 1.0, "queued_count": 0.0, "queued_bytes": 0.0, "receipt_at_ms": 0.0, "error_code": ""},
 		"outbox_bytes":    0.0, "active_outbox": 0.0, "active_inbound": 0.0, "pending_materialization": 0.0,
@@ -115,6 +115,42 @@ func validObservationPayloadForTest() map[string]any {
 	}
 }
 
+func TestParseObservationRequiresClosedTransportHealth(t *testing.T) {
+	for name, transport := range map[string]any{
+		"missing":    nil,
+		"unknown":    "bluetooth",
+		"wrong type": 7,
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := validObservationPayloadForTest()
+			health := payload["health"].(map[string]any)
+			if transport == nil {
+				delete(health, "transport")
+			} else {
+				health["transport"] = transport
+			}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := scenario.ParseObservation(encoded); err == nil {
+				t.Fatal("invalid transport health passed")
+			}
+		})
+	}
+
+	payload := validObservationPayloadForTest()
+	payload["health"].(map[string]any)["transport"] = "offline"
+	encoded, _ := json.Marshal(payload)
+	state, err := scenario.ParseObservation(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Transport != "offline" {
+		t.Fatalf("transport=%q", state.Transport)
+	}
+}
+
 func TestParseObservationReadsContentFreeNotificationActionEvidence(t *testing.T) {
 	payload := validObservationPayloadForTest()
 	payload["notification_action_fixture"].(map[string]any)["reply_dispatch_count"] = 2.0
@@ -134,6 +170,23 @@ func TestParseObservationReadsContentFreeNotificationActionEvidence(t *testing.T
 		if _, err := scenario.ParseObservation(raw); err == nil {
 			t.Fatalf("accepted forbidden notification field %s", forbidden)
 		}
+	}
+}
+
+func TestParseObservationAcceptsSanitizedPairHashes(t *testing.T) {
+	payload := validObservationPayloadForTest()
+	payload["device_id_hash"] = strings.Repeat("a", 64)
+	payload["paired_peer_hash"] = strings.Repeat("b", 64)
+	encoded, _ := json.Marshal(payload)
+
+	if _, err := scenario.ParseObservation(encoded); err != nil {
+		t.Fatalf("sanitized pair hashes rejected: %v", err)
+	}
+
+	payload["device_id_hash"] = "raw-device-id"
+	encoded, _ = json.Marshal(payload)
+	if _, err := scenario.ParseObservation(encoded); err == nil {
+		t.Fatal("malformed device hash passed")
 	}
 }
 
@@ -339,7 +392,8 @@ func (f *fakeBridge) SetNetwork(_ context.Context, device string, enabled bool) 
 	f.calls++
 	f.events = append(f.events, device+".network")
 	state := f.states[device]
-	state.Health = map[bool]string{true: "connected", false: "offline"}[enabled]
+	state.Health = map[bool]string{true: "connected", false: "degraded"}[enabled]
+	state.Transport = map[bool]string{true: "online", false: "offline"}[enabled]
 	f.states[device] = state
 	if device == "B" && enabled {
 		state = f.states[device]
@@ -379,6 +433,9 @@ func (f *fakeBridge) Snapshot(_ context.Context, device string) (scenario.Observ
 	state := f.states[device]
 	if state.Health == "" {
 		state.Health = "stopped"
+	}
+	if state.Transport == "" {
+		state.Transport = map[bool]string{true: "online", false: "offline"}[state.Health == "connected"]
 	}
 	if state.Route == "" {
 		state.Route, state.RoutePhase = "none", "idle"

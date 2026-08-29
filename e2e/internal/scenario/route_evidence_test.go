@@ -1,6 +1,7 @@
 package scenario
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -222,6 +223,29 @@ func TestAggregateEvidenceWritesEachCompletedChildSeparately(t *testing.T) {
 		if info, err := os.Stat(filepath.Join(dir, relative)); err != nil || info.Size() == 0 {
 			t.Fatalf("%s missing: %v", relative, err)
 		}
+	}
+}
+
+func TestPassedNonRouteEvidenceWritesEmptyRouteObject(t *testing.T) {
+	result := ScenarioResult{
+		Scenario: "action-reply", Status: "passed", Events: []string{},
+		Before: terminalPair(), After: terminalPair(),
+	}
+	dir := t.TempDir()
+	if err := WriteEvidenceArtifacts(dir, result); err != nil {
+		t.Fatalf("passed non-route evidence rejected: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "scenario-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded map[string]any
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	route, ok := encoded["route"].(map[string]any)
+	if !ok || len(route) != 0 {
+		t.Fatalf("zero route must be encoded as an empty object: %s", raw)
 	}
 }
 

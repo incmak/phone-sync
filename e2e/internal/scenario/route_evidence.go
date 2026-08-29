@@ -37,6 +37,14 @@ var (
 // scenario predating route evidence must not be made to invent one.
 func (r RouteEvidence) IsZero() bool { return r == RouteEvidence{} }
 
+func (r RouteEvidence) MarshalJSON() ([]byte, error) {
+	if r.IsZero() {
+		return []byte("{}"), nil
+	}
+	type wireRouteEvidence RouteEvidence
+	return json.Marshal(wireRouteEvidence(r))
+}
+
 // Validate reports whether the record is one this project is willing to persist.
 // A wholly absent record passes; a partially filled one does not, so a route
 // cannot be half-claimed.
@@ -129,7 +137,7 @@ func inspectClosedWorldScenario(root map[string]any) error {
 		}
 	}
 	allowedObservation := map[string]bool{
-		"health": true, "call_capture_enabled": true, "call_capture_health_code": true,
+		"health": true, "transport": true, "call_capture_enabled": true, "call_capture_health_code": true,
 		"outbox": true, "active_inbound": true, "pending_materialization": true,
 		"mirror": true, "sequence": true, "terminal": true, "loop_events": true,
 		"route": true, "route_phase": true, "queued_bytes": true, "route_generation": true,
@@ -220,6 +228,11 @@ func validateObservationShape(value map[string]any) error {
 	}
 	if err := stringEnum("health", map[string]bool{"stopped": true, "connecting": true, "connected": true, "degraded": true, "offline": true}); err != nil {
 		return err
+	}
+	if _, present := value["transport"]; present {
+		if err := stringEnum("transport", map[string]bool{"offline": true, "connecting": true, "online": true}); err != nil {
+			return err
+		}
 	}
 	if err := stringEnum("route", routeKinds); err != nil {
 		return err

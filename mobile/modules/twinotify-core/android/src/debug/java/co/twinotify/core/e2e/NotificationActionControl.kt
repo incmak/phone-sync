@@ -11,8 +11,12 @@ import co.twinotify.core.actions.ActionControlEncoder
 import co.twinotify.core.actions.ActionDispatchGate
 import co.twinotify.core.actions.ActionInvokeInput
 import co.twinotify.core.actions.MirrorActionIntent
+import co.twinotify.core.service.NotificationStateReducer
 import co.twinotify.core.service.SyncService
 import co.twinotify.core.storage.NotificationDb
+
+internal fun shouldEmulateSystemTapCancellation(flags: Int): Boolean =
+    flags and Notification.FLAG_AUTO_CANCEL != 0
 
 internal object NotificationActionControl {
     private const val FIXED_REPLY = "Twinotify E2E reply"
@@ -25,9 +29,15 @@ internal object NotificationActionControl {
         "arm_reply" -> arm(context, reply = true)
         "arm_mark_read" -> arm(context, reply = false)
         "invoke_armed" -> send(context, armed, armedRemoteInputs)
-        "tap" -> newestMirror(context)?.notification?.contentIntent
-            ?.let { send(context, it, null) }
-            ?: E2eControlOutcome("not_found", "mirror_tap_unavailable")
+        "tap" -> newestMirror(context)?.let { mirror ->
+            val result = mirror.notification.contentIntent
+                ?.let { send(context, it, null) }
+                ?: return@let E2eControlOutcome("not_found", "mirror_tap_unavailable")
+            if (result.code == "ok" && shouldEmulateSystemTapCancellation(mirror.notification.flags)) {
+                context.getSystemService(NotificationManager::class.java)?.cancel(mirror.tag, mirror.id)
+            }
+            result
+        } ?: E2eControlOutcome("not_found", "mirror_tap_unavailable")
         "replay_last_invoke" -> replayLastInvoke(context)
         else -> E2eControlOutcome("unavailable", "unknown_operation")
     }
@@ -82,7 +92,7 @@ internal object NotificationActionControl {
 
     private fun newestMirror(context: Context) = context.getSystemService(NotificationManager::class.java)
         ?.activeNotifications.orEmpty()
-        .filter { it.packageName == context.packageName && it.tag?.startsWith("twinotify-mirror-") == true }
+        .filter { it.packageName == context.packageName && NotificationStateReducer.isMirrorTag(it.tag) }
         .maxByOrNull { it.postTime }
 
     private suspend fun replayLastInvoke(context: Context): E2eControlOutcome {
