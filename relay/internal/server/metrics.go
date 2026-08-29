@@ -128,6 +128,10 @@ func (m *relayMetrics) recordBackup(err error) {
 	m.backup[result].Add(1)
 }
 
+func (s *Server) RecordBackupResult(err error) {
+	s.metrics.recordBackup(err)
+}
+
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(s.metrics.render(s.isReady())))

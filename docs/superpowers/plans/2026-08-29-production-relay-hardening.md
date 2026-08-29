@@ -244,24 +244,25 @@ Commit: `feat(relay): add graceful drain and private metrics`
 - Test: `relay/cmd/relay/backup_test.go`
 - Modify: `relay/cmd/relay/main.go`
 - Modify: `relay/cmd/relay/main_test.go`
+- Modify: `relay/internal/server/metrics.go`
 
 **Interfaces:**
 - Produces: `(*Bolt).Snapshot(path string) error` and `ValidateBolt(path string) error`.
 - Produces: periodic `backupManager.Run(ctx)`, offline CLI `relay backup --from PATH --to-dir DIR --retention N`, and CLI `relay restore --from PATH --to PATH --backup-dir DIR --data-dir DIR`.
 
-- [ ] **Step 1: Write failing backup, retention, corruption, and restore tests**
+- [x] **Step 1: Write failing backup, retention, corruption, and restore tests**
 
 Mutate Bolt while taking a snapshot and assert the snapshot opens and passes consistency checks. Create more snapshots than retention and assert only the newest configured count remain. Assert a corrupt source, path outside allowed roots, and restore while the destination lock is held all fail without changing the destination. Assert a valid restore keeps a timestamped recovery copy.
 
-- [ ] **Step 2: Observe RED**
+- [x] **Step 2: Observe RED**
 
 Run: `make sync-proto && cd relay && go test ./cmd/relay ./internal/store -run 'TestSnapshot|TestBackup|TestRestore' -race -count=1`
 
-- [ ] **Step 3: Implement snapshot scheduling and restore**
+- [x] **Step 3: Implement snapshot scheduling and restore**
 
 Create snapshots through `Tx.CopyFile` into a same-directory temporary path, validate, then rename. Use mode `0600`, UTC names, sanitized build version, and lexicographic time ordering. Restore copies into the data directory, validates, renames the current DB to `.recovery-<UTC>`, then atomically installs the new DB. Refuse symlinked or out-of-root paths.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run focused tests and `make relay-test`.
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,17 +18,36 @@ import (
 
 func main() {
 	slog.SetDefault(slog.New(newLogHandler(os.Stderr, os.Getenv("TWINOTIFY_ENV") == productionEnvironment)))
-	runtimeConfig, err := loadRuntimeConfig(os.Getenv)
-	if err != nil {
-		slog.Error("relay_start_failed", "stage", "config")
+	if err := run(os.Args[1:], os.Getenv); err != nil {
+		slog.Error("relay_command_failed")
 		os.Exit(1)
+	}
+}
+
+func run(arguments []string, getenv func(string) string) error {
+	if len(arguments) > 0 {
+		switch arguments[0] {
+		case "backup":
+			return runBackupCommand(arguments[1:], time.Now)
+		case "restore":
+			return runRestoreCommand(arguments[1:])
+		default:
+			return fmt.Errorf("unknown relay command %q", arguments[0])
+		}
+	}
+	return runRelay(getenv)
+}
+
+func runRelay(getenv func(string) string) error {
+	runtimeConfig, err := loadRuntimeConfig(getenv)
+	if err != nil {
+		return errors.New("invalid relay configuration")
 	}
 	b, err := store.OpenBolt(runtimeConfig.boltPath)
 	if err != nil {
-		slog.Error("relay_start_failed", "stage", "store")
-		os.Exit(1)
+		return errors.New("open relay store")
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	config := server.DefaultConfig()
 	config.TrustProxyHeaders = runtimeConfig.trustProxyHeaders
@@ -36,41 +56,53 @@ func main() {
 	config.BuildVersion = runtimeConfig.buildVersion
 	app, err := server.NewWithConfigChecked(b, config)
 	if err != nil {
-		slog.Error("relay_start_failed", "stage", "server")
-		os.Exit(1)
+		return errors.New("initialize relay server")
 	}
 	srv := server.NewHTTPServer(runtimeConfig.listenAddr, app.Handler())
 	listener, err := net.Listen("tcp", runtimeConfig.listenAddr)
 	if err != nil {
-		slog.Error("relay_start_failed", "stage", "listener")
-		os.Exit(1)
+		return errors.New("open relay listener")
 	}
+	defer func() { _ = listener.Close() }()
 	limitedListener, err := newLimitListener(listener, runtimeConfig.maxOpenConnections)
 	if err != nil {
-		_ = listener.Close()
-		slog.Error("relay_start_failed", "stage", "listener_limit")
-		os.Exit(1)
+		return errors.New("limit relay listener")
 	}
-	maintenanceContext, stopMaintenance := context.WithCancel(context.Background())
-	maintenanceDone := app.StartMaintenance(maintenanceContext)
-
-	done := make(chan struct{})
-	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		<-sig
-		if err := gracefulStop(app.BeginShutdown, stopMaintenance, maintenanceDone, 10*time.Second, srv.Shutdown); err != nil {
-			slog.Error("relay_shutdown_failed")
+	backgroundContext, stopBackground := context.WithCancel(context.Background())
+	maintenanceDone := app.StartMaintenance(backgroundContext)
+	backupDone := closedDoneChannel()
+	if runtimeConfig.backupDir != "" {
+		manager, err := newBackupManager(
+			b, runtimeConfig.backupDir, runtimeConfig.backupInterval, runtimeConfig.backupRetention,
+			runtimeConfig.buildVersion, time.Now,
+		)
+		if err != nil {
+			stopBackground()
+			<-maintenanceDone
+			return errors.New("initialize relay backups")
 		}
-		close(done)
+		manager.observe = app.RecordBackupResult
+		backupDone = manager.Run(backgroundContext)
+	}
+	backgroundDone := joinDoneChannels(maintenanceDone, backupDone)
+
+	shutdownResult := make(chan error, 1)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	go func() {
+		<-signals
+		shutdownResult <- gracefulStop(app.BeginShutdown, stopBackground, backgroundDone, 10*time.Second, srv.Shutdown)
 	}()
 
 	slog.Info("relay_listening")
 	if err := srv.Serve(limitedListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("relay_serve_failed")
-		os.Exit(1)
+		app.BeginShutdown()
+		stopBackground()
+		<-backgroundDone
+		return errors.New("relay serve failed")
 	}
-	<-done
+	return <-shutdownResult
 }
 
 func gracefulStop(beginShutdown func(), stopMaintenance context.CancelFunc, maintenanceDone <-chan struct{}, shutdownTimeout time.Duration, shutdown func(context.Context) error) error {
@@ -80,4 +112,21 @@ func gracefulStop(beginShutdown func(), stopMaintenance context.CancelFunc, main
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return shutdown(ctx)
+}
+
+func closedDoneChannel() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+func joinDoneChannels(channels ...<-chan struct{}) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, channel := range channels {
+			<-channel
+		}
+	}()
+	return done
 }

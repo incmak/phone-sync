@@ -1,6 +1,10 @@
 package store
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -9,6 +13,86 @@ import (
 // Bolt wraps a bbolt database with simple Put/Get/Delete operations.
 type Bolt struct {
 	db *bbolt.DB
+}
+
+// Snapshot writes a transactionally consistent Bolt copy to path and installs
+// it atomically only after the temporary copy passes a full Bolt check.
+func (b *Bolt) Snapshot(path string) error {
+	if b == nil || b.db == nil || path == "" {
+		return errors.New("snapshot database and path are required")
+	}
+	directory := filepath.Dir(path)
+	info, err := os.Stat(directory)
+	if err != nil {
+		return fmt.Errorf("snapshot directory unavailable: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("snapshot parent must be a directory")
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return errors.New("snapshot target already exists")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	defer os.Remove(temporaryPath)
+	if err := b.db.View(func(tx *bbolt.Tx) error {
+		return tx.CopyFile(temporaryPath, 0600)
+	}); err != nil {
+		return fmt.Errorf("copy Bolt snapshot: %w", err)
+	}
+	if err := os.Chmod(temporaryPath, 0600); err != nil {
+		return err
+	}
+	if err := ValidateBolt(temporaryPath); err != nil {
+		return fmt.Errorf("validate Bolt snapshot: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("install Bolt snapshot: %w", err)
+	}
+	return syncDirectory(directory)
+}
+
+// ValidateBolt opens path read-only and checks every reachable page and bucket.
+func ValidateBolt(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("Bolt path must be a regular non-symlink file")
+	}
+	database, err := bbolt.Open(path, 0400, &bbolt.Options{ReadOnly: true, Timeout: time.Second})
+	if err != nil {
+		return fmt.Errorf("open Bolt read-only: %w", err)
+	}
+	defer database.Close()
+	return database.View(func(tx *bbolt.Tx) error {
+		var firstError error
+		for checkErr := range tx.Check() {
+			if checkErr != nil && firstError == nil {
+				firstError = checkErr
+			}
+		}
+		return firstError
+	})
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 // OpenBolt opens (or creates) a bbolt database at path.
