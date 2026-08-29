@@ -7,6 +7,9 @@ import androidx.room.Query
 import androidx.room.Transaction
 import co.twinotify.core.actions.ActionClaimDecision
 import co.twinotify.core.actions.ActionExpiryCommitResult
+import co.twinotify.core.actions.ActionResultCommitResult
+import co.twinotify.core.actions.ActionResultRepost
+import co.twinotify.core.actions.ActionResultRequest
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
 import co.twinotify.core.service.CallRejectionCommitResult
@@ -186,6 +189,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     ): Int
 
     @Query(
+        "SELECT * FROM action_invocation WHERE canonId=:canonId AND notificationSequence=:sequence " +
+            "ORDER BY updatedAt DESC, invocationId DESC",
+    )
+    abstract fun actionInvocationsForNotification(
+        canonId: String,
+        sequence: Long,
+    ): List<ActionInvocation>
+
+    @Query(
         "SELECT * FROM action_invocation WHERE state='PENDING' AND expiresAt <= :now " +
             "ORDER BY expiresAt, invocationId",
     )
@@ -212,6 +224,68 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 canonical.latestSequence == current.notificationSequence &&
                 canonical.mirrorLocalTag != null && canonical.mirrorLocalId != null,
         )
+    }
+
+    @Transaction
+    open suspend fun commitActionResult(
+        row: InboundMessage,
+        invocationId: String,
+        canonId: String,
+        status: String,
+    ): ActionResultCommitResult = commitActionResult(
+        ActionResultRequest(row, invocationId, canonId, status),
+    )
+
+    @Transaction
+    open suspend fun commitActionResult(request: ActionResultRequest): ActionResultCommitResult {
+        val row = request.inbound
+        require(row.eventType == "notif.action.result")
+        require(row.canonId == null && row.sequence == null)
+        require(row.outcome == "APPLIED" && row.appliedAt != null && row.relayAckState == "READY")
+        require(request.status in ACTION_RESULT_STATUSES)
+
+        inbound(row.msgId)?.let { existing ->
+            return if (existing.envelopeSha256 == row.envelopeSha256) {
+                ActionResultCommitResult.Duplicate
+            } else {
+                ActionResultCommitResult.IdConflict
+            }
+        }
+        insertInbound(row)
+
+        val invocation = actionInvocation(request.invocationId)
+            ?: return ActionResultCommitResult.Committed(repost = null)
+        if (invocation.canonId != request.canonId || invocation.state != "PENDING") {
+            return ActionResultCommitResult.Committed(repost = null)
+        }
+        val terminalState = when (request.status) {
+            "dispatched" -> "DISPATCHED"
+            "outcome_unknown" -> "OUTCOME_UNKNOWN"
+            "action_gone" -> "ACTION_GONE"
+            "notification_gone" -> "NOTIFICATION_GONE"
+            "expired" -> "EXPIRED"
+            "failed" -> "FAILED"
+            else -> error("validated action result status drift")
+        }
+        if (terminalizeActionInvocation(invocation.invocationId, terminalState, row.committedAt) != 1) {
+            return ActionResultCommitResult.Committed(repost = null)
+        }
+        val canonical = canonical(invocation.canonId)
+        val repost = if (
+            canonical?.state == "ACTIVE" &&
+            canonical.latestSequence == invocation.notificationSequence &&
+            canonical.mirrorLocalTag != null && canonical.mirrorLocalId != null
+        ) {
+            ActionResultRepost(
+                canonId = invocation.canonId,
+                notificationSequence = invocation.notificationSequence,
+                localTag = canonical.mirrorLocalTag,
+                localId = canonical.mirrorLocalId,
+            )
+        } else {
+            null
+        }
+        return ActionResultCommitResult.Committed(repost)
     }
 
     @Insert(onConflict = OnConflictStrategy.ABORT)

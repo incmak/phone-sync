@@ -10,6 +10,11 @@ import co.twinotify.core.actions.ActionInvokeRequest
 import co.twinotify.core.actions.ActionInvocationProcessor
 import co.twinotify.core.actions.ActionProcessResult
 import co.twinotify.core.actions.ActionResultRowEncoder
+import co.twinotify.core.actions.ActionResultJournal
+import co.twinotify.core.actions.ActionResultProcessResult
+import co.twinotify.core.actions.ActionResultProcessor
+import co.twinotify.core.actions.ActionResultReposter
+import co.twinotify.core.actions.ActionResultRequest
 import co.twinotify.core.actions.DaoActionClaimJournal
 import co.twinotify.core.actions.PendingIntentActionExecutor
 import co.twinotify.core.actions.PersistentActionClaimWakeScheduler
@@ -93,6 +98,43 @@ fun interface ActionInvokeRejectionJournal {
 
 fun interface AuthenticatedActionInvokeProcessor {
     suspend fun process(request: ActionInvokeRequest): ActionProcessResult
+}
+
+fun interface AuthenticatedActionResultProcessor {
+    suspend fun process(request: ActionResultRequest): ActionResultProcessResult
+}
+
+internal suspend fun dispatchAuthenticatedActionResult(
+    inner: co.twinotify.core.protocol.InnerEventV2,
+    envelopeSha256: String,
+    committedAt: Long,
+    processor: AuthenticatedActionResultProcessor,
+): InboundDispatchResult {
+    require(inner.type == "notif.action.result")
+    val payload = inner.payloadObject()
+    val request = ActionResultRequest(
+        inbound = InboundMessage(
+            msgId = inner.msgId,
+            originDevice = inner.originDevice,
+            envelopeSha256 = envelopeSha256,
+            eventType = inner.type,
+            canonId = null,
+            sequence = null,
+            outcome = "APPLIED",
+            committedAt = committedAt,
+            appliedAt = committedAt,
+            receiptMsgId = null,
+            relayAckState = "READY",
+        ),
+        invocationId = payload.getString("invocation_id"),
+        canonId = payload.getString("canon_id"),
+        status = payload.getString("status"),
+    )
+    return when (processor.process(request)) {
+        ActionResultProcessResult.Applied -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+        ActionResultProcessResult.Duplicate -> InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+        ActionResultProcessResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+    }
 }
 
 internal suspend fun dispatchAuthenticatedActionInvoke(
@@ -360,6 +402,24 @@ class InboundDispatcher internal constructor(
             wakeScheduler = PersistentActionClaimWakeScheduler(ctx.applicationContext),
         )
     }
+    private val actionResultProcessor by lazy {
+        ActionResultProcessor(
+            journal = ActionResultJournal(reliableDao::commitActionResult),
+            repost = ActionResultReposter { target ->
+                val current = reliableDao.canonical(target.canonId) ?: return@ActionResultReposter
+                if (
+                    current.state != "ACTIVE" ||
+                    current.latestSequence != target.notificationSequence ||
+                    current.mirrorLocalTag != target.localTag ||
+                    current.mirrorLocalId != target.localId
+                ) {
+                    return@ActionResultReposter
+                }
+                val localDeviceId = DeviceIdentity.getOrCreate(ctx)
+                DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao).postMirrorOutcome(current)
+            },
+        )
+    }
 
     /**
      * Relay callers may ignore the result; their acknowledgement semantics are
@@ -528,6 +588,16 @@ class InboundDispatcher internal constructor(
             if (result !is InboundDispatchResult.Rejected) {
                 SyncServiceStatus.setQueueStats(reliableDao.activeOutboundCount(), reliableDao.activeOutboundBytes())
             }
+            onAuthenticatedEvent(inner.type)
+            return result
+        }
+        if (inner.type == "notif.action.result") {
+            val result = dispatchAuthenticatedActionResult(
+                inner = inner,
+                envelopeSha256 = opened.envelopeSha256,
+                committedAt = System.currentTimeMillis(),
+                processor = AuthenticatedActionResultProcessor(actionResultProcessor::process),
+            )
             onAuthenticatedEvent(inner.type)
             return result
         }

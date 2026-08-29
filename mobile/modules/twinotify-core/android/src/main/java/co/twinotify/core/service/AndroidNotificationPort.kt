@@ -71,11 +71,15 @@ class DefaultAndroidNotificationPort(
             ?: return NotificationPostOutcome.RetryableFailure
         if (post.canon_id != state.canonId) return NotificationPostOutcome.RetryableFailure
         return runCatching {
+            val invocations = reliableDao?.actionInvocationsForNotification(
+                state.canonId,
+                state.latestSequence,
+            ).orEmpty()
             NotifChannelSetup.ensureChannels(appContext)
             NotificationManagerCompat.from(appContext).notify(
                 tag,
                 id,
-                MirrorPoster.buildNotification(appContext, post, id, tag),
+                MirrorPoster.buildNotification(appContext, post, id, tag, invocations),
             )
             NotificationPostOutcome.Applied
         }.getOrDefault(NotificationPostOutcome.RetryableFailure)

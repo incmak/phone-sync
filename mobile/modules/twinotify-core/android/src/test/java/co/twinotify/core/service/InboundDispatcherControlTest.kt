@@ -12,6 +12,8 @@ import co.twinotify.core.protocol.PayloadDecryptor
 import co.twinotify.core.protocol.ProtocolJson
 import co.twinotify.core.actions.ActionInvokeRequest
 import co.twinotify.core.actions.ActionProcessResult
+import co.twinotify.core.actions.ActionResultProcessResult
+import co.twinotify.core.actions.ActionResultRequest
 import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.InboundMessage
 import co.twinotify.core.storage.SnapshotBeginResult
@@ -33,6 +35,27 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class InboundDispatcherControlTest {
+    @Test
+    fun authenticatedActionResultUsesDedicatedProcessor() = runTest {
+        val event = actionResultEvent()
+        var request: ActionResultRequest? = null
+
+        val result = dispatchAuthenticatedActionResult(
+            inner = event,
+            envelopeSha256 = "d".repeat(64),
+            committedAt = 2_000,
+            processor = AuthenticatedActionResultProcessor {
+                request = it
+                ActionResultProcessResult.Applied
+            },
+        )
+
+        assertEquals(InboundDispatchResult.Accepted(event.msgId, "d".repeat(64)), result)
+        assertEquals("dispatched", request?.status)
+        assertEquals("APPLIED", request?.inbound?.outcome)
+        assertNull(request?.inbound?.canonId)
+    }
+
     @Test
     fun authenticatedActionInvokeUsesDedicatedProcessorAndWaitsForItsClaimCommit() = runTest {
         val processorEntered = CompletableDeferred<Unit>()
@@ -292,6 +315,21 @@ class InboundDispatcherControlTest {
           "notification_sequence":7,
           "reply_text":"private reply",
           "invoked_at":1000
+        }""".trimIndent(),
+    )
+
+    private fun actionResultEvent() = InnerEventV2(
+        msgId = "55555555-5555-4555-8555-555555555555",
+        originDevice = "origin-device",
+        type = "notif.action.result",
+        canonId = null,
+        sequence = null,
+        createdAt = 1_000,
+        expiresAt = 601_000,
+        payloadJson = """{
+          "invocation_id":"22222222-2222-4222-8222-222222222222",
+          "canon_id":"origin:pkg:1:tag",
+          "status":"dispatched"
         }""".trimIndent(),
     )
 

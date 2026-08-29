@@ -16,6 +16,7 @@ import co.twinotify.core.actions.ActionInvokeReceiver
 import co.twinotify.core.actions.MirrorActionIntent
 import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.storage.NotificationDb
+import co.twinotify.core.storage.ActionInvocation
 
 object MirrorPoster {
     @SuppressLint("LaunchActivityFromNotification")
@@ -24,6 +25,7 @@ object MirrorPoster {
         post: NotifPostJson,
         localId: Int,
         localTag: String = NotificationStateReducer.stableMirrorTag(post.canon_id),
+        invocations: List<ActionInvocation> = emptyList(),
     ): Notification {
         require(localId > 0) { "local notification ID must be positive" }
         NotifChannelSetup.ensureChannels(ctx)
@@ -42,10 +44,11 @@ object MirrorPoster {
         val expandedText = post.big_text?.takeIf { it.isNotBlank() }
             ?: post.text?.takeIf { it.isNotBlank() }
             ?: post.title
+        val presentation = MirrorActionPresentation.from(ctx, invocations)
         return NotificationCompat.Builder(ctx, NotifChannelSetup.CHANNEL_MIRRORS)
             .setContentTitle(post.title ?: "")
             .setContentText(post.text ?: "")
-            .setSubText(post.sub_text)
+            .setSubText(presentation.statusText ?: post.sub_text)
             .setVisibility(NotifVisibility.toAndroid(post.visibility))
             .setAutoCancel(post.is_auto_cancel)
             .setContentIntent(tapPi)
@@ -53,7 +56,8 @@ object MirrorPoster {
             .apply {
                 if (sourceArtwork != null) setLargeIcon(sourceArtwork)
                 if (!expandedText.isNullOrBlank()) setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
-                post.actions.take(3).forEach { action ->
+                presentation.replyText?.let { setRemoteInputHistory(arrayOf(it)) }
+                post.actions.take(3).filterNot { it.action_id in presentation.pendingActionIds }.forEach { action ->
                     val invokeIntent = Intent(ctx, ActionInvokeReceiver::class.java).apply {
                         data = MirrorActionIntent.dataUri(localTag, localId, action.action_id).toUri()
                     }
@@ -113,6 +117,37 @@ object MirrorPoster {
             ((digest[2].toInt() and 0xff) shl 8) or
             (digest[3].toInt() and 0xff)
         return (raw and Int.MAX_VALUE).coerceAtLeast(1)
+    }
+}
+
+private data class MirrorActionPresentation(
+    val statusText: String?,
+    val replyText: String?,
+    val pendingActionIds: Set<String>,
+) {
+    companion object {
+        fun from(context: Context, invocations: List<ActionInvocation>): MirrorActionPresentation {
+            val latest = invocations.firstOrNull()
+                ?: return MirrorActionPresentation(null, null, emptySet())
+            val label = when (latest.state) {
+                "PENDING" -> R.string.mirror_action_pending
+                "DISPATCHED" -> R.string.mirror_action_dispatched
+                "OUTCOME_UNKNOWN" -> R.string.mirror_action_outcome_unknown
+                "FAILED" -> R.string.mirror_action_failed
+                "ACTION_GONE" -> R.string.mirror_action_gone
+                "NOTIFICATION_GONE" -> R.string.mirror_action_notification_gone
+                "EXPIRED" -> R.string.mirror_action_expired
+                else -> return MirrorActionPresentation(null, null, emptySet())
+            }
+            return MirrorActionPresentation(
+                statusText = context.getString(label),
+                replyText = latest.replyText.takeIf { latest.state == "PENDING" },
+                pendingActionIds = invocations.asSequence()
+                    .filter { it.state == "PENDING" }
+                    .map { it.actionId }
+                    .toSet(),
+            )
+        }
     }
 }
 

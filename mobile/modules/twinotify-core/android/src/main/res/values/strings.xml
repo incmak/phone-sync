@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mirror_action_pending">Sending…</string>
+    <string name="mirror_action_dispatched">Sent</string>
+    <string name="mirror_action_outcome_unknown">Unconfirmed</string>
+    <string name="mirror_action_failed">Could not send</string>
+    <string name="mirror_action_gone">Action unavailable</string>
+    <string name="mirror_action_notification_gone">Notification unavailable</string>
+    <string name="mirror_action_expired">Timed out</string>
+</resources>

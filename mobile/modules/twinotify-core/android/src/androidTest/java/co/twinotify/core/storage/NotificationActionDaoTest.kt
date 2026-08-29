@@ -157,6 +157,90 @@ class NotificationActionDaoTest {
         )
     }
 
+    @Test
+    fun actionResultJournalsAndTerminalizesPendingExactlyOnce() = runBlocking {
+        dao.putCanonical(activeState(sequence = 7))
+        dao.insertActionInvocation(pendingInvocation())
+        val inbound = actionResultInbound("result-1", "a".repeat(64))
+
+        val committed = assertIs<co.twinotify.core.actions.ActionResultCommitResult.Committed>(
+            dao.commitActionResult(inbound, INVOCATION_ID, CANON_ID, "dispatched"),
+        )
+        assertEquals(co.twinotify.core.actions.ActionResultRepost(CANON_ID, 7, "mirror-tag", 41), committed.repost)
+        val terminal = assertNotNull(dao.actionInvocation(INVOCATION_ID))
+        assertEquals("DISPATCHED", terminal.state)
+        assertNull(terminal.replyText)
+        assertEquals("APPLIED", dao.inbound("result-1")?.outcome)
+
+        assertEquals(
+            co.twinotify.core.actions.ActionResultCommitResult.Duplicate,
+            dao.commitActionResult(inbound, INVOCATION_ID, CANON_ID, "dispatched"),
+        )
+        assertEquals(
+            co.twinotify.core.actions.ActionResultCommitResult.IdConflict,
+            dao.commitActionResult(actionResultInbound("result-1", "b".repeat(64)), INVOCATION_ID, CANON_ID, "failed"),
+        )
+    }
+
+    @Test
+    fun resultAfterLocalExpiryIsJournaledWithoutResurrectionOrRepost() = runBlocking {
+        dao.putCanonical(activeState(sequence = 7))
+        dao.insertActionInvocation(pendingInvocation().copy(state = "EXPIRED", replyText = null))
+
+        val committed = assertIs<co.twinotify.core.actions.ActionResultCommitResult.Committed>(
+            dao.commitActionResult(
+                actionResultInbound("late-result", "c".repeat(64)),
+                INVOCATION_ID,
+                CANON_ID,
+                "dispatched",
+            ),
+        )
+
+        assertNull(committed.repost)
+        assertEquals("EXPIRED", dao.actionInvocation(INVOCATION_ID)?.state)
+        assertEquals("APPLIED", dao.inbound("late-result")?.outcome)
+    }
+
+    private fun activeState(sequence: Long) = CanonicalNotificationState(
+        canonId = CANON_ID,
+        originDevice = "origin-device",
+        latestSequence = sequence,
+        state = "ACTIVE",
+        desiredPayloadJson = "{}",
+        materializedSequence = sequence,
+        sourceNotificationKey = null,
+        mirrorLocalId = 41,
+        mirrorLocalTag = "mirror-tag",
+        peerCancelPending = false,
+        updatedAt = 1_000,
+    )
+
+    private fun pendingInvocation() = ActionInvocation(
+        invocationId = INVOCATION_ID,
+        canonId = CANON_ID,
+        actionId = ACTION_ID,
+        notificationSequence = 7,
+        replyText = "private reply",
+        state = "PENDING",
+        createdAt = 1_000,
+        expiresAt = 121_000,
+        updatedAt = 1_000,
+    )
+
+    private fun actionResultInbound(msgId: String, digest: String) = InboundMessage(
+        msgId = msgId,
+        originDevice = "origin-device",
+        envelopeSha256 = digest,
+        eventType = "notif.action.result",
+        canonId = null,
+        sequence = null,
+        outcome = "APPLIED",
+        committedAt = 2_000,
+        appliedAt = 2_000,
+        receiptMsgId = null,
+        relayAckState = "READY",
+    )
+
     private fun execution(id: String, claimedAt: Long) = ActionExecution(
         invocationId = id,
         canonId = CANON_ID,
