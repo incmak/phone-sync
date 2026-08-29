@@ -59,13 +59,15 @@ var (
 )
 
 type relayMetrics struct {
-	websocketConnections atomic.Int64
-	relayPutAccepted     atomic.Uint64
-	relayPutRejected     [len(relayPutReasonLabels)]atomic.Uint64
-	pairMutations        [pairStageCount][pairResultCount]atomic.Uint64
-	authRejected         [authRejectReasonCount]atomic.Uint64
-	maintenance          [maintenanceOperationCount][2]atomic.Uint64
-	backup               [2]atomic.Uint64
+	websocketConnections       atomic.Int64
+	websocketOutboundBytes     atomic.Int64
+	websocketAdmissionRejected atomic.Uint64
+	relayPutAccepted           atomic.Uint64
+	relayPutRejected           [len(relayPutReasonLabels)]atomic.Uint64
+	pairMutations              [pairStageCount][pairResultCount]atomic.Uint64
+	authRejected               [authRejectReasonCount]atomic.Uint64
+	maintenance                [maintenanceOperationCount][2]atomic.Uint64
+	backup                     [2]atomic.Uint64
 }
 
 func newRelayMetrics() *relayMetrics { return &relayMetrics{} }
@@ -75,6 +77,10 @@ func (m *relayMetrics) connectionOpened() { m.websocketConnections.Add(1) }
 func (m *relayMetrics) connectionClosed() { m.websocketConnections.Add(-1) }
 
 func (m *relayMetrics) activeConnections() int64 { return m.websocketConnections.Load() }
+
+func (m *relayMetrics) addWebSocketOutboundBytes(delta int64) { m.websocketOutboundBytes.Add(delta) }
+
+func (m *relayMetrics) recordWebSocketAdmissionRejected() { m.websocketAdmissionRejected.Add(1) }
 
 func (m *relayMetrics) recordRelayPutAccepted() { m.relayPutAccepted.Add(1) }
 
@@ -142,6 +148,10 @@ func (m *relayMetrics) render(ready bool) string {
 	var output strings.Builder
 	output.WriteString("# TYPE twinotify_websocket_connections gauge\n")
 	fmt.Fprintf(&output, "twinotify_websocket_connections %d\n", m.websocketConnections.Load())
+	output.WriteString("# TYPE twinotify_websocket_outbound_bytes gauge\n")
+	fmt.Fprintf(&output, "twinotify_websocket_outbound_bytes %d\n", m.websocketOutboundBytes.Load())
+	output.WriteString("# TYPE twinotify_websocket_admission_rejected_total counter\n")
+	fmt.Fprintf(&output, "twinotify_websocket_admission_rejected_total %d\n", m.websocketAdmissionRejected.Load())
 	output.WriteString("# TYPE twinotify_relay_put_accepted_total counter\n")
 	fmt.Fprintf(&output, "twinotify_relay_put_accepted_total %d\n", m.relayPutAccepted.Load())
 	output.WriteString("# TYPE twinotify_relay_put_rejected_total counter\n")

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ func TestMetricsUseOnlyClosedLabelsAndNeverRenderIdentifiers(t *testing.T) {
 	server.metrics.recordAuthRejected(authRejectRateLimited)
 	server.metrics.recordMaintenance(maintenanceMailbox, nil)
 	server.metrics.recordMaintenance(maintenanceJTI, errors.New("secret-storage-detail"))
+	server.metrics.recordWebSocketAdmissionRejected()
 
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response := httptest.NewRecorder()
@@ -40,6 +43,8 @@ func TestMetricsUseOnlyClosedLabelsAndNeverRenderIdentifiers(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"twinotify_websocket_connections 0",
+		"twinotify_websocket_outbound_bytes 0",
+		"twinotify_websocket_admission_rejected_total 1",
 		"twinotify_relay_put_accepted_total 1",
 		`reason="mailbox_full"} 1`,
 		`reason="invalid_frame"} 1`,
@@ -52,6 +57,104 @@ func TestMetricsUseOnlyClosedLabelsAndNeverRenderIdentifiers(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("metrics omitted %q:\n%s", expected, body)
 		}
+	}
+}
+
+func TestBlockedWriterReplacementKeepsExactConnectionByteOwnership(t *testing.T) {
+	config := DefaultConfig()
+	frame := bytes.Repeat([]byte{'x'}, maxRelayDeliverFrameBytes)
+	charge := outboundFrameCharge(frame)
+	config.WebSocketQueueMaxBytes = charge
+	config.WebSocketProcessQueueMaxBytes = charge
+	server := newTestServerWithConfig(t, config)
+	deviceID, privateKey := registerPair(t, server.pairStore)
+
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var writes atomic.Int32
+	server.webSocketWriteAfterLock = func() {
+		switch writes.Add(1) {
+		case 1:
+			close(firstEntered)
+			<-releaseFirst
+		case 2:
+			close(secondEntered)
+			<-releaseSecond
+		}
+	}
+
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	dial := func() *websocket.Conn {
+		header := http.Header{}
+		header.Set("Authorization", "Bearer "+mintJWT(t, deviceID, privateKey, ""))
+		connection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/ws", header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return connection
+	}
+	oldConnection := dial()
+	defer oldConnection.Close()
+	waitForRevokePairRegistration(t, server, deviceID, "pair-test-1")
+	server.clientHub.mu.Lock()
+	oldClient := server.clientHub.clients[deviceID]
+	server.clientHub.mu.Unlock()
+	if !server.clientHub.Send(deviceID, frame) {
+		t.Fatal("queue old maximum frame")
+	}
+	<-firstEntered
+
+	replacementConnection := dial()
+	defer replacementConnection.Close()
+	replacementDeadline := time.Now().Add(time.Second)
+	for {
+		server.clientHub.mu.Lock()
+		current := server.clientHub.clients[deviceID]
+		server.clientHub.mu.Unlock()
+		if current != nil && current != oldClient {
+			break
+		}
+		if time.Now().After(replacementDeadline) {
+			t.Fatal("replacement registration did not supersede old client")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if server.clientHub.Send(deviceID, frame) {
+		t.Fatal("replacement spent bytes still owned by blocked old writer")
+	}
+	close(releaseFirst)
+	select {
+	case <-oldClient.closed:
+	case <-time.After(time.Second):
+		t.Fatal("old connection did not complete exact cleanup")
+	}
+	if !server.clientHub.Send(deviceID, frame) {
+		t.Fatal("replacement could not spend bytes after old writer completed")
+	}
+	<-secondEntered
+	charged := server.metrics.websocketOutboundBytes.Load()
+	if charged != int64(charge) || server.metrics.websocketAdmissionRejected.Load() == 0 {
+		t.Fatalf("replacement metrics bytes/rejections = %d/%d, want %d/positive", charged, server.metrics.websocketAdmissionRejected.Load(), charge)
+	}
+	server.clientHub.Unregister(oldClient)
+	if got := server.metrics.websocketOutboundBytes.Load(); got != charged {
+		t.Fatalf("stale old cleanup changed replacement charge: %d to %d", charged, got)
+	}
+	close(releaseSecond)
+	_ = replacementConnection.SetReadDeadline(time.Now().Add(time.Second))
+	_, delivered, err := replacementConnection.ReadMessage()
+	if err != nil || len(delivered) != len(frame) {
+		t.Fatalf("replacement frame after release = %d bytes, %v", len(delivered), err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for server.metrics.websocketOutboundBytes.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("replacement gauge after completed write = %d, want 0", server.metrics.websocketOutboundBytes.Load())
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -112,13 +215,17 @@ func TestBeginShutdownClosesWebSocketWhileWriterIsBlockedAndWaitsForCleanup(t *t
 	}
 	defer connection.Close()
 	waitForRevokePairRegistration(t, server, deviceID, "pair-test-1")
-	if !server.clientHub.Send(deviceID, []byte(`{"type":"blocked-writer"}`)) {
+	blockedFrame := []byte(`{"type":"blocked-writer"}`)
+	if !server.clientHub.Send(deviceID, blockedFrame) {
 		t.Fatal("failed to queue frame for the active WebSocket writer")
 	}
 	select {
 	case <-writerEntered:
 	case <-time.After(time.Second):
 		t.Fatal("active WebSocket writer did not reach the deterministic barrier")
+	}
+	if got := server.clientHub.outboundBytesCharged(); got != outboundFrameCharge(blockedFrame) {
+		t.Fatalf("bytes charged during blocked WriteMessage = %d, want %d", got, outboundFrameCharge(blockedFrame))
 	}
 
 	drainDone := server.BeginShutdown()
@@ -139,6 +246,9 @@ func TestBeginShutdownClosesWebSocketWhileWriterIsBlockedAndWaitsForCleanup(t *t
 	case <-drainDone:
 	case <-time.After(time.Second):
 		t.Fatal("WebSocket drain did not complete after the writer exited")
+	}
+	if got := server.clientHub.outboundBytesCharged(); got != 0 {
+		t.Fatalf("bytes charged after blocked writer cleanup = %d, want 0", got)
 	}
 	if server.metrics.activeConnections() != 0 {
 		t.Fatalf("active WebSocket metric = %d, want 0", server.metrics.activeConnections())

@@ -31,6 +31,7 @@ type Server struct {
 	buildVersion                string
 	shuttingDown                atomic.Bool
 	metrics                     *relayMetrics
+	durableTransferMaxBytes     uint64
 	now                         func() time.Time
 	mutationMu                  sync.RWMutex
 	maintenanceInterval         time.Duration
@@ -38,6 +39,7 @@ type Server struct {
 	mailboxExpiryBatch          int
 	statusExpiryBatch           int
 	maintenanceMu               sync.Mutex
+	deliveryTransferMu          sync.Mutex
 	maintenanceDone             chan struct{}
 	requireMutualPairSignatures bool
 
@@ -47,10 +49,13 @@ type Server struct {
 	// relayBeforeDeliveryTransfer is a deterministic test barrier immediately
 	// before the Bolt-view-to-hub-queue linearization point.
 	relayBeforeDeliveryTransfer func(deviceID string)
-	webSocketBeforeRegister     func(deviceID, pairID string)
-	revokeAfterCommit           func(pairID string)
-	relayPutBeforeStore         func(deviceID, pairID, msgID string)
-	relayAckBeforeStore         func(deviceID, pairID, msgID string)
+	// relayDeliveryTransferBeforeAdmission proves transfer workspace admission
+	// ordering in tests. Production constructors leave it nil.
+	relayDeliveryTransferBeforeAdmission func()
+	webSocketBeforeRegister              func(deviceID, pairID string)
+	revokeAfterCommit                    func(pairID string)
+	relayPutBeforeStore                  func(deviceID, pairID, msgID string)
+	relayAckBeforeStore                  func(deviceID, pairID, msgID string)
 	// pairMutationBeforeStore is a deterministic test barrier immediately
 	// before pairing handlers acquire shutdown-linearized write admission.
 	pairMutationBeforeStore func(stage pairStage)
@@ -86,19 +91,24 @@ func NewWithDependencies(b *store.Bolt, mailboxLimits store.MailboxLimits) *Serv
 }
 
 type Config struct {
-	MailboxLimits               store.MailboxLimits
-	PendingPairLimits           store.PendingPairLimits
-	PairingRateLimits           PairingRateLimitConfig
-	AuthenticationRateLimits    AuthenticationRateLimitConfig
-	JTI                         JTICacheConfig
-	MaintenanceInterval         time.Duration
-	MailboxExpiryBatch          int
-	StatusExpiryBatch           int
-	TrustProxyHeaders           bool
-	RequireMutualPairSignatures bool
-	CapacityCheck               CapacityCheck
-	BuildVersion                string
-	Now                         func() time.Time
+	MailboxLimits                 store.MailboxLimits
+	PendingPairLimits             store.PendingPairLimits
+	PairingRateLimits             PairingRateLimitConfig
+	AuthenticationRateLimits      AuthenticationRateLimitConfig
+	JTI                           JTICacheConfig
+	MaintenanceInterval           time.Duration
+	MailboxExpiryBatch            int
+	StatusExpiryBatch             int
+	TrustProxyHeaders             bool
+	RequireMutualPairSignatures   bool
+	CapacityCheck                 CapacityCheck
+	BuildVersion                  string
+	WebSocketQueueMaxBytes        uint64
+	WebSocketProcessQueueMaxBytes uint64
+	DurableTransferMaxBytes       uint64
+	RelayMemoryLimitBytes         uint64
+	MaxOpenConnections            int
+	Now                           func() time.Time
 }
 
 func DefaultConfig() Config {
@@ -113,13 +123,18 @@ func DefaultConfig() Config {
 			IPBurst: 2_000, DeviceBurst: 120, RefillInterval: time.Second, IdleTTL: 10 * time.Minute,
 			MaxEntries: 20_000, CleanupBatch: 256,
 		},
-		JTI:                 JTICacheConfig{TTL: 60 * time.Second, MaxEntries: 100_000, CleanupBatch: 256},
-		MaintenanceInterval: time.Minute,
-		MailboxExpiryBatch:  256,
-		StatusExpiryBatch:   256,
-		CapacityCheck:       noCapacityLimit,
-		BuildVersion:        "dev",
-		Now:                 time.Now,
+		JTI:                           JTICacheConfig{TTL: 60 * time.Second, MaxEntries: 100_000, CleanupBatch: 256},
+		MaintenanceInterval:           time.Minute,
+		MailboxExpiryBatch:            256,
+		StatusExpiryBatch:             256,
+		CapacityCheck:                 noCapacityLimit,
+		BuildVersion:                  "dev",
+		WebSocketQueueMaxBytes:        defaultWebSocketQueueMaxBytes,
+		WebSocketProcessQueueMaxBytes: defaultWebSocketProcessQueueMaxBytes,
+		DurableTransferMaxBytes:       defaultDurableTransferMaxBytes,
+		RelayMemoryLimitBytes:         256 << 20,
+		MaxOpenConnections:            64,
+		Now:                           time.Now,
 	}
 }
 
@@ -140,6 +155,9 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 		!validRateLimitConfig(config.PairingRateLimits) || !validRateLimitConfig(authLimiterConfig) {
 		return nil, errors.New("invalid server config")
 	}
+	if err := validateWebSocketMemoryConfig(config); err != nil {
+		return nil, err
+	}
 	v, err := NewValidator()
 	if err != nil {
 		return nil, err
@@ -156,7 +174,8 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	clientHub := NewClientHubWithMailboxLimits(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes)
+	metrics := newRelayMetrics()
+	clientHub := newClientHubWithMemoryLimits(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes, config.WebSocketQueueMaxBytes, config.WebSocketProcessQueueMaxBytes, metrics)
 	s := &Server{
 		router:                      chi.NewRouter(),
 		validator:                   v,
@@ -172,7 +191,8 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 		authLimiter:                 newPairingRateLimiter(authLimiterConfig),
 		capacityCheck:               config.CapacityCheck,
 		buildVersion:                config.BuildVersion,
-		metrics:                     newRelayMetrics(),
+		metrics:                     metrics,
+		durableTransferMaxBytes:     config.DurableTransferMaxBytes,
 		now:                         config.Now,
 		maintenanceInterval:         config.MaintenanceInterval,
 		trustProxyHeaders:           config.TrustProxyHeaders,
@@ -183,6 +203,28 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 	clientHub.SetHandoffResolver(s.transferHandoffFrames)
 	s.routes()
 	return s, nil
+}
+
+func validateWebSocketMemoryConfig(config Config) error {
+	minimumFrameCharge := uint64(maxRelayDeliverFrameBytes + webSocketFrameMemoryOverhead)
+	if config.WebSocketQueueMaxBytes < minimumFrameCharge || config.WebSocketProcessQueueMaxBytes < config.WebSocketQueueMaxBytes ||
+		config.DurableTransferMaxBytes < maxRelayDeliverFrameBytes || config.RelayMemoryLimitBytes == 0 || config.MaxOpenConnections <= 0 {
+		return errors.New("invalid WebSocket memory limits")
+	}
+	connections := uint64(config.MaxOpenConnections)
+	if connections > ^uint64(0)/uint64(maxRelayControlFrameSize) || config.DurableTransferMaxBytes > ^uint64(0)/2 {
+		return errors.New("WebSocket connection memory overflow")
+	}
+	inbound := connections * uint64(maxRelayControlFrameSize)
+	workspace := 2 * config.DurableTransferMaxBytes
+	if config.WebSocketProcessQueueMaxBytes > ^uint64(0)-inbound || workspace > ^uint64(0)-inbound-config.WebSocketProcessQueueMaxBytes {
+		return errors.New("WebSocket controlled memory overflow")
+	}
+	controlled := inbound + config.WebSocketProcessQueueMaxBytes + workspace
+	if controlled > config.RelayMemoryLimitBytes-(config.RelayMemoryLimitBytes/4) {
+		return errors.New("WebSocket memory limits exceed safe container margin")
+	}
+	return nil
 }
 
 // New is a convenience wrapper that opens BOLT_PATH (or a default) and calls NewWithStore.

@@ -17,6 +17,10 @@ type ClientHub struct {
 	drainDone       chan struct{}
 	handoffMaxItems int
 	handoffMaxBytes uint64
+	queueMaxBytes   uint64
+	processMaxBytes uint64
+	outboundBytes   uint64
+	metrics         *relayMetrics
 	resolveHandoff  func(*wsClient, []queuedV2Notification) error
 }
 
@@ -39,6 +43,7 @@ type wsClient struct {
 	stopOnce            sync.Once
 	closed              chan struct{}
 	closedOnce          sync.Once
+	outboundBytes       uint64
 }
 
 type websocketDrain struct {
@@ -79,11 +84,18 @@ func NewClientHub() *ClientHub {
 }
 
 func NewClientHubWithMailboxLimits(maxItems int, maxBytes uint64) *ClientHub {
+	return newClientHubWithMemoryLimits(maxItems, maxBytes, defaultWebSocketQueueMaxBytes, defaultWebSocketProcessQueueMaxBytes, nil)
+}
+
+func newClientHubWithMemoryLimits(maxItems int, maxBytes, queueMaxBytes, processMaxBytes uint64, metrics *relayMetrics) *ClientHub {
 	return &ClientHub{
 		clients:         make(map[string]*wsClient),
 		active:          make(map[*wsClient]struct{}),
 		handoffMaxItems: maxItems,
 		handoffMaxBytes: maxBytes,
+		queueMaxBytes:   queueMaxBytes,
+		processMaxBytes: processMaxBytes,
+		metrics:         metrics,
 	}
 }
 
@@ -182,7 +194,47 @@ func (h *ClientHub) Unregister(c *wsClient) {
 	}
 	delete(h.active, c)
 	c.stop()
-	c.markClosed()
+	if len(c.pendingCapabilities) > 0 {
+		h.releaseOutboundLocked(c, outboundFrameCharge(c.pendingCapabilities))
+		c.pendingCapabilities = nil
+	}
+	for {
+		select {
+		case frame := <-c.outbound:
+			h.releaseOutboundLocked(c, outboundFrameCharge(frame))
+		default:
+			c.markClosed()
+			return
+		}
+	}
+}
+
+// releaseOutbound keeps bytes owned by the process until the socket writer has
+// finished using the frame. Buffered frames are reclaimed by Unregister.
+func (h *ClientHub) releaseOutbound(c *wsClient, bytes uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.releaseOutboundLocked(c, bytes)
+}
+
+func (h *ClientHub) releaseOutboundLocked(c *wsClient, bytes uint64) {
+	if bytes > c.outboundBytes {
+		bytes = c.outboundBytes
+	}
+	if bytes > h.outboundBytes {
+		bytes = h.outboundBytes
+	}
+	c.outboundBytes -= bytes
+	h.outboundBytes -= bytes
+	if h.metrics != nil {
+		h.metrics.addWebSocketOutboundBytes(-int64(bytes))
+	}
+}
+
+func (h *ClientHub) outboundBytesCharged() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.outboundBytes
 }
 
 func (h *ClientHub) Stop(deviceID string) {
@@ -267,11 +319,11 @@ func (h *ClientHub) SendCapabilitiesForPair(deviceID, pairID string, selfProtoco
 	}
 	switch c.protocol {
 	case protocolV2Handshake:
-		c.pendingCapabilities = append(c.pendingCapabilities[:0], frame...)
+		if !h.replacePendingCapabilitiesLocked(c, frame) {
+			c.stop()
+		}
 	case protocolV2:
-		select {
-		case c.outbound <- append([]byte(nil), frame...):
-		default:
+		if !h.enqueueLocked(c, frame) {
 			c.stop()
 		}
 	}
@@ -342,7 +394,8 @@ func (h *ClientHub) TransferV2BatchForPair(deviceID, pairID string, notification
 				queueIndexes = append(queueIndexes, i)
 			}
 		}
-		if cap(c.outbound)-len(c.outbound) < len(queueIndexes) {
+		queueBytes, ok := framesBytes(frames, queueIndexes)
+		if !ok || !h.canEnqueueLocked(c, len(queueIndexes), queueBytes) {
 			c.stop()
 			return false
 		}
@@ -351,7 +404,7 @@ func (h *ClientHub) TransferV2BatchForPair(deviceID, pairID string, notification
 				delete(c.handoffSuppress, notification.msgID)
 				continue
 			}
-			c.outbound <- append([]byte(nil), frames[i]...)
+			h.enqueueAdmittedLocked(c, frames[i])
 		}
 		return true
 	default:
@@ -376,12 +429,13 @@ func (h *ClientHub) TransferHandshakeV2Batch(c *wsClient, notifications []queued
 		return false
 	default:
 	}
-	if cap(c.outbound)-len(c.outbound) < len(frames) {
+	queueBytes, ok := framesBytes(frames, nil)
+	if !ok || !h.canEnqueueLocked(c, len(frames), queueBytes) {
 		c.stop()
 		return false
 	}
 	for _, frame := range frames {
-		c.outbound <- append([]byte(nil), frame...)
+		h.enqueueAdmittedLocked(c, frame)
 	}
 	return true
 }
@@ -432,10 +486,7 @@ func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) bool {
 		})
 		if len(queued) == 0 {
 			if len(c.pendingCapabilities) > 0 {
-				select {
-				case c.outbound <- append([]byte(nil), c.pendingCapabilities...):
-					c.pendingCapabilities = nil
-				default:
+				if !h.transferPendingCapabilitiesLocked(c) {
 					c.stop()
 					h.mu.Unlock()
 					return false
@@ -472,11 +523,101 @@ func (h *ClientHub) send(deviceID, pairID string, frame []byte, accepts func(*ws
 	select {
 	case <-c.done:
 		return false
-	case c.outbound <- append([]byte(nil), frame...):
-		return true
 	default:
+		return h.enqueueLocked(c, frame)
+	}
+}
+
+func (h *ClientHub) enqueueLocked(c *wsClient, frame []byte) bool {
+	bytes := outboundFrameCharge(frame)
+	if !h.canEnqueueLocked(c, 1, bytes) {
 		return false
 	}
+	h.enqueueAdmittedLocked(c, frame)
+	return true
+}
+
+func (h *ClientHub) canEnqueueLocked(c *wsClient, items int, bytes uint64) bool {
+	if items < 0 || cap(c.outbound)-len(c.outbound) < items || bytes > h.queueMaxBytes ||
+		c.outboundBytes > h.queueMaxBytes-bytes || bytes > h.processMaxBytes ||
+		h.outboundBytes > h.processMaxBytes-bytes {
+		if h.metrics != nil {
+			h.metrics.recordWebSocketAdmissionRejected()
+		}
+		return false
+	}
+	return true
+}
+
+func (h *ClientHub) enqueueAdmittedLocked(c *wsClient, frame []byte) {
+	copyFrame := append([]byte(nil), frame...)
+	bytes := outboundFrameCharge(copyFrame)
+	c.outboundBytes += bytes
+	h.outboundBytes += bytes
+	if h.metrics != nil {
+		h.metrics.addWebSocketOutboundBytes(int64(bytes))
+	}
+	c.outbound <- copyFrame
+}
+
+func framesBytes(frames [][]byte, indexes []int) (uint64, bool) {
+	var total uint64
+	if indexes == nil {
+		indexes = make([]int, len(frames))
+		for i := range frames {
+			indexes[i] = i
+		}
+	}
+	for _, index := range indexes {
+		bytes := outboundFrameCharge(frames[index])
+		if total > ^uint64(0)-bytes {
+			return 0, false
+		}
+		total += bytes
+	}
+	return total, true
+}
+
+func (h *ClientHub) replacePendingCapabilitiesLocked(c *wsClient, frame []byte) bool {
+	oldCharge := uint64(0)
+	if len(c.pendingCapabilities) > 0 {
+		oldCharge = outboundFrameCharge(c.pendingCapabilities)
+	}
+	newCharge := outboundFrameCharge(frame)
+	if newCharge > oldCharge {
+		additional := newCharge - oldCharge
+		if additional > h.queueMaxBytes || c.outboundBytes > h.queueMaxBytes-additional ||
+			additional > h.processMaxBytes || h.outboundBytes > h.processMaxBytes-additional {
+			if h.metrics != nil {
+				h.metrics.recordWebSocketAdmissionRejected()
+			}
+			return false
+		}
+		c.outboundBytes += additional
+		h.outboundBytes += additional
+		if h.metrics != nil {
+			h.metrics.addWebSocketOutboundBytes(int64(additional))
+		}
+	} else {
+		h.releaseOutboundLocked(c, oldCharge-newCharge)
+	}
+	c.pendingCapabilities = append([]byte(nil), frame...)
+	return true
+}
+
+// transferPendingCapabilitiesLocked moves the already charged owned frame to
+// the socket queue without copying or charging it a second time.
+func (h *ClientHub) transferPendingCapabilitiesLocked(c *wsClient) bool {
+	if cap(c.outbound)-len(c.outbound) < 1 {
+		return false
+	}
+	c.outbound <- c.pendingCapabilities
+	c.pendingCapabilities = nil
+	return true
+}
+
+func outboundFrameCharge(frame []byte) uint64 {
+	return uint64(len(frame)) + webSocketFrameMemoryOverhead
 }
 
 func (h *ClientHub) SetProtocol(c *wsClient, protocol connectionProtocol) bool {

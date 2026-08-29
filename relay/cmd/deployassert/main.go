@@ -164,13 +164,17 @@ func validateComposeJSON(raw []byte, mode, domain string) error {
 		return errors.New("production relay must enable trusted proxy headers")
 	}
 	for key, value := range map[string]string{
-		"TWINOTIFY_ENV":                  "production",
-		"REQUIRE_MUTUAL_PAIR_SIGNATURES": "true",
-		"MIN_FREE_DISK_BYTES":            "536870912",
-		"MAX_OPEN_CONNECTIONS":           "512",
-		"BACKUP_DIR":                     "/backups",
-		"BACKUP_INTERVAL":                "6h",
-		"BACKUP_RETENTION_COUNT":         "14",
+		"TWINOTIFY_ENV":                     "production",
+		"REQUIRE_MUTUAL_PAIR_SIGNATURES":    "true",
+		"MIN_FREE_DISK_BYTES":               "536870912",
+		"MAX_OPEN_CONNECTIONS":              "64",
+		"WEBSOCKET_QUEUE_MAX_BYTES":         "8388608",
+		"WEBSOCKET_PROCESS_QUEUE_MAX_BYTES": "67108864",
+		"DURABLE_TRANSFER_MAX_BYTES":        "4194304",
+		"RELAY_MEMORY_LIMIT_BYTES":          "268435456",
+		"BACKUP_DIR":                        "/backups",
+		"BACKUP_INTERVAL":                   "6h",
+		"BACKUP_RETENTION_COUNT":            "14",
 	} {
 		if relay.Environment[key] != value {
 			return fmt.Errorf("production relay %s = %q, want %q", key, relay.Environment[key], value)

@@ -51,6 +51,37 @@ func TestMailboxPutIsIdempotentAndSurvivesReopen(t *testing.T) {
 	}
 }
 
+func TestPendingMetadataForPairPreservesAuthorizationOrderAndOmitsEnvelope(t *testing.T) {
+	b := openTestBolt(t)
+	pairs, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "pair-one", DeviceA: "dev-a", DeviceB: "dev-b"}); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMailboxStore(b, MailboxLimits{MaxItems: 4, MaxBytes: 1 << 20, Retention: time.Hour})
+	wantOrder := []string{"22222222-2222-4222-8222-222222222222", "11111111-1111-4111-8111-111111111111"}
+	for index, id := range wantOrder {
+		record := testMailboxRecord(id, fmt.Sprintf("%d", index))
+		record.SenderDevice, record.RecipientDevice = "dev-a", "dev-b"
+		if _, err := store.PutForPair("pair-one", record, time.UnixMilli(int64(1000+index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metadata, err := store.PendingMetadataForPair("pair-one", "dev-b", 4)
+	if err != nil || len(metadata) != 2 || metadata[0].MsgID != wantOrder[0] || metadata[1].MsgID != wantOrder[1] || metadata[0].SenderDevice != "dev-a" {
+		t.Fatalf("ordered metadata = %#v, %v", metadata, err)
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil || bytes.Contains(raw, []byte("envelope")) {
+		t.Fatalf("metadata exposed envelope: %s, %v", raw, err)
+	}
+	if _, err := store.PendingMetadataForPair("wrong-pair", "dev-b", 4); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong-pair metadata error = %v, want not found", err)
+	}
+}
+
 func TestMailboxLiveByIDsCopiesAndOmitsExpiredRecords(t *testing.T) {
 	b := openTestBolt(t)
 	s := NewMailboxStore(b, MailboxLimits{MaxItems: 2, MaxBytes: 1024, Retention: time.Hour})

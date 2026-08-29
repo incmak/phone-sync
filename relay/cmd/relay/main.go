@@ -56,6 +56,11 @@ func runRelay(getenv func(string) string) error {
 	config.RequireMutualPairSignatures = runtimeConfig.requireMutualPairSignatures
 	config.CapacityCheck = server.NewDiskCapacityCheck(runtimeConfig.boltPath, runtimeConfig.minFreeDiskBytes)
 	config.BuildVersion = runtimeConfig.buildVersion
+	config.WebSocketQueueMaxBytes = runtimeConfig.webSocketQueueMaxBytes
+	config.WebSocketProcessQueueMaxBytes = runtimeConfig.webSocketProcessQueueMaxBytes
+	config.DurableTransferMaxBytes = runtimeConfig.durableTransferMaxBytes
+	config.RelayMemoryLimitBytes = runtimeConfig.relayMemoryLimitBytes
+	config.MaxOpenConnections = runtimeConfig.maxOpenConnections
 	app, err := server.NewWithConfigChecked(b, config)
 	if err != nil {
 		return errors.New("initialize relay server")

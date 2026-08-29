@@ -64,6 +64,15 @@ type MailboxRecord struct {
 	AcceptanceSequence uint64 `json:"acceptance_sequence,omitempty"`
 }
 
+// MailboxPendingMetadata is the bounded reconnect snapshot. It deliberately
+// omits Envelope so scanning an order index cannot retain mailbox ciphertext.
+type MailboxPendingMetadata struct {
+	SenderDevice       string `json:"sender_device"`
+	MsgID              string `json:"msg_id"`
+	ByteSize           uint64 `json:"byte_size"`
+	AcceptanceSequence uint64 `json:"acceptance_sequence,omitempty"`
+}
+
 type PutResult struct {
 	AcceptedAt         int64
 	AcceptanceSequence uint64
@@ -329,6 +338,51 @@ func (s *MailboxStore) pendingForPair(expectedPairID, recipient string, limit in
 				continue
 			}
 			result = append(result, copyMailboxRecord(rec))
+		}
+		return nil
+	})
+	return result, err
+}
+
+// PendingMetadataForPair returns the oldest authorized routing metadata in
+// mailbox order without copying Envelope bytes out of Bolt's mmap.
+func (s *MailboxStore) PendingMetadataForPair(pairID, recipient string, limit int) ([]MailboxPendingMetadata, error) {
+	if pairID == "" || recipient == "" || strings.ContainsRune(recipient, '\x00') || limit <= 0 {
+		return nil, errors.New("invalid pair session")
+	}
+	result := make([]MailboxPendingMetadata, 0, limit)
+	err := s.bolt.View(func(tx *bbolt.Tx) error {
+		_, pair, err := confirmedPairForSessionTx(tx, recipient, pairID)
+		if err != nil {
+			return err
+		}
+		expectedSender := pair.DeviceA
+		if recipient == pair.DeviceA {
+			expectedSender = pair.DeviceB
+		}
+		items := tx.Bucket([]byte(bucketMailboxItems))
+		order := tx.Bucket([]byte(bucketMailboxOrder))
+		if items == nil || order == nil {
+			return nil
+		}
+		prefix := recipientPrefix(recipient)
+		cursor := order.Cursor()
+		for key, _ := cursor.Seek(prefix); key != nil && len(result) < limit && bytes.HasPrefix(key, prefix); key, _ = cursor.Next() {
+			_, msgID, ok := parseOrderKey(key)
+			if !ok {
+				return errors.New("invalid mailbox order key")
+			}
+			raw := items.Get(itemKey(recipient, msgID))
+			if raw == nil {
+				return errors.New("mailbox item missing for order index")
+			}
+			var metadata MailboxPendingMetadata
+			if err := json.Unmarshal(raw, &metadata); err != nil {
+				return fmt.Errorf("unmarshal mailbox metadata: %w", err)
+			}
+			if metadata.SenderDevice == expectedSender {
+				result = append(result, metadata)
+			}
 		}
 		return nil
 	})

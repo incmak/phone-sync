@@ -21,9 +21,18 @@ const (
 	maxRelayControlFrameSize = maxMessageSize + (4 << 10)
 	mailboxBatchSize         = 64
 	outboundQueueSize        = 128
-	pongWait                 = 60 * time.Second
-	pingPeriod               = (pongWait * 9) / 10
-	writeWait                = 10 * time.Second
+	// Queue reservations include serialized bytes plus a conservative per-frame
+	// allocation charge. Together these leave headroom for Go, Bolt, TLS, and
+	// the byte-bounded transfer workspace inside the 256 MiB container limit.
+	defaultWebSocketQueueMaxBytes        = 8 << 20
+	defaultWebSocketProcessQueueMaxBytes = 64 << 20
+	webSocketFrameMemoryOverhead         = 16 << 10
+	defaultDurableTransferMaxBytes       = 4 << 20
+	maxRelayDeliverOverhead              = 256
+	maxRelayDeliverFrameBytes            = maxMessageSize + maxRelayDeliverOverhead
+	pongWait                             = 60 * time.Second
+	pingPeriod                           = (pongWait * 9) / 10
+	writeWait                            = 10 * time.Second
 )
 
 var upgrader = websocket.Upgrader{
@@ -170,7 +179,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			case <-client.done:
 				return
 			case frame := <-client.outbound:
-				if err := writeMsg(websocket.TextMessage, frame); err != nil {
+				err := writeMsg(websocket.TextMessage, frame)
+				s.clientHub.releaseOutbound(client, outboundFrameCharge(frame))
+				if err != nil {
 					return
 				}
 			}
@@ -420,7 +431,7 @@ func (s *Server) handleRelayHelloForPair(
 		}
 	}
 
-	pending, err := s.mailbox.PendingForPair(pairID, deviceID, mailboxBatchSize)
+	pending, err := s.mailbox.PendingMetadataForPair(pairID, deviceID, mailboxBatchSize)
 	if err != nil {
 		return err
 	}
@@ -633,36 +644,76 @@ func (s *Server) transferDurableRecords(
 	notifications []queuedV2Notification,
 	enqueue func([]queuedV2Notification, [][]byte) bool,
 ) ([]string, error) {
+	if s.relayDeliveryTransferBeforeAdmission != nil {
+		s.relayDeliveryTransferBeforeAdmission()
+	}
+	s.deliveryTransferMu.Lock()
+	defer s.deliveryTransferMu.Unlock()
 	if s.relayBeforeDeliveryTransfer != nil {
 		s.relayBeforeDeliveryTransfer(recipient)
 	}
-	msgIDs := make([]string, 0, len(notifications))
-	for _, notification := range notifications {
-		msgIDs = append(msgIDs, notification.msgID)
-	}
 	transferred := []string{}
-	err := s.mailbox.TransferLiveByIDsForPair(pairID, recipient, msgIDs, time.Now(), func(records []store.MailboxRecord) error {
-		byID := make(map[string]store.MailboxRecord, len(records))
-		for _, rec := range records {
-			byID[rec.MsgID] = rec
+	for start := 0; start < len(notifications); {
+		end := durableTransferBatchEnd(notifications, start, s.durableTransferMaxBytes)
+		batch := notifications[start:end]
+		msgIDs := make([]string, 0, len(batch))
+		for _, notification := range batch {
+			msgIDs = append(msgIDs, notification.msgID)
 		}
-		liveNotices := make([]queuedV2Notification, 0, len(records))
-		frames := make([][]byte, 0, len(records))
-		for _, notification := range notifications {
-			if rec, ok := byID[notification.msgID]; ok {
-				liveNotices = append(liveNotices, notification)
-				frames = append(frames, marshalRelayDeliver(rec))
+		err := s.mailbox.TransferLiveByIDsForPair(pairID, recipient, msgIDs, time.Now(), func(records []store.MailboxRecord) error {
+			byID := make(map[string]store.MailboxRecord, len(records))
+			for _, rec := range records {
+				byID[rec.MsgID] = rec
 			}
+			liveNotices := make([]queuedV2Notification, 0, len(records))
+			frames := make([][]byte, 0, len(records))
+			var frameBytes uint64
+			for _, notification := range batch {
+				if rec, ok := byID[notification.msgID]; ok {
+					frame := marshalRelayDeliver(rec)
+					if uint64(len(frame)) > s.durableTransferMaxBytes || frameBytes > s.durableTransferMaxBytes-uint64(len(frame)) {
+						return errors.New("delivery batch exceeds memory limit")
+					}
+					liveNotices = append(liveNotices, notification)
+					frames = append(frames, frame)
+					frameBytes += uint64(len(frame))
+				}
+			}
+			if !enqueue(liveNotices, frames) {
+				return errors.New("delivery queue unavailable")
+			}
+			for _, notification := range liveNotices {
+				transferred = append(transferred, notification.msgID)
+			}
+			return nil
+		})
+		if err != nil {
+			return transferred, err
 		}
-		if !enqueue(liveNotices, frames) {
-			return errors.New("delivery queue unavailable")
+		start = end
+	}
+	return transferred, nil
+}
+
+func durableTransferBatchEnd(notifications []queuedV2Notification, start int, limit uint64) int {
+	end := start
+	var bytes uint64
+	for end < len(notifications) {
+		envelopeBytes := notifications[end].byteSize
+		if envelopeBytes == 0 || envelopeBytes > maxMessageSize {
+			envelopeBytes = maxMessageSize
 		}
-		for _, notification := range liveNotices {
-			transferred = append(transferred, notification.msgID)
+		next := envelopeBytes + maxRelayDeliverOverhead
+		if end > start && (next > limit || bytes > limit-next) {
+			break
 		}
-		return nil
-	})
-	return transferred, err
+		bytes += next
+		end++
+		if bytes >= limit {
+			break
+		}
+	}
+	return end
 }
 
 func isBoundedRelayPut(raw []byte) bool {
