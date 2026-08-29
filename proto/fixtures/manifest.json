@@ -19,6 +19,18 @@
       "valid": true
     },
     {
+      "file": "v2-valid/notif-post-actions-valid.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/notif-post-legacy-valid.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "valid": true
+    },
+    {
       "file": "v2-invalid/relay-ack-bad-digest.json",
       "scope": "server",
       "type": "relay_control",
@@ -82,6 +94,24 @@
       "file": "v2-invalid/call-state-invalid-direction.json",
       "scope": "cross_layer",
       "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-post-four-actions.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-post-long-action-title.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-post-remote-input-key.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
       "expected_code": "invalid_frame"
     }
   ]

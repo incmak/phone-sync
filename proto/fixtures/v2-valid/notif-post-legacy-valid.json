@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "type": "notif.update",
+  "canon_id": "dev-a:com.example.mail:9:inbox",
+  "app_name": "Example Mail",
+  "package_name": "com.example.mail",
+  "id": 9,
+  "tag": "inbox",
+  "title": "Mail",
+  "text": "Legacy sender payload",
+  "sub_text": null,
+  "big_text": null,
+  "visibility": "private",
+  "is_group_summary": false,
+  "is_ongoing": false,
+  "is_clearable": true,
+  "small_icon_png_b64": null,
+  "large_icon_png_b64": null,
+  "ts": 1788267348000
+}

@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "type": "notif.post",
+  "canon_id": "dev-a:com.example.chat:42:thread-7",
+  "app_name": "Example Chat",
+  "package_name": "com.example.chat",
+  "id": 42,
+  "tag": "thread-7",
+  "title": "New message",
+  "text": "Can you make it?",
+  "sub_text": null,
+  "big_text": "Can you make it tonight?",
+  "visibility": "private",
+  "is_group_summary": false,
+  "is_ongoing": false,
+  "is_clearable": true,
+  "small_icon_png_b64": null,
+  "large_icon_png_b64": null,
+  "ts": 1788267348000,
+  "is_auto_cancel": true,
+  "actions": [
+    {
+      "action_id": "b6d3142a-e936-4d7d-b15a-bdf318bb0539",
+      "title": "Reply",
+      "semantic": 1,
+      "reply": true,
+      "reply_label": "Message"
+    }
+  ]
+}

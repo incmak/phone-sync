@@ -101,13 +101,13 @@ func validateFixtureDeclaration(fixture protocolFixture) error {
 			return fmt.Errorf("unsupported server fixture code %q", fixture.ExpectedCode)
 		}
 	case "cross_layer":
-		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" {
+		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" {
 			return fmt.Errorf("unknown cross-layer fixture type %q", fixture.Type)
 		}
 		if !fixture.Valid && fixture.Type == "outer_inner_pair" && fixture.ExpectedCode != "outer_inner_id_mismatch" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
-		if !fixture.Valid && fixture.Type == "call_state" && fixture.ExpectedCode != "invalid_frame" {
+		if !fixture.Valid && (fixture.Type == "call_state" || fixture.Type == "notif_post_payload") && fixture.ExpectedCode != "invalid_frame" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
 	default:
@@ -333,6 +333,11 @@ func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []b
 			return fixtureCodeError("invalid_frame")
 		}
 		if !callSessionIDPattern.MatchString(inner.Payload.SessionID) || inner.CanonID != "call:"+strings.ToLower(inner.Payload.SessionID) {
+			return fixtureCodeError("invalid_frame")
+		}
+		return nil
+	case "notif_post_payload":
+		if err := validator.ValidateNotifPostPayload(raw); err != nil {
 			return fixtureCodeError("invalid_frame")
 		}
 		return nil

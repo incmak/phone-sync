@@ -19,6 +19,7 @@ type Validator struct {
 	relayControl *jsonschema.Schema
 	innerV2      *jsonschema.Schema
 	peerReceipt  *jsonschema.Schema
+	notifPost    *jsonschema.Schema
 }
 
 // schemaBaseURL must match the $id prefix used in /proto/*.schema.json.
@@ -69,6 +70,10 @@ func NewValidator() (*Validator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("compile peer receipt: %w", err)
 	}
+	notifPost, err := compiler.Compile(schemaBaseURL + "notif-post.schema.json")
+	if err != nil {
+		return nil, fmt.Errorf("compile notification post payload: %w", err)
+	}
 
 	return &Validator{
 		legacyPacket: legacyPacket,
@@ -76,6 +81,7 @@ func NewValidator() (*Validator, error) {
 		relayControl: relayControl,
 		innerV2:      innerV2,
 		peerReceipt:  peerReceipt,
+		notifPost:    notifPost,
 	}, nil
 }
 
@@ -97,6 +103,10 @@ func (v *Validator) ValidateEncryptedEnvelope(raw []byte) error {
 
 func (v *Validator) ValidateRelayControl(raw []byte) error {
 	return validateJSON(v.relayControl, raw)
+}
+
+func (v *Validator) ValidateNotifPostPayload(raw []byte) error {
+	return validateJSON(v.notifPost, raw)
 }
 
 // ValidateEnvelope preserves the v1 WebSocket call site until Task 4 introduces
