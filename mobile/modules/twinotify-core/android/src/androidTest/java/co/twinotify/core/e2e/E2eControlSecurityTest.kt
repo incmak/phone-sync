@@ -214,6 +214,54 @@ class E2eControlSecurityTest {
     }
 
     @Test
+    fun notificationFixtureControlAcceptsOnlyClosedFixtureAndOperationEnums() {
+        val receiver = E2eControlReceiver()
+        val token = E2eSessionToken.forTest(context, "notification-fixture-closed-world")
+
+        for (fixture in listOf("reply", "mark_read", "auto_cancel", "persistent")) {
+            for (operation in listOf("post", "update", "cancel", "reset_counters")) {
+                val result = receiver.executeForTest(
+                    context,
+                    E2eCommand(
+                        requestId = "fixture-$fixture-$operation",
+                        name = "NOTIFICATION_FIXTURE",
+                        token = token,
+                        params = mapOf("fixture" to fixture, "operation" to operation),
+                    ),
+                )
+                assertTrue(result.code == "ok" || result.code == "unavailable", result.toJson().toString())
+            }
+        }
+
+        for (forbidden in listOf("title", "text", "package", "component", "action", "intent", "intent_extra", "reply_text")) {
+            val result = receiver.executeForTest(
+                context,
+                E2eCommand(
+                    requestId = "fixture-forbidden-$forbidden",
+                    name = "NOTIFICATION_FIXTURE",
+                    token = token,
+                    params = mapOf("fixture" to "reply", "operation" to "post", forbidden to "arbitrary"),
+                ),
+            )
+            assertEquals("invalid", result.code, forbidden)
+        }
+
+        for (params in listOf(
+            emptyMap(),
+            mapOf("fixture" to "arbitrary", "operation" to "post"),
+            mapOf("fixture" to "reply", "operation" to "arbitrary"),
+        )) {
+            assertEquals(
+                "invalid",
+                receiver.executeForTest(
+                    context,
+                    E2eCommand("fixture-invalid", "NOTIFICATION_FIXTURE", token = token, params = params),
+                ).code,
+            )
+        }
+    }
+
+    @Test
     fun pairingWaitAndSignatureCommandsAreAllowlistedButValidateInputs() {
         val token = E2eSessionToken.forTest(context, "pairing-command-allowlist")
         listOf("AWAIT_PEER_HELLO", "SIGN_CONFIRMATION", "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG").forEach { command ->

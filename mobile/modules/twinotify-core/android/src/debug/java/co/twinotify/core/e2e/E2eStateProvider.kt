@@ -83,6 +83,7 @@ class E2eStateProvider : ContentProvider() {
                 .put("product_observations", productObservations(context, database, activeOutbox, outboxBytes))
             root.put("canonical", canonical(database))
             root.put("activity", activity(database))
+            root.put("notification_action_fixture", NotificationActionFixture.snapshot(context))
             root.toString()
         }
 

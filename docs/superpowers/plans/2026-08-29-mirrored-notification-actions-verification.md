@@ -4,7 +4,7 @@
 
 **Goal:** Prove action fidelity, at-most-once dispatch, expiry, tap routing, UI behavior, and OEM behavior with repeatable host tests, two-emulator scenarios, and recorded MI 11X plus POCO F1 evidence.
 
-**Architecture:** Debug-only fixed fixtures create notifications with known reply and broadcast actions without accepting arbitrary content or intents. The Go E2E harness drives typed controls and reads sanitized state counters. A dedicated fail-closed evidence verifier binds physical results to the tested APK and commit. Automated tests supplement but never replace physical acceptance.
+**Architecture:** A dedicated debug-only fixture APK creates notifications with known reply and broadcast actions without accepting arbitrary content or intents. Twinotify's authenticated debug bridge drives that APK through a closed enum contract and reads sanitized state counters. This separation is required because Twinotify's production listener correctly ignores notifications posted by its own package. The Go E2E harness uses the same typed controls. A dedicated fail-closed evidence verifier binds physical results to the tested APK and commit. Automated tests supplement but never replace physical acceptance.
 
 **Tech Stack:** Go E2E harness, ADB, Android debug controls, Kotlin instrumented tests, Bash evidence verifier, JSON/JQ, two Android emulators, Xiaomi MI 11X, POCO F1.
 
@@ -26,11 +26,18 @@
 
 **Files:**
 
+- Create: `mobile/fixtures/notification-action-fixture/build.gradle`
+- Create: `mobile/fixtures/notification-action-fixture/src/main/AndroidManifest.xml`
+- Create: `mobile/fixtures/notification-action-fixture/src/main/java/co/twinotify/fixture/*.java`
+- Create: `mobile/fixtures/notification-action-fixture/src/androidTest/java/co/twinotify/fixture/NotificationActionFixtureTest.java`
 - Create: `mobile/modules/twinotify-core/android/src/debug/java/co/twinotify/core/e2e/NotificationActionFixture.kt`
+- Modify: `mobile/modules/twinotify-core/android/src/debug/AndroidManifest.xml`
 - Modify: `mobile/modules/twinotify-core/android/src/debug/java/co/twinotify/core/e2e/E2eControlReceiver.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/debug/java/co/twinotify/core/e2e/E2eStateProvider.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/e2e/E2eControlSecurityTest.kt`
 - Create: `mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/e2e/NotificationActionFixtureTest.kt`
+- Modify: `mobile/plugins/with-android-toolchain-workarounds.js`
+- Modify: `mobile/plugins/__tests__/with-android-toolchain-workarounds.test.js`
 
 ### Step 1: Specify the closed fixture surface
 
@@ -45,18 +52,20 @@ The reply notification owns a real mutable `PendingIntent` plus free-form `Remot
 
 Expected initial result: FAIL because the fixture control is unknown.
 
-### Step 2: Implement debug-only fixtures
+### Step 2: Implement the dedicated debug-only fixture APK
 
-Keep the fixture under `src/debug`, never `src/main`. Use hard-coded local strings and action definitions. Expose only counters such as `replyDispatchCount`, `markReadDispatchCount`, `lastFixtureGeneration`, and safe terminal status through `E2eStateProvider`.
+Keep the Twinotify controller under `src/debug`, never `src/main`. Put the actual notification producer in the dedicated `co.twinotify.fixture` debug APK so capture traverses the organic listener path instead of Twinotify's own-package exclusion. Protect its exported command surface with a signature permission, target an exact explicit component, and permit only the fixed fixture and operation enums. Use hard-coded local strings and action definitions. Expose only counters such as `replyDispatchCount`, `markReadDispatchCount`, `lastFixtureGeneration`, and safe terminal status through `E2eStateProvider`.
+
+Wire the fixture module into generated Android settings through the existing config plugin so `expo prebuild --clean` preserves it. Sign the fixture with the app debug key; never package it into the Twinotify APK.
 
 ### Step 3: Verify release exclusion and commit
 
-Run instrumented security/fixture tests and inspect the release source set or APK manifest to prove the receiver is absent from release.
+Run both fixture-owned and Twinotify bridge instrumented tests. Inspect the Twinotify release APK manifest to prove the controller, provider, signature permission, and fixture package are absent from release.
 
 Commit:
 
 ```bash
-git add mobile/modules/twinotify-core/android/src/debug mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/e2e
+git add mobile/fixtures/notification-action-fixture mobile/modules/twinotify-core/android/src/debug mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/e2e mobile/plugins docs/superpowers/plans/2026-08-29-mirrored-notification-actions-verification.md
 git commit -m "test(mobile): add fixed notification action fixtures"
 ```
 

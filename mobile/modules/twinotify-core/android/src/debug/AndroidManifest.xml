@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+  <permission
+    android:name="co.twinotify.app.permission.E2E_FIXTURE"
+    android:protectionLevel="signature" />
+
+  <uses-permission android:name="co.twinotify.app.permission.E2E_FIXTURE" />
   <application>
     <receiver
       android:name="co.twinotify.core.e2e.E2eControlReceiver"

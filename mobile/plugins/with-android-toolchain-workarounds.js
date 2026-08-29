@@ -1,7 +1,11 @@
-const { withProjectBuildGradle } = require('expo/config-plugins');
+const { withProjectBuildGradle, withSettingsGradle } = require('expo/config-plugins');
 
 const ANCHOR = 'apply plugin: "com.facebook.react.rootproject"';
 const MARKER = '// Twinotify: isolate AGP lint crash in third-party Kotlin scripts.';
+const SETTINGS_ANCHOR = "include ':app'";
+const FIXTURE_MARKER = "include ':notification-action-fixture'";
+const FIXTURE_SETTINGS = `${FIXTURE_MARKER}
+project(':notification-action-fixture').projectDir = new File(rootProject.projectDir, '../fixtures/notification-action-fixture')`;
 const WORKAROUND = `${MARKER}
 // Android lint issue 430991549 is fixed in AGP 9, but React Native 0.86 pins
 // AGP 8.12. Keep lint enabled for the app and twinotify-core; only the two
@@ -68,8 +72,18 @@ function patchProjectBuildGradle(contents) {
   return contents.replace(ANCHOR, `${ANCHOR}\n\n${WORKAROUND}`);
 }
 
+function patchSettingsGradle(contents) {
+  if (contents.includes(FIXTURE_MARKER)) {
+    return contents;
+  }
+  if (!contents.includes(SETTINGS_ANCHOR)) {
+    throw new Error('Android app settings anchor was not found');
+  }
+  return contents.replace(SETTINGS_ANCHOR, `${SETTINGS_ANCHOR}\n${FIXTURE_SETTINGS}`);
+}
+
 function withAndroidToolchainWorkarounds(config) {
-  return withProjectBuildGradle(config, (gradleConfig) => {
+  const withBuildWorkarounds = withProjectBuildGradle(config, (gradleConfig) => {
     if (gradleConfig.modResults.language !== 'groovy') {
       throw new Error('Twinotify Android toolchain workarounds require Groovy');
     }
@@ -78,7 +92,17 @@ function withAndroidToolchainWorkarounds(config) {
     );
     return gradleConfig;
   });
+  return withSettingsGradle(withBuildWorkarounds, (settingsConfig) => {
+    if (settingsConfig.modResults.language !== 'groovy') {
+      throw new Error('Twinotify Android fixture settings require Groovy');
+    }
+    settingsConfig.modResults.contents = patchSettingsGradle(
+      settingsConfig.modResults.contents
+    );
+    return settingsConfig;
+  });
 }
 
 module.exports = withAndroidToolchainWorkarounds;
 module.exports.patchProjectBuildGradle = patchProjectBuildGradle;
+module.exports.patchSettingsGradle = patchSettingsGradle;

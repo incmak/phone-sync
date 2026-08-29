@@ -1,9 +1,15 @@
 const {
   patchProjectBuildGradle,
+  patchSettingsGradle,
 } = require('../with-android-toolchain-workarounds');
 
 const BASE_GRADLE = `apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"
+`;
+const BASE_SETTINGS = `rootProject.name = 'Twinotify'
+
+include ':app'
+includeBuild(expoAutolinking.reactNativeGradlePlugin)
 `;
 
 describe('withAndroidToolchainWorkarounds', () => {
@@ -51,6 +57,22 @@ describe('withAndroidToolchainWorkarounds', () => {
   it('fails closed when the generated Gradle anchor changes', () => {
     expect(() => patchProjectBuildGradle('// unexpected template')).toThrow(
       'React Native root-project plugin anchor was not found'
+    );
+  });
+
+  it('includes the dedicated action fixture from its tracked source directory', () => {
+    const patched = patchSettingsGradle(BASE_SETTINGS);
+
+    expect(patched).toContain("include ':notification-action-fixture'");
+    expect(patched).toContain(
+      "project(':notification-action-fixture').projectDir = new File(rootProject.projectDir, '../fixtures/notification-action-fixture')"
+    );
+    expect(patchSettingsGradle(patched)).toBe(patched);
+  });
+
+  it('fails closed when the generated settings anchor changes', () => {
+    expect(() => patchSettingsGradle('// unexpected template')).toThrow(
+      'Android app settings anchor was not found'
     );
   });
 });

@@ -161,6 +161,7 @@ class E2eControlReceiver internal constructor(
             "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
             "SET_LAN_AVAILABLE",
+            "NOTIFICATION_FIXTURE",
             "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR",
             "OFFLINE_PAIR_START", "OFFLINE_PAIR_JOIN", "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL", "OFFLINE_PAIR_QUERY",
         )
@@ -396,6 +397,11 @@ class E2eControlReceiver internal constructor(
             SyncServiceStatus.requestRouteRetry()
             E2eCommandResult(requestId, "ok")
         }
+        "NOTIFICATION_FIXTURE" -> NotificationActionFixture.execute(
+            context,
+            command.param("fixture").orEmpty(),
+            command.param("operation").orEmpty(),
+        ).toResult(requestId)
         "RECONCILE" -> {
             val relayUrl = ServiceConfigStore.read(context).relayUrl
                 ?: return E2eCommandResult(requestId, "invalid", "relay URL is not configured")
@@ -513,11 +519,20 @@ class E2eControlReceiver internal constructor(
             "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL" -> setOf("secret_input_id")
             "OFFLINE_PAIR_QUERY" -> emptySet()
             "SET_LAN_AVAILABLE" -> setOf("available")
+            "NOTIFICATION_FIXTURE" -> setOf("fixture", "operation")
             "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR" -> emptySet()
             else -> return null
         }
         if (command.params.keys.any { it !in allowed }) return "unexpected parameter"
         if (command.params.values.any { it.encodeToByteArray().size > MAX_SECRET_BYTES }) return "parameter too large"
+        if (command.name == "NOTIFICATION_FIXTURE") {
+            if (command.param("fixture") !in setOf("reply", "mark_read", "auto_cancel", "persistent")) {
+                return "fixture must be reply, mark_read, auto_cancel, or persistent"
+            }
+            if (command.param("operation") !in setOf("post", "update", "cancel", "reset_counters")) {
+                return "operation must be post, update, cancel, or reset_counters"
+            }
+        }
         return null
     }
 
