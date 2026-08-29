@@ -38,6 +38,7 @@ done
 [[ -n "$body" && -n "$headers" && -n "$url" ]]
 status=404
 payload='not found'
+upgrade_header=false
 case "$url" in
 */health/live)
 	status=200
@@ -49,9 +50,15 @@ case "$url" in
 	;;
 */metrics) status=${FAKE_METRICS_STATUS:-404} ;;
 */not-public) status=404 ;;
-*/ws) status=401 ;;
+*/ws)
+	status=426
+	upgrade_header=true
+	;;
 esac
 printf 'HTTP/1.1 %s fixture\r\n' "$status" >"$headers"
+if [[ "$upgrade_header" == true ]]; then
+	printf 'Upgrade: websocket\r\n' >>"$headers"
+fi
 if [[ "${FAKE_SERVER_HEADER:-false}" == true ]]; then
 	printf 'Server: fixture\r\n' >>"$headers"
 fi

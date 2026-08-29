@@ -92,7 +92,8 @@ check_once() {
 	code=$(request_status /not-public "$smoke_root/not-public.body" "$smoke_root/not-public.headers") || return 1
 	[[ "$code" == 404 ]] || return 1
 	code=$(request_status /ws "$smoke_root/ws.body" "$smoke_root/ws.headers") || return 1
-	[[ "$code" == 401 ]] || return 1
+	[[ "$code" == 426 ]] || return 1
+	grep -Eiq '^Upgrade:[[:space:]]*websocket[[:space:]]*$' "$smoke_root/ws.headers" || return 1
 	return 0
 }
 
