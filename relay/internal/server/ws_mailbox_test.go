@@ -1968,6 +1968,16 @@ func TestWebSocketHelloPropagatesFloorToBothLiveTypedPeers(t *testing.T) {
 func TestWebSocketSimultaneousFreshHellosNeverRegressCapabilities(t *testing.T) {
 	srv, bolt := newMailboxTestServerWithBolt(t)
 	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	a := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer a.Close()
+	b := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer b.Close()
+
+	// Authentication now consumes each JTI in Bolt before the upgrade. Hold the
+	// writer only after both sockets are authenticated so this barrier continues
+	// to isolate the simultaneous capability writes it was designed to exercise.
 	held := make(chan struct{})
 	release := make(chan struct{})
 	writeDone := make(chan error, 1)
@@ -1980,12 +1990,6 @@ func TestWebSocketSimultaneousFreshHellosNeverRegressCapabilities(t *testing.T) 
 	}()
 	<-held
 
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-	a := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
-	defer a.Close()
-	b := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
-	defer b.Close()
 	writeMailboxFrame(t, a, map[string]any{
 		"v": 2, "type": "relay.hello", "protocols": []int{2, 1}, "app_version": "simultaneous-a",
 	})

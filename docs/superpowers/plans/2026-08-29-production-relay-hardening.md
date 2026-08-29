@@ -116,25 +116,25 @@ Commit only Task 1 files with: `feat(relay): require mutual pairing confirmation
 
 **Interfaces:**
 - Consumes: `*store.Bolt`, `JTICacheConfig`, and the server clock.
-- Produces: `OpenPersistentJTICache(*store.Bolt, JTICacheConfig) (*PersistentJTICache, error)` implementing `CheckAndSet(string, time.Time) error`, `Cleanup(time.Time) int`, and `EntryCount() int`.
+- Produces: `OpenPersistentJTICache(*store.Bolt, JTICacheConfig) (*PersistentJTICache, error)` implementing `CheckAndSet(string, time.Time) error`, `Cleanup(time.Time) (int, error)`, and `EntryCount() (int, error)`.
 
-- [ ] **Step 1: Write failing persistence and claim-bound tests**
+- [x] **Step 1: Write failing persistence and claim-bound tests**
 
 Create a Bolt file, admit one UUID JTI, close and reopen Bolt, then assert the same JTI returns `ErrJTIReplay`. Add middleware tests for missing `iat`, missing `exp`, non-UUID JTI, an `exp-iat` window above 60 seconds, and `iat` more than 30 seconds in the future.
 
-- [ ] **Step 2: Observe RED**
+- [x] **Step 2: Observe RED**
 
 Run: `make sync-proto && cd relay && go test ./internal/server -run 'TestPersistentJTI|TestJWTClaims' -race -count=1`
 
 Expected: missing type or requests incorrectly authorized.
 
-- [ ] **Step 3: Implement the bounded Bolt replay store**
+- [x] **Step 3: Implement the bounded Bolt replay store**
 
 Use three buckets: `auth_jti_v1`, `auth_jti_expiry_v1`, and `auth_jti_meta_v1`. Store `sha256(jti)` as the primary key. Use an eight-byte big-endian expiry prefix plus the digest for the expiry key. Initialize by validating reciprocal entries and rebuilding the exact count.
 
 The middleware parses with an injected clock, requires EdDSA, reads verified claims, enforces the 60-second lifetime and 30-second future-skew limits, then atomically consumes the JTI. Any storage or capacity error returns 401 without calling the handler.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run the focused test, then `make relay-test`. Expected: PASS with the race detector.
 

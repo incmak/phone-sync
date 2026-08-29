@@ -278,7 +278,9 @@ func (s *Server) runMaintenance(ctx context.Context, now time.Time) {
 	if !s.beforeMaintenanceUnit(ctx, "jti") {
 		return
 	}
-	s.jtiCache.Cleanup(now)
+	if _, err := s.jtiCache.Cleanup(now); err != nil {
+		log.Printf("expire JWT replay entries: %v", err)
+	}
 	if !s.beforeMaintenanceUnit(ctx, "limiter") {
 		return
 	}

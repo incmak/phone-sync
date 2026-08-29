@@ -17,7 +17,7 @@ type Server struct {
 	router                      *chi.Mux
 	validator                   *Validator
 	pairStore                   *store.PairStore
-	jtiCache                    *JTICache
+	jtiCache                    *PersistentJTICache
 	pairHub                     *PairHub
 	clientHub                   *ClientHub
 	mailbox                     *store.MailboxStore
@@ -115,12 +115,16 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	jtiCache, err := OpenPersistentJTICache(b, config.JTI)
+	if err != nil {
+		return nil, err
+	}
 	clientHub := NewClientHubWithMailboxLimits(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes)
 	s := &Server{
 		router:                      chi.NewRouter(),
 		validator:                   v,
 		pairStore:                   pairStore,
-		jtiCache:                    NewJTICacheWithConfig(config.JTI),
+		jtiCache:                    jtiCache,
 		pairHub:                     NewPairHub(),
 		clientHub:                   clientHub,
 		mailbox:                     mailbox,

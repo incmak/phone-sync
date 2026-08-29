@@ -11,10 +11,18 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 var ErrJTIReplay = errors.New("jti replay")
 var ErrJTICapacity = errors.New("jti cache capacity reached")
+
+const (
+	maxJWTBytes          = 4 << 10
+	maxJWTLifetime       = 60 * time.Second
+	maxJWTIssuedAtFuture = 30 * time.Second
+	jwtClockLeeway       = 5 * time.Second
+)
 
 type JTICacheConfig struct {
 	TTL          time.Duration
@@ -124,11 +132,15 @@ func PairIDFromContext(ctx context.Context) (string, bool) {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
+		if len(authHeader) > len("Bearer ")+maxJWTBytes || !strings.HasPrefix(authHeader, "Bearer ") {
 			http.Error(w, "missing bearer", http.StatusUnauthorized)
 			return
 		}
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+		if tokenStr == "" || len(tokenStr) > maxJWTBytes {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
 
 		// Parse without verification first to extract sub, which selects the right public key.
 		parser := jwt.NewParser()
@@ -153,25 +165,32 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "unknown device", http.StatusUnauthorized)
 			return
 		}
+		now := s.now()
 
-		// Verify signature + validate exp using the stored pubkey.
-		_, err = jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		// Verify signature and require expiration using the stored pubkey. The
+		// remaining claim relationships are checked below against the same clock.
+		verified, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 			if t.Method.Alg() != "EdDSA" {
 				return nil, errors.New("bad alg")
 			}
 			return ed25519.PublicKey(session.SignPubkey), nil
-		})
+		}, jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithExpirationRequired(),
+			jwt.WithTimeFunc(func() time.Time { return now }), jwt.WithLeeway(jwtClockLeeway))
 		if err != nil {
-			http.Error(w, "invalid signature or expired", http.StatusUnauthorized)
+			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
-
-		jti, _ := claims["jti"].(string)
-		if jti == "" {
-			http.Error(w, "missing jti", http.StatusUnauthorized)
+		verifiedClaims, ok := verified.Claims.(jwt.MapClaims)
+		if !ok {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
-		if err := s.jtiCache.CheckAndSet(jti, time.Now()); err != nil {
+		jti, err := validateAuthClaims(verifiedClaims, sub, now)
+		if err != nil {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		if err := s.jtiCache.CheckAndSet(jti, now); err != nil {
 			http.Error(w, "jti replay", http.StatusUnauthorized)
 			return
 		}
@@ -179,4 +198,32 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		r = r.WithContext(withPairSession(r.Context(), sub, session.PairID))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func validateAuthClaims(claims jwt.MapClaims, expectedSubject string, now time.Time) (string, error) {
+	subject, err := claims.GetSubject()
+	if err != nil || subject == "" || subject != expectedSubject {
+		return "", errors.New("invalid subject")
+	}
+	jti, ok := claims["jti"].(string)
+	parsedJTI, err := uuid.Parse(jti)
+	if !ok || err != nil || parsedJTI.String() != jti {
+		return "", errors.New("invalid jti")
+	}
+	issuedAt, err := claims.GetIssuedAt()
+	if err != nil || issuedAt == nil {
+		return "", errors.New("missing issued-at")
+	}
+	expiresAt, err := claims.GetExpirationTime()
+	if err != nil || expiresAt == nil {
+		return "", errors.New("missing expiration")
+	}
+	if issuedAt.Time.After(now.Add(maxJWTIssuedAtFuture)) {
+		return "", errors.New("issued-at too far in future")
+	}
+	lifetime := expiresAt.Time.Sub(issuedAt.Time)
+	if lifetime <= 0 || lifetime > maxJWTLifetime {
+		return "", errors.New("invalid token lifetime")
+	}
+	return jti, nil
 }

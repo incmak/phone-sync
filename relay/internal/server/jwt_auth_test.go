@@ -85,17 +85,69 @@ func mintJWT(t *testing.T, deviceID string, priv ed25519.PrivateKey, jti string)
 	if jti == "" {
 		jti = uuid.NewString()
 	}
-	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{
+	issuedAt := time.Now()
+	return signJWTClaims(t, priv, jwt.MapClaims{
 		"sub": deviceID,
 		"jti": jti,
-		"iat": time.Now().Unix(),
-		"exp": time.Now().Add(60 * time.Second).Unix(),
+		"iat": issuedAt.Unix(),
+		"exp": issuedAt.Add(60 * time.Second).Unix(),
 	})
+}
+
+func signJWTClaims(t *testing.T, priv ed25519.PrivateKey, claims jwt.MapClaims) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 	s, err := tok.SignedString(priv)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
 	return s
+}
+
+func TestJWTClaimsRejectMalformedOrOverlongValues(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	tests := map[string]func() jwt.MapClaims{
+		"missing issued-at": func() jwt.MapClaims {
+			return jwt.MapClaims{
+				"sub": "devA", "jti": uuid.NewString(), "exp": now.Add(time.Minute).Unix(),
+			}
+		},
+		"missing expiration": func() jwt.MapClaims {
+			return jwt.MapClaims{
+				"sub": "devA", "jti": uuid.NewString(), "iat": now.Unix(),
+			}
+		},
+		"non-UUID JWT ID": func() jwt.MapClaims {
+			return jwt.MapClaims{
+				"sub": "devA", "jti": "predictable", "iat": now.Unix(), "exp": now.Add(time.Minute).Unix(),
+			}
+		},
+		"lifetime exceeds maximum": func() jwt.MapClaims {
+			return jwt.MapClaims{
+				"sub": "devA", "jti": uuid.NewString(), "iat": now.Unix(), "exp": now.Add(time.Minute + time.Second).Unix(),
+			}
+		},
+		"issued too far in future": func() jwt.MapClaims {
+			return jwt.MapClaims{
+				"sub": "devA", "jti": uuid.NewString(), "iat": now.Add(31 * time.Second).Unix(), "exp": now.Add(time.Minute).Unix(),
+			}
+		},
+	}
+
+	for name, claims := range tests {
+		t.Run(name, func(t *testing.T) {
+			config := DefaultConfig()
+			config.Now = func() time.Time { return now }
+			server := newTestServerWithConfig(t, config)
+			deviceID, privateKey := registerPair(t, server.pairStore)
+			candidate := claims()
+			candidate["sub"] = deviceID
+			token := signJWTClaims(t, privateKey, candidate)
+			if status := authenticatedStatus(t, server, token); status != http.StatusUnauthorized {
+				t.Fatalf("malformed claims status = %d, want %d", status, http.StatusUnauthorized)
+			}
+		})
+	}
 }
 
 // dialWSAuthed registers a pair, mints a JWT, and dials /ws with the Authorization header.
