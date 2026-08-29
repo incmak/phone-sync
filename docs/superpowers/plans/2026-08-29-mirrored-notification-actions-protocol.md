@@ -226,7 +226,7 @@ git commit -m "feat(mobile/protocol): validate notification action controls"
 
 **Files:**
 
-- Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/MirrorPoster.kt`
+- Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/listener/NotifPostBuilder.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/InboundDispatcherControlTest.kt`
 - Create: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/NotifPostJsonTest.kt`
 
@@ -272,7 +272,7 @@ Expected: PASS, including the legacy payload case.
 Commit:
 
 ```bash
-git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/MirrorPoster.kt mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service
+git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/listener/NotifPostBuilder.kt mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service
 git commit -m "feat(mobile/protocol): parse mirrored action descriptors"
 ```
 
