@@ -24,11 +24,15 @@ class PendingIntentActionExecutor(
                 .getOrElse { return false }
         }
 
-        val options = if (Build.VERSION.SDK_INT >= 34 && handle.actionIntent.isActivity) {
+        val options = if (handle.actionIntent.isActivity) {
+            @Suppress("DEPRECATION")
+            val backgroundStartMode = if (Build.VERSION.SDK_INT >= 36) {
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+            } else {
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+            }
             ActivityOptions.makeBasic()
-                .setPendingIntentBackgroundActivityStartMode(
-                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
-                )
+                .setPendingIntentBackgroundActivityStartMode(backgroundStartMode)
                 .toBundle()
         } else {
             null

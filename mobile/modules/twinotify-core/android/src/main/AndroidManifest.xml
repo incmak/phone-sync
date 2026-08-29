@@ -49,5 +49,9 @@
     <receiver
       android:name="co.twinotify.core.service.MaterializationRetryReceiver"
       android:exported="false" />
+
+    <receiver
+      android:name="co.twinotify.core.actions.ActionClaimRecoveryReceiver"
+      android:exported="false" />
   </application>
 </manifest>

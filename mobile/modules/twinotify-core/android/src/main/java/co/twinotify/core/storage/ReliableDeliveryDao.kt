@@ -190,6 +190,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     abstract suspend fun actionExecution(invocationId: String): ActionExecution?
 
     @Query(
+        "SELECT * FROM action_execution WHERE state='CLAIMED' AND claimedAt <= :cutoffClaimedAt " +
+            "ORDER BY claimedAt, invocationId",
+    )
+    abstract suspend fun dueActionExecutionClaims(cutoffClaimedAt: Long): List<ActionExecution>
+
+    @Query("SELECT MIN(claimedAt) FROM action_execution WHERE state='CLAIMED'")
+    abstract suspend fun earliestActionExecutionClaimedAt(): Long?
+
+    @Query(
         "UPDATE action_execution SET state='COMPLETED', resultStatus=:status, completedAt=:now " +
             "WHERE invocationId=:invocationId AND state='CLAIMED'",
     )

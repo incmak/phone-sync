@@ -893,6 +893,16 @@ class SyncService : Service() {
             activeInstance?.routePreferenceRestarter?.forceRestart()
         }
 
+        /** Existing sessions poll the durable outbox; a dead service is safely re-evaluated. */
+        fun notifyActionOutboxChanged(context: android.content.Context) {
+            if (activeInstance != null) return
+            runCatching {
+                context.startForegroundService(
+                    Intent(context, SyncService::class.java).apply { action = ACTION_START },
+                )
+            }
+        }
+
         /** Debug source calls this seam; the emitted digest is the normal production event. */
         internal suspend fun emitProductionSnapshotForE2e(): Boolean {
             val service = activeInstance ?: return false
@@ -1010,6 +1020,9 @@ class SyncService : Service() {
         val postAvailable = effectivePostAvailability(applicationContext)
         SyncServiceStatus.setPostPermission(postAvailable)
         requestPendingMaterialization(materializationTriggerForPostAvailability(postAvailable))
+        scope.launch {
+            co.twinotify.core.actions.ActionClaimRecoveryRuntime.recover(applicationContext)
+        }
         routePreferenceJob = scope.launch { routePreferenceRestarter.run() }
     }
 
