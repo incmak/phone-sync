@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import co.twinotify.core.actions.ActionClaimDecision
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
 import co.twinotify.core.service.CallRejectionCommitResult
@@ -199,6 +200,54 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     ): Int
 
     @Transaction
+    open suspend fun claimActionInvocation(
+        row: InboundMessage,
+        execution: ActionExecution,
+        now: Long,
+    ): ActionClaimDecision {
+        require(row.eventType == "notif.action.invoke")
+        require(row.canonId == null && row.sequence == null)
+        require(row.outcome == "APPLIED" && row.appliedAt != null)
+        require(row.relayAckState == "READY")
+        require(execution.state == "CLAIMED")
+
+        val existingInbound = inbound(row.msgId)
+        if (existingInbound != null && existingInbound.envelopeSha256 != row.envelopeSha256) {
+            return ActionClaimDecision.IdConflict
+        }
+        val existingExecution = actionExecution(execution.invocationId)
+        if (existingExecution != null && (
+                existingExecution.canonId != execution.canonId ||
+                    existingExecution.actionId != execution.actionId
+                )
+        ) {
+            return ActionClaimDecision.IdConflict
+        }
+
+        if (existingExecution == null) {
+            if (existingInbound == null) insertInbound(row)
+            insertActionExecution(execution.copy(claimedAt = now))
+            return ActionClaimDecision.Execute
+        }
+
+        if (existingInbound == null) insertInbound(row)
+        if (existingExecution.state == "COMPLETED") {
+            return ActionClaimDecision.Replay(requireNotNull(existingExecution.resultStatus))
+        }
+        if (claimGraceElapsed(existingExecution.claimedAt, now)) {
+            check(
+                completeActionExecutionClaim(
+                    existingExecution.invocationId,
+                    "outcome_unknown",
+                    now,
+                ) == 1,
+            )
+            return ActionClaimDecision.Replay("outcome_unknown")
+        }
+        return ActionClaimDecision.InFlight
+    }
+
+    @Transaction
     open suspend fun commitActionInvocationAndOutbound(
         invocation: ActionInvocation,
         invoke: OutboundMessage,
@@ -247,6 +296,24 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         check(completeActionExecutionClaim(invocationId, status, now) == 1)
         insertOutbound(result)
         return ActionCompletionOutboxCommitResult.Committed
+    }
+
+    @Transaction
+    open suspend fun enqueueCompletedActionResult(
+        invocationId: String,
+        status: String,
+        result: OutboundMessage,
+    ): Boolean {
+        require(status in ACTION_RESULT_STATUSES)
+        require(result.eventType == "notif.action.result")
+        require(result.canonId == null && result.sequence == null)
+        require(!result.requiresPeerReceipt)
+        val execution = actionExecution(invocationId) ?: return false
+        if (execution.state != "COMPLETED" || execution.resultStatus != status) return false
+        val existing = outboundMessage(result.msgId)
+        if (existing != null) return existing == result
+        insertOutbound(result)
+        return true
     }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -1576,5 +1643,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 .digest(canonId.toByteArray(Charsets.UTF_8))
             return "mirror-" + digest.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }.take(24)
         }
+
+        fun claimGraceElapsed(claimedAt: Long, now: Long): Boolean =
+            now >= claimedAt && now - claimedAt >= 60_000L
     }
 }
