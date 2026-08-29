@@ -1245,6 +1245,64 @@ class ReliableDeliveryTransactionTest {
         }
     }
 
+    @Test
+    fun mirrorActionInvocationAndInvokeOutboxCommitAtomically() = runBlocking {
+        val invocation = actionInvocation()
+        val invoke = controlOutbound("action-invoke", "notif.action.invoke")
+
+        assertEquals(
+            ActionInvocationOutboxCommitResult.Committed,
+            dao.commitActionInvocationAndOutbound(invocation, invoke),
+        )
+
+        assertEquals(invocation, dao.actionInvocation(INVOCATION_ID))
+        assertEquals(invoke, dao.outboundMessage("action-invoke"))
+    }
+
+    @Test
+    fun mirrorActionInvocationRollsBackWhenInvokeOutboxConflicts() = runBlocking {
+        dao.insertOutbound(controlOutbound("action-invoke", "notif.action.result"))
+
+        assertEquals(
+            ActionInvocationOutboxCommitResult.OutboundConflict,
+            dao.commitActionInvocationAndOutbound(
+                actionInvocation(),
+                controlOutbound("action-invoke", "notif.action.invoke"),
+            ),
+        )
+
+        assertNull(dao.actionInvocation(INVOCATION_ID))
+    }
+
+    @Test
+    fun originActionCompletionAndResultOutboxCommitAtomically() = runBlocking {
+        dao.insertActionExecution(actionExecution())
+        val result = controlOutbound("action-result", "notif.action.result")
+
+        assertEquals(
+            ActionCompletionOutboxCommitResult.Committed,
+            dao.completeActionExecutionAndEnqueue(
+                invocationId = INVOCATION_ID,
+                status = "dispatched",
+                now = 2_000,
+                result = result,
+            ),
+        )
+
+        assertEquals("dispatched", dao.actionExecution(INVOCATION_ID)?.resultStatus)
+        assertEquals(result, dao.outboundMessage("action-result"))
+        assertEquals(
+            ActionCompletionOutboxCommitResult.AlreadyCompleted("dispatched"),
+            dao.completeActionExecutionAndEnqueue(
+                invocationId = INVOCATION_ID,
+                status = "failed",
+                now = 3_000,
+                result = controlOutbound("contradictory-result", "notif.action.result"),
+            ),
+        )
+        assertNull(dao.outboundMessage("contradictory-result"))
+    }
+
     private fun activeMessageIds(): List<String> = db.openHelper.readableDatabase.query(
         "SELECT msgId FROM outbound_message ORDER BY msgId",
     ).use { cursor ->
@@ -1432,6 +1490,37 @@ class ReliableDeliveryTransactionTest {
         requiresPeerReceipt = true,
     )
 
+    private fun controlOutbound(msgId: String, eventType: String) = outbound(
+        msgId = msgId,
+        sequence = null,
+        eventType = eventType,
+    ).copy(
+        canonId = null,
+        requiresPeerReceipt = false,
+    )
+
+    private fun actionInvocation() = ActionInvocation(
+        invocationId = INVOCATION_ID,
+        canonId = CANON_ID,
+        actionId = ACTION_ID,
+        notificationSequence = 7,
+        replyText = "private reply",
+        state = "PENDING",
+        createdAt = 1_000,
+        expiresAt = 121_000,
+        updatedAt = 1_000,
+    )
+
+    private fun actionExecution() = ActionExecution(
+        invocationId = INVOCATION_ID,
+        canonId = CANON_ID,
+        actionId = ACTION_ID,
+        state = "CLAIMED",
+        resultStatus = null,
+        claimedAt = 1_000,
+        completedAt = null,
+    )
+
     private fun inbound(msgId: String, digest: String) = InboundMessage(
         msgId = msgId,
         originDevice = ORIGIN,
@@ -1458,5 +1547,7 @@ class ReliableDeliveryTransactionTest {
         const val CANON_ID = "canon-a"
         const val CALL_CANON_ID = "call:11111111-1111-4111-8111-111111111111"
         const val ORIGIN = "dev-a"
+        const val INVOCATION_ID = "22222222-2222-4222-8222-222222222222"
+        const val ACTION_ID = "33333333-3333-4333-8333-333333333333"
     }
 }

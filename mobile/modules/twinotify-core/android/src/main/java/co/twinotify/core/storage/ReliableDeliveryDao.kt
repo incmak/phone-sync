@@ -125,6 +125,20 @@ sealed interface LegacyConversionResult {
     data class Conflict(val existingSha256: String) : LegacyConversionResult
 }
 
+sealed interface ActionInvocationOutboxCommitResult {
+    data object Committed : ActionInvocationOutboxCommitResult
+    data object AlreadyCommitted : ActionInvocationOutboxCommitResult
+    data object InvocationConflict : ActionInvocationOutboxCommitResult
+    data object OutboundConflict : ActionInvocationOutboxCommitResult
+}
+
+sealed interface ActionCompletionOutboxCommitResult {
+    data object Committed : ActionCompletionOutboxCommitResult
+    data class AlreadyCompleted(val status: String) : ActionCompletionOutboxCommitResult
+    data object MissingClaim : ActionCompletionOutboxCommitResult
+    data object OutboundConflict : ActionCompletionOutboxCommitResult
+}
+
 sealed interface CustodyAcceptanceResult {
     data object Missing : CustodyAcceptanceResult
     data object DeletedReceipt : CustodyAcceptanceResult
@@ -183,6 +197,57 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         status: String,
         now: Long,
     ): Int
+
+    @Transaction
+    open suspend fun commitActionInvocationAndOutbound(
+        invocation: ActionInvocation,
+        invoke: OutboundMessage,
+    ): ActionInvocationOutboxCommitResult {
+        require(invocation.state == "PENDING")
+        require(invoke.eventType == "notif.action.invoke")
+        require(invoke.canonId == null && invoke.sequence == null)
+        require(!invoke.requiresPeerReceipt)
+
+        val existingInvocation = actionInvocation(invocation.invocationId)
+        if (existingInvocation != null) {
+            return if (existingInvocation == invocation && outboundMessage(invoke.msgId) == invoke) {
+                ActionInvocationOutboxCommitResult.AlreadyCommitted
+            } else {
+                ActionInvocationOutboxCommitResult.InvocationConflict
+            }
+        }
+        if (outboundMessage(invoke.msgId) != null) {
+            return ActionInvocationOutboxCommitResult.OutboundConflict
+        }
+        insertActionInvocation(invocation)
+        insertOutbound(invoke)
+        return ActionInvocationOutboxCommitResult.Committed
+    }
+
+    @Transaction
+    open suspend fun completeActionExecutionAndEnqueue(
+        invocationId: String,
+        status: String,
+        now: Long,
+        result: OutboundMessage,
+    ): ActionCompletionOutboxCommitResult {
+        require(status in ACTION_RESULT_STATUSES)
+        require(result.eventType == "notif.action.result")
+        require(result.canonId == null && result.sequence == null)
+        require(!result.requiresPeerReceipt)
+
+        val execution = actionExecution(invocationId)
+            ?: return ActionCompletionOutboxCommitResult.MissingClaim
+        if (execution.state == "COMPLETED") {
+            return ActionCompletionOutboxCommitResult.AlreadyCompleted(requireNotNull(execution.resultStatus))
+        }
+        if (outboundMessage(result.msgId) != null) {
+            return ActionCompletionOutboxCommitResult.OutboundConflict
+        }
+        check(completeActionExecutionClaim(invocationId, status, now) == 1)
+        insertOutbound(result)
+        return ActionCompletionOutboxCommitResult.Committed
+    }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun putNotificationDetail(row: NotificationDetailCache)
@@ -1459,6 +1524,14 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             "state.snapshot.begin",
             "state.snapshot.item",
             "state.snapshot.end",
+        )
+        val ACTION_RESULT_STATUSES = setOf(
+            "dispatched",
+            "outcome_unknown",
+            "action_gone",
+            "notification_gone",
+            "expired",
+            "failed",
         )
         val POST_OR_UPDATE_EVENT_TYPES = setOf("notif.post", "notif.update")
         val STATE_EVENT_TYPES = POST_OR_UPDATE_EVENT_TYPES + setOf("notif.cancel", "call.state")
