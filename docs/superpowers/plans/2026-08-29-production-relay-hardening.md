@@ -383,27 +383,30 @@ git diff --check
 
 Record exact exit codes and test counts. Do not claim Android instrumentation, physical devices, public TLS, or off-host backup evidence unless actually run.
 
-Fresh committed-head evidence at `d1b98c6` on 2026-08-29:
+Fresh committed-head evidence at `b4f4dfc` on 2026-08-29:
 
 - `make relay-verify`: exit 0; workflow/shell contracts, `go vet`, four Go packages under `-race -count=1`, and the Docker build passed.
-- A separate JSON race run recorded 203 top-level tests and 408 total test/subtest pass events across four packages, with zero skips and zero failures.
+- A separate JSON race run recorded 218 top-level tests and 431 total test/subtest pass events across four packages, with zero skips and zero failures.
 - `make deployment-test`: exit 0.
+- `make relay-ci-test`: exit 0.
 - `cd mobile && npm run typecheck`: exit 0.
 - `git diff --check`: exit 0.
 - Actionlint 1.7.7 and ShellCheck 0.11.0: exit 0.
-- A final AMD64/ARM64 OCI export with BuildKit maximum provenance and SBOM completed at manifest-list digest `sha256:ea7c909bf1d5f846c7d120339c7e2a3ec61b7789e2cce09b2ce509612e8b7659`; the local OCI archive SHA-256 is `1bf0a065c65aa66d4ebd6670858a34488a940ec7b262308ade2f170e047f8e95`.
+- A final AMD64/ARM64 OCI export with BuildKit maximum provenance and SBOM completed at manifest-list digest `sha256:5e4483779c0ef71f511941b7a01ae0c241e61da058c37cf44c34e470a142233f`; the local OCI archive SHA-256 is `d24a246401a92132c8dfaa7540b5ebf167134909ea14f546482b721ae35f9376`.
 
 - [x] **Step 2: Perform manual artifact inspection**
 
 Inspect the full diff, generated-schema cleanliness, Compose-resolved configuration, image user, read-only mounts, exposed ports, health state, backup file permissions, restore recovery copy, workflow action pins, and privacy scan.
 
-The isolated production-Compose audit reported relay user `65532:65532`, read-only root, `cap_drop: [ALL]`, `no-new-privileges`, no host port binding, and only `/data` plus `/backups` writable. Readiness was healthy. The startup snapshot was owned by `65532:65532` with mode `0600`; an offline restore created a separate mode-`0600` recovery copy and returned healthy. Only Caddy resolves public ports 80/443. The exact pinned Caddy image validated the production Caddyfile. Generated schemas/fixtures remain ignored and untracked. All workflow actions use full commit SHAs, and the relay log scan found only static event names and bounded static labels.
+The fresh isolated production-Compose audit at `b4f4dfc` reported relay user `65532:65532`, read-only root, `cap_drop: [ALL]`, `no-new-privileges`, no host port binding, and only `/data` plus `/backups` writable. Readiness was healthy. The startup snapshot was owned by `65532:65532` with mode `0600`; an offline restore created a separate mode-`0600` recovery copy and returned healthy. The named temporary containers, network, and volumes were removed after inspection. Only Caddy resolves public ports 80/443. The exact pinned Caddy image validated the production Caddyfile. Generated schemas/fixtures remain ignored and untracked. All workflow actions use full commit SHAs, and the relay log scan found only static event names and bounded static labels.
 
 Evidence limits remain explicit: no GHCR publication, public DNS/TLS request, real off-host backup transfer, production monitoring alert, Android instrumentation, protected EAS build, or physical two-phone scenario was run in this host audit.
 
 - [ ] **Step 3: Obtain the fresh read-only Sol/High audit**
 
 Provide the exact base/head commits, allowed files, design/spec, verification outputs, and residual evidence limits. Accept only `ship`; on `fix-first`, implement in the primary session, rerun every affected gate, and obtain a new fresh reviewer.
+
+The first fresh Sol audit of `a9b52d5..69ba092` returned `fix-first`. It found that shutdown could wait for backup work before stopping HTTP admission, persistent mutations were not all linearized against Bolt close, authentication replay capacity could be exhausted without on-admission expiry reclamation, and a non-upgrade `/ws` request could consume a valid JTI. Commit `b4f4dfc` closes those findings with deterministic RED/GREEN coverage for request, WebSocket, authentication, and all four maintenance mutation paths; it also adds bounded per-IP/per-device authentication admission. Four focused independent code-review passes ended `CLEAR / APPROVE`. A new exact-head Sol audit is still required before checking this step.
 
 - [ ] **Step 4: Mark plan complete and hand off deployment choice**
 
