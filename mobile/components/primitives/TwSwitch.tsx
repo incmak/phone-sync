@@ -4,7 +4,6 @@ import Animated, {
   useAnimatedStyle,
   useSharedValue,
   withTiming,
-  interpolateColor,
   useReducedMotion,
 } from 'react-native-reanimated';
 import { useTheme } from '../Theme';
@@ -30,10 +29,10 @@ export function TwSwitch({
   accessibilityLabel,
 }: TwSwitchProps) {
   const theme = useTheme();
-  const w = size === 'lg' ? 52 : 44;
-  const h = size === 'lg' ? 30 : 26;
-  const d = h - 6; // thumb diameter
-  const thumbOffOn = w - d - 3;
+  const w = 52;
+  const h = 32;
+  const d = checked ? 24 : 16;
+  const thumbOffOn = w - d - 4;
 
   const progress = useSharedValue(checked ? 1 : 0);
   const reduceMotion = useReducedMotion();
@@ -41,14 +40,6 @@ export function TwSwitch({
   useEffect(() => {
     progress.value = withTiming(checked ? 1 : 0, { duration: reduceMotion ? 0 : 180 });
   }, [checked, progress, reduceMotion]);
-
-  const trackStyle = useAnimatedStyle(() => ({
-    backgroundColor: interpolateColor(
-      progress.value,
-      [0, 1],
-      [theme.switchOff, theme.accent],
-    ),
-  }));
 
   const thumbStyle = useAnimatedStyle(() => ({
     transform: [
@@ -67,14 +58,20 @@ export function TwSwitch({
       accessibilityState={{ checked, disabled: !!disabled }}
       style={[
         styles.target,
-        { minWidth: touchTargetSize, minHeight: touchTargetSize, opacity: disabled ? 0.5 : 1 },
+        { minWidth: Math.max(48, touchTargetSize), minHeight: Math.max(48, touchTargetSize), opacity: disabled ? 0.38 : 1 },
       ]}
     >
       <Animated.View
+        testID="tw-switch-track"
         style={[
           styles.track,
-          trackStyle,
-          { width: w, height: h, borderRadius: h / 2, borderColor: theme.border },
+          {
+            width: w,
+            height: h,
+            borderRadius: h / 2,
+            borderColor: checked ? theme.colors.primary : theme.colors.outline,
+            backgroundColor: checked ? theme.colors.primary : theme.colors.surfaceContainerHighest,
+          },
         ]}
       >
         <Animated.View
@@ -85,9 +82,9 @@ export function TwSwitch({
               width: d,
               height: d,
               borderRadius: d / 2,
-              top: 3,
-              left: 3,
-              backgroundColor: theme.bg,
+              top: (h - d) / 2,
+              left: 4,
+              backgroundColor: checked ? theme.colors.onPrimary : theme.colors.outline,
             },
           ]}
         />
@@ -102,8 +99,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   target: {
-    minWidth: 44,
-    minHeight: 44,
+    minWidth: 48,
+    minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },

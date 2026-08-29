@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useMemo } from 'react';
-import { useColorScheme } from 'react-native';
-import { twTheme, Theme } from './tokens';
+import { Platform, useColorScheme } from 'react-native';
+import { androidMonetScheme, resolveMaterialScheme, twTheme, Theme } from './tokens';
 
 interface ThemeContextValue {
   theme: Theme;
@@ -10,7 +10,13 @@ const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const system = useColorScheme();
-  const theme = useMemo(() => twTheme({ dark: system === 'dark' }), [system]);
+  const dark = system === 'dark';
+  const theme = useMemo(() => {
+    const dynamic = Platform.OS === 'android' && Number(Platform.Version) >= 31
+      ? androidMonetScheme(dark)
+      : undefined;
+    return twTheme({ dark, colors: resolveMaterialScheme({ dark, dynamic }) });
+  }, [dark]);
 
   return (
     <ThemeContext.Provider value={{ theme }}>

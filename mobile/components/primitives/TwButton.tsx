@@ -4,8 +4,10 @@ import {
   Text,
   StyleSheet,
   ActivityIndicator,
+  View,
   type PressableProps,
   type ViewStyle,
+  type ColorValue,
   useWindowDimensions,
 } from 'react-native';
 import { useTheme } from '../Theme';
@@ -15,13 +17,13 @@ export type TwButtonVariant = 'primary' | 'accent' | 'secondary' | 'ghost' | 'de
 export type TwButtonSize = 'sm' | 'md' | 'lg';
 
 export interface TwButtonColors {
-  backgroundColor: string;
-  pressedBackgroundColor: string;
-  textColor: string;
-  borderColor?: string;
+  backgroundColor: ColorValue;
+  pressedBackgroundColor: ColorValue;
+  textColor: ColorValue;
+  borderColor?: ColorValue;
 }
 
-function pressedButtonStyle(backgroundColor: string, pressedBackgroundColor: string, pressed: boolean, disabled: boolean) {
+function pressedButtonStyle(backgroundColor: ColorValue, pressedBackgroundColor: ColorValue, pressed: boolean, disabled: boolean) {
   return { backgroundColor: pressed && !disabled ? pressedBackgroundColor : backgroundColor };
 }
 
@@ -31,19 +33,19 @@ export function resolveButtonColors(
 ): TwButtonColors {
   switch (variant) {
     case 'primary':
-      return { backgroundColor: theme.ink, pressedBackgroundColor: theme.borderHi, textColor: theme.bg };
+      return { backgroundColor: theme.colors.primary, pressedBackgroundColor: theme.colors.primary, textColor: theme.colors.onPrimary };
     case 'accent':
-      return { backgroundColor: theme.accent, pressedBackgroundColor: theme.accentText, textColor: theme.bg };
+      return { backgroundColor: theme.colors.tertiary, pressedBackgroundColor: theme.colors.tertiary, textColor: theme.colors.onTertiary };
     case 'secondary':
-      return { backgroundColor: theme.fill, pressedBackgroundColor: theme.hover, textColor: theme.ink, borderColor: theme.border };
+      return { backgroundColor: theme.colors.secondaryContainer, pressedBackgroundColor: theme.colors.surfaceContainerHighest, textColor: theme.colors.onSecondaryContainer };
     case 'ghost':
-      return { backgroundColor: 'transparent', pressedBackgroundColor: theme.hover, textColor: theme.ink };
+      return { backgroundColor: 'transparent', pressedBackgroundColor: theme.colors.surfaceContainerHighest, textColor: theme.colors.onSurface };
     case 'destructive':
       return {
         backgroundColor: 'transparent',
-        pressedBackgroundColor: theme.sem.danger.surface,
-        textColor: theme.sem.danger.foreground,
-        borderColor: theme.sem.danger.foreground,
+        pressedBackgroundColor: theme.colors.errorContainer,
+        textColor: theme.colors.error,
+        borderColor: theme.colors.error,
       };
   }
 }
@@ -119,6 +121,18 @@ export function TwButton({
         style,
       ]}
     >
+      <View
+        pointerEvents="none"
+        testID="tw-button-state-layer"
+        style={[
+          StyleSheet.absoluteFill,
+          {
+            borderRadius: theme.radius.md,
+            backgroundColor: textColor,
+            opacity: pressed && !isDisabled ? 0.08 : 0,
+          },
+        ]}
+      />
       {loading ? (
         <ActivityIndicator size="small" color={textColor} />
       ) : (

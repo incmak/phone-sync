@@ -22,17 +22,33 @@ function contrast(a: string, b: string): number {
 }
 
 describe('TwButton accessibility contract', () => {
+  test('maps primary and secondary actions to Material color roles', () => {
+    const theme = twTheme({ dark: false });
+
+    expect(resolveButtonColors(theme, 'primary')).toMatchObject({
+      backgroundColor: theme.colors.primary,
+      textColor: theme.colors.onPrimary,
+    });
+    expect(resolveButtonColors(theme, 'secondary')).toMatchObject({
+      backgroundColor: theme.colors.secondaryContainer,
+      textColor: theme.colors.onSecondaryContainer,
+    });
+  });
+
   test('never moves on press', () => {
     renderButton(<TwButton>Continue</TwButton>);
     const button = screen.getByRole('button', { name: 'Continue' });
     const restingBefore = StyleSheet.flatten(button.props.style);
     fireEvent(button, 'pressIn');
     const pressed = StyleSheet.flatten(screen.getByRole('button', { name: 'Continue' }).props.style);
+    const pressedLayer = StyleSheet.flatten(screen.getByTestId('tw-button-state-layer').props.style);
     fireEvent(button, 'pressOut');
     const resting = StyleSheet.flatten(screen.getByRole('button', { name: 'Continue' }).props.style);
-    expect(restingBefore.backgroundColor).toBe(twTheme({ dark: false }).ink);
-    expect(pressed.backgroundColor).toBe(twTheme({ dark: false }).borderHi);
-    expect(resting.backgroundColor).toBe(twTheme({ dark: false }).ink);
+    expect(restingBefore.backgroundColor).toBe(twTheme({ dark: false }).colors.primary);
+    expect(pressed.backgroundColor).toBe(twTheme({ dark: false }).colors.primary);
+    expect(resting.backgroundColor).toBe(twTheme({ dark: false }).colors.primary);
+    expect(pressedLayer.opacity).toBe(0.08);
+    expect(StyleSheet.flatten(screen.getByTestId('tw-button-state-layer').props.style).opacity).toBe(0);
     expect(JSON.stringify(pressed)).not.toMatch(/transform|scale|translate/i);
     expect(JSON.stringify(resting)).not.toMatch(/transform|scale|translate/i);
   });
@@ -43,8 +59,7 @@ describe('TwButton accessibility contract', () => {
 
     for (const variant of variants) {
       const colors = resolveButtonColors(theme, variant);
-      expect(colors.pressedBackgroundColor).not.toBe(colors.backgroundColor);
-      expect(contrast(colors.textColor, colors.pressedBackgroundColor)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(String(colors.textColor), String(colors.pressedBackgroundColor))).toBeGreaterThanOrEqual(4.5);
     }
   });
 

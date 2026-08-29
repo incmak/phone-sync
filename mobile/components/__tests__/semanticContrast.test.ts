@@ -87,7 +87,7 @@ function buildChecks(dark: boolean): Check[] {
         add(
           `button.${variant}.text`,
           `button.${variant}.fill.${surface}`,
-          colors.textColor,
+          String(colors.textColor),
           theme[surface],
           'text',
           4.5,
@@ -97,8 +97,8 @@ function buildChecks(dark: boolean): Check[] {
       add(
         `button.${variant}.text`,
         `button.${variant}.fill`,
-        colors.textColor,
-        colors.backgroundColor,
+        String(colors.textColor),
+        String(colors.backgroundColor),
         'text',
         4.5,
       );

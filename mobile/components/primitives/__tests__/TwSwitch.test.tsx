@@ -28,18 +28,30 @@ function renderedThumbColor(scheme: 'light' | 'dark') {
 }
 
 describe('TwSwitch accessibility and target contract', () => {
+  test('uses the Material 3 switch geometry inside a 48dp target', () => {
+    render(<ThemeProvider><TwSwitch checked accessibilityLabel="Enable mirroring" /></ThemeProvider>);
+
+    const control = screen.getByRole('switch', { name: 'Enable mirroring' });
+    const targetStyle = StyleSheet.flatten(control.props.style);
+    const trackStyle = StyleSheet.flatten(screen.getByTestId('tw-switch-track').props.style);
+    expect(targetStyle.minWidth ?? targetStyle.width).toBeGreaterThanOrEqual(48);
+    expect(targetStyle.minHeight ?? targetStyle.height).toBeGreaterThanOrEqual(48);
+    expect(trackStyle.width).toBe(52);
+    expect(trackStyle.height).toBe(32);
+  });
+
   test('uses a physical 44dp pressable switch frame', () => {
     render(<ThemeProvider><TwSwitch checked accessibilityLabel="Enable mirroring" /></ThemeProvider>);
 
     const control = screen.getByRole('switch', { name: 'Enable mirroring' });
     const style = StyleSheet.flatten(control.props.style);
-    expect(style.minWidth ?? style.width).toBeGreaterThanOrEqual(44);
-    expect(style.minHeight ?? style.height).toBeGreaterThanOrEqual(44);
+    expect(style.minWidth ?? style.width).toBeGreaterThanOrEqual(48);
+    expect(style.minHeight ?? style.height).toBeGreaterThanOrEqual(48);
   });
 
   test('renders a theme-owned thumb in both light and dark modes without raw color literals', () => {
-    expect(renderedThumbColor('light')).toBe(twTheme({ dark: false }).bg);
-    expect(renderedThumbColor('dark')).toBe(twTheme({ dark: true }).bg);
+    expect(renderedThumbColor('light')).toBe(twTheme({ dark: false }).colors.onPrimary);
+    expect(renderedThumbColor('dark')).toBe(twTheme({ dark: true }).colors.onPrimary);
     const source = fs.readFileSync(path.join(__dirname, '..', 'TwSwitch.tsx'), 'utf8');
     expect(source).not.toMatch(/#[0-9a-f]{3,8}\b/i);
   });
