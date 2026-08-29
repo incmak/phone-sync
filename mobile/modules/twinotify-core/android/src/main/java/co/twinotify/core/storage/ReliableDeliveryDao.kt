@@ -335,6 +335,27 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("SELECT * FROM notification_detail_cache WHERE canonId=:canonId")
     abstract suspend fun notificationDetailForCanon(canonId: String): NotificationDetailCache?
 
+    @Query("SELECT COUNT(*) FROM notification_detail_cache WHERE cancelledAt IS NOT NULL")
+    abstract suspend fun cancelledNotificationDetailCount(): Int
+
+    @Query("DELETE FROM notification_detail_cache WHERE cancelledAt IS NOT NULL AND cancelledAt < :cutoff")
+    protected abstract suspend fun deleteCancelledNotificationDetailsBefore(cutoff: Long): Int
+
+    @Query(
+        "DELETE FROM notification_detail_cache WHERE cancelledAt IS NOT NULL AND detailId NOT IN (" +
+            "SELECT detailId FROM notification_detail_cache WHERE cancelledAt IS NOT NULL " +
+            "ORDER BY cancelledAt DESC, updatedAt DESC, detailId DESC LIMIT :limit)",
+    )
+    protected abstract suspend fun trimCancelledNotificationDetails(limit: Int): Int
+
+    @Transaction
+    open suspend fun sweepNotificationDetailCache(now: Long): Int {
+        require(now >= 0) { "notification detail sweep time must be non-negative" }
+        var removed = deleteCancelledNotificationDetailsBefore(now - NOTIFICATION_DETAIL_CANCELLED_RETENTION_MS)
+        removed += trimCancelledNotificationDetails(MAX_CANCELLED_NOTIFICATION_DETAILS)
+        return removed
+    }
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insertOutbound(row: OutboundMessage)
 
@@ -420,6 +441,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         removed += deleteTerminalOutboundBefore(now - activityRetentionMs)
         removed += deleteCompletedActionExecutionsBefore(now - ACTION_EXECUTION_RETENTION_MS)
         removed += deleteCancelledBefore(now - tombstoneRetentionMs)
+        removed += sweepNotificationDetailCache(now)
         removed += deleteOrphanMaterializationRetries()
         removed += expireSnapshotStages(now - SNAPSHOT_TTL_MS)
         return removed
@@ -929,8 +951,51 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         }
 
         insertInbound(row)
-        if (desired != null) putCanonical(desired)
+        if (desired != null) {
+            maintainNotificationDetail(row, desired)
+            putCanonical(desired)
+        }
         return InboundDesiredCommitResult.Committed
+    }
+
+    private suspend fun maintainNotificationDetail(
+        row: InboundMessage,
+        desired: CanonicalNotificationState,
+    ) {
+        if (!isNotificationSnapshotCanonical(desired.canonId)) return
+        val existing = notificationDetailForCanon(desired.canonId)
+        when (row.eventType) {
+            "notif.post", "notif.update" -> {
+                val payload = requireNotNull(desired.desiredPayloadJson) {
+                    "active notification detail requires desired payload"
+                }
+                upsertActiveNotificationDetail(desired.canonId, desired.originDevice, payload, row.committedAt)
+            }
+            "notif.cancel" -> if (existing != null) {
+                putNotificationDetail(existing.copy(updatedAt = row.committedAt, cancelledAt = row.committedAt))
+                sweepNotificationDetailCache(row.committedAt)
+            }
+        }
+    }
+
+    private suspend fun upsertActiveNotificationDetail(
+        canonId: String,
+        originDevice: String,
+        payloadJson: String,
+        updatedAt: Long,
+    ) {
+        val existing = notificationDetailForCanon(canonId)
+        putNotificationDetail(
+            NotificationDetailCache(
+                detailId = existing?.detailId ?: java.util.UUID.randomUUID().toString(),
+                canonId = canonId,
+                payloadJson = payloadJson,
+                originDevice = originDevice,
+                receivedAt = existing?.receivedAt ?: updatedAt,
+                updatedAt = updatedAt,
+                cancelledAt = null,
+            ),
+        )
     }
 
     /** Repairs a complete canonical group; partial bundles are rejected without mutation. */
@@ -1517,6 +1582,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             if (current != null && current.originDevice != originDevice) continue
             if (current == null || item.sequence > current.latestSequence) {
                 val mirrorId = current?.mirrorLocalId ?: nextMirrorLocalId()
+                upsertActiveNotificationDetail(item.canonId, originDevice, item.payloadJson, committedAt)
                 putCanonical(
                     CanonicalNotificationState(
                         canonId = item.canonId,
@@ -1548,6 +1614,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 beginSequence != null &&
                 current.latestSequence <= beginSequence
             ) {
+                notificationDetailForCanon(current.canonId)?.let { detail ->
+                    putNotificationDetail(detail.copy(updatedAt = committedAt, cancelledAt = committedAt))
+                }
                 putCanonical(
                     current.copy(
                         latestSequence = current.latestSequence + 1,
@@ -1559,6 +1628,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 cancelled += 1
             }
         }
+        if (cancelled > 0) sweepNotificationDetailCache(committedAt)
         deleteSnapshot(snapshotId)
         return SnapshotCommitResult.Committed(upserted, cancelled)
     }
@@ -1640,6 +1710,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         const val MAX_SNAPSHOT_ITEM_BYTES = 512 * 1024
         const val SNAPSHOT_TTL_MS = 10 * 60 * 1_000L
         const val ACTION_EXECUTION_RETENTION_MS = 24 * 60 * 60 * 1_000L
+        const val NOTIFICATION_DETAIL_CANCELLED_RETENTION_MS = 10 * 60 * 1_000L
+        const val MAX_CANCELLED_NOTIFICATION_DETAILS = 500
 
         private data class SnapshotBeginMarker(val originDevice: String, val expectedDigest: String?)
 
