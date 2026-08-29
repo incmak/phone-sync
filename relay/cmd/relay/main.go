@@ -99,16 +99,17 @@ func runRelay(getenv func(string) string) error {
 
 	slog.Info("relay_listening")
 	if err := srv.Serve(limitedListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		app.BeginShutdown()
+		websocketDone := app.BeginShutdown()
 		stopBackground()
 		<-backgroundDone
+		<-websocketDone
 		return errors.New("relay serve failed")
 	}
 	return <-shutdownResult
 }
 
-func gracefulStop(beginShutdown func(), stopMaintenance context.CancelFunc, backgroundDone <-chan struct{}, shutdownTimeout time.Duration, shutdown func(context.Context) error) error {
-	beginShutdown()
+func gracefulStop(beginShutdown func() <-chan struct{}, stopMaintenance context.CancelFunc, backgroundDone <-chan struct{}, shutdownTimeout time.Duration, shutdown func(context.Context) error) error {
+	websocketDone := beginShutdown()
 	stopMaintenance()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -117,6 +118,7 @@ func gracefulStop(beginShutdown func(), stopMaintenance context.CancelFunc, back
 		shutdownDone <- shutdown(ctx)
 	}()
 	<-backgroundDone
+	<-websocketDone
 	return <-shutdownDone
 }
 

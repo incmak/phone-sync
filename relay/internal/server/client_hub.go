@@ -12,7 +12,9 @@ import (
 type ClientHub struct {
 	mu              sync.Mutex
 	clients         map[string]*wsClient
+	active          map[*wsClient]struct{}
 	draining        bool
+	drainDone       chan struct{}
 	handoffMaxItems int
 	handoffMaxBytes uint64
 	resolveHandoff  func(*wsClient, []queuedV2Notification) error
@@ -35,6 +37,8 @@ type wsClient struct {
 	done                chan struct{}
 	drain               chan websocketDrain
 	stopOnce            sync.Once
+	closed              chan struct{}
+	closedOnce          sync.Once
 }
 
 type websocketDrain struct {
@@ -66,6 +70,10 @@ func (c *wsClient) stop() {
 	c.stopOnce.Do(func() { close(c.done) })
 }
 
+func (c *wsClient) markClosed() {
+	c.closedOnce.Do(func() { close(c.closed) })
+}
+
 func NewClientHub() *ClientHub {
 	return NewClientHubWithMailboxLimits(2000, 128<<20)
 }
@@ -73,6 +81,7 @@ func NewClientHub() *ClientHub {
 func NewClientHubWithMailboxLimits(maxItems int, maxBytes uint64) *ClientHub {
 	return &ClientHub{
 		clients:         make(map[string]*wsClient),
+		active:          make(map[*wsClient]struct{}),
 		handoffMaxItems: maxItems,
 		handoffMaxBytes: maxBytes,
 	}
@@ -106,7 +115,7 @@ func (h *ClientHub) registerPair(deviceID, pairID string, out chan []byte) (*wsC
 	defer h.mu.Unlock()
 	c := &wsClient{
 		deviceID: deviceID, pairID: pairID, outbound: out,
-		done: make(chan struct{}), drain: make(chan websocketDrain, 1),
+		done: make(chan struct{}), drain: make(chan websocketDrain, 1), closed: make(chan struct{}),
 	}
 	if h.draining {
 		c.stop()
@@ -120,26 +129,46 @@ func (h *ClientHub) registerPair(deviceID, pairID string, out chan []byte) (*wsC
 		prev.stop()
 	}
 	h.clients[deviceID] = c
+	h.active[c] = struct{}{}
 	return c, true
 }
 
 // Drain prevents new registrations and asks every current handler to send a
-// serialized WebSocket close control frame before closing its socket.
-func (h *ClientHub) Drain(code int, reason string) {
+// serialized WebSocket close control frame before closing its socket. The
+// returned channel closes only after every handler active at the drain
+// linearization point has joined its connection workers and unregistered.
+func (h *ClientHub) Drain(code int, reason string) <-chan struct{} {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.draining {
-		return
+		done := h.drainDone
+		h.mu.Unlock()
+		return done
 	}
 	h.draining = true
+	h.drainDone = make(chan struct{})
+	clients := make([]*wsClient, 0, len(h.active))
 	signal := websocketDrain{code: code, reason: reason}
-	for _, client := range h.clients {
+	for client := range h.active {
+		clients = append(clients, client)
 		select {
 		case client.drain <- signal:
 		default:
 			client.stop()
 		}
 	}
+	done := h.drainDone
+	h.mu.Unlock()
+	if len(clients) == 0 {
+		close(done)
+		return done
+	}
+	go func() {
+		for _, client := range clients {
+			<-client.closed
+		}
+		close(done)
+	}()
+	return done
 }
 
 // Unregister removes client only if it's still the registered entry for this device.
@@ -151,7 +180,9 @@ func (h *ClientHub) Unregister(c *wsClient) {
 	if cur, ok := h.clients[c.deviceID]; ok && cur == c {
 		delete(h.clients, c.deviceID)
 	}
+	delete(h.active, c)
 	c.stop()
+	c.markClosed()
 }
 
 func (h *ClientHub) Stop(deviceID string) {

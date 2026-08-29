@@ -13,12 +13,17 @@ import (
 
 func TestGracefulStopStartsHTTPShutdownWhileBackupIsBlocked(t *testing.T) {
 	backgroundDone := make(chan struct{})
+	websocketDone := make(chan struct{})
+	close(websocketDone)
 	beginCalled := make(chan struct{})
 	stopCalled := make(chan struct{})
 	shutdownCalled := make(chan struct{})
 	result := make(chan error, 1)
 	go func() {
-		result <- gracefulStop(func() { close(beginCalled) }, func() { close(stopCalled) }, backgroundDone, time.Second, func(ctx context.Context) error {
+		result <- gracefulStop(func() <-chan struct{} {
+			close(beginCalled)
+			return websocketDone
+		}, func() { close(stopCalled) }, backgroundDone, time.Second, func(ctx context.Context) error {
 			close(shutdownCalled)
 			return nil
 		})
@@ -38,6 +43,30 @@ func TestGracefulStopStartsHTTPShutdownWhileBackupIsBlocked(t *testing.T) {
 	default:
 	}
 	close(backgroundDone)
+	if err := <-result; err != nil {
+		t.Fatalf("graceful stop returned %v", err)
+	}
+}
+
+func TestGracefulStopWaitsForBlockedWebSocketDrain(t *testing.T) {
+	backgroundDone := make(chan struct{})
+	close(backgroundDone)
+	websocketDone := make(chan struct{})
+	shutdownCalled := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- gracefulStop(func() <-chan struct{} { return websocketDone }, func() {}, backgroundDone, time.Second, func(context.Context) error {
+			close(shutdownCalled)
+			return nil
+		})
+	}()
+	<-shutdownCalled
+	select {
+	case err := <-result:
+		t.Fatalf("graceful stop returned before WebSocket drain completed: %v", err)
+	default:
+	}
+	close(websocketDone)
 	if err := <-result; err != nil {
 		t.Fatalf("graceful stop returned %v", err)
 	}

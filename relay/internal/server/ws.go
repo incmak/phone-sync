@@ -72,6 +72,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	writeMsg := func(mt int, data []byte) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
+		if s.webSocketWriteAfterLock != nil {
+			s.webSocketWriteAfterLock()
+		}
 		_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 		return conn.WriteMessage(mt, data)
 	}
@@ -91,34 +94,43 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.webSocketBeforeRegister(deviceID, pairID)
 	}
 	client, registered := s.clientHub.registerPair(deviceID, pairID, outbound)
-	defer s.clientHub.Unregister(client)
 	if !registered {
+		s.clientHub.Unregister(client)
 		return
 	}
 	s.metrics.connectionOpened()
-	defer s.metrics.connectionClosed()
-	if err := s.pairStore.ValidateSession(deviceID, pairID); err != nil {
-		return
-	}
 	connectionLifetime := make(chan struct{})
-	defer close(connectionLifetime)
+	stopPinger := make(chan struct{})
+	var connectionWorkers sync.WaitGroup
+	defer func() {
+		close(connectionLifetime)
+		close(stopPinger)
+		client.stop()
+		_ = conn.Close()
+		connectionWorkers.Wait()
+		s.metrics.connectionClosed()
+		s.clientHub.Unregister(client)
+	}()
+	connectionWorkers.Add(1)
 	go func() {
+		defer connectionWorkers.Done()
 		select {
 		case signal := <-client.drain:
-			writeMu.Lock()
 			deadline := time.Now().Add(writeWait)
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(signal.code, signal.reason), deadline)
 			_ = conn.Close()
-			writeMu.Unlock()
 		case <-client.done:
 			_ = conn.Close()
 		case <-connectionLifetime:
 		}
 	}()
 
-	stopPinger := make(chan struct{})
-	defer close(stopPinger)
+	if err := s.pairStore.ValidateSession(deviceID, pairID); err != nil {
+		return
+	}
+	connectionWorkers.Add(1)
 	go func() {
+		defer connectionWorkers.Done()
 		ticker := time.NewTicker(pingPeriod)
 		defer ticker.Stop()
 		for {
@@ -133,7 +145,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	connectionWorkers.Add(1)
 	go func() {
+		defer connectionWorkers.Done()
 		for {
 			select {
 			case <-client.done:

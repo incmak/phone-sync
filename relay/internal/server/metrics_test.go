@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,12 +70,75 @@ func TestBeginShutdownClosesWebSocketWithServiceRestart(t *testing.T) {
 	}
 	defer connection.Close()
 
-	server.BeginShutdown()
+	drainDone := server.BeginShutdown()
 	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
 	_, _, err = connection.ReadMessage()
 	var closeError *websocket.CloseError
 	if !errors.As(err, &closeError) || closeError.Code != websocket.CloseServiceRestart {
 		t.Fatalf("shutdown close = %v, want WebSocket code %d", err, websocket.CloseServiceRestart)
+	}
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket drain did not complete after the service-restart close")
+	}
+	if server.metrics.activeConnections() != 0 {
+		t.Fatalf("active WebSocket metric = %d, want 0", server.metrics.activeConnections())
+	}
+}
+
+func TestBeginShutdownClosesWebSocketWhileWriterIsBlockedAndWaitsForCleanup(t *testing.T) {
+	server := newTestServer(t)
+	deviceID, privateKey := registerPair(t, server.pairStore)
+	writerEntered := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	var enteredOnce sync.Once
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseWriter) })
+	server.webSocketWriteAfterLock = func() {
+		enteredOnce.Do(func() { close(writerEntered) })
+		<-releaseWriter
+	}
+
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+mintJWT(t, deviceID, privateKey, ""))
+	connection, _, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(httpServer.URL, "http")+"/ws", header,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	waitForRevokePairRegistration(t, server, deviceID, "pair-test-1")
+	if !server.clientHub.Send(deviceID, []byte(`{"type":"blocked-writer"}`)) {
+		t.Fatal("failed to queue frame for the active WebSocket writer")
+	}
+	select {
+	case <-writerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("active WebSocket writer did not reach the deterministic barrier")
+	}
+
+	drainDone := server.BeginShutdown()
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err = connection.ReadMessage()
+	var closeError *websocket.CloseError
+	if !errors.As(err, &closeError) || closeError.Code != websocket.CloseServiceRestart {
+		t.Fatalf("shutdown close with blocked writer = %v, want WebSocket code %d", err, websocket.CloseServiceRestart)
+	}
+	select {
+	case <-drainDone:
+		t.Fatal("WebSocket drain completed before the blocked writer exited")
+	default:
+	}
+
+	releaseOnce.Do(func() { close(releaseWriter) })
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket drain did not complete after the writer exited")
 	}
 	if server.metrics.activeConnections() != 0 {
 		t.Fatalf("active WebSocket metric = %d, want 0", server.metrics.activeConnections())

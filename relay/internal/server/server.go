@@ -58,8 +58,12 @@ type Server struct {
 	relayHelloBeforeMailboxStore func(operation string)
 	// authBeforeJTIStore is a deterministic test barrier immediately before
 	// persistent replay admission acquires shutdown-linearized write admission.
-	authBeforeJTIStore    func()
-	maintenanceBeforeUnit func(unit string)
+	authBeforeJTIStore func()
+	// webSocketWriteAfterLock is a deterministic test barrier for proving that
+	// shutdown control frames and connection joining do not depend on a data
+	// writer releasing the application-level write mutex.
+	webSocketWriteAfterLock func()
+	maintenanceBeforeUnit   func(unit string)
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -192,13 +196,11 @@ func New() *Server {
 
 func (s *Server) Handler() http.Handler { return s.router }
 
-func (s *Server) BeginShutdown() {
+func (s *Server) BeginShutdown() <-chan struct{} {
 	s.mutationMu.Lock()
-	first := s.shuttingDown.CompareAndSwap(false, true)
+	s.shuttingDown.Store(true)
 	s.mutationMu.Unlock()
-	if first {
-		s.clientHub.Drain(serviceRestartCloseCode, serviceRestartCloseReason)
-	}
+	return s.clientHub.Drain(serviceRestartCloseCode, serviceRestartCloseReason)
 }
 
 func (s *Server) routes() {
