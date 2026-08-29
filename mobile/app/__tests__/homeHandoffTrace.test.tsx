@@ -87,6 +87,7 @@ describe('Home handoff trace', () => {
     const screen = render(<HomeScreen />);
 
     await waitFor(() => expect(traceFor(screen, routeCase.state)).toBeTruthy());
+    expect(screen.getByTestId('connection-surface')).toBeTruthy();
     expect(screen.getAllByText(routeCase.label).length).toBeGreaterThan(0);
     expect(screen.getByText(routeCase.explanation)).toBeTruthy();
     expect(screen.getByLabelText(`${routeCase.label}. ${routeCase.explanation}`).props.accessibilityLiveRegion).toBe('polite');
@@ -109,8 +110,8 @@ describe('Home handoff trace', () => {
     expect(global.__TWINOTIFY_CORE__.retryRoute).toHaveBeenCalledTimes(1);
 
     fireEvent.press(screen.getByRole('button', { name: 'Open settings' }));
-    fireEvent.press(screen.getByRole('button', { name: 'Open paired device settings' }));
-    fireEvent.press(screen.getByRole('button', { name: 'App filter' }));
+    fireEvent.press(screen.getByRole('button', { name: 'Open paired phone' }));
+    fireEvent.press(screen.getByRole('button', { name: 'Choose mirrored apps' }));
     expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings');
     expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/pair');
     expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/filter');
@@ -187,16 +188,17 @@ describe('Home handoff trace', () => {
     await waitFor(() => expect(traceFor(screen, 'direct')).toBeTruthy());
     expect(screen.queryByText('⚙')).toBeNull();
     expect(screen.queryByText('›')).toBeNull();
-    expect(screen.queryByText(/No mirrors yet/)).toBeTruthy();
+    expect(screen.queryByText(/No mirrors yet/)).toBeNull();
+    expect(screen.getByText('No activity yet')).toBeTruthy();
   });
 
-  it('renders the visible Settings action while retaining the complete legacy action name', async () => {
+  it('renders a conventional settings icon action without a text-tab treatment', async () => {
     arrange(cases[0]);
     const screen = render(<HomeScreen />);
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Open settings' })).toBeTruthy());
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Mirror notifications' }).props.accessibilityState.disabled).toBe(false));
-    expect(StyleSheet.flatten(screen.getByText('settings').props.style).textTransform).toBe('capitalize');
+    expect(screen.queryByText('settings')).toBeNull();
   });
 
   it('keeps narrow route status readable and physical touch targets safely above 44dp', async () => {
@@ -215,13 +217,25 @@ describe('Home handoff trace', () => {
       expect(closestFlexDirection(liveStatus)).toBe('column');
       expect(
         StyleSheet.flatten(
-          screen.getByRole('button', { name: 'Open paired device settings' }).props.style,
+          screen.getByRole('button', { name: 'Open paired phone' }).props.style,
         ).minHeight,
       ).toBeGreaterThanOrEqual(48);
     } finally {
       screen?.unmount();
       Dimensions.set({ window: originalWindow, screen: originalScreen });
     }
+  });
+
+  it('renders real privacy-safe recent activity instead of the permanent placeholder', async () => {
+    arrange(cases[0]);
+    global.__TWINOTIFY_CORE__.getRecentActivity.mockResolvedValueOnce([{
+      appName: 'Messages', artworkDataUri: null, direction: 'SENT', kind: 'NOTIFICATION',
+      status: 'DELIVERED', route: 'LAN', occurredAt: 2_000,
+    }]);
+    const screen = render(<HomeScreen />);
+
+    expect(await screen.findByText('Mirrored to Pixel')).toBeTruthy();
+    expect(screen.queryByText(/No mirrors yet/)).toBeNull();
   });
 
   it('does not emit React lifecycle warnings while asserting reconnecting route truth', async () => {

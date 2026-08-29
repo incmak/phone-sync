@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import type { ColorValue } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { useReducedMotion } from 'react-native-reanimated';
 
@@ -202,9 +203,9 @@ export function traceTicketOffset(
   return clamp(progress, 0, 1) * 8;
 }
 
-export function HandoffDisclosureMark({ size = 16, color }: { size?: number; color?: string }): React.ReactElement {
+export function HandoffDisclosureMark({ size = 16, color }: { size?: number; color?: ColorValue }): React.ReactElement {
   const theme = useTheme();
-  const stroke = color ?? theme.accentText;
+  const stroke = color ?? theme.colors.primary;
 
   return (
     <Svg
@@ -250,8 +251,8 @@ export function HandoffTrace({
   }, [reduceMotion, state]);
 
   const ticket = translateTicket(geometry.ticket, traceTicketOffset(state, reduceMotion, motionProgress));
-  const routeColor = state === 'unpaired' ? theme.border : theme.accent;
-  const waypointColor = state === 'queued' || state === 'paused' ? theme.borderHi : theme.accentHi;
+  const routeColor = state === 'unpaired' ? theme.colors.outlineVariant : theme.colors.primary;
+  const waypointColor = state === 'queued' || state === 'paused' ? theme.colors.outline : theme.colors.primary;
 
   return (
     <Svg
@@ -264,8 +265,8 @@ export function HandoffTrace({
       pointerEvents="none"
       testID={testID}
     >
-      <Path d={geometry.leftBracket} stroke={theme.borderHi} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-      <Path d={geometry.rightBracket} stroke={theme.borderHi} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+      <Path d={geometry.leftBracket} stroke={theme.colors.outline} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+      <Path d={geometry.rightBracket} stroke={theme.colors.outline} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
       {geometry.routePaths.map((route, index) => (
         <Path key={`route-${index}`} d={route} stroke={routeColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
       ))}
@@ -273,7 +274,7 @@ export function HandoffTrace({
         <Path
           key={`waypoint-${index}`}
           d={waypoint}
-          fill={state === 'relay' ? theme.accentLo : 'none'}
+          fill={state === 'relay' ? theme.colors.primaryContainer : 'none'}
           stroke={waypointColor}
           strokeWidth={2}
           strokeLinecap="round"
@@ -283,8 +284,8 @@ export function HandoffTrace({
       <Path
         testID="handoff-trace-ticket"
         d={ticket.path}
-        fill={theme.accentLo}
-        stroke={theme.accent}
+        fill={theme.colors.primaryContainer}
+        stroke={theme.colors.primary}
         strokeWidth={2}
         strokeLinejoin="round"
       />

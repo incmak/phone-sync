@@ -9,7 +9,7 @@ export type RecentActivityState =
   | { kind: 'loading' }
   | { kind: 'empty' }
   | { kind: 'error'; retry: () => void }
-  | { kind: 'populated'; items: RecentActivityItem[] };
+  | { kind: 'populated'; items: RecentActivityItem[]; refreshedAt: number };
 
 export function useRecentActivity(limit = 5): RecentActivityState {
   const boundedLimit = Math.max(1, Math.min(limit, 5));
@@ -27,7 +27,7 @@ export function useRecentActivity(limit = 5): RecentActivityState {
           const items = await TwinotifyCoreModule.getRecentActivity(boundedLimit);
           if (!active) return;
           lastSuccess.current = items;
-          setState(items.length === 0 ? { kind: 'empty' } : { kind: 'populated', items });
+          setState(items.length === 0 ? { kind: 'empty' } : { kind: 'populated', items, refreshedAt: Date.now() });
         } catch {
           if (active && lastSuccess.current === null) setState({ kind: 'error', retry });
         }

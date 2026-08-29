@@ -149,6 +149,7 @@ global.__RESET_OFFLINE_TEST_STATE__ = () => {
   mockTwinotifyCore.getDeviceDisplayName.mockResolvedValue('Android phone');
   mockTwinotifyCore.getOfflinePairingStatus.mockResolvedValue(idleStatus);
   mockTwinotifyCore.getPairStatus.mockResolvedValue({ paired: false });
+  mockTwinotifyCore.getRecentActivity.mockResolvedValue([]);
   mockTwinotifyCore.getCallCaptureEnabled.mockResolvedValue(false);
   mockTwinotifyCore.getCallStatePermissionAsync.mockResolvedValue({
     status: 'undetermined', granted: false, canAskAgain: true, expires: 'never',

@@ -16,11 +16,12 @@ import { presentRecentActivity } from './recentActivityPresentation';
 interface RecentActivitySectionProps {
   state: RecentActivityState;
   peerName: string;
-  now: number;
+  now?: number;
 }
 
 export function RecentActivitySection({ state, peerName, now }: RecentActivitySectionProps) {
   const theme = useTheme();
+  const relativeNow = now ?? (state.kind === 'populated' ? state.refreshedAt : 0);
 
   return (
     <View accessibilityLabel="Recent activity" style={styles.section}>
@@ -51,7 +52,7 @@ export function RecentActivitySection({ state, peerName, now }: RecentActivitySe
       {state.kind === 'populated' && (
         <View style={styles.list}>
           {state.items.map((item, index) => {
-            const copy = presentRecentActivity(item, peerName, now);
+            const copy = presentRecentActivity(item, peerName, relativeNow);
             return (
               <View key={`${item.occurredAt}-${index}`} style={styles.row}>
                 {item.artworkDataUri ? (

@@ -28,7 +28,7 @@ describe('RecentActivitySection', () => {
   it('renders only privacy-safe typed fields from populated activity', () => {
     const unexpected = { ...safeItem, title: 'secret', text: 'secret' } as never;
     const screen = render(
-      <RecentActivitySection state={{ kind: 'populated', items: [unexpected] }} peerName="POCO F1" now={3_000} />,
+      <RecentActivitySection state={{ kind: 'populated', items: [unexpected], refreshedAt: 3_000 }} peerName="POCO F1" now={3_000} />,
     );
 
     expect(screen.getByText('Mirrored from POCO F1')).toBeTruthy();

@@ -16,3 +16,8 @@ export * from './primitives/TwBanner';
 export * from './primitives/TwEmpty';
 export * from './primitives/TwIcon';
 export * from './primitives/TwSpinner';
+export * from './home/HomeTopAppBar';
+export * from './home/ConnectionSurface';
+export * from './home/HomeMetrics';
+export * from './home/HomeFilterAction';
+export * from './home/RecentActivitySection';

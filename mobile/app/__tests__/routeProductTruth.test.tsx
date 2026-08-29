@@ -59,8 +59,8 @@ describe('route product truth', () => {
   it('names route controls and keeps touch targets at least 44 points', async () => {
     const screen = render(<HomeScreen />);
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Mirror notifications' }).props.accessibilityState.disabled).toBe(false));
-    expect(screen.getByRole('button', { name: 'Open settings' }).props.style).toEqual(expect.arrayContaining([expect.objectContaining({ minWidth: 44, minHeight: 44 })]));
-    expect(screen.getByRole('button', { name: 'Open paired device settings' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open settings' }).props.style).toEqual(expect.arrayContaining([expect.objectContaining({ minWidth: 48, minHeight: 48 })]));
+    expect(screen.getByRole('button', { name: 'Open paired phone' })).toBeTruthy();
     expect(screen.getByRole('switch', { name: 'Mirror notifications' })).toBeTruthy();
     expect(screen.getByText('No data')).toBeTruthy();
     expect(screen.getByLabelText('Latency not measured')).toBeTruthy();
