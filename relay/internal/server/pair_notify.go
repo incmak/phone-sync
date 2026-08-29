@@ -63,15 +63,57 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	registration, registered := s.webSockets.register()
+	if !registered {
+		writeShutdownUnavailable(w)
+		return
+	}
+	defer registration.unregister()
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
-	defer conn.Close()
 
 	conn.SetReadLimit(256)
 	expiresAt := time.Unix(initial.CreatedAt, 0).Add(pairNotifyMaxDuration)
 	_ = conn.SetReadDeadline(expiresAt)
+
+	connectionLifetime := make(chan struct{})
+	readerDone := make(chan struct{})
+	shutdownWorkerDone := make(chan struct{})
+	go func() {
+		if s.pairNotifyReaderStarted != nil {
+			s.pairNotifyReaderStarted()
+		}
+		defer func() {
+			if s.pairNotifyReaderBeforeExit != nil {
+				s.pairNotifyReaderBeforeExit()
+			}
+			close(readerDone)
+		}()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer close(shutdownWorkerDone)
+		select {
+		case signal := <-registration.drain:
+			deadline := time.Now().Add(writeWait)
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(signal.code, signal.reason), deadline)
+			_ = conn.Close()
+		case <-connectionLifetime:
+		}
+	}()
+	defer func() {
+		close(connectionLifetime)
+		_ = conn.Close()
+		<-readerDone
+		<-shutdownWorkerDone
+	}()
 
 	sent := make(map[string]struct{}, 3)
 	complete, err := writePairTransitionFrames(conn, initialFrames, sent)
@@ -97,18 +139,6 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reader goroutine: detect client disconnect.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-		}
-	}()
-
 	remaining := time.Until(expiresAt)
 	if remaining < 0 {
 		remaining = 0
@@ -132,7 +162,7 @@ func (s *Server) handlePairNotify(w http.ResponseWriter, r *http.Request) {
 		case <-timer.C:
 			writePairClose(conn, "pair token expired")
 			return
-		case <-done:
+		case <-readerDone:
 			return
 		}
 	}

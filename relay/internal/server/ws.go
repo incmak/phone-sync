@@ -55,6 +55,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	registration, lifecycleRegistered := s.webSockets.register()
+	if !lifecycleRegistered {
+		writeShutdownUnavailable(w)
+		return
+	}
+	defer registration.unregister()
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Warn("websocket_upgrade_failed")
@@ -95,6 +102,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	client, registered := s.clientHub.registerPair(deviceID, pairID, outbound)
 	if !registered {
+		select {
+		case signal := <-registration.drain:
+			deadline := time.Now().Add(writeWait)
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(signal.code, signal.reason), deadline)
+		default:
+		}
 		s.clientHub.Unregister(client)
 		return
 	}
@@ -115,6 +128,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer connectionWorkers.Done()
 		select {
+		case signal := <-registration.drain:
+			deadline := time.Now().Add(writeWait)
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(signal.code, signal.reason), deadline)
+			_ = conn.Close()
 		case signal := <-client.drain:
 			deadline := time.Now().Add(writeWait)
 			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(signal.code, signal.reason), deadline)

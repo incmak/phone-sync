@@ -21,6 +21,7 @@ type Server struct {
 	jtiCache                    *PersistentJTICache
 	pairHub                     *PairHub
 	clientHub                   *ClientHub
+	webSockets                  *webSocketLifecycle
 	mailbox                     *store.MailboxStore
 	bolt                        *store.Bolt
 	handoffs                    *durableHandoffs
@@ -63,7 +64,11 @@ type Server struct {
 	// shutdown control frames and connection joining do not depend on a data
 	// writer releasing the application-level write mutex.
 	webSocketWriteAfterLock func()
-	maintenanceBeforeUnit   func(unit string)
+	// pairNotifyReaderStarted and pairNotifyReaderBeforeExit are deterministic
+	// seams for proving that process-wide WebSocket drain joins pairing readers.
+	pairNotifyReaderStarted    func()
+	pairNotifyReaderBeforeExit func()
+	maintenanceBeforeUnit      func(unit string)
 }
 
 // NewWithStore builds a server backed by the given Bolt DB. Tests use this.
@@ -159,6 +164,7 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 		jtiCache:                    jtiCache,
 		pairHub:                     NewPairHub(),
 		clientHub:                   clientHub,
+		webSockets:                  newWebSocketLifecycle(),
 		mailbox:                     mailbox,
 		bolt:                        b,
 		handoffs:                    newDurableHandoffs(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes),
@@ -200,7 +206,9 @@ func (s *Server) BeginShutdown() <-chan struct{} {
 	s.mutationMu.Lock()
 	s.shuttingDown.Store(true)
 	s.mutationMu.Unlock()
-	return s.clientHub.Drain(serviceRestartCloseCode, serviceRestartCloseReason)
+	webSocketDone := s.webSockets.Drain(serviceRestartCloseCode, serviceRestartCloseReason)
+	relayClientDone := s.clientHub.Drain(serviceRestartCloseCode, serviceRestartCloseReason)
+	return joinWebSocketDrains(webSocketDone, relayClientDone)
 }
 
 func (s *Server) routes() {

@@ -43,6 +43,63 @@ func signedPairNotifyHeaders(token, role, deviceID string, privateKey ed25519.Pr
 	return headers
 }
 
+func TestBeginShutdownClosesPairNotifyWithServiceRestartAndWaitsForReaderCleanup(t *testing.T) {
+	srv := newTestServer(t)
+	readerStarted := make(chan struct{})
+	readerExiting := make(chan struct{})
+	releaseReader := make(chan struct{})
+	var startedOnce sync.Once
+	var exitingOnce sync.Once
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseReader) })
+	srv.pairNotifyReaderStarted = func() {
+		startedOnce.Do(func() { close(readerStarted) })
+	}
+	srv.pairNotifyReaderBeforeExit = func() {
+		exitingOnce.Do(func() { close(readerExiting) })
+		<-releaseReader
+	}
+
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+	encPublicKey, signPublicKey, signPrivateKey := ed25519Keypair(t)
+	const pairToken = "tok-shutdown-drain"
+	const deviceID = "devA-shutdown-drain"
+	initPair(t, httpServer.URL, pairToken, deviceID, encPublicKey, signPublicKey)
+	connection := dialPairNotify(t, httpServer.URL, pairToken, "A", deviceID, signPrivateKey)
+	defer connection.Close()
+
+	select {
+	case <-readerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("pair-notify reader did not start")
+	}
+	drainDone := srv.BeginShutdown()
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err := connection.ReadMessage()
+	var closeError *websocket.CloseError
+	if !errors.As(err, &closeError) || closeError.Code != websocket.CloseServiceRestart {
+		t.Fatalf("pair-notify shutdown close = %v, want WebSocket code %d", err, websocket.CloseServiceRestart)
+	}
+	select {
+	case <-readerExiting:
+	case <-time.After(time.Second):
+		t.Fatal("pair-notify reader did not reach cleanup")
+	}
+	select {
+	case <-drainDone:
+		t.Fatal("WebSocket drain completed before the pair-notify reader exited")
+	default:
+	}
+
+	releaseOnce.Do(func() { close(releaseReader) })
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket drain did not complete after the pair-notify reader exited")
+	}
+}
+
 // initPair calls /pair/init and fatals on non-200.
 func initPair(t *testing.T, baseURL, pairToken, deviceID string, encPk, signPk []byte) {
 	t.Helper()

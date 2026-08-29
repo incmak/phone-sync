@@ -144,3 +144,54 @@ func TestBeginShutdownClosesWebSocketWhileWriterIsBlockedAndWaitsForCleanup(t *t
 		t.Fatalf("active WebSocket metric = %d, want 0", server.metrics.activeConnections())
 	}
 }
+
+func TestBeginShutdownClosesWebSocketAdmittedBeforeRelayHubRegistration(t *testing.T) {
+	server := newTestServer(t)
+	deviceID, privateKey := registerPair(t, server.pairStore)
+	beforeRelayRegistration := make(chan struct{})
+	releaseRelayRegistration := make(chan struct{})
+	var enteredOnce sync.Once
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseRelayRegistration) })
+	server.webSocketBeforeRegister = func(string, string) {
+		enteredOnce.Do(func() { close(beforeRelayRegistration) })
+		<-releaseRelayRegistration
+	}
+
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+mintJWT(t, deviceID, privateKey, ""))
+	connection, _, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(httpServer.URL, "http")+"/ws", header,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	select {
+	case <-beforeRelayRegistration:
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket did not reach the relay registration barrier")
+	}
+
+	drainDone := server.BeginShutdown()
+	select {
+	case <-drainDone:
+		t.Fatal("WebSocket drain completed before the admitted handler exited")
+	default:
+	}
+	releaseOnce.Do(func() { close(releaseRelayRegistration) })
+
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err = connection.ReadMessage()
+	var closeError *websocket.CloseError
+	if !errors.As(err, &closeError) || closeError.Code != websocket.CloseServiceRestart {
+		t.Fatalf("shutdown close before relay registration = %v, want WebSocket code %d", err, websocket.CloseServiceRestart)
+	}
+	select {
+	case <-drainDone:
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket drain did not complete after relay registration was released")
+	}
+}
