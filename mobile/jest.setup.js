@@ -102,6 +102,7 @@ const mockTwinotifyCore = {
   getNotificationDetail: jest.fn(async () => null),
   invokeMirrorAction: jest.fn(async () => ({ status: 'failed' })),
   canLaunchSourceApp: jest.fn(async () => false),
+  openNotificationSourceApp: jest.fn(async () => false),
   unpair: jest.fn(),
 };
 

@@ -9,6 +9,7 @@ describe('notification detail bridge', () => {
     native.getNotificationDetail.mockResolvedValue(detail);
     native.invokeMirrorAction.mockResolvedValue({ status: 'queued', invocationId: 'invoke' });
     native.canLaunchSourceApp.mockResolvedValue(true);
+    native.openNotificationSourceApp.mockResolvedValue(true);
     const bridge = useTwinotifyCore();
 
     await expect(bridge.getNotificationDetail('detail')).resolves.toBe(detail);
@@ -16,6 +17,7 @@ describe('notification detail bridge', () => {
       status: 'queued', invocationId: 'invoke',
     });
     await expect(bridge.canLaunchSourceApp('com.example')).resolves.toBe(true);
+    await expect(bridge.openNotificationSourceApp('detail')).resolves.toBe(true);
     expect(native.invokeMirrorAction).toHaveBeenCalledWith('detail', 'action', 'reply');
   });
 });

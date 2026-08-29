@@ -136,6 +136,7 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
     replyText?: string | null,
   ): Promise<MirrorActionInvocationResult>;
   canLaunchSourceApp(packageName: string): Promise<boolean>;
+  openNotificationSourceApp(detailId: string): Promise<boolean>;
 }
 
 export default requireNativeModule<TwinotifyCoreModuleType>('TwinotifyCore');

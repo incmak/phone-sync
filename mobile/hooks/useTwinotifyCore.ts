@@ -83,5 +83,7 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.invokeMirrorAction(detailId, actionId, replyText),
     canLaunchSourceApp: (packageName: string): Promise<boolean> =>
       TwinotifyCoreModule.canLaunchSourceApp(packageName),
+    openNotificationSourceApp: (detailId: string): Promise<boolean> =>
+      TwinotifyCoreModule.openNotificationSourceApp(detailId),
   };
 }

@@ -75,21 +75,40 @@ class NotificationDetailRepositoryTest {
         assertEquals(true, repository.canLaunchSourceApp("com.example"))
     }
 
+    @Test
+    fun sourceOpenResolvesPackageFromOpaqueDetailAtTapTime() = runTest {
+        val opened = mutableListOf<String>()
+        val repository = repository(
+            cache = cache(cancelledAt = null),
+            canonical = canonical(state = "ACTIVE"),
+            openSource = NotificationSourceOpener { packageName ->
+                opened += packageName
+                SourceLaunchResult.Launched
+            },
+        )
+
+        assertEquals(true, repository.openSourceApp(DETAIL_ID))
+        assertEquals(listOf("com.example"), opened)
+        assertEquals(false, repository.openSourceApp("44444444-4444-4444-8444-444444444444"))
+    }
+
     private fun repository(
         cache: NotificationDetailCache?,
         canonical: CanonicalNotificationState? = null,
         invocations: List<ActionInvocation> = emptyList(),
         invoke: NotificationDetailActionInvoker = NotificationDetailActionInvoker { _, _ -> error("unused") },
         canLaunch: NotificationSourceLaunchability = NotificationSourceLaunchability { false },
+        openSource: NotificationSourceOpener = NotificationSourceOpener { SourceLaunchResult.LaunchFailed },
     ) = NotificationDetailRepository(
         store = object : NotificationDetailStore {
-            override suspend fun cache(detailId: String) = cache
+            override suspend fun cache(detailId: String) = cache?.takeIf { it.detailId == detailId }
             override suspend fun canonical(canonId: String) = canonical
             override suspend fun invocations(canonId: String, sequence: Long) = invocations
         },
         originLabel = NotificationOriginLabel { "Paired phone" },
         invokeAction = invoke,
         sourceLaunchability = canLaunch,
+        sourceOpener = openSource,
     )
 
     private fun cache(cancelledAt: Long?) = NotificationDetailCache(

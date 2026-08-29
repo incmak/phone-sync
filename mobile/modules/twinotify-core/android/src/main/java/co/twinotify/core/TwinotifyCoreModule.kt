@@ -992,6 +992,19 @@ class TwinotifyCoreModule internal constructor(
             }
         }
 
+        AsyncFunction("openNotificationSourceApp") { detailId: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    promise.resolve(
+                        NotificationDetailRepository.production(requireContext())
+                            .openSourceApp(detailId),
+                    )
+                } catch (_: Throwable) {
+                    promise.resolve(false)
+                }
+            }
+        }
+
         AsyncFunction("ping") { relayUrl: String, authed: Boolean, promise: Promise ->
             val settled = AtomicBoolean(false)
             val handler = Handler(Looper.getMainLooper())

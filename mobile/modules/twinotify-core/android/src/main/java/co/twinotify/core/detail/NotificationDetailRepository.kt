@@ -11,6 +11,8 @@ import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.NotificationDetailCache
 import co.twinotify.core.storage.PeerStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class NotificationDetailAction(
     val actionId: String,
@@ -59,11 +61,16 @@ fun interface NotificationSourceLaunchability {
     suspend fun canLaunch(packageName: String): Boolean
 }
 
+fun interface NotificationSourceOpener {
+    suspend fun open(packageName: String): SourceLaunchResult
+}
+
 class NotificationDetailRepository(
     private val store: NotificationDetailStore,
     private val originLabel: NotificationOriginLabel,
     private val invokeAction: NotificationDetailActionInvoker,
     private val sourceLaunchability: NotificationSourceLaunchability,
+    private val sourceOpener: NotificationSourceOpener,
     private val sourceIcon: (String) -> String? = { null },
 ) {
     suspend fun get(detailId: String): NotificationDetail? {
@@ -134,6 +141,14 @@ class NotificationDetailRepository(
     suspend fun canLaunchSourceApp(packageName: String): Boolean =
         packageName.isNotBlank() && sourceLaunchability.canLaunch(packageName)
 
+    suspend fun openSourceApp(detailId: String): Boolean {
+        val cached = store.cache(detailId) ?: return false
+        val post = runCatching { NotifPostJson.fromPayloadJson(cached.payloadJson) }.getOrNull()
+            ?.takeIf { it.canon_id == cached.canonId }
+            ?: return false
+        return sourceOpener.open(post.package_name) == SourceLaunchResult.Launched
+    }
+
     companion object {
         fun production(context: Context): NotificationDetailRepository {
             val app = context.applicationContext
@@ -157,6 +172,11 @@ class NotificationDetailRepository(
                 invokeAction = NotificationDetailActionInvoker(invoker::invoke),
                 sourceLaunchability = NotificationSourceLaunchability { packageName ->
                     sourcePlatform.isInstalled(packageName) && sourcePlatform.hasLauncher(packageName)
+                },
+                sourceOpener = NotificationSourceOpener { packageName ->
+                    withContext(Dispatchers.Main.immediate) {
+                        SourceAppLauncher(sourcePlatform).launch(packageName)
+                    }
                 },
                 sourceIcon = { packageName -> sourceAppArtworkDataUri(app, packageName) },
             )
