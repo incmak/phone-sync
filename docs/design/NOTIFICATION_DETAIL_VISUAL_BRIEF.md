@@ -1,6 +1,6 @@
 # Twinotify Notification Detail - Visual Proposal
 
-Status: proposed for user approval
+Status: approved by the user on 2026-08-29
 
 Date: 2026-08-29
 

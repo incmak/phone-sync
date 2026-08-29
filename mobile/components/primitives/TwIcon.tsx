@@ -2,11 +2,12 @@
 // Uses react-native-svg primitives. Export as named function + keyed registry.
 
 import React from 'react';
-import Svg, { Path, Circle, Rect, Line, G } from 'react-native-svg';
+import type { ColorValue } from 'react-native';
+import Svg, { Path, Circle, Rect } from 'react-native-svg';
 
 export interface TwIconProps {
   size?: number;
-  color?: string;
+  color?: ColorValue;
   strokeWidth?: number;
 }
 
