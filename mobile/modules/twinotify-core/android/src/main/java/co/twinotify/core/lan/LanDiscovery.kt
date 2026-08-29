@@ -57,6 +57,14 @@ internal object LanDiscoveryContract {
             capabilitiesText == capabilities.toString() &&
             capabilities > 0 && capabilities and LanCapabilities.REVIEWED_MASK == capabilities
     }
+
+    /**
+     * Android may omit some or all TXT attributes from `onServiceFound` and only
+     * populate them after resolution. A complete non-match can be rejected early;
+     * an incomplete record must be resolved before it is authenticated.
+     */
+    fun shouldResolve(attributes: Map<String, ByteArray>, expectedAdvertisementIds: Set<String>): Boolean =
+        attributes.keys != allowedKeys || matches(attributes, expectedAdvertisementIds)
 }
 
 private fun ByteArray.strictUtf8(): String? = try {

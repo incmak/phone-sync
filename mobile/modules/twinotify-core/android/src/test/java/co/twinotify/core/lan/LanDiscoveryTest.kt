@@ -26,6 +26,25 @@ class LanDiscoveryTest {
     }
 
     @Test
+    fun incompleteFoundRecordMustBeResolvedBeforeTxtValidation() {
+        val advertisement = "g08A2xG_6-WMx9D8X9P2zQ"
+
+        assertTrue(LanDiscoveryContract.shouldResolve(emptyMap(), setOf(advertisement)))
+        assertTrue(
+            LanDiscoveryContract.shouldResolve(
+                LanDiscoveryContract.txt(advertisement, LanCapabilities.DIRECT_V1),
+                setOf(advertisement),
+            ),
+        )
+        assertFalse(
+            LanDiscoveryContract.shouldResolve(
+                LanDiscoveryContract.txt("AAAAAAAAAAAAAAAAAAAAAA", LanCapabilities.DIRECT_V1),
+                setOf(advertisement),
+            ),
+        )
+    }
+
+    @Test
     fun candidatesRetainOriginatingNetworkAndDoNotExposeItInText() {
         val network = FakeLanNetwork()
         val candidate = LanCandidate(InetAddress.getLoopbackAddress(), 4455, network)

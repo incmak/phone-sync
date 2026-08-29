@@ -217,7 +217,11 @@ class PairingConnection internal constructor(
     override suspend fun read(): OfflinePairingFrame {
         val cancellationCloser = currentCoroutineContext().closeOnCancellation(::close)
         try {
-            socket.soTimeout = readTimeoutMillis.toSocketTimeout()
+            socket.soTimeout = if (readTimeoutMillis == NO_READ_TIMEOUT_MILLIS) {
+                0
+            } else {
+                readTimeoutMillis.toSocketTimeout()
+            }
             return runInterruptible(Dispatchers.IO) {
                 OfflinePairingFrameCodec.read(socket.getInputStream(), inbound)
             }
@@ -266,7 +270,8 @@ class PairingConnection internal constructor(
     private companion object {
         const val DEFAULT_MAX_FRAMES = 16
         const val DEFAULT_MAX_BYTES = 256 * 1024
-        const val DEFAULT_READ_TIMEOUT_MILLIS = 30_000L
+        const val NO_READ_TIMEOUT_MILLIS = 0L
+        const val DEFAULT_READ_TIMEOUT_MILLIS = NO_READ_TIMEOUT_MILLIS
         const val DEFAULT_WRITE_TIMEOUT_MILLIS = PAIRING_WRITE_TIMEOUT_MILLIS
     }
 }
@@ -328,7 +333,7 @@ internal class JssePairingTlsClient(
 
 internal class JssePairingTlsServer private constructor(
     private val socket: SSLServerSocket,
-    private val operationTimeoutMillis: Long,
+    private val handshakeTimeoutMillis: Long,
 ) : PairingTlsServer {
     override val localPort: Int get() = socket.localPort
 
@@ -345,7 +350,7 @@ internal class JssePairingTlsServer private constructor(
         }
         try {
             accepted.useClientMode = false
-            accepted.soTimeout = operationTimeoutMillis.toSocketTimeout()
+            accepted.soTimeout = handshakeTimeoutMillis.toSocketTimeout()
             runInterruptible(Dispatchers.IO) { accepted.startHandshake() }
             val certificate = accepted.session.peerCertificates.firstOrNull() as? X509Certificate
                 ?: throw PairingTransportException(PairingTransportFailure.TLS_FAILED)
@@ -369,16 +374,22 @@ internal class JssePairingTlsServer private constructor(
     companion object {
         fun open(
             context: SSLContext = LanTlsContextFactory.serverContext(),
-            operationTimeoutMillis: Long = DEFAULT_TLS_TIMEOUT_MILLIS,
+            acceptTimeoutMillis: Long = NO_ACCEPT_TIMEOUT_MILLIS,
+            handshakeTimeoutMillis: Long = DEFAULT_TLS_HANDSHAKE_TIMEOUT_MILLIS,
         ): JssePairingTlsServer {
             val socket = context.serverSocketFactory.createServerSocket(0) as SSLServerSocket
             socket.useClientMode = false
             socket.needClientAuth = true
-            socket.soTimeout = operationTimeoutMillis.toSocketTimeout()
-            return JssePairingTlsServer(socket, operationTimeoutMillis)
+            socket.soTimeout = if (acceptTimeoutMillis == NO_ACCEPT_TIMEOUT_MILLIS) {
+                0
+            } else {
+                acceptTimeoutMillis.toSocketTimeout()
+            }
+            return JssePairingTlsServer(socket, handshakeTimeoutMillis)
         }
 
-        private const val DEFAULT_TLS_TIMEOUT_MILLIS = 30_000L
+        private const val NO_ACCEPT_TIMEOUT_MILLIS = 0L
+        private const val DEFAULT_TLS_HANDSHAKE_TIMEOUT_MILLIS = 30_000L
     }
 }
 
@@ -386,7 +397,7 @@ class OfflinePairingTransport internal constructor(
     private val nsd: PairingNsdAdapter,
     private val tlsClient: PairingTlsClient? = null,
     private val tlsServer: PairingTlsServer? = null,
-    private val acceptTimeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
+    private val acceptTimeoutMillis: Long = NO_ACCEPT_TIMEOUT_MILLIS,
     private val connectTimeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
     private val cleanupTimeoutMillis: Long = DEFAULT_CLEANUP_TIMEOUT_MILLIS,
 ) {
@@ -441,17 +452,22 @@ class OfflinePairingTransport internal constructor(
 
     suspend fun accept(sessionId: String): PairingConnection {
         validateSessionId(sessionId)
-        val server = tlsServer ?: JssePairingTlsServer.open(operationTimeoutMillis = acceptTimeoutMillis)
+        val server = tlsServer ?: JssePairingTlsServer.open(acceptTimeoutMillis = acceptTimeoutMillis)
         var advertisement: PairingAdvertisement? = null
         try {
             advertisement = nsd.register(sessionId, server.localPort)
-            val connection = withTimeout(acceptTimeoutMillis) {
+            suspend fun awaitConnection(): PairingConnection {
                 val cancellationCloser = currentCoroutineContext().closeOnCancellation(server::close)
-                try {
+                return try {
                     server.accept()
                 } finally {
                     cancellationCloser.dispose()
                 }
+            }
+            val connection = if (acceptTimeoutMillis == NO_ACCEPT_TIMEOUT_MILLIS) {
+                awaitConnection()
+            } else {
+                withTimeout(acceptTimeoutMillis) { awaitConnection() }
             }
             if (connection.peerSpkiSha256 == null) {
                 connection.close()
@@ -479,6 +495,7 @@ class OfflinePairingTransport internal constructor(
     }
 
     private companion object {
+        const val NO_ACCEPT_TIMEOUT_MILLIS = 0L
         const val DEFAULT_TIMEOUT_MILLIS = 30_000L
         const val DEFAULT_CLEANUP_TIMEOUT_MILLIS = 1_000L
     }

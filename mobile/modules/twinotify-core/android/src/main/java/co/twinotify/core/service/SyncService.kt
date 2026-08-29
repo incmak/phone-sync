@@ -319,6 +319,7 @@ internal class LiveServiceTransportLoop(
     private val queuedCount: suspend () -> Int,
     private val retryRequests: Flow<Unit> = emptyFlow(),
     private val onAuthenticatedRoute: suspend (RouteKind) -> Unit = {},
+    private val onEstablishedFailure: (Throwable) -> Unit = {},
     private val publishHealth: suspend (RouteHealth) -> Unit,
 ) {
     private val healthState = MutableStateFlow(RouteHealth())
@@ -333,6 +334,7 @@ internal class LiveServiceTransportLoop(
             preferLan = preferLan,
             queuedCount = queuedCount,
             retryRequests = retryRequests,
+            onEstablishedFailure = onEstablishedFailure,
         )
         coroutineScope {
             var authenticatedRoute = RouteKind.NONE
@@ -1277,6 +1279,9 @@ class SyncService : Service() {
                 outbox = outbox,
                 dispatch = dispatcher::dispatch,
                 onLanEvent = { event ->
+                    if (event is co.twinotify.core.lan.LanTransportEvent.Closed) {
+                        runCatching { android.util.Log.w("Twinotify", event.code) }
+                    }
                     if (event is co.twinotify.core.lan.LanTransportEvent.PeerAccepted) {
                         recordLanCustodyObservation(event)
                     }
@@ -1297,6 +1302,14 @@ class SyncService : Service() {
                     } catch (_: Throwable) {
                         SyncServiceStatus.setLastError("snapshot_emit")
                     }
+                },
+                onEstablishedFailure = { error ->
+                    val code = when (error) {
+                        is co.twinotify.core.lan.LanConnectionException -> error.failure.code
+                        is co.twinotify.core.lan.LanFrameException -> error.failure.code
+                        else -> error.javaClass.simpleName.ifBlank { "route_failure" }
+                    }
+                    runCatching { android.util.Log.w("Twinotify", code) }
                 },
                 publishHealth = { routeHealth ->
                     val status = routeHealth.toSyncRouteStatus()

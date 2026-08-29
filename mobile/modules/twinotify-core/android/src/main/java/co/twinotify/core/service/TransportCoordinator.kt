@@ -79,6 +79,7 @@ class TransportCoordinator(
     private val idlePollMs: Long = 1_000L,
     /** Emits when a user asks to reconnect now, cutting the current backoff short. */
     private val retryRequests: Flow<Unit> = emptyFlow(),
+    private val onEstablishedFailure: (Throwable) -> Unit = {},
 ) {
     private val healthState = MutableStateFlow(RouteHealth())
     val health: StateFlow<RouteHealth> = healthState.asStateFlow()
@@ -108,7 +109,8 @@ class TransportCoordinator(
             } catch (error: CancellationException) {
                 carryCancellation = error
                 throw error
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                runCatching { onEstablishedFailure(error) }
                 closeCode = ESTABLISHED_ROUTE_FAILURE
             } finally {
                 try {

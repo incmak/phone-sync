@@ -155,6 +155,44 @@ class NotificationStateReducerTest {
         )
     }
 
+    @Test
+    fun authenticatedOriginCancelWithoutPriorStateCreatesATombstone() {
+        val incoming = event(type = "notif.cancel", sequence = 3, origin = "dev-peer")
+
+        val authorized = NotificationStateReducer.authorizePeerCancel(
+            current = null,
+            event = incoming,
+            authenticatedPeerId = "dev-peer",
+        )
+        val cancelled = assertIs<Reduction.Apply>(
+            NotificationStateReducer.reduce(
+                current = null,
+                event = requireNotNull(authorized),
+                localDeviceId = "dev-local",
+                allocator = allocator,
+            ),
+        ).state
+
+        assertEquals("CANCELLED", cancelled.state)
+        assertEquals("dev-peer", cancelled.originDevice)
+        assertEquals(null, cancelled.mirrorLocalId)
+        assertEquals(null, cancelled.mirrorLocalTag)
+    }
+
+    @Test
+    fun unknownCancelFromMismatchedOriginIsRejected() {
+        val incoming = event(type = "notif.cancel", sequence = 3, origin = "spoof")
+
+        assertEquals(
+            null,
+            NotificationStateReducer.authorizePeerCancel(
+                current = null,
+                event = incoming,
+                authenticatedPeerId = "dev-peer",
+            ),
+        )
+    }
+
     private fun event(
         type: String,
         sequence: Long,

@@ -37,6 +37,8 @@ class OfflinePairingCoordinator(
     private var ownSignature: ByteArray? = null
     private var pendingPeerSignature: ByteArray? = null
     private var peerSignature: ByteArray? = null
+    private var signatureSendAccepted = false
+    private var signatureWriteAcknowledged = false
     private var signatureSent = false
     private var deriveScheduled = false
     private var closeScheduled = false
@@ -134,11 +136,15 @@ class OfflinePairingCoordinator(
                 prepareMutual()
                 val session = qr ?: return@cryptoEffect abort(OfflinePairingError.INVALID_FRAME)
                 transportEffect(token, setOf(OfflinePairingState.LOCAL_CONFIRMED, OfflinePairingState.MUTUALLY_SIGNED),
-                    call = { port.send(OfflinePairingFrame.Signature(session.sessionId, signature)) },
+                    call = {
+                        port.send(OfflinePairingFrame.Signature(session.sessionId, signature)) {
+                            acknowledgeSignatureWrite(token)
+                        }
+                    },
                     onSuccess = {
                         signature.fill(0)
-                        signatureSent = true
-                        if (status.state == OfflinePairingState.MUTUALLY_SIGNED) scheduleDerive()
+                        signatureSendAccepted = true
+                        finishSignatureSendIfReady()
                     },
                     onDiscard = { signature.fill(0) },
                 )
@@ -165,7 +171,14 @@ class OfflinePairingCoordinator(
         }
     }
 
-    fun fail(error: OfflinePairingError) = submitPublic { abort(error) }
+    fun fail(error: OfflinePairingError) = submitPublic {
+        if (
+            status.state == OfflinePairingState.COMMITTED ||
+            status.state == OfflinePairingState.COMPLETE ||
+            status.error != null
+        ) return@submitPublic
+        abort(error)
+    }
 
     internal fun provisionalSignatureSizeForTest(): Int = peerSignature?.size ?: pendingPeerSignature?.size ?: 0
 
@@ -267,6 +280,20 @@ class OfflinePairingCoordinator(
         if (expiredAt(now)) return abort(OfflinePairingError.EXPIRED)
         transition(OfflinePairingState.MUTUALLY_SIGNED)
         if (signatureSent) scheduleDerive()
+    }
+
+    private fun acknowledgeSignatureWrite(token: Long) = submitPublic {
+        if (!current(token, setOf(OfflinePairingState.LOCAL_CONFIRMED, OfflinePairingState.MUTUALLY_SIGNED))) {
+            return@submitPublic
+        }
+        signatureWriteAcknowledged = true
+        finishSignatureSendIfReady()
+    }
+
+    private fun finishSignatureSendIfReady() {
+        if (signatureSent || !signatureSendAccepted || !signatureWriteAcknowledged) return
+        signatureSent = true
+        if (status.state == OfflinePairingState.MUTUALLY_SIGNED) scheduleDerive()
     }
 
     private fun scheduleDerive() {
@@ -444,6 +471,8 @@ class OfflinePairingCoordinator(
         transcript = null
         pendingPeerHello = null
         peerHello = null
+        signatureSendAccepted = false
+        signatureWriteAcknowledged = false
         signatureSent = false
         deriveScheduled = false
     }

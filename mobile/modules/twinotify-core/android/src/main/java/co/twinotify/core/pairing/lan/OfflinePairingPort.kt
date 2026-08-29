@@ -8,7 +8,7 @@ interface OfflinePairingPort {
     fun monotonicMillis(): Long
     fun advertise(sessionId: String)
     fun resolve(sessionId: String, expectedTlsSpkiSha256: ByteArray)
-    fun send(frame: OfflinePairingFrame)
+    fun send(frame: OfflinePairingFrame, onWritten: () -> Unit = {})
     fun close()
 }
 

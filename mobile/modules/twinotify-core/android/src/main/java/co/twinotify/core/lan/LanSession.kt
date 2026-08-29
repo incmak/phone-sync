@@ -9,10 +9,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -40,24 +43,64 @@ class DirectLanConnector(
     private val discovery: LanDiscovery,
     private val listener: LanListener,
     private val dialer: LanDialer,
+    private val localDeviceId: String,
+    private val peerDeviceId: String,
     private val arbitrationGraceMillis: Long = DEFAULT_ARBITRATION_GRACE_MILLIS,
+    private val fallbackDialDelayMillis: Long = DEFAULT_FALLBACK_DIAL_DELAY_MILLIS,
+    private val preferredConnectionWaitMillis: Long = DEFAULT_PREFERRED_CONNECTION_WAIT_MILLIS,
+    private val closeListener: () -> Unit = { listener.close() },
+    private val closeDiscovery: suspend () -> Unit = { discovery.close() },
     /**
      * Whole-attempt ceiling. Without it a silent listener would block the route
      * open forever and the coordinator could never fall back to the relay.
      */
     private val connectTimeoutMillis: Long = DEFAULT_CONNECT_TIMEOUT_MILLIS,
 ) {
+    init {
+        require(localDeviceId != peerDeviceId) { "lan_identity_collision" }
+        require(arbitrationGraceMillis > 0)
+        require(fallbackDialDelayMillis >= 0)
+        require(preferredConnectionWaitMillis >= arbitrationGraceMillis)
+        require(connectTimeoutMillis > fallbackDialDelayMillis + preferredConnectionWaitMillis)
+    }
+
+    private val preferredInitiatorDeviceId = minOf(localDeviceId, peerDeviceId)
+
     suspend fun connect(): AuthenticatedLanConnection = withTimeout(connectTimeoutMillis) {
         coroutineScope {
             // Each side reports its own outcome, so one failing does not cancel the
             // other. A refused dial must still let an inbound connection land.
             val inbound = async { attempt { listener.accept() } }
-            val outbound = async { attempt { dialer.dial(discovery.candidates().first()) } }
+            val outbound = async {
+                // Normally only the stable, identity-selected initiator dials. The other
+                // phone retains a delayed reverse dial so asymmetric OEM/firewall behavior
+                // can still recover without creating routine crossed connections.
+                if (localDeviceId != preferredInitiatorDeviceId) {
+                    delay(fallbackDialDelayMillis)
+                }
+                attempt { dialer.dial(discovery.candidates().first()) }
+            }
             try {
                 race(inbound, outbound)
             } finally {
-                inbound.cancel()
-                outbound.cancel()
+                withContext(NonCancellable) {
+                    inbound.cancel()
+                    outbound.cancel()
+
+                    // SSLServerSocket.accept() is not reliably interruptible on Android.
+                    // Close the owned listener before joining the losing branch, otherwise
+                    // coroutineScope can hold an authenticated winner until the outer
+                    // timeout tears that winner down as well.
+                    runCatching { closeListener() }
+                    try {
+                        closeDiscovery()
+                    } catch (_: Exception) {
+                        // Closing discovery is best-effort cleanup. The branch joins below
+                        // are what prevent connector work from escaping this attempt.
+                    }
+                    inbound.join()
+                    outbound.join()
+                }
             }
         }
     }
@@ -74,8 +117,15 @@ class DirectLanConnector(
         val winner = first.getOrNull()
             // That side failed, so the other is the only remaining chance.
             ?: return pending.await().getOrElse { throw first.exceptionOrNull() ?: it }
-
-        val other = withTimeoutOrNull(arbitrationGraceMillis) { pending.await() }?.getOrNull()
+        // If the first authenticated half has the non-preferred initiator, give the
+        // deterministic half longer to finish. Otherwise two slow crossed handshakes can
+        // make the phones keep opposite sockets and repeatedly tear each other down.
+        val otherWait = if (winner.session.initiatorDeviceId == preferredInitiatorDeviceId) {
+            arbitrationGraceMillis
+        } else {
+            preferredConnectionWaitMillis
+        }
+        val other = withTimeoutOrNull(otherWait) { pending.await() }?.getOrNull()
             ?: return winner
 
         return if (LanConnectionArbiter.prefer(other.session, winner.session)) {
@@ -96,9 +146,15 @@ class DirectLanConnector(
     }
 
     private companion object {
-        /** Long enough for a crossed dial to land, short enough not to stall a route. */
-        const val DEFAULT_ARBITRATION_GRACE_MILLIS = 750L
-        const val DEFAULT_CONNECT_TIMEOUT_MILLIS = 8_000L
+        /**
+         * Physical Android TLS/Keystore handshakes can complete more than a second apart on
+         * the two halves of a crossed dial. Keep this below the whole-attempt ceiling while
+         * giving both phones enough time to arbitrate the same authenticated session.
+         */
+        const val DEFAULT_ARBITRATION_GRACE_MILLIS = 2_000L
+        const val DEFAULT_FALLBACK_DIAL_DELAY_MILLIS = 4_000L
+        const val DEFAULT_PREFERRED_CONNECTION_WAIT_MILLIS = 6_000L
+        const val DEFAULT_CONNECT_TIMEOUT_MILLIS = 15_000L
     }
 }
 

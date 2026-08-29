@@ -13,11 +13,15 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface LanTransportEvent {
     /** The peer took durable custody of one of our outbound rows. */
@@ -48,8 +52,13 @@ sealed interface LanTransportEvent {
 class LanTransport(
     private val connection: AuthenticatedLanConnection,
     private val outbox: OutboxRepository,
+    private val heartbeatIntervalMillis: Long = DEFAULT_HEARTBEAT_INTERVAL_MILLIS,
     private val dispatch: suspend (String) -> InboundDispatchResult,
 ) {
+    init {
+        require(heartbeatIntervalMillis > 0)
+    }
+
     val peerDeviceId: String get() = connection.peerDeviceId
 
     /**
@@ -90,6 +99,21 @@ class LanTransport(
             events.send(LanTransportEvent.Closed("session_already_started"))
             return@channelFlow
         }
+        val heartbeat = launch {
+            var token = 0L
+            while (isActive) {
+                delay(heartbeatIntervalMillis)
+                try {
+                    connection.send(LanFrame.Ping(token++))
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    // Unblock the inbound reader so the session reports connection_lost.
+                    connection.close()
+                    return@launch
+                }
+            }
+        }
         try {
             connection.incoming.collect { frame ->
                 when (frame) {
@@ -120,8 +144,15 @@ class LanTransport(
         } catch (_: Throwable) {
             events.send(LanTransportEvent.Closed("connection_lost"))
         } finally {
-            connection.close()
+            withContext(NonCancellable) {
+                heartbeat.cancelAndJoin()
+                connection.close()
+            }
         }
+    }
+
+    private companion object {
+        const val DEFAULT_HEARTBEAT_INTERVAL_MILLIS = 3_000L
     }
 
     /** Not a coroutine cancellation: it unwinds one collect to end one session. */
@@ -204,7 +235,7 @@ class LanRoute(
 
     override suspend fun open(): AuthenticatedRouteSession {
         val connection = connect()
-        val transport = LanTransport(connection, outbox, dispatch)
+        val transport = LanTransport(connection, outbox, dispatch = dispatch)
         val closed = CompletableDeferred<String>()
         val session = CoroutineScope(currentCoroutineContext()).launch {
             try {

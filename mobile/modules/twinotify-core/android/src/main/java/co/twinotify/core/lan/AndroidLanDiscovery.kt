@@ -10,9 +10,9 @@ import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import java.net.InetAddress
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filterNotNull
@@ -139,7 +139,7 @@ private class AndroidNsdPlatform(
     private val connectivity = requireNotNull(appContext.getSystemService(ConnectivityManager::class.java)) { "lan_unavailable" }
     private val stopped = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
-    private val activeResolution = AtomicReference<NsdManager.ResolveListener?>()
+    private val activeResolutions = ConcurrentHashMap.newKeySet<NsdManager.ResolveListener>()
     private var callback: LanDiscoveryPlatform.Callback? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var registrationStarted = false
@@ -158,17 +158,17 @@ private class AndroidNsdPlatform(
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
             if (stopped.get() || serviceInfo.serviceType != LanDiscoveryContract.SERVICE_TYPE) return
             val recognizedIds = expectedAdvertisementIds + clockSkewAdvertisementIds
-            if (!LanDiscoveryContract.matches(serviceInfo.attributes, recognizedIds)) return
-            val ad = serviceInfo.attributes.getValue("ad").decodeToString()
-            if (ad in clockSkewAdvertisementIds) {
-                callback?.onFailure(LanDiscoveryFailure.CLOCK_SKEW)
-                return
-            }
+            if (!LanDiscoveryContract.shouldResolve(serviceInfo.attributes, recognizedIds)) return
             lateinit var resolver: NsdManager.ResolveListener
             resolver = object : NsdManager.ResolveListener {
                 override fun onServiceResolved(resolved: NsdServiceInfo) {
-                    activeResolution.compareAndSet(resolver, null)
-                    if (!LanDiscoveryContract.matches(resolved.attributes, expectedAdvertisementIds)) return
+                    activeResolutions.remove(resolver)
+                    if (!LanDiscoveryContract.matches(resolved.attributes, recognizedIds)) return
+                    val ad = resolved.attributes.getValue("ad").decodeToString()
+                    if (ad in clockSkewAdvertisementIds) {
+                        callback?.onFailure(LanDiscoveryFailure.CLOCK_SKEW)
+                        return
+                    }
                     val address = resolved.hostAddresses.firstOrNull() ?: resolved.host ?: return
                     if (resolved.port !in 1..65535 || resolved.network != null && resolved.network != network) return
                     callback?.onCandidate(
@@ -182,17 +182,17 @@ private class AndroidNsdPlatform(
                 }
 
                 override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                    activeResolution.compareAndSet(resolver, null)
+                    activeResolutions.remove(resolver)
                 }
             }
-            if (!activeResolution.compareAndSet(null, resolver)) return
+            activeResolutions.add(resolver)
             try {
                 nsd.resolveService(serviceInfo, executor, resolver)
             } catch (error: SecurityException) {
-                activeResolution.compareAndSet(resolver, null)
+                activeResolutions.remove(resolver)
                 callback?.onFailure(LanDiscoveryFailure.PERMISSION_DENIED)
             } catch (_: Throwable) {
-                activeResolution.compareAndSet(resolver, null)
+                activeResolutions.remove(resolver)
             }
         }
 
@@ -253,7 +253,9 @@ private class AndroidNsdPlatform(
 
     override fun stop() {
         if (!stopped.compareAndSet(false, true)) return
-        activeResolution.getAndSet(null)?.let { runCatching { nsd.stopServiceResolution(it) } }
+        activeResolutions.toList().forEach { resolver ->
+            if (activeResolutions.remove(resolver)) runCatching { nsd.stopServiceResolution(resolver) }
+        }
         if (discoveryStarted) runCatching { nsd.stopServiceDiscovery(discovery) }
         if (registrationStarted) runCatching { nsd.unregisterService(registration) }
         if (networkCallbackStarted) runCatching { connectivity.unregisterNetworkCallback(networkCallback) }

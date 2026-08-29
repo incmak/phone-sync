@@ -3,6 +3,7 @@ package co.twinotify.core.service
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
+import android.util.Log
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.lan.AuthenticatedLanConnection
 import co.twinotify.core.lan.DirectLanConnector
@@ -11,6 +12,7 @@ import co.twinotify.core.lan.JsseLanListener
 import co.twinotify.core.lan.LanAdvertisement
 import co.twinotify.core.lan.LanAdvertisementMatcher
 import co.twinotify.core.lan.LanConnectionRole
+import co.twinotify.core.lan.LanConnectionException
 import co.twinotify.core.lan.LanDialer
 import co.twinotify.core.lan.LanDiscovery
 import co.twinotify.core.lan.LanHandshake
@@ -302,7 +304,15 @@ class DefaultLiveLanAttemptFactory(
             resources.installDiscovery(discovery)
             val dialer = platform.openDialer(config, lease)
             return DefaultLiveLanAttempt(
-                DirectLanConnector(discovery, bound.listener, dialer),
+                DirectLanConnector(
+                    discovery,
+                    bound.listener,
+                    dialer,
+                    localDeviceId = config.localDeviceId,
+                    peerDeviceId = config.peerDeviceId,
+                    closeListener = resources::closeListenerOnce,
+                    closeDiscovery = resources::closeDiscoveryOnce,
+                ),
                 resources,
                 lost,
             )
@@ -423,9 +433,12 @@ class LiveLanTransportRoute(
         val attempt = attemptFactory.open(currentConfig) { attemptRef.get()?.abort() }
         attemptRef.set(attempt)
         try {
-            val session = sessionFactory(attempt.connect())
+            val connection = attempt.connect()
+            val session = sessionFactory(connection)
             return LiveLanOwnedSession(session, attempt)
         } catch (error: Throwable) {
+            val code = (error as? LanConnectionException)?.failure?.code ?: "lan_open_failed"
+            runCatching { Log.w("Twinotify", code) }
             attempt.close()
             throw error
         }

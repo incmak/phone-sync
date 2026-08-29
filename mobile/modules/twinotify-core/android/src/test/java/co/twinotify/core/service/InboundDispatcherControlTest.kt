@@ -516,6 +516,14 @@ class InboundDispatcherControlTest {
     }
 
     @Test
+    fun digestSourceUnavailableIsAcceptedSoTheDirectQueueCanContinueDraining() {
+        assertSame(
+            DirectControlProcessingResult.Applied,
+            SnapshotConvergence.SourceUnavailable.toDirectControlResult("digest_rejected"),
+        )
+    }
+
+    @Test
     fun committedSnapshotIncrementsCommitObservationOnce() {
         ProductObservationTracker.clear()
 

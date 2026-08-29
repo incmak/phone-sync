@@ -263,8 +263,12 @@ class TwinotifyNotificationListener : NotificationListenerService() {
     private fun submitFromListener(command: CaptureCommand) {
         when (coordinator.submit(command)) {
             CaptureAdmission.Accepted -> Unit
-            CaptureAdmission.ReconcileRequired -> requestCaptureReconciliation()
-            CaptureAdmission.Closed -> android.util.Log.w(TAG, "capture_admission_closed")
+            CaptureAdmission.ReconcileRequired -> {
+                requestCaptureReconciliation()
+            }
+            CaptureAdmission.Closed -> {
+                android.util.Log.w(TAG, "capture_admission_closed")
+            }
         }
     }
 

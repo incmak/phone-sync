@@ -782,16 +782,17 @@ internal fun recordSnapshotCommitIfCommitted(result: Result<SnapshotConvergence>
     return convergence
 }
 
-private fun SnapshotConvergence.toDirectControlResult(
+internal fun SnapshotConvergence.toDirectControlResult(
     rejectedCode: String,
     requireCommitted: Boolean = false,
 ): DirectControlProcessingResult = when {
     this is SnapshotConvergence.Rejected ||
         this is SnapshotConvergence.Incomplete ||
         this is SnapshotConvergence.DigestMismatch ||
-        this is SnapshotConvergence.SourceUnavailable ||
         (requireCommitted && this !is SnapshotConvergence.Committed) ->
         DirectControlProcessingResult.Rejected(rejectedCode)
+    // A peer receiving an origin owner's digest cannot enumerate that owner's source
+    // notifications. That is a valid no-repair outcome, not malformed control data.
     else -> DirectControlProcessingResult.Applied
 }
 

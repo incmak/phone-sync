@@ -11,6 +11,7 @@ import java.nio.ByteBuffer
 import java.util.UUID
 import javax.net.ssl.SSLContext
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -245,6 +246,23 @@ class OfflinePairingTransportTest {
     }
 
     @Test
+    fun zeroAcceptTimeoutDelegatesWaitingToCeremonyCancellation() = runBlocking {
+        val adapter = FakeNsdAdapter(null)
+        val server = FakeTlsServer()
+        val transport = OfflinePairingTransport(adapter, tlsServer = server, acceptTimeoutMillis = 0)
+        val result = async(Dispatchers.IO) { runCatching { transport.accept(sessionId) } }
+
+        while (adapter.registeredHandle == null && !result.isCompleted) delay(5)
+        delay(25)
+
+        assertFalse(result.isCompleted)
+        result.cancelAndJoin()
+        assertTrue(server.closed)
+        assertEquals(1, adapter.unregisterCalls)
+        assertTrue(adapter.registeredHandle === adapter.unregisteredHandle)
+    }
+
+    @Test
     fun acceptedTlsConnectionWithoutClientCertificatePinIsRejectedBeforeFrameRead() = runBlocking {
         val input = CountingInputStream(prefixed("not-a-pairing-frame".encodeToByteArray()))
         val socket = RecordingSocket(input)
@@ -310,7 +328,7 @@ class OfflinePairingTransportTest {
     fun cancellingRealSslServerAcceptClosesListenerAndUnregistersWithinTerminalBound() = runBlocking {
         val adapter = FakeNsdAdapter(null)
         val context = SSLContext.getInstance("TLS").apply { init(null, null, null) }
-        val server = JssePairingTlsServer.open(context, operationTimeoutMillis = 10_000)
+        val server = JssePairingTlsServer.open(context, handshakeTimeoutMillis = 10_000)
         val transport = OfflinePairingTransport(
             adapter,
             tlsServer = server,
@@ -396,6 +414,31 @@ class OfflinePairingTransportTest {
             assertEquals(PairingTransportFailure.READ_TIMEOUT, failure.failure)
             assertTrue("elapsed=${elapsedMillis}ms", elapsedMillis < 500)
             assertTrue(socket.isClosed)
+        }
+    }
+
+    @Test
+    fun defaultReadTimeoutIsOwnedByTheCeremonyDeadline() = runBlocking {
+        val readStarted = java.util.concurrent.CountDownLatch(1)
+        val releaseRead = java.util.concurrent.CountDownLatch(1)
+        val source = object : java.io.InputStream() {
+            override fun read(): Int {
+                readStarted.countDown()
+                releaseRead.await()
+                return -1
+            }
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int = read()
+        }
+        val socket = RecordingSocket(source)
+        val connection = PairingConnection(socket, null)
+        val reading = async(Dispatchers.IO) { connection.read() }
+
+        try {
+            assertTrue(readStarted.await(500, java.util.concurrent.TimeUnit.MILLISECONDS))
+            assertEquals(0, socket.soTimeout)
+        } finally {
+            reading.cancelAndJoin()
+            releaseRead.countDown()
         }
     }
 

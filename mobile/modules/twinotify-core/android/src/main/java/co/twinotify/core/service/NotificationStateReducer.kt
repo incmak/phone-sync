@@ -39,9 +39,12 @@ object NotificationStateReducer {
         authenticatedPeerId: String,
     ): InnerEventV2? {
         if (event.type != "notif.cancel") return event
-        // A peer cannot create a tombstone for an unknown canonical identity. This also prevents
-        // an authenticated peer from probing arbitrary source keys.
-        if (current == null) return null
+        // Offline compaction may legitimately leave only a cancel when a notification was posted
+        // and removed before delivery. Preserve that cancellation tombstone, but only when the
+        // claimed origin is the authenticated peer; a peer-dismissal still requires known state.
+        if (current == null) {
+            return event.takeIf { event.originDevice == authenticatedPeerId }
+        }
         if (event.originDevice == current.originDevice) return event
         if (event.originDevice != authenticatedPeerId) return null
         return event.copy(originDevice = current.originDevice)

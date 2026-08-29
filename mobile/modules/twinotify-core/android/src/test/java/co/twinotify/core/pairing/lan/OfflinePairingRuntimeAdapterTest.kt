@@ -136,6 +136,31 @@ class OfflinePairingRuntimeAdapterTest {
 
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
+    fun completionIsNotPublishedUntilTheLocalSignatureIsWritten() = runTest {
+        val harness = RuntimeHarness(CoroutineScope(StandardTestDispatcher(testScheduler)))
+        var signatureWritesAtJoinerCompletion: Int? = null
+        harness.joinerObserver = { status ->
+            if (status.completed) {
+                signatureWritesAtJoinerCompletion = harness.joinerConnection.signatureWriteCount
+            }
+        }
+        runCurrent()
+
+        // Stage the initiator signature at the joiner before the joiner confirms.
+        // This is the ordering that used to let the joiner commit while its own
+        // signature was only queued in the actor mailbox.
+        harness.initiator.confirm()
+        runCurrent()
+        harness.joiner.confirm()
+        runCurrent()
+
+        assertEquals(1, signatureWritesAtJoinerCompletion)
+        assertEquals(OfflinePairingApiPhase.COMPLETE, harness.initiatorStatuses.last().phase)
+        assertEquals(OfflinePairingApiPhase.COMPLETE, harness.joinerStatuses.last().phase)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
     fun localCancellationIsDistinctFromAuthenticatedPeerRejectionAndCleansOnce() = runTest {
         val harness = RuntimeHarness(CoroutineScope(StandardTestDispatcher(testScheduler)))
         runCurrent()
@@ -341,13 +366,15 @@ private class RuntimeHarness(scope: CoroutineScope) {
     private val bToA = Channel<OfflinePairingFrame>(16)
     val initiatorConnection = MemoryConnection(bToA, aToB, joinerIdentity.tlsSpkiSha256)
     val initiatorTransport = MemoryTransport(initiatorConnection)
-    val joinerTransport = MemoryTransport(MemoryConnection(aToB, bToA, initiatorIdentity.tlsSpkiSha256))
+    val joinerConnection = MemoryConnection(aToB, bToA, initiatorIdentity.tlsSpkiSha256)
+    val joinerTransport = MemoryTransport(joinerConnection)
     val initiatorCommitter = RecordingCommitter()
     val joinerCommitter = RecordingCommitter()
     val initiatorStatuses = mutableListOf<OfflinePairingPublicStatus>()
     val joinerStatuses = mutableListOf<OfflinePairingPublicStatus>()
     val failures = mutableListOf<Throwable?>()
     var initiatorObserver: ((OfflinePairingPublicStatus) -> Unit)? = null
+    var joinerObserver: ((OfflinePairingPublicStatus) -> Unit)? = null
     private val qr = LanPairingQr(
         1,
         UUID.randomUUID().toString(),
@@ -387,6 +414,7 @@ private class RuntimeHarness(scope: CoroutineScope) {
         { status ->
             statuses += status
             if (role == OfflinePairingRole.INITIATOR) initiatorObserver?.invoke(status)
+            else joinerObserver?.invoke(status)
         },
         TestRuntimeCrypto,
         monotonicMillis = { 1_000 },
@@ -439,8 +467,10 @@ private class MemoryConnection(
     override val peerSpkiSha256: ByteArray get() = pin.copyOf()
     override suspend fun read(): OfflinePairingFrame = inbound.receive()
     var cancelWriteCount = 0
+    var signatureWriteCount = 0
     override suspend fun write(frame: OfflinePairingFrame) {
         if (frame is OfflinePairingFrame.Cancel) cancelWriteCount++
+        if (frame is OfflinePairingFrame.Signature) signatureWriteCount++
         check(outbound.trySend(frame).isSuccess)
     }
     override fun close() = Unit

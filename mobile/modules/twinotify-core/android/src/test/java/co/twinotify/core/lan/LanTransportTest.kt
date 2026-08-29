@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 
@@ -314,6 +315,21 @@ class LanTransportTest {
 
         assertEquals(LanFrame.Pong(7), connection.written.single())
         assertTrue(store.accepted.isEmpty())
+    }
+
+    @Test
+    fun idleSessionSendsHeartbeatBeforeTheSocketReadDeadline() = runTest {
+        val connection = FakeConnection()
+        val transport = transport(connection)
+        val collected = collectEvents(transport)
+        runCurrent()
+
+        advanceTimeBy(3_001)
+        runCurrent()
+
+        assertTrue(connection.written.single() is LanFrame.Ping)
+        connection.closeSession()
+        collected.await()
     }
 
     @Test

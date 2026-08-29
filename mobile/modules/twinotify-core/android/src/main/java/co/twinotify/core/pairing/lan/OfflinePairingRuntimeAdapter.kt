@@ -89,7 +89,7 @@ internal interface OfflinePairingSessionTransport : Closeable {
 
 private sealed interface PairingActorEvent {
     data object Open : PairingActorEvent
-    data class Send(val frame: OfflinePairingFrame) : PairingActorEvent
+    data class Send(val frame: OfflinePairingFrame, val onWritten: () -> Unit) : PairingActorEvent
     data class Received(val frame: OfflinePairingFrame) : PairingActorEvent
     data class Fail(val error: OfflinePairingError) : PairingActorEvent
     data object Confirm : PairingActorEvent
@@ -134,11 +134,11 @@ internal class OfflinePairingRuntimeAdapter(
         override fun advertise(sessionId: String) = enqueue(PairingActorEvent.Open, CONTROL_EVENT_BYTES)
         override fun resolve(sessionId: String, expectedTlsSpkiSha256: ByteArray) =
             enqueue(PairingActorEvent.Open, CONTROL_EVENT_BYTES)
-        override fun send(frame: OfflinePairingFrame) {
+        override fun send(frame: OfflinePairingFrame, onWritten: () -> Unit) {
             if (capturingTerminalCancel && frame is OfflinePairingFrame.Cancel) {
                 check(terminalCancelFrame == null) { "duplicate_terminal_cancel" }
                 terminalCancelFrame = frame
-            } else enqueue(PairingActorEvent.Send(frame), frameWeight(frame))
+            } else enqueue(PairingActorEvent.Send(frame, onWritten), frameWeight(frame))
         }
         override fun close() {
             if (!capturingTerminalCancel) enqueue(PairingActorEvent.Close, CONTROL_EVENT_BYTES)
@@ -195,8 +195,14 @@ internal class OfflinePairingRuntimeAdapter(
                 }
                 when (event) {
                     PairingActorEvent.Open -> if (connection == null) openConnection()
-                    is PairingActorEvent.Send -> connection?.write(event.frame)
-                        ?: coordinator.fail(OfflinePairingError.INVALID_FRAME)
+                    is PairingActorEvent.Send -> {
+                        val activeConnection = connection
+                        if (activeConnection == null) coordinator.fail(OfflinePairingError.INVALID_FRAME)
+                        else {
+                            activeConnection.write(event.frame)
+                            event.onWritten()
+                        }
+                    }
                     is PairingActorEvent.Received -> coordinator.onPeerFrame(event.frame)
                     is PairingActorEvent.Fail -> coordinator.fail(event.error)
                     PairingActorEvent.Confirm -> coordinator.confirmLocally()

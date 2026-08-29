@@ -50,6 +50,42 @@ class OfflinePairingCoordinatorTest {
         )))
     }
 
+    @Test fun `late transport failure cannot overwrite completed pairing`() {
+        val pair = PairHarness()
+        pair.startAndAuthenticate()
+        pair.initiator.confirmLocally()
+        pair.joiner.confirmLocally()
+        pair.pump()
+
+        pair.initiator.fail(OfflinePairingError.INVALID_FRAME)
+        pair.joiner.fail(OfflinePairingError.INVALID_FRAME)
+
+        assertEquals(OfflinePairingState.COMPLETE, pair.initiator.status.state)
+        assertEquals(OfflinePairingState.COMPLETE, pair.joiner.status.state)
+        assertNull(pair.initiator.status.error)
+        assertNull(pair.joiner.status.error)
+        assertEquals(1, pair.initiatorStore.commits.size)
+        assertEquals(1, pair.joinerStore.commits.size)
+    }
+
+    @Test fun `transport failure after durable commit cannot undo completion`() {
+        val pair = PairHarness()
+        pair.startAndAuthenticate()
+        pair.initiatorStatusHook = { status ->
+            if (status.state == OfflinePairingState.COMMITTED) {
+                pair.initiator.fail(OfflinePairingError.INVALID_FRAME)
+            }
+        }
+
+        pair.initiator.confirmLocally()
+        pair.joiner.confirmLocally()
+        pair.pump()
+
+        assertEquals(OfflinePairingState.COMPLETE, pair.initiator.status.state)
+        assertNull(pair.initiator.status.error)
+        assertEquals(1, pair.initiatorStore.commits.size)
+    }
+
     @Test fun `peer signature received before local confirmation is a single bounded provisional value`() {
         val pair = PairHarness()
         pair.startAndAuthenticate()
@@ -873,7 +909,11 @@ private class FakePort(private val clock: FakeClock) : OfflinePairingPort {
     var onClose: (() -> Unit)? = null
     override fun advertise(sessionId: String) { onAdvertise?.invoke() }
     override fun resolve(sessionId: String, expectedTlsSpkiSha256: ByteArray) = Unit
-    override fun send(frame: OfflinePairingFrame) { outbound += frame; onSend?.invoke(frame) }
+    override fun send(frame: OfflinePairingFrame, onWritten: () -> Unit) {
+        outbound += frame
+        onSend?.invoke(frame)
+        onWritten()
+    }
     override fun close() { onClose?.invoke(); closed = true; closeCount++ }
 }
 
