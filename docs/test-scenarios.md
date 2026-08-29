@@ -486,3 +486,52 @@ two-phone work. One topology check remains operator-driven:
   Nothing in the automated suite may be presented as this evidence.
 
 - [ ] LAN-loss, restart, burst, unpair, and no-uplink operator matrix - pending physical two-phone run.
+
+## Mirrored notification actions
+
+Use the MI 11X (`M2012K11AI`) as origin A and the POCO F1 as mirror B, then
+repeat directional rows where noted. Install the same commit-bound debug APK on
+both phones and the repository-owned `co.twinotify.fixture` APK on both. Keep
+screenshots and content-free log extracts in a private directory. A result of
+`dispatched` proves Android handed the `PendingIntent` to the source app. It
+does not prove that the source app applied the action.
+
+Run the non-disruptive aggregate first. On physical phones, stop immediately
+before any airplane-mode change, Doze/restriction change, package force-stop,
+or fixture uninstall and obtain explicit operator confirmation. Never clear
+package data, unpair, or modify a third-party app during this matrix.
+
+```bash
+E2E_DEVICE_A='<mi-11x-serial>' \
+E2E_DEVICE_B='<poco-f1-serial>' \
+E2E_NOTIFICATION_ACTION_FIXTURE_APK='mobile/android/notification-action-fixture/build/outputs/apk/debug/notification-action-fixture-debug.apk' \
+E2E_NOTIFICATION_ACTION_EVIDENCE_DIR='/private/path/notification-actions/automated' \
+make e2e-notification-actions
+```
+
+Record these physical rows separately:
+
+| ID | Operator procedure and required transition |
+| --- | --- |
+| `PHY-ACTION-REPLY-LAN` | On authenticated LAN, reply on B; A fixture counter increases once and B becomes `DISPATCHED` |
+| `PHY-ACTION-REPLY-RELAY` | With direct route unavailable but relay authenticated, repeat reply and prove one dispatch |
+| `PHY-ACTION-MARK-READ` | Invoke mark-read on B; A counter increases once and the organic source cancellation converges |
+| `PHY-ACTION-LOCKED` | Lock B, attempt the action, and prove no invocation until the user unlocks and deliberately retries |
+| `PHY-ACTION-DOZE` | After approval, place the origin under the intended OEM restriction/Doze condition; action stays durable and dispatches once after recovery |
+| `PHY-ACTION-LATE` | Keep origin unavailable beyond two minutes; B reaches `EXPIRED` and A's counter stays unchanged |
+| `PHY-ACTION-MID-CLAIM` | Arm the debug claim pause, invoke, confirm `CLAIMED`, force-stop A, restart, wait through the grace interval, and prove `OUTCOME_UNKNOWN` with no fixture dispatch |
+| `PHY-ACTION-REBIND` | Restart/rebind the mirror listener while an invocation is pending; it dispatches once after recovery |
+| `PHY-ACTION-TAP-INSTALLED` | With the fixture installed on B, tap the mirror and prove the fixture becomes foreground while the persistent notification stays active |
+| `PHY-ACTION-TAP-FALLBACK` | After approval, uninstall only the repository fixture from B, tap, prove Twinotify detail becomes foreground, then reinstall the exact APK |
+| `PHY-ACTION-OEM-SHAPING` | On both MIUI/HyperOS devices, inspect standalone mirror title, actions, direct reply, lock-screen policy, and auto-cancel behavior for OEM loss or mutation |
+| `PHY-ACTION-50-DAY-SANITY` | Across normal daily use, invoke 50 fixed actions and prove 50 terminal outcomes with no duplicate dispatch |
+
+Each row needs `pass`, a UTC completion timestamp, non-empty operator notes,
+one screenshot, and one sanitized log extract. A skipped, unknown, or unavailable
+row remains incomplete. Build the manifest according to
+[`notification-actions-schema.json`](release-evidence/notification-actions-schema.json),
+then run:
+
+```bash
+make verify-notification-action-evidence ACTION_EVIDENCE_DIR=/private/path/notification-actions/physical
+```

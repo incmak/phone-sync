@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://twinotify.app/release-evidence/notification-actions-schema.json",
+  "title": "Twinotify physical notification action evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["git_commit", "apk_sha256", "apk", "tested_at", "devices", "scenarios"],
+  "properties": {
+    "git_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "apk_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "apk": { "type": "string", "minLength": 1 },
+    "tested_at": { "type": "string", "format": "date-time" },
+    "devices": { "type": "array", "minItems": 2, "maxItems": 2 },
+    "scenarios": { "type": "array", "minItems": 12, "maxItems": 12 }
+  }
+}
