@@ -1,0 +1,115 @@
+name: relay-image-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['relay-v*']
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: relay-image-release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/twinotify-relay
+
+jobs:
+  publish:
+    name: Verify, publish, and attest relay image
+    runs-on: ubuntu-latest
+    environment: relay-release
+    timeout-minutes: 90
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.23'
+      - name: Select immutable build identity
+        id: identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^relay-v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="relay-manual-${GITHUB_SHA:0:12}"
+          fi
+          CREATED=$(git show -s --format=%cI "$GITHUB_SHA")
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          printf 'created=%s\n' "$CREATED" >> "$GITHUB_OUTPUT"
+      - name: Verify exact relay source and deployment contracts
+        run: |
+          set -Eeuo pipefail
+          make relay-verify
+          make deployment-test
+          git diff --exit-code
+          git diff --cached --exit-code
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Authenticate to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish multi-architecture image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: relay/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.identity.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:relay-sha-${{ github.sha }}
+          build-args: |
+            VERSION=${{ steps.identity.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.identity.outputs.created }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Add signed GitHub build provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Emit immutable deployment reference
+        id: reference
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          IMAGE="${REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
+          printf 'image=%s\n' "$IMAGE" | tee "$RUNNER_TEMP/relay-image.txt"
+          printf 'image=%s\n' "$IMAGE" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' '${{ steps.identity.outputs.version }}' >> "$RUNNER_TEMP/relay-image.txt"
+          docker buildx imagetools inspect "$IMAGE" >/dev/null
+          printf '### Twinotify relay image\n\n`%s`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload immutable image reference
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: twinotify-relay-image-${{ github.sha }}
+          path: ${{ runner.temp }}/relay-image.txt
+          if-no-files-found: error
+          retention-days: 30

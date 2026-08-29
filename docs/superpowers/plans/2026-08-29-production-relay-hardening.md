@@ -316,11 +316,17 @@ Commit: `chore(deploy): harden production relay container`
 ### Task 7: Release workflow, smoke automation, and runbook
 
 **Files:**
+- Create: `.dockerignore`
 - Create: `.github/workflows/relay-image.yml`
 - Modify: `.github/workflows/relay.yml`
+- Modify: `.gitignore`
 - Modify: `Makefile`
+- Modify: `relay/cmd/relay/backup.go`
+- Modify: `relay/cmd/relay/backup_test.go`
 - Create: `deploy/smoke-relay.sh`
+- Create: `deploy/smoke-relay_test.sh`
 - Create: `deploy/deploy-relay.sh`
+- Create: `deploy/deploy-relay_test.sh`
 - Create: `docs/relay-production-runbook.md`
 - Modify: `relay/README.md`
 
@@ -328,7 +334,7 @@ Commit: `chore(deploy): harden production relay container`
 - Produces: manual or `relay-v*` tag GHCR publication with SBOM and provenance.
 - Produces: digest-only deploy and automatic previous-digest rollback on failed readiness/smoke.
 
-- [ ] **Step 1: Write workflow and shell contract tests and observe RED**
+- [x] **Step 1: Write workflow and shell contract tests and observe RED**
 
 Extend `relay-ci-test` to require SHA-pinned actions, least-privilege permissions, provenance, SBOM, digest output, deployment smoke, and shell syntax checks. Add fixture-driven shell tests for digest rejection and rollback command selection.
 
@@ -336,17 +342,19 @@ Run: `make relay-ci-test`
 
 Expected: failure because the image workflow and scripts are absent.
 
-- [ ] **Step 2: Implement publication, deployment, and operator docs**
+- [x] **Step 2: Implement publication, deployment, and operator docs**
 
 Publish only on `workflow_dispatch` or tags matching `relay-v*`. Require a digest reference matching `@sha256:[0-9a-f]{64}` for production. The deploy script records the current image, stops the single relay writer, runs the image's offline `backup` command against the mounted data and backup volumes, starts the new digest, waits for readiness, runs the smoke script, and restores the prior digest on failure without restoring the database.
 
 Document DNS, firewall, backup export, restore drill, uptime monitoring, upgrade, rollback, and the beta-to-paid launch move.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run: `make relay-ci-test && bash -n deploy/smoke-relay.sh deploy/deploy-relay.sh`
 
 Run: `make relay-verify && make deployment-test`
+
+Also verified the workflow with actionlint, all four shell files with ShellCheck 0.11.0, and a local `linux/amd64,linux/arm64` OCI export with BuildKit SBOM and maximum provenance enabled.
 
 Commit: `ci(relay): publish and deploy verified images`
 

@@ -108,6 +108,33 @@ func TestOfflineBackupCommandCreatesValidatedSnapshot(t *testing.T) {
 	}
 }
 
+func TestOfflineBackupCommandAllowsOnlyAnExplicitlyMissingSource(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "data", "relay.db")
+	backupDirectory := filepath.Join(root, "backups")
+	now := func() time.Time { return time.Date(2026, 8, 29, 13, 0, 0, 0, time.UTC) }
+
+	arguments := []string{
+		"--from", missing, "--to-dir", backupDirectory, "--retention", "2",
+	}
+	if err := runBackupCommand(arguments, now); err == nil {
+		t.Fatal("missing source was accepted without --allow-missing")
+	}
+	if err := runBackupCommand(append(arguments, "--allow-missing"), now); err != nil {
+		t.Fatalf("explicitly allowed missing source: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(missing), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(missing, []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runBackupCommand(append(arguments, "--allow-missing"), now); err == nil {
+		t.Fatal("corrupt source was accepted by --allow-missing")
+	}
+}
+
 func TestRestoreRejectsUnsafeCorruptOrLockedInputsWithoutMutation(t *testing.T) {
 	root := t.TempDir()
 	backupDirectory := filepath.Join(root, "backups")

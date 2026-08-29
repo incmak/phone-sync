@@ -49,22 +49,26 @@ curl -fsS http://localhost:8080/health
 
 The development Compose file publishes port 8080 for local clients and stores BoltDB in the `relay-data` volume at `/data/twinotify-relay.db`.
 
-## Production TLS
+## Production release and TLS
 
-Do not publish the relay's plaintext port in production. `deploy/docker-compose.prod.yml` places the relay on an internal network, exposes port 8080 only to Caddy, and publishes Caddy on ports 80 and 443. Set `TWINOTIFY_DOMAIN` to the production host and configure public DNS before starting it:
+Do not publish the relay's plaintext port in production. `deploy/docker-compose.prod.yml` places the relay on an internal network, exposes port 8080 only to Caddy, and publishes Caddy on ports 80 and 443. Production requires a digest-pinned relay image, an immutable build version, a real domain, and the fail-closed production environment supplied by Compose.
 
 ```sh
-TWINOTIFY_DOMAIN=relay.example.com \
-  docker compose -f deploy/docker-compose.prod.yml up -d
+./deploy/deploy-relay.sh \
+  --image 'ghcr.io/incmak/twinotify-relay@sha256:RELEASE_DIGEST' \
+  --version 'relay-v0.1.0' \
+  --domain 'relay.example.com'
 ```
 
-Release clients must use `https://` and `wss://`. Plain `http://` and `ws://` are for explicitly configured local development only. Keep `/health`, `/pair/*`, and `/ws` behind the trusted TLS proxy rules supplied in the production Caddy configuration.
+`.github/workflows/relay-image.yml` publishes verified AMD64/ARM64 GHCR images with SBOM and provenance attestations. The deploy script takes only a full digest, creates an offline pre-upgrade backup, waits for readiness, runs the public smoke, and restores the prior binary digest on failure without restoring the database. See [the production runbook](../docs/relay-production-runbook.md) for host provisioning, DNS/firewall rules, backup export, restore drills, monitoring, and launch migration.
+
+Release clients must use `https://` and `wss://`. Plain `http://` and `ws://` are for explicitly configured local development only. Caddy proxies `/health`, `/health/*`, `/pair/*`, and `/ws`; `/metrics` remains private.
 
 ## Backup and restore
 
-`/data` is the authoritative persistent relay state. It contains pairing records, capability floors, expiry indexes, and queued ciphertext in `twinotify-relay.db`. Back up the whole `/data` volume using a volume snapshot or a copy taken while the relay container is stopped, so the BoltDB file is consistent.
+`/data` is the authoritative persistent relay state. It contains pairing records, capability floors, expiry indexes, authentication replay state, and queued ciphertext in `twinotify-relay.db`. Production writes consistent snapshots to the separate `/backups` volume immediately on startup and at the configured interval. Export those snapshots to encrypted off-host storage; a second volume on the same VM is not disaster recovery.
 
-To restore, stop the relay, restore the complete saved `/data` contents into the `relay-data` volume with the original ownership and permissions, then start the relay and check `/health`. Do not restore only selected Bolt buckets or merge databases. Protect backups like production metadata because they contain device relationships, timing, and ciphertext.
+The offline `relay backup` command validates snapshots before publication. The offline `relay restore` command validates the source, keeps a timestamped recovery copy, and atomically installs the selected database. Restore only while the relay is stopped. Do not restore selected Bolt buckets or merge databases. Protect backups like production metadata because they contain device relationships, timing, and ciphertext.
 
 ## Revocation
 
@@ -72,7 +76,7 @@ An authenticated device revokes its pair with `POST /pair/revoke`. Revocation at
 
 ## Health and failure codes
 
-`GET /health` is an unauthenticated liveness check and returns HTTP 200 with `{"status":"ok"}` while the process can serve requests. It is not a deep delivery, disk-capacity, or peer-connectivity check.
+`GET /health/live` is unauthenticated liveness. `GET /health/ready` verifies that shutdown has not begun, Bolt accepts a read transaction, and the configured disk reserve remains available. `GET /health` is the backward-compatible readiness alias. Health responses expose only status and build version; they do not test peer connectivity or end-to-end delivery.
 
 Stable relay WebSocket outcomes are:
 

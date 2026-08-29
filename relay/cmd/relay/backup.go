@@ -346,6 +346,7 @@ func runBackupCommand(arguments []string, now func() time.Time) error {
 	from := flags.String("from", "", "source Bolt path")
 	toDirectory := flags.String("to-dir", "", "backup directory")
 	retention := flags.Int("retention", 0, "snapshot retention count")
+	allowMissing := flags.Bool("allow-missing", false, "succeed only when the source does not exist")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		return errors.New("invalid backup arguments")
 	}
@@ -353,7 +354,13 @@ func runBackupCommand(arguments []string, now func() time.Time) error {
 		return errors.New("backup requires --from, --to-dir, and positive --retention")
 	}
 	info, err := os.Lstat(*from)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+	if err != nil {
+		if *allowMissing && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return errors.New("backup source must be an existing non-symlink file")
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return errors.New("backup source must be an existing non-symlink file")
 	}
 	bolt, err := store.OpenBolt(*from)

@@ -18,6 +18,16 @@ relay-ci-test:
 	@grep -Fq 'run: make deployment-test' .github/workflows/relay.yml || { echo "relay workflow must run make deployment-test" >&2; exit 1; }
 	@grep -Fq 'permissions:' .github/workflows/relay.yml && grep -Fq 'contents: read' .github/workflows/relay.yml || { echo "relay workflow must use read-only contents permission" >&2; exit 1; }
 	@test "$$(grep -Ec '^[[:space:]]*- uses: [^[:space:]]+@[0-9a-f]{40}([[:space:]]|$$)' .github/workflows/relay.yml)" -eq "$$(grep -Ec '^[[:space:]]*- uses:' .github/workflows/relay.yml)" || { echo "relay workflow actions must use full commit SHAs" >&2; exit 1; }
+	@test -f .github/workflows/relay-image.yml || { echo "relay image workflow is missing" >&2; exit 1; }
+	@grep -Fq 'workflow_dispatch:' .github/workflows/relay-image.yml && grep -Fq "tags: ['relay-v*']" .github/workflows/relay-image.yml || { echo "relay image publication must be manual or relay-v tag only" >&2; exit 1; }
+	@grep -Fq 'packages: write' .github/workflows/relay-image.yml && grep -Fq 'attestations: write' .github/workflows/relay-image.yml && grep -Fq 'id-token: write' .github/workflows/relay-image.yml || { echo "relay image workflow permissions are incomplete" >&2; exit 1; }
+	@grep -Fq 'provenance: mode=max' .github/workflows/relay-image.yml && grep -Fq 'sbom: true' .github/workflows/relay-image.yml || { echo "relay image workflow must publish provenance and an SBOM" >&2; exit 1; }
+	@grep -Fq 'steps.build.outputs.digest' .github/workflows/relay-image.yml || { echo "relay image workflow must emit the immutable digest" >&2; exit 1; }
+	@test "$$(grep -Ec '^[[:space:]]*- uses: [^[:space:]]+@[0-9a-f]{40}([[:space:]]|$$)' .github/workflows/relay-image.yml)" -eq "$$(grep -Ec '^[[:space:]]*- uses:' .github/workflows/relay-image.yml)" || { echo "relay image workflow actions must use full commit SHAs" >&2; exit 1; }
+	@test -f .dockerignore && grep -Fxq '**' .dockerignore && grep -Fxq '!relay/**' .dockerignore && grep -Fxq '!proto/**' .dockerignore || { echo "root Docker context must allow only relay and protocol sources" >&2; exit 1; }
+	@bash -n deploy/smoke-relay.sh deploy/smoke-relay_test.sh deploy/deploy-relay.sh deploy/deploy-relay_test.sh
+	@./deploy/smoke-relay_test.sh
+	@./deploy/deploy-relay_test.sh
 
 relay-verify: sync-proto relay-ci-test
 	@test -z "$$(cd relay && gofmt -l .)"
