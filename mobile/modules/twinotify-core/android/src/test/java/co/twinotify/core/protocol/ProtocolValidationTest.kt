@@ -94,9 +94,60 @@ class ProtocolValidationTest {
         }
     }
 
+    @Test
+    fun notificationActionInvoke_isAControlEventWithStrictPayload() {
+        val decoded = ProtocolJson.decodeInner(actionInvokeJson())
+
+        assertEquals("notif.action.invoke", decoded.type)
+        assertEquals(null, decoded.canonId)
+        assertEquals(null, decoded.sequence)
+        assertEquals(decoded, ProtocolJson.decodeInner(ProtocolJson.encodeInner(decoded)))
+    }
+
+    @Test
+    fun notificationActionInvoke_enforcesUtf8ReplyLimitAndExactKeys() {
+        ProtocolJson.decodeInner(actionInvokeJson(replyText = "a".repeat(4096)))
+
+        val invalid = listOf(
+            actionInvokeJson(replyText = "a".repeat(4097)),
+            actionInvokeJson(replyText = "\uD83D\uDE80".repeat(1025)),
+            actionInvokeJson().replace("\"invoked_at\":1000", "\"invoked_at\":1000,\"component\":\"private\""),
+            actionInvokeJson().replace(ACTION_ID, "not-a-uuid"),
+        )
+        invalid.forEach { raw ->
+            assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
+        }
+    }
+
+    @Test
+    fun notificationActionResult_rejectsUnknownStatusAndKeys() {
+        ProtocolJson.decodeInner(actionResultJson())
+
+        val invalid = listOf(
+            actionResultJson().replace("\"dispatched\"", "\"applied\""),
+            actionResultJson().replace("\"status\":\"dispatched\"", "\"status\":\"dispatched\",\"error\":\"private\""),
+        )
+        invalid.forEach { raw ->
+            assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
+        }
+    }
+
     private companion object {
         fun callStateJson() = """
             {"v":2,"msg_id":"22222222-2222-4222-8222-222222222222","origin_device":"dev-a","type":"call.state","canon_id":"call:11111111-1111-4111-8111-111111111111","sequence":1,"created_at":1000,"expires_at":2000,"payload":{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming"}}
+        """.trimIndent()
+
+        const val ACTION_ID = "b6d3142a-e936-4d7d-b15a-bdf318bb0539"
+
+        fun actionInvokeJson(replyText: String? = "On my way"): String {
+            val reply = replyText?.let { ",\"reply_text\":${JSONObject.quote(it)}" }.orEmpty()
+            return """
+                {"v":2,"msg_id":"8ac240b7-8b89-4b41-80bf-d96424c654ec","origin_device":"mirror-device","type":"notif.action.invoke","created_at":1000,"expires_at":121000,"payload":{"invocation_id":"fd2fb70b-829a-4701-8956-61611bc9c701","canon_id":"origin-device:com.example.chat:42:thread-7","action_id":"$ACTION_ID","notification_sequence":17$reply,"invoked_at":1000}}
+            """.trimIndent()
+        }
+
+        fun actionResultJson() = """
+            {"v":2,"msg_id":"7ddc4c03-951f-4e7b-ad09-6c5b1c1df6f5","origin_device":"origin-device","type":"notif.action.result","created_at":1000,"expires_at":601000,"payload":{"invocation_id":"fd2fb70b-829a-4701-8956-61611bc9c701","canon_id":"origin-device:com.example.chat:42:thread-7","status":"dispatched"}}
         """.trimIndent()
 
         const val validReceipt = """

@@ -16,13 +16,26 @@ object ProtocolJson {
     private const val MAX_ORIGIN_DEVICE_LENGTH = 128
     private const val MAX_CANON_ID_LENGTH = 1024
     private const val MAX_RECEIPT_REASON_LENGTH = 128
+    private const val MAX_REPLY_BYTES = 4096
+    private const val ACTION_INVOKE_TTL_MS = 120_000L
+    private const val ACTION_RESULT_TTL_MS = 600_000L
     private const val ENVELOPE_TYPE = "enc"
     private val receiptStatuses = setOf("applied", "expired", "rejected", "decrypt_failed")
+    private val actionResultStatuses = setOf(
+        "dispatched",
+        "outcome_unknown",
+        "action_gone",
+        "notification_gone",
+        "expired",
+        "failed",
+    )
 
     private val innerTypes = setOf(
         "notif.post",
         "notif.update",
         "notif.cancel",
+        "notif.action.invoke",
+        "notif.action.result",
         "call.state",
         "peer.receipt",
         "state.digest",
@@ -161,6 +174,21 @@ object ProtocolJson {
         }
         if (event.type == "peer.receipt") validateReceiptPayload(payload)
         if (event.type == "call.state") validateCallStatePayload(payload, event.canonId, event.sequence)
+        if (event.type == "notif.action.invoke") {
+            validateActionInvokePayload(payload)
+            require(event.expiresAt - event.createdAt == ACTION_INVOKE_TTL_MS) {
+                "notif.action.invoke expires_at must be created_at + $ACTION_INVOKE_TTL_MS"
+            }
+            require(payload.getLong("invoked_at") == event.createdAt) {
+                "notif.action.invoke invoked_at must equal created_at"
+            }
+        }
+        if (event.type == "notif.action.result") {
+            validateActionResultPayload(payload)
+            require(event.expiresAt - event.createdAt == ACTION_RESULT_TTL_MS) {
+                "notif.action.result expires_at must be created_at + $ACTION_RESULT_TTL_MS"
+            }
+        }
     }
 
     private fun validateEnvelope(envelope: EncryptedEnvelope) {
@@ -219,6 +247,53 @@ object ProtocolJson {
         val direction = requiredString(payload, "direction", "call.state payload")
         require(direction in setOf("incoming", "outgoing", "unknown")) {
             "unsupported call.state direction $direction"
+        }
+    }
+
+    private fun validateActionInvokePayload(payload: JSONObject) {
+        requireOnlyKeys(
+            payload,
+            setOf(
+                "invocation_id",
+                "canon_id",
+                "action_id",
+                "notification_sequence",
+                "reply_text",
+                "invoked_at",
+            ),
+            "notif.action.invoke payload",
+        )
+        requiredUuid(payload, "invocation_id", "notif.action.invoke payload")
+        val canonId = requiredString(payload, "canon_id", "notif.action.invoke payload")
+        require(canonId.isNotEmpty() && canonId.length <= MAX_CANON_ID_LENGTH) {
+            "notif.action.invoke payload canon_id must be 1..$MAX_CANON_ID_LENGTH characters"
+        }
+        requiredUuid(payload, "action_id", "notif.action.invoke payload")
+        require(requiredLong(payload, "notification_sequence", "notif.action.invoke payload") >= 1) {
+            "notif.action.invoke payload notification_sequence must be positive"
+        }
+        optionalString(payload, "reply_text", "notif.action.invoke payload")?.let { replyText ->
+            require(replyText.toByteArray(Charsets.UTF_8).size <= MAX_REPLY_BYTES) {
+                "notif.action.invoke payload reply_text must be at most $MAX_REPLY_BYTES UTF-8 bytes"
+            }
+        }
+        requiredNonNegativeLong(payload, "invoked_at", "notif.action.invoke payload")
+    }
+
+    private fun validateActionResultPayload(payload: JSONObject) {
+        requireOnlyKeys(
+            payload,
+            setOf("invocation_id", "canon_id", "status"),
+            "notif.action.result payload",
+        )
+        requiredUuid(payload, "invocation_id", "notif.action.result payload")
+        val canonId = requiredString(payload, "canon_id", "notif.action.result payload")
+        require(canonId.isNotEmpty() && canonId.length <= MAX_CANON_ID_LENGTH) {
+            "notif.action.result payload canon_id must be 1..$MAX_CANON_ID_LENGTH characters"
+        }
+        val status = requiredString(payload, "status", "notif.action.result payload")
+        require(status in actionResultStatuses) {
+            "unsupported notif.action.result status $status"
         }
     }
 
