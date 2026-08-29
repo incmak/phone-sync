@@ -347,12 +347,17 @@ class E2eControlReceiver internal constructor(
         "PAIR_COMPLETE" -> {
             val relayUrl = command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid", "relay_url required")
             val token = command.param("pair_token") ?: return E2eCommandResult(requestId, "invalid", "pair_token required")
+            val peer = PeerStore.load(context) ?: return E2eCommandResult(requestId, "invalid", "peer identity required")
+            val (box, sign) = CryptoStore.loadOrGenerate(context)
             PairProtocol.deviceBCompletePair(
                 relayUrl,
                 token,
                 DeviceIdentity.getOrCreate(context),
-                CryptoStore.loadOrGenerate(context).first.publicKey,
-                CryptoStore.loadOrGenerate(context).second.publicKey,
+                peer.encPubkey,
+                peer.signPubkey,
+                box.publicKey,
+                sign.publicKey,
+                sign.secretKey,
                 java.util.Base64.getDecoder().decode(command.param("confirmation_sig") ?: ""),
             )
             E2eCommandResult(requestId, "ok")

@@ -45,7 +45,7 @@
 - Consumes: existing A transcript `pair_token || A_enc || A_sign || B_enc || B_sign` and existing `confirmation_sig`.
 - Produces: `responder_confirmation_sig` and `responderConfirmationMessage(token, aEnc, aSign, bEnc, bSign, aSig): ByteArray` with the domain prefix from the design.
 
-- [ ] **Step 1: Write failing Go request tests**
+- [x] **Step 1: Write failing Go request tests**
 
 Add cases that enable `Config.RequireMutualPairSignatures`, omit the responder signature, sign with the wrong B key, alter one transcript field, and submit two identical valid retries. Assert 400 for missing/invalid proof and one stable `pair_id` for valid retries.
 
@@ -59,13 +59,13 @@ complete["responder_confirmation_sig"] = base64.StdEncoding.EncodeToString(
 )
 ```
 
-- [ ] **Step 2: Run the focused Go test and observe RED**
+- [x] **Step 2: Run the focused Go test and observe RED**
 
 Run: `make sync-proto && cd relay && go test ./internal/server -run 'TestPairComplete.*Responder|TestPairCompletion.*Mutual' -race -count=1`
 
 Expected: compilation or assertion failure because the config field, transcript helper, and request field do not exist.
 
-- [ ] **Step 3: Write the pure Kotlin transcript test and observe RED**
+- [x] **Step 3: Write the pure Kotlin transcript test and observe RED**
 
 Use fixed byte arrays and assert the exact bytes equal the UTF-8 domain prefix followed by token, A keys, B keys, and A signature. Run:
 
@@ -73,7 +73,7 @@ Use fixed byte arrays and assert the exact bytes equal the UTF-8 domain prefix f
 
 Expected: compilation failure because `PairConfirmation` does not exist.
 
-- [ ] **Step 4: Implement and verify mutual confirmation**
+- [x] **Step 4: Implement and verify mutual confirmation**
 
 Add this Go boundary and its Kotlin byte-equivalent:
 
@@ -94,7 +94,7 @@ Store the verified responder signature in `PendingPair.ResponderConfirmationSig`
 
 Run the focused Go and Kotlin commands again. Expected: PASS.
 
-- [ ] **Step 5: Run regression gates and commit**
+- [x] **Step 5: Run regression gates and commit**
 
 Run: `make proto-test && make relay-test`
 

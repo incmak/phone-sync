@@ -71,6 +71,9 @@ type PendingPair struct {
 
 	// Populated by /pair/send_sig once Device A signs:
 	ConfirmationSig []byte `json:"confirmation_sig,omitempty"`
+	// Populated by /pair/complete once Device B signs the domain-separated
+	// transcript and Device A's exact confirmation signature.
+	ResponderConfirmationSig []byte `json:"responder_confirmation_sig,omitempty"`
 
 	// Populated atomically with the confirmed pair and retained until the
 	// original pair token expires so a lost completion response can be replayed.
@@ -307,6 +310,25 @@ func (ps *PairStore) UpdatePendingSig(pairToken string, sig []byte) error {
 			return ErrPairConflict
 		}
 		p.ConfirmationSig = append([]byte(nil), sig...)
+		return putPendingPair(pending, p)
+	})
+}
+
+// UpdatePendingResponderSig retains Device B's verified confirmation proof so
+// identical completion retries remain auditable and conflicting retries fail.
+func (ps *PairStore) UpdatePendingResponderSig(pairToken string, sig []byte) error {
+	return ps.bolt.Update(func(tx *bbolt.Tx) error {
+		pending, p, err := pendingPairForUpdate(tx, pairToken)
+		if err != nil {
+			return err
+		}
+		if len(p.ResponderConfirmationSig) != 0 {
+			if bytes.Equal(p.ResponderConfirmationSig, sig) {
+				return nil
+			}
+			return ErrPairConflict
+		}
+		p.ResponderConfirmationSig = append([]byte(nil), sig...)
 		return putPendingPair(pending, p)
 	})
 }

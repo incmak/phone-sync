@@ -93,7 +93,13 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   deviceASignConfirmation(pairToken: string, bEncB64: string, bSignB64: string): Promise<string>;
   // Backward-compat: waits for pair.sig on role=B, returns base64 sig
   awaitPairSig(relayUrl: string, pairToken: string): Promise<string>;
-  deviceBCompletePairing(relayUrl: string, pairToken: string, confirmationSigB64: string): Promise<void>;
+  deviceBCompletePairing(
+    relayUrl: string,
+    pairToken: string,
+    initiatorEncPubkeyB64: string,
+    initiatorSignPubkeyB64: string,
+    confirmationSigB64: string,
+  ): Promise<void>;
   storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string): Promise<void>;
   mintAuthJwt(): Promise<string>;
   encryptToPeer(plaintextB64: string): Promise<EncryptResult>;

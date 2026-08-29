@@ -17,13 +17,22 @@ import (
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
+	return newTestServerWithConfig(t, DefaultConfig())
+}
+
+func newTestServerWithConfig(t *testing.T, config Config) *Server {
+	t.Helper()
 	dir := t.TempDir()
 	b, err := store.OpenBolt(filepath.Join(dir, "relay.db"))
 	if err != nil {
 		t.Fatalf("open bolt: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Close() })
-	return NewWithStore(b)
+	server, err := NewWithConfigChecked(b, config)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return server
 }
 
 // ed25519Keypair generates a random X25519-like enc pubkey (32 random bytes) and
@@ -158,5 +167,139 @@ func TestPairComplete_BadSig(t *testing.T) {
 	resp, _ := http.Post(ts.URL+"/pair/complete", "application/json", bytes.NewReader(completeBody))
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for bad sig, got %d", resp.StatusCode)
+	}
+}
+
+func TestPairCompleteRequiresResponderSignatureWhenConfigured(t *testing.T) {
+	config := DefaultConfig()
+	config.RequireMutualPairSignatures = true
+	srv := newTestServerWithConfig(t, config)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPub, aSignPub, aSignPriv := ed25519Keypair(t)
+	bEncPub, bSignPub, _ := ed25519Keypair(t)
+	token := "tok-mutual-required"
+
+	initPair(t, ts.URL, token, "devA-mutual", aEncPub, aSignPub)
+	message := append([]byte(token), aEncPub...)
+	message = append(message, aSignPub...)
+	message = append(message, bEncPub...)
+	message = append(message, bSignPub...)
+	aSignature := ed25519.Sign(aSignPriv, message)
+
+	body, err := json.Marshal(map[string]any{
+		"pair_token":       token,
+		"device_id":        "devB-mutual",
+		"enc_pubkey":       base64.StdEncoding.EncodeToString(bEncPub),
+		"sign_pubkey":      base64.StdEncoding.EncodeToString(bSignPub),
+		"confirmation_sig": base64.StdEncoding.EncodeToString(aSignature),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.Post(ts.URL+"/pair/complete", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("pair/complete without responder signature = %d, want 400", response.StatusCode)
+	}
+}
+
+func TestPairCompleteRejectsResponderSignatureFromWrongKey(t *testing.T) {
+	config := DefaultConfig()
+	config.RequireMutualPairSignatures = true
+	srv := newTestServerWithConfig(t, config)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPub, aSignPub, aSignPriv := ed25519Keypair(t)
+	bEncPub, bSignPub, _ := ed25519Keypair(t)
+	_, _, attackerSignPriv := ed25519Keypair(t)
+	token := "tok-mutual-wrong-key"
+	initPair(t, ts.URL, token, "devA-mutual-wrong", aEncPub, aSignPub)
+
+	aMessage := append([]byte(token), aEncPub...)
+	aMessage = append(aMessage, aSignPub...)
+	aMessage = append(aMessage, bEncPub...)
+	aMessage = append(aMessage, bSignPub...)
+	aSignature := ed25519.Sign(aSignPriv, aMessage)
+	bMessage := append([]byte("twinotify-pair-confirm-b-v1\n"), aMessage...)
+	bMessage = append(bMessage, aSignature...)
+	wrongBSignature := ed25519.Sign(attackerSignPriv, bMessage)
+
+	response := postPairJSON(t, ts.URL+"/pair/complete", map[string]any{
+		"pair_token":                 token,
+		"device_id":                  "devB-mutual-wrong",
+		"enc_pubkey":                 base64.StdEncoding.EncodeToString(bEncPub),
+		"sign_pubkey":                base64.StdEncoding.EncodeToString(bSignPub),
+		"confirmation_sig":           base64.StdEncoding.EncodeToString(aSignature),
+		"responder_confirmation_sig": base64.StdEncoding.EncodeToString(wrongBSignature),
+	})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("pair/complete with wrong responder key = %d, want 400", response.StatusCode)
+	}
+}
+
+func TestPairCompleteAcceptsAndPersistsMutualConfirmation(t *testing.T) {
+	config := DefaultConfig()
+	config.RequireMutualPairSignatures = true
+	srv := newTestServerWithConfig(t, config)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	aEncPub, aSignPub, aSignPriv := ed25519Keypair(t)
+	bEncPub, bSignPub, bSignPriv := ed25519Keypair(t)
+	token := "tok-mutual-valid"
+	initPair(t, ts.URL, token, "devA-mutual-valid", aEncPub, aSignPub)
+
+	aMessage := append([]byte(token), aEncPub...)
+	aMessage = append(aMessage, aSignPub...)
+	aMessage = append(aMessage, bEncPub...)
+	aMessage = append(aMessage, bSignPub...)
+	aSignature := ed25519.Sign(aSignPriv, aMessage)
+	bMessage := append([]byte("twinotify-pair-confirm-b-v1\n"), aMessage...)
+	bMessage = append(bMessage, aSignature...)
+	bSignature := ed25519.Sign(bSignPriv, bMessage)
+	request := map[string]any{
+		"pair_token":                 token,
+		"device_id":                  "devB-mutual-valid",
+		"enc_pubkey":                 base64.StdEncoding.EncodeToString(bEncPub),
+		"sign_pubkey":                base64.StdEncoding.EncodeToString(bSignPub),
+		"confirmation_sig":           base64.StdEncoding.EncodeToString(aSignature),
+		"responder_confirmation_sig": base64.StdEncoding.EncodeToString(bSignature),
+	}
+
+	var pairID string
+	for attempt := 0; attempt < 2; attempt++ {
+		response := postPairJSON(t, ts.URL+"/pair/complete", request)
+		if response.StatusCode != http.StatusOK {
+			response.Body.Close()
+			t.Fatalf("mutual completion attempt %d = %d, want 200", attempt+1, response.StatusCode)
+		}
+		var body struct {
+			PairID string `json:"pair_id"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			response.Body.Close()
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if pairID == "" {
+			pairID = body.PairID
+		} else if body.PairID != pairID {
+			t.Fatalf("retry pair id = %q, want %q", body.PairID, pairID)
+		}
+	}
+
+	pending, err := srv.pairStore.GetPending(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pending.ResponderConfirmationSig, bSignature) {
+		t.Fatal("responder confirmation signature was not retained for retry auditing")
 	}
 }

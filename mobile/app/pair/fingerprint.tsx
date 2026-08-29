@@ -73,7 +73,13 @@ export default function FingerprintScreen() {
       setWorking(true);
       setErrorMsg(null);
       const sigB64 = await TwinotifyCoreModule.awaitPairSig(relayUrl, pairToken);
-      await TwinotifyCoreModule.deviceBCompletePairing(relayUrl, pairToken, sigB64);
+      await TwinotifyCoreModule.deviceBCompletePairing(
+        relayUrl,
+        pairToken,
+        peerEncB64,
+        peerSignB64,
+        sigB64,
+      );
       await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId, peerDisplayName);
       router.replace('/pair/success');
     } catch (err: unknown) {

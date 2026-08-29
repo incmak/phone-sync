@@ -31,8 +31,19 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.deviceASignConfirmation(pairToken, bEncB64, bSignB64),
     awaitPairSig: (relayUrl: string, pairToken: string): Promise<string> =>
       TwinotifyCoreModule.awaitPairSig(relayUrl, pairToken),
-    deviceBCompletePairing: (relayUrl: string, pairToken: string, sigB64: string): Promise<void> =>
-      TwinotifyCoreModule.deviceBCompletePairing(relayUrl, pairToken, sigB64),
+    deviceBCompletePairing: (
+      relayUrl: string,
+      pairToken: string,
+      initiatorEncPubkeyB64: string,
+      initiatorSignPubkeyB64: string,
+      sigB64: string,
+    ): Promise<void> => TwinotifyCoreModule.deviceBCompletePairing(
+      relayUrl,
+      pairToken,
+      initiatorEncPubkeyB64,
+      initiatorSignPubkeyB64,
+      sigB64,
+    ),
     storePeerPubkeys: (encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string = ''): Promise<void> =>
       TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId, peerDisplayName),
     unpair: (): Promise<void> =>

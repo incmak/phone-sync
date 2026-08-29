@@ -20,12 +20,13 @@ type pairInitReq struct {
 }
 
 type pairCompleteReq struct {
-	PairToken       string `json:"pair_token"`
-	DeviceID        string `json:"device_id"`
-	EncPubkey       string `json:"enc_pubkey"`
-	SignPubkey      string `json:"sign_pubkey"`
-	ConfirmationSig string `json:"confirmation_sig"`
-	DisplayName     string `json:"display_name,omitempty"`
+	PairToken                string `json:"pair_token"`
+	DeviceID                 string `json:"device_id"`
+	EncPubkey                string `json:"enc_pubkey"`
+	SignPubkey               string `json:"sign_pubkey"`
+	ConfirmationSig          string `json:"confirmation_sig"`
+	ResponderConfirmationSig string `json:"responder_confirmation_sig,omitempty"`
+	DisplayName              string `json:"display_name,omitempty"`
 }
 
 func (s *Server) handlePairInit(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +84,10 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
+	if s.requireMutualPairSignatures && req.ResponderConfirmationSig == "" {
+		http.Error(w, "missing responder confirmation signature", http.StatusBadRequest)
+		return
+	}
 	if !s.allowPairToken(w, req.PairToken) {
 		return
 	}
@@ -130,6 +135,36 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 	if !ed25519.Verify(ed25519.PublicKey(pending.ASignPubkey), msg, sig) {
 		http.Error(w, "invalid confirmation signature", http.StatusBadRequest)
 		return
+	}
+	var responderSig []byte
+	if req.ResponderConfirmationSig != "" {
+		responderSig, err = base64.StdEncoding.DecodeString(req.ResponderConfirmationSig)
+		if err != nil {
+			http.Error(w, "bad responder_confirmation_sig base64", http.StatusBadRequest)
+			return
+		}
+		confirmation := *pending
+		confirmation.DeviceBID = req.DeviceID
+		confirmation.BEncPubkey = encPk
+		confirmation.BSignPubkey = signPk
+		if !ed25519.Verify(ed25519.PublicKey(signPk), responderConfirmationMessage(&confirmation, sig), responderSig) {
+			http.Error(w, "invalid responder confirmation signature", http.StatusBadRequest)
+			return
+		}
+	}
+	if len(responderSig) != 0 {
+		if err := s.pairStore.UpdatePendingResponderSig(req.PairToken, responderSig); err != nil {
+			if errors.Is(err, store.ErrPairConflict) {
+				http.Error(w, "pair transition conflict", http.StatusConflict)
+				return
+			}
+			if errors.Is(err, store.ErrNotFound) {
+				http.Error(w, "unknown pair_token", http.StatusBadRequest)
+				return
+			}
+			http.Error(w, "store", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Prefer B's display name from /pair/hello if already stored; allow override from this request.

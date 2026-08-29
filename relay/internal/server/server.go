@@ -14,22 +14,23 @@ import (
 )
 
 type Server struct {
-	router              *chi.Mux
-	validator           *Validator
-	pairStore           *store.PairStore
-	jtiCache            *JTICache
-	pairHub             *PairHub
-	clientHub           *ClientHub
-	mailbox             *store.MailboxStore
-	handoffs            *durableHandoffs
-	pairLimiter         *pairingRateLimiter
-	now                 func() time.Time
-	maintenanceInterval time.Duration
-	trustProxyHeaders   bool
-	mailboxExpiryBatch  int
-	statusExpiryBatch   int
-	maintenanceMu       sync.Mutex
-	maintenanceDone     chan struct{}
+	router                      *chi.Mux
+	validator                   *Validator
+	pairStore                   *store.PairStore
+	jtiCache                    *JTICache
+	pairHub                     *PairHub
+	clientHub                   *ClientHub
+	mailbox                     *store.MailboxStore
+	handoffs                    *durableHandoffs
+	pairLimiter                 *pairingRateLimiter
+	now                         func() time.Time
+	maintenanceInterval         time.Duration
+	trustProxyHeaders           bool
+	mailboxExpiryBatch          int
+	statusExpiryBatch           int
+	maintenanceMu               sync.Mutex
+	maintenanceDone             chan struct{}
+	requireMutualPairSignatures bool
 
 	// relayHelloBeforeActivate is a deterministic test seam around the
 	// drain-to-live handoff. Production constructors leave it nil.
@@ -59,15 +60,16 @@ func NewWithDependencies(b *store.Bolt, mailboxLimits store.MailboxLimits) *Serv
 }
 
 type Config struct {
-	MailboxLimits       store.MailboxLimits
-	PendingPairLimits   store.PendingPairLimits
-	PairingRateLimits   PairingRateLimitConfig
-	JTI                 JTICacheConfig
-	MaintenanceInterval time.Duration
-	MailboxExpiryBatch  int
-	StatusExpiryBatch   int
-	TrustProxyHeaders   bool
-	Now                 func() time.Time
+	MailboxLimits               store.MailboxLimits
+	PendingPairLimits           store.PendingPairLimits
+	PairingRateLimits           PairingRateLimitConfig
+	JTI                         JTICacheConfig
+	MaintenanceInterval         time.Duration
+	MailboxExpiryBatch          int
+	StatusExpiryBatch           int
+	TrustProxyHeaders           bool
+	RequireMutualPairSignatures bool
+	Now                         func() time.Time
 }
 
 func DefaultConfig() Config {
@@ -115,20 +117,21 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 	}
 	clientHub := NewClientHubWithMailboxLimits(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes)
 	s := &Server{
-		router:              chi.NewRouter(),
-		validator:           v,
-		pairStore:           pairStore,
-		jtiCache:            NewJTICacheWithConfig(config.JTI),
-		pairHub:             NewPairHub(),
-		clientHub:           clientHub,
-		mailbox:             mailbox,
-		handoffs:            newDurableHandoffs(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes),
-		pairLimiter:         newPairingRateLimiter(config.PairingRateLimits),
-		now:                 config.Now,
-		maintenanceInterval: config.MaintenanceInterval,
-		trustProxyHeaders:   config.TrustProxyHeaders,
-		mailboxExpiryBatch:  config.MailboxExpiryBatch,
-		statusExpiryBatch:   config.StatusExpiryBatch,
+		router:                      chi.NewRouter(),
+		validator:                   v,
+		pairStore:                   pairStore,
+		jtiCache:                    NewJTICacheWithConfig(config.JTI),
+		pairHub:                     NewPairHub(),
+		clientHub:                   clientHub,
+		mailbox:                     mailbox,
+		handoffs:                    newDurableHandoffs(config.MailboxLimits.MaxItems, config.MailboxLimits.MaxBytes),
+		pairLimiter:                 newPairingRateLimiter(config.PairingRateLimits),
+		now:                         config.Now,
+		maintenanceInterval:         config.MaintenanceInterval,
+		trustProxyHeaders:           config.TrustProxyHeaders,
+		mailboxExpiryBatch:          config.MailboxExpiryBatch,
+		statusExpiryBatch:           config.StatusExpiryBatch,
+		requireMutualPairSignatures: config.RequireMutualPairSignatures,
 	}
 	clientHub.SetHandoffResolver(s.transferHandoffFrames)
 	s.routes()

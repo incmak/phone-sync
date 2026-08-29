@@ -53,9 +53,17 @@ export async function deviceASignConfirmation(
 export async function deviceBCompletePairing(
   relayUrl: string,
   pairToken: string,
+  initiatorEncPubkeyB64: string,
+  initiatorSignPubkeyB64: string,
   sigB64: string,
 ): Promise<void> {
-  return await TwinotifyCoreModule.deviceBCompletePairing(relayUrl, pairToken, sigB64);
+  return await TwinotifyCoreModule.deviceBCompletePairing(
+    relayUrl,
+    pairToken,
+    initiatorEncPubkeyB64,
+    initiatorSignPubkeyB64,
+    sigB64,
+  );
 }
 
 export async function storePeerPubkeys(

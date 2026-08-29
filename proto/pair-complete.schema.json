@@ -2,12 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://twinotify.app/schemas/pair-complete.schema.json",
   "type": "object",
-  "required": ["pair_token", "device_id", "enc_pubkey", "sign_pubkey", "confirmation_sig"],
+  "required": ["pair_token", "device_id", "enc_pubkey", "sign_pubkey", "confirmation_sig", "responder_confirmation_sig"],
   "properties": {
     "pair_token": { "type": "string" },
     "device_id": { "type": "string" },
     "enc_pubkey": { "type": "string", "contentEncoding": "base64" },
     "sign_pubkey": { "type": "string", "contentEncoding": "base64" },
-    "confirmation_sig": { "type": "string", "contentEncoding": "base64" }
-  }
+    "confirmation_sig": { "type": "string", "contentEncoding": "base64", "minLength": 1 },
+    "responder_confirmation_sig": { "type": "string", "contentEncoding": "base64", "minLength": 1 },
+    "display_name": { "type": "string", "maxLength": 64 }
+  },
+  "additionalProperties": false
 }

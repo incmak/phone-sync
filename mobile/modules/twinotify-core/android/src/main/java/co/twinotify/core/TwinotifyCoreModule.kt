@@ -799,14 +799,24 @@ class TwinotifyCoreModule internal constructor(
             }
         }
 
-        AsyncFunction("deviceBCompletePairing") { relayUrl: String, pairToken: String, sigB64: String, promise: Promise ->
+        AsyncFunction("deviceBCompletePairing") { relayUrl: String, pairToken: String, aEncB64: String, aSignB64: String, sigB64: String, promise: Promise ->
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
                     val (box, sign) = CryptoStore.loadOrGenerate(ctx)
                     val deviceId = DeviceIdentity.getOrCreate(ctx)
                     val sig = Base64.getDecoder().decode(sigB64)
-                    PairProtocol.deviceBCompletePair(relayUrl, pairToken, deviceId, box.publicKey, sign.publicKey, sig)
+                    PairProtocol.deviceBCompletePair(
+                        relayUrl,
+                        pairToken,
+                        deviceId,
+                        Base64.getDecoder().decode(aEncB64),
+                        Base64.getDecoder().decode(aSignB64),
+                        box.publicKey,
+                        sign.publicKey,
+                        sign.secretKey,
+                        sig,
+                    )
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("COMPLETE_PAIR", e.message ?: "err", e) }
             }
