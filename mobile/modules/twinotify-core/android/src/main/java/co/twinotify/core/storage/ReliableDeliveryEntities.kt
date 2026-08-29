@@ -113,6 +113,22 @@ data class ActivityEvent(
     val detailCode: String?,
 )
 
+@Entity(
+    tableName = "ui_activity_event",
+    indices = [Index("occurredAt"), Index(value = ["msgId"], unique = true)],
+)
+data class UiActivityEvent(
+    @PrimaryKey val eventId: String,
+    val msgId: String?,
+    val packageName: String?,
+    val appName: String?,
+    val direction: String,
+    val kind: String,
+    val status: String,
+    val route: String?,
+    val occurredAt: Long,
+)
+
 @Entity(tableName = "snapshot_stage", primaryKeys = ["snapshotId", "canonId"])
 data class SnapshotStage(
     val snapshotId: String,

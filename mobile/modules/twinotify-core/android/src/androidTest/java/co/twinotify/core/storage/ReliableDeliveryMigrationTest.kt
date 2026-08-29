@@ -229,11 +229,46 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate7To8_preservesProtocolHistoryAndAddsPrivacyBoundedUiActivity() {
+        helper.createDatabase(TEST_DB_V8, 7).apply {
+            execSQL(
+                "INSERT INTO activity_event(" +
+                    "eventId,msgId,packageName,eventType,status,byteSize,occurredAt,detailCode) " +
+                    "VALUES('protocol-event','message-1','example.messages','notif.post','applied',24,1000,NULL)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB_V8, 8, true, MIGRATION_7_8)
+        db.query("SELECT COUNT(*) FROM activity_event WHERE eventId='protocol-event'").use { row ->
+            assertTrue(row.moveToFirst())
+            assertEquals(1, row.getInt(0))
+        }
+        db.execSQL(
+            "INSERT INTO ui_activity_event(" +
+                "eventId,msgId,packageName,appName,direction,kind,status,route,occurredAt) " +
+                "VALUES('ui-event','message-1','example.messages','Messages','RECEIVED'," +
+                "'NOTIFICATION','APPLIED','LAN',2000)",
+        )
+        db.query(
+            "SELECT direction,kind,status,route FROM ui_activity_event WHERE eventId='ui-event'",
+        ).use { row ->
+            assertTrue(row.moveToFirst())
+            assertEquals("RECEIVED", row.getString(0))
+            assertEquals("NOTIFICATION", row.getString(1))
+            assertEquals("APPLIED", row.getString(2))
+            assertEquals("LAN", row.getString(3))
+        }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
         const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"
         const val TEST_DB_V5 = "reliable-delivery-migration-v5-test"
         const val TEST_DB_V6 = "reliable-delivery-migration-v6-test"
         const val TEST_DB_V7 = "reliable-delivery-migration-v7-test"
+        const val TEST_DB_V8 = "reliable-delivery-migration-v8-test"
     }
 }

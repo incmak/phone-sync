@@ -150,7 +150,7 @@ interface LegacyOutboxStore {
 }
 
 @Dao
-abstract class ReliableDeliveryDao : LegacyOutboxStore {
+abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insertOutbound(row: OutboundMessage)
 
@@ -188,6 +188,24 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     @Query("DELETE FROM activity_event WHERE occurredAt < :cutoff")
     protected abstract suspend fun deleteActivityBefore(cutoff: Long): Int
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract override suspend fun upsertUiActivity(row: UiActivityEvent)
+
+    @Query("SELECT * FROM ui_activity_event WHERE msgId=:msgId LIMIT 1")
+    abstract override suspend fun uiActivityForMessage(msgId: String): UiActivityEvent?
+
+    @Query("SELECT * FROM ui_activity_event ORDER BY occurredAt DESC, eventId DESC LIMIT :limit")
+    abstract override suspend fun recentUiActivity(limit: Int): List<UiActivityEvent>
+
+    @Query("DELETE FROM ui_activity_event WHERE occurredAt < :cutoff")
+    abstract override suspend fun deleteUiActivityBefore(cutoff: Long): Int
+
+    @Query(
+        "DELETE FROM ui_activity_event WHERE eventId NOT IN " +
+            "(SELECT eventId FROM ui_activity_event ORDER BY occurredAt DESC, eventId DESC LIMIT :limit)",
+    )
+    abstract override suspend fun trimUiActivityToLimit(limit: Int): Int
+
     @Query("DELETE FROM inbound_message WHERE committedAt < :cutoff AND outcome IN ('APPLIED','STALE','REJECTED')")
     protected abstract suspend fun deleteInboundBefore(cutoff: Long): Int
 
@@ -223,6 +241,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
         clearCanonicalStates()
         clearOriginSequences()
         clearActivityEvents()
+        clearUiActivityEvents()
         clearSnapshotStages()
         clearMaterializationRetries()
     }
@@ -237,6 +256,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore {
     protected abstract suspend fun clearOriginSequences()
     @Query("DELETE FROM activity_event")
     protected abstract suspend fun clearActivityEvents()
+    @Query("DELETE FROM ui_activity_event")
+    protected abstract suspend fun clearUiActivityEvents()
     @Query("DELETE FROM snapshot_stage")
     protected abstract suspend fun clearSnapshotStages()
     @Query("DELETE FROM materialization_retry")
