@@ -234,6 +234,10 @@ func TestClientProvidesTypedNotificationAndStateCommands(t *testing.T) {
 	if len(runner.args) != 4 {
 		t.Fatalf("calls=%d want 4", len(runner.args))
 	}
+	wantAirplane := []string{"-s", "emulator-5556", "shell", "cmd", "connectivity", "airplane-mode", "enable"}
+	if !reflect.DeepEqual(runner.args[3], wantAirplane) {
+		t.Fatalf("airplane args=%q want=%q", runner.args[3], wantAirplane)
+	}
 }
 
 func TestPhysicalOfflinePairingPreflightDisablesOnlyMobileDataAndHashesWiFi(t *testing.T) {

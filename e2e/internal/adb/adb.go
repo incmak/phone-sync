@@ -303,11 +303,11 @@ func (c *Client) WaitForDevice(ctx context.Context) error {
 }
 
 func (c *Client) SetAirplaneMode(ctx context.Context, enabled bool) error {
-	value := "0"
+	state := "disable"
 	if enabled {
-		value = "1"
+		state = "enable"
 	}
-	_, err := c.run(ctx, "shell", "settings", "put", "global", "airplane_mode_on", value)
+	_, err := c.run(ctx, "shell", "cmd", "connectivity", "airplane-mode", state)
 	return err
 }
 

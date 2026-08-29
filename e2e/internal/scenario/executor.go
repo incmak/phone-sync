@@ -382,6 +382,7 @@ type Executor struct {
 	burstCancel           context.CancelFunc
 	burstDone             <-chan error
 	fixtureUninstalled    bool
+	originClaimPauseArmed bool
 }
 
 func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
@@ -433,6 +434,7 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.burstCancel = nil
 		e.burstDone = nil
 		e.fixtureUninstalled = false
+		e.originClaimPauseArmed = false
 		e.direct = strings.HasPrefix(plan.Name, "lan-direct-") || plan.Name == "lan-restart-persistence"
 	}
 	if err := ValidateExecutablePlan(plan); err != nil {
@@ -443,6 +445,18 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		return e.runAggregate(ctx, plan)
 	}
 	defer func() {
+		if e.originClaimPauseArmed {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
+			response, err := e.bridge.Control(cleanupCtx, "A", "NOTIFICATION_ORIGIN", map[string]string{"operation": "release_claim_pause"})
+			cancel()
+			if runErr == nil && (err != nil || response.Code != "ok") {
+				if err == nil {
+					err = oracleFailure("origin_control_rejected")
+				}
+				runErr = fmt.Errorf("release origin claim pause: %w", err)
+			}
+			e.originClaimPauseArmed = false
+		}
 		if e.fixtureUninstalled {
 			if fixtureBridge, ok := e.bridge.(notificationFixtureAppBridge); ok {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
@@ -657,7 +671,11 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 	case actionNetwork:
 		return "", e.bridge.SetNetwork(ctx, a.device, a.enabled)
 	case actionForceStop:
-		return "", e.bridge.ForceStop(ctx, a.device)
+		err := e.bridge.ForceStop(ctx, a.device)
+		if err == nil && a.device == "A" {
+			e.originClaimPauseArmed = false
+		}
+		return "", err
 	case actionRestart:
 		return "", e.bridge.Restart(ctx, a.device)
 	case actionReconcile:
@@ -744,6 +762,9 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 		}
 		if response.Code != "ok" {
 			return "", oracleFailure("origin_control_rejected")
+		}
+		if a.command == "pause_after_claim" {
+			e.originClaimPauseArmed = true
 		}
 		return "", nil
 	case actionDelay:
