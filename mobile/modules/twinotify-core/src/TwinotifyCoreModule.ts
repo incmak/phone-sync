@@ -5,6 +5,8 @@ import type {
   OfflinePairingStatusEvent,
   RouteStatus,
   RouteStatusEvent,
+  NotificationDetail,
+  MirrorActionInvocationResult,
 } from './TwinotifyCore.types';
 
 export type {
@@ -17,6 +19,12 @@ export type {
   OfflinePairingRole,
   OfflinePairingStatus,
   OfflinePairingStatusEvent,
+  NotificationDetail,
+  NotificationDetailAction,
+  NotificationDetailState,
+  NotificationActionInvocationState,
+  MirrorActionInvocationResult,
+  MirrorActionInvocationStatus,
 } from './TwinotifyCore.types';
 
 export type KeyPair = { encPubkey: string; signPubkey: string };
@@ -121,6 +129,13 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   // Home screen metrics
   getMetrics(): Promise<MetricsSnapshot>;
   getRecentActivity(limit: number): Promise<RecentActivityItem[]>;
+  getNotificationDetail(detailId: string): Promise<NotificationDetail | null>;
+  invokeMirrorAction(
+    detailId: string,
+    actionId: string,
+    replyText?: string | null,
+  ): Promise<MirrorActionInvocationResult>;
+  canLaunchSourceApp(packageName: string): Promise<boolean>;
 }
 
 export default requireNativeModule<TwinotifyCoreModuleType>('TwinotifyCore');

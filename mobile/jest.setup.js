@@ -99,6 +99,9 @@ const mockTwinotifyCore = {
   openAppSettings: jest.fn(async () => {}),
   getMetrics: jest.fn(async () => ({ mirroredToday: 0, blockedToday: 0, latencyMs: 0 })),
   getRecentActivity: jest.fn(async () => []),
+  getNotificationDetail: jest.fn(async () => null),
+  invokeMirrorAction: jest.fn(async () => ({ status: 'failed' })),
+  canLaunchSourceApp: jest.fn(async () => false),
   unpair: jest.fn(),
 };
 

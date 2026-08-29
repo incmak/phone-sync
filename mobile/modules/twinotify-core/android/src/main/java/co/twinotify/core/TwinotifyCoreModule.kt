@@ -22,6 +22,8 @@ import co.twinotify.core.pairing.lan.LanPairingCodec
 import co.twinotify.core.pairing.lan.LanPairingQr
 import co.twinotify.core.pairing.lan.AndroidOfflinePairingRuntimeFactory
 import co.twinotify.core.service.toEventMap
+import co.twinotify.core.detail.NotificationDetailRepository
+import co.twinotify.core.detail.toBridgeMap
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.PeerRecord
 import co.twinotify.core.storage.PeerStore
@@ -945,6 +947,47 @@ class TwinotifyCoreModule internal constructor(
                     })
                 } catch (e: Throwable) {
                     promise.reject("RECENT_ACTIVITY", "recent_activity_unavailable", e)
+                }
+            }
+        }
+
+        AsyncFunction("getNotificationDetail") { detailId: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val detail = NotificationDetailRepository.production(requireContext()).get(detailId)
+                    promise.resolve(detail?.toBridgeMap())
+                } catch (_: Throwable) {
+                    promise.reject("NOTIFICATION_DETAIL", "notification_detail_unavailable", null)
+                }
+            }
+        }
+
+        AsyncFunction("invokeMirrorAction") {
+                detailId: String,
+                actionId: String,
+                replyText: String?,
+                promise: Promise,
+            ->
+            moduleScope.launch {
+                try {
+                    val result = NotificationDetailRepository.production(requireContext())
+                        .invoke(detailId, actionId, replyText)
+                    promise.resolve(result.toBridgeMap())
+                } catch (_: Throwable) {
+                    promise.reject("NOTIFICATION_ACTION", "notification_action_unavailable", null)
+                }
+            }
+        }
+
+        AsyncFunction("canLaunchSourceApp") { packageName: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    promise.resolve(
+                        NotificationDetailRepository.production(requireContext())
+                            .canLaunchSourceApp(packageName),
+                    )
+                } catch (_: Throwable) {
+                    promise.resolve(false)
                 }
             }
         }

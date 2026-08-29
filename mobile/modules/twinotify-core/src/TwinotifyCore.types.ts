@@ -35,6 +35,58 @@ export interface RouteStatus {
 
 export type RouteStatusEvent = (status: RouteStatus) => void;
 
+export type NotificationDetailState = 'ACTIVE' | 'CANCELLED' | 'GONE';
+
+export type NotificationActionInvocationState =
+  | 'PENDING'
+  | 'DISPATCHED'
+  | 'OUTCOME_UNKNOWN'
+  | 'FAILED'
+  | 'ACTION_GONE'
+  | 'NOTIFICATION_GONE'
+  | 'EXPIRED';
+
+export interface NotificationDetailAction {
+  actionId: string;
+  title: string;
+  semantic: number;
+  reply: boolean;
+  replyLabel: string | null;
+  invocationId: string | null;
+  invocationState: NotificationActionInvocationState | null;
+}
+
+export interface NotificationDetail {
+  detailId: string;
+  sourceAppName: string | null;
+  sourcePackage: string;
+  sourceAppIconDataUri: string | null;
+  originDeviceLabel: string;
+  title: string | null;
+  text: string | null;
+  subText: string | null;
+  bigText: string | null;
+  smallIconDataUri: string | null;
+  largeIconDataUri: string | null;
+  receivedAt: number;
+  updatedAt: number;
+  state: NotificationDetailState;
+  isAutoCancel: boolean;
+  actions: NotificationDetailAction[];
+}
+
+export type MirrorActionInvocationStatus =
+  | 'queued'
+  | 'locked'
+  | 'gone'
+  | 'invalid_reply'
+  | 'failed';
+
+export interface MirrorActionInvocationResult {
+  status: MirrorActionInvocationStatus;
+  invocationId: string | null;
+}
+
 export type OfflinePairingRole = 'initiator' | 'joiner';
 
 export type OfflinePairingPhase =

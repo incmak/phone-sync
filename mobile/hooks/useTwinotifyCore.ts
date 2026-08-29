@@ -1,6 +1,13 @@
 import * as Notifications from 'expo-notifications';
 import TwinotifyCoreModule from '../modules/twinotify-core/src/TwinotifyCoreModule';
-import type { SyncStatus, PairStatus, KeyPair, MetricsSnapshot } from '../modules/twinotify-core/src/TwinotifyCoreModule';
+import type {
+  SyncStatus,
+  PairStatus,
+  KeyPair,
+  MetricsSnapshot,
+  NotificationDetail,
+  MirrorActionInvocationResult,
+} from '../modules/twinotify-core/src/TwinotifyCoreModule';
 
 export function useTwinotifyCore() {
   return {
@@ -66,5 +73,15 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.removeFromDenylist(pkg),
     getMetrics: (): Promise<MetricsSnapshot> =>
       TwinotifyCoreModule.getMetrics(),
+    getNotificationDetail: (detailId: string): Promise<NotificationDetail | null> =>
+      TwinotifyCoreModule.getNotificationDetail(detailId),
+    invokeMirrorAction: (
+      detailId: string,
+      actionId: string,
+      replyText: string | null = null,
+    ): Promise<MirrorActionInvocationResult> =>
+      TwinotifyCoreModule.invokeMirrorAction(detailId, actionId, replyText),
+    canLaunchSourceApp: (packageName: string): Promise<boolean> =>
+      TwinotifyCoreModule.canLaunchSourceApp(packageName),
   };
 }
