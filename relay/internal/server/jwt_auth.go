@@ -133,12 +133,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if len(authHeader) > len("Bearer ")+maxJWTBytes || !strings.HasPrefix(authHeader, "Bearer ") {
-			http.Error(w, "missing bearer", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectMissing)
 			return
 		}
 		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 		if tokenStr == "" || len(tokenStr) > maxJWTBytes {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectMalformed)
 			return
 		}
 
@@ -146,23 +146,23 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		parser := jwt.NewParser()
 		unverified, _, err := parser.ParseUnverified(tokenStr, jwt.MapClaims{})
 		if err != nil {
-			http.Error(w, "bad token", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectMalformed)
 			return
 		}
 		claims, ok := unverified.Claims.(jwt.MapClaims)
 		if !ok {
-			http.Error(w, "bad claims", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectClaims)
 			return
 		}
 		sub, _ := claims["sub"].(string)
 		if sub == "" {
-			http.Error(w, "missing sub", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectClaims)
 			return
 		}
 
 		session, err := s.pairStore.SessionFor(sub)
 		if err != nil || len(session.SignPubkey) != ed25519.PublicKeySize {
-			http.Error(w, "unknown device", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectUnknownDevice)
 			return
 		}
 		now := s.now()
@@ -177,27 +177,36 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}, jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithExpirationRequired(),
 			jwt.WithTimeFunc(func() time.Time { return now }), jwt.WithLeeway(jwtClockLeeway))
 		if err != nil {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectSignature)
 			return
 		}
 		verifiedClaims, ok := verified.Claims.(jwt.MapClaims)
 		if !ok {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectClaims)
 			return
 		}
 		jti, err := validateAuthClaims(verifiedClaims, sub, now)
 		if err != nil {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			s.rejectAuthentication(w, authRejectClaims)
 			return
 		}
 		if err := s.jtiCache.CheckAndSet(jti, now); err != nil {
-			http.Error(w, "jti replay", http.StatusUnauthorized)
+			reason := authRejectStore
+			if errors.Is(err, ErrJTIReplay) {
+				reason = authRejectReplay
+			}
+			s.rejectAuthentication(w, reason)
 			return
 		}
 
 		r = r.WithContext(withPairSession(r.Context(), sub, session.PairID))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) rejectAuthentication(w http.ResponseWriter, reason authRejectReason) {
+	s.metrics.recordAuthRejected(reason)
+	http.Error(w, "invalid token", http.StatusUnauthorized)
 }
 
 func validateAuthClaims(claims jwt.MapClaims, expectedSubject string, now time.Time) (string, error) {

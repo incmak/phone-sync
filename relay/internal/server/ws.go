@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -46,7 +46,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("upgrade: %v", err)
+		slog.Warn("websocket_upgrade_failed")
 		return
 	}
 	defer conn.Close()
@@ -84,6 +84,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if !registered {
 		return
 	}
+	s.metrics.connectionOpened()
+	defer s.metrics.connectionClosed()
 	if err := s.pairStore.ValidateSession(deviceID, pairID); err != nil {
 		return
 	}
@@ -91,6 +93,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer close(connectionLifetime)
 	go func() {
 		select {
+		case signal := <-client.drain:
+			writeMu.Lock()
+			deadline := time.Now().Add(writeWait)
+			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(signal.code, signal.reason), deadline)
+			_ = conn.Close()
+			writeMu.Unlock()
 		case <-client.done:
 			_ = conn.Close()
 		case <-connectionLifetime:
@@ -177,7 +185,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if err := s.handleRelayHelloForPair(deviceID, pairID, client, typed, writeFrame, func(ids []string) {
 					drainedIDs = ids
 				}); err != nil {
-					log.Printf("relay hello for %s: %v", deviceID, err)
+					slog.Error("relay_hello_failed")
 					return
 				}
 				if s.relayHelloBeforeActivate != nil {
@@ -385,6 +393,7 @@ func (s *Server) handleRelayPut(
 ) {
 	session, err := s.pairStore.SessionFor(deviceID)
 	if err != nil {
+		s.metrics.recordRelayPutRejected("not_recipient")
 		_ = writeRejected(relayFrameMsgID(mustWrapEnvelope(put.Envelope)), "not_recipient")
 		return
 	}
@@ -397,34 +406,38 @@ func (s *Server) handleRelayPutForPair(
 	writeFrame func(any) error,
 	writeRejected func(string, string) error,
 ) {
+	reject := func(msgID, reason string) {
+		s.metrics.recordRelayPutRejected(reason)
+		_ = writeRejected(msgID, reason)
+	}
 	var envelope encryptedEnvelopeHeader
 	if err := s.validator.ValidateEncryptedEnvelope(put.Envelope); err != nil {
-		_ = writeRejected(relayFrameMsgID(mustWrapEnvelope(put.Envelope)), "invalid_frame")
+		reject(relayFrameMsgID(mustWrapEnvelope(put.Envelope)), "invalid_frame")
 		return
 	}
 	if err := json.Unmarshal(put.Envelope, &envelope); err != nil || envelope.Type != "enc" {
-		_ = writeRejected(envelope.MsgID, "invalid_frame")
+		reject(envelope.MsgID, "invalid_frame")
 		return
 	}
 	if envelope.OriginDevice != deviceID {
-		_ = writeRejected(envelope.MsgID, "invalid_frame")
+		reject(envelope.MsgID, "invalid_frame")
 		return
 	}
 	peerID, err := s.pairStore.PeerForPair(deviceID, pairID)
 	if err != nil || peerID == "" {
-		_ = writeRejected(envelope.MsgID, "not_recipient")
+		reject(envelope.MsgID, "not_recipient")
 		return
 	}
 
 	_, persistedPeerCapabilities, floor, err := s.pairStore.CapabilitiesForPair(deviceID, pairID)
 	if err != nil {
-		_ = writeRejected(envelope.MsgID, "not_recipient")
+		reject(envelope.MsgID, "not_recipient")
 		return
 	}
 	peerProtocol, peerProtocols, peerOnline := s.clientHub.ConnectionForPair(peerID, pairID)
 	if envelope.V == 1 {
 		if floor >= 2 {
-			_ = writeRejected(envelope.MsgID, "peer_legacy")
+			reject(envelope.MsgID, "peer_legacy")
 			return
 		}
 		if peerOnline {
@@ -434,27 +447,27 @@ func (s *Server) handleRelayPutForPair(
 					_ = writeFrame(RelayLegacyForwarded{V: 2, Type: "relay.legacy_forwarded", MsgID: envelope.MsgID})
 					return
 				}
-				_ = writeRejected(envelope.MsgID, "peer_legacy")
+				reject(envelope.MsgID, "peer_legacy")
 				return
 			case protocolV2, protocolV2Handshake:
 				if !supportsProtocol(peerProtocols, 1) {
-					_ = writeRejected(envelope.MsgID, "peer_legacy")
+					reject(envelope.MsgID, "peer_legacy")
 					return
 				}
 			default:
-				_ = writeRejected(envelope.MsgID, "peer_legacy")
+				reject(envelope.MsgID, "peer_legacy")
 				return
 			}
 		} else if !supportsProtocol(persistedPeerCapabilities.Protocols, 1) {
-			_ = writeRejected(envelope.MsgID, "peer_legacy")
+			reject(envelope.MsgID, "peer_legacy")
 			return
 		}
 	} else if floor < 2 {
-		_ = writeRejected(envelope.MsgID, "peer_legacy")
+		reject(envelope.MsgID, "peer_legacy")
 		return
 	}
 	if err := s.capacityCheck(); err != nil {
-		_ = writeRejected(envelope.MsgID, "server_capacity")
+		reject(envelope.MsgID, "server_capacity")
 		return
 	}
 
@@ -482,9 +495,10 @@ func (s *Server) handleRelayPutForPair(
 	}
 	handoff.commitMu.Unlock()
 	if err != nil {
-		_ = writeRejected(envelope.MsgID, relayPutErrorCode(err))
+		reject(envelope.MsgID, relayPutErrorCode(err))
 		return
 	}
+	s.metrics.recordRelayPutAccepted()
 
 	writeErr := writeFrame(RelayAccepted{
 		V: 2, Type: "relay.accepted", MsgID: envelope.MsgID, AcceptedAt: result.AcceptedAt,
@@ -524,7 +538,7 @@ func (s *Server) dispatchDurableNotificationBatch(notifications []durableNotific
 		return true
 	})
 	if err != nil {
-		log.Printf("transfer durable relay delivery for %s: %v", recipient, err)
+		slog.Error("relay_delivery_transfer_failed")
 		s.clientHub.StopPair(recipient, pairID)
 	}
 }

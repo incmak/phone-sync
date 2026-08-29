@@ -194,6 +194,7 @@ Commit: `feat(relay): fail closed on production capacity`
 **Files:**
 - Create: `relay/cmd/relay/limit_listener.go`
 - Test: `relay/cmd/relay/limit_listener_test.go`
+- Create: `relay/cmd/relay/logging.go`
 - Create: `relay/internal/server/metrics.go`
 - Test: `relay/internal/server/metrics_test.go`
 - Modify: `relay/internal/server/client_hub.go`
@@ -208,21 +209,21 @@ Commit: `feat(relay): fail closed on production capacity`
 - Produces: `GET /metrics` on the relay router only.
 - Produces: `ClientHub.Drain(code int, reason string)` closing active sockets with code 1012.
 
-- [ ] **Step 1: Write failing listener, metrics, privacy, and shutdown tests**
+- [x] **Step 1: Write failing listener, metrics, privacy, and shutdown tests**
 
 Assert the limited listener never has more accepted live connections than its budget. Assert metric labels come only from closed enums, active connections return to zero, and rendered metrics contain no supplied device or message IDs. Open a WebSocket, call `BeginShutdown`, and assert close code 1012.
 
-- [ ] **Step 2: Observe RED**
+- [x] **Step 2: Observe RED**
 
 Run: `make sync-proto && cd relay && go test ./cmd/relay ./internal/server -run 'TestLimitListener|TestMetrics|TestBeginShutdown' -race -count=1`
 
-- [ ] **Step 3: Implement bounded observability and drain**
+- [x] **Step 3: Implement bounded observability and drain**
 
 Use atomics for counters and gauges. Render a fixed Prometheus text body with no dynamic labels. Replace relay logging with `slog` calls that contain only constant event names and bounded reasons. Configure JSON logging only when `TWINOTIFY_ENV=production`.
 
 Track each live WebSocket in the hub. Drain by signaling the handler, which serializes a WebSocket close control frame with code 1012 before closing the connection.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run focused tests and `make relay-test`. Scan with:
 

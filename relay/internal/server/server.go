@@ -3,7 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -28,6 +28,7 @@ type Server struct {
 	capacityCheck               CapacityCheck
 	buildVersion                string
 	shuttingDown                atomic.Bool
+	metrics                     *relayMetrics
 	now                         func() time.Time
 	maintenanceInterval         time.Duration
 	trustProxyHeaders           bool
@@ -142,6 +143,7 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 		pairLimiter:                 newPairingRateLimiter(config.PairingRateLimits),
 		capacityCheck:               config.CapacityCheck,
 		buildVersion:                config.BuildVersion,
+		metrics:                     newRelayMetrics(),
 		now:                         config.Now,
 		maintenanceInterval:         config.MaintenanceInterval,
 		trustProxyHeaders:           config.TrustProxyHeaders,
@@ -163,7 +165,8 @@ func New() *Server {
 	}
 	b, err := store.OpenBolt(path)
 	if err != nil {
-		log.Fatalf("open bolt: %v", err)
+		slog.Error("relay_start_failed", "stage", "store")
+		os.Exit(1)
 	}
 	return NewWithStore(b)
 }
@@ -171,17 +174,20 @@ func New() *Server {
 func (s *Server) Handler() http.Handler { return s.router }
 
 func (s *Server) BeginShutdown() {
-	s.shuttingDown.Store(true)
+	if s.shuttingDown.CompareAndSwap(false, true) {
+		s.clientHub.Drain(serviceRestartCloseCode, serviceRestartCloseReason)
+	}
 }
 
 func (s *Server) routes() {
 	s.router.Get("/health/live", s.handleLive)
 	s.router.Get("/health/ready", s.handleReady)
 	s.router.Get("/health", s.handleReady)
-	s.router.With(s.pairIPRateLimit).Post("/pair/init", s.handlePairInit)
-	s.router.With(s.pairIPRateLimit).Post("/pair/hello", s.handlePairHello)
-	s.router.With(s.pairIPRateLimit).Post("/pair/send_sig", s.handlePairSendSig)
-	s.router.With(s.pairIPRateLimit).Post("/pair/complete", s.handlePairComplete)
+	s.router.Get("/metrics", s.handleMetrics)
+	s.router.With(s.observePairMutation(pairStageInit), s.pairIPRateLimit).Post("/pair/init", s.handlePairInit)
+	s.router.With(s.observePairMutation(pairStageHello), s.pairIPRateLimit).Post("/pair/hello", s.handlePairHello)
+	s.router.With(s.observePairMutation(pairStageSignature), s.pairIPRateLimit).Post("/pair/send_sig", s.handlePairSendSig)
+	s.router.With(s.observePairMutation(pairStageComplete), s.pairIPRateLimit).Post("/pair/complete", s.handlePairComplete)
 	s.router.With(s.pairIPRateLimit).Get("/pair/notify", s.handlePairNotify)
 	s.router.With(s.authMiddleware).Post("/pair/revoke", s.handlePairRevoke)
 	s.router.With(s.authMiddleware).Get("/ws", s.handleWebSocket)

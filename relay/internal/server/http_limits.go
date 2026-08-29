@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -260,26 +260,34 @@ func (s *Server) runMaintenance(ctx context.Context, now time.Time) {
 	if !s.beforeMaintenanceUnit(ctx, "mailbox") {
 		return
 	}
-	if _, err := s.mailbox.ExpireBatch(now, s.mailboxExpiryBatch); err != nil {
-		log.Printf("expire mailboxes: %v", err)
+	_, err := s.mailbox.ExpireBatch(now, s.mailboxExpiryBatch)
+	s.metrics.recordMaintenance(maintenanceMailbox, err)
+	if err != nil {
+		slog.Error("maintenance_failed", "operation", "mailbox_expiry")
 	}
 	if !s.beforeMaintenanceUnit(ctx, "statuses") {
 		return
 	}
-	if _, err := s.mailbox.ExpireStatusesBatch(now, s.statusExpiryBatch); err != nil {
-		log.Printf("expire delivery statuses: %v", err)
+	_, err = s.mailbox.ExpireStatusesBatch(now, s.statusExpiryBatch)
+	s.metrics.recordMaintenance(maintenanceStatuses, err)
+	if err != nil {
+		slog.Error("maintenance_failed", "operation", "status_expiry")
 	}
 	if !s.beforeMaintenanceUnit(ctx, "pairs") {
 		return
 	}
-	if _, err := s.pairStore.SweepExpired(now); err != nil {
-		log.Printf("expire pairing tokens: %v", err)
+	_, err = s.pairStore.SweepExpired(now)
+	s.metrics.recordMaintenance(maintenancePairs, err)
+	if err != nil {
+		slog.Error("maintenance_failed", "operation", "pair_expiry")
 	}
 	if !s.beforeMaintenanceUnit(ctx, "jti") {
 		return
 	}
-	if _, err := s.jtiCache.Cleanup(now); err != nil {
-		log.Printf("expire JWT replay entries: %v", err)
+	_, err = s.jtiCache.Cleanup(now)
+	s.metrics.recordMaintenance(maintenanceJTI, err)
+	if err != nil {
+		slog.Error("maintenance_failed", "operation", "jti_expiry")
 	}
 	if !s.beforeMaintenanceUnit(ctx, "limiter") {
 		return

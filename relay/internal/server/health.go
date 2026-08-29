@@ -17,11 +17,15 @@ func (s *Server) handleLive(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
-	if s.shuttingDown.Load() || s.bolt.View(func(*bbolt.Tx) error { return nil }) != nil || s.capacityCheck() != nil {
+	if !s.isReady() {
 		s.writeHealth(w, http.StatusServiceUnavailable, "not_ready")
 		return
 	}
 	s.writeHealth(w, http.StatusOK, "ready")
+}
+
+func (s *Server) isReady() bool {
+	return !s.shuttingDown.Load() && s.bolt.View(func(*bbolt.Tx) error { return nil }) == nil && s.capacityCheck() == nil
 }
 
 func (s *Server) writeHealth(w http.ResponseWriter, statusCode int, status string) {

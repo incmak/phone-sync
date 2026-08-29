@@ -5,7 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -78,7 +78,7 @@ func (s *Server) handlePairHello(w http.ResponseWriter, r *http.Request) {
 	}
 	frame, err := marshalPeerHello(pending)
 	if err != nil {
-		log.Printf("peer.hello marshal: %v", err)
+		slog.Error("pair_frame_marshal_failed", "frame", "peer_hello")
 	} else {
 		s.pairHub.Push(req.PairToken, "A", frame)
 	}
@@ -168,7 +168,7 @@ func (s *Server) handlePairSendSig(w http.ResponseWriter, r *http.Request) {
 	}
 	frame, err := marshalPairSignature(pending)
 	if err != nil {
-		log.Printf("pair.sig marshal: %v", err)
+		slog.Error("pair_frame_marshal_failed", "frame", "pair_signature")
 	} else {
 		s.pairHub.Push(req.PairToken, "B", frame)
 	}

@@ -12,6 +12,7 @@ import (
 type ClientHub struct {
 	mu              sync.Mutex
 	clients         map[string]*wsClient
+	draining        bool
 	handoffMaxItems int
 	handoffMaxBytes uint64
 	resolveHandoff  func(*wsClient, []queuedV2Notification) error
@@ -32,8 +33,19 @@ type wsClient struct {
 	handshakeBytes      uint64
 	handoffSuppress     map[string]struct{}
 	done                chan struct{}
+	drain               chan websocketDrain
 	stopOnce            sync.Once
 }
+
+type websocketDrain struct {
+	code   int
+	reason string
+}
+
+const (
+	serviceRestartCloseCode   = 1012
+	serviceRestartCloseReason = "service restart"
+)
 
 type queuedV2Notification struct {
 	msgID    string
@@ -92,7 +104,14 @@ func (h *ClientHub) RegisterPair(deviceID, pairID string, out chan []byte) *wsCl
 func (h *ClientHub) registerPair(deviceID, pairID string, out chan []byte) (*wsClient, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c := &wsClient{deviceID: deviceID, pairID: pairID, outbound: out, done: make(chan struct{})}
+	c := &wsClient{
+		deviceID: deviceID, pairID: pairID, outbound: out,
+		done: make(chan struct{}), drain: make(chan websocketDrain, 1),
+	}
+	if h.draining {
+		c.stop()
+		return c, false
+	}
 	if prev, ok := h.clients[deviceID]; ok {
 		if prev.pairID != "" && pairID != "" && prev.pairID != pairID {
 			c.stop()
@@ -102,6 +121,25 @@ func (h *ClientHub) registerPair(deviceID, pairID string, out chan []byte) (*wsC
 	}
 	h.clients[deviceID] = c
 	return c, true
+}
+
+// Drain prevents new registrations and asks every current handler to send a
+// serialized WebSocket close control frame before closing its socket.
+func (h *ClientHub) Drain(code int, reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.draining {
+		return
+	}
+	h.draining = true
+	signal := websocketDrain{code: code, reason: reason}
+	for _, client := range h.clients {
+		select {
+		case client.drain <- signal:
+		default:
+			client.stop()
+		}
+	}
 }
 
 // Unregister removes client only if it's still the registered entry for this device.
