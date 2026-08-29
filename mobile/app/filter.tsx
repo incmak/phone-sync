@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 import TwinotifyCoreModule from '../modules/twinotify-core/src/TwinotifyCoreModule';
 import { useTheme, TwAppChip, TW_APPS, TwSwitch, TwBanner } from '../components';
@@ -82,10 +83,13 @@ export default function FilterScreen() {
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <Pressable onPress={() => router.back()} hitSlop={12} style={styles.backBtn}>
-          <Text style={[styles.backLabel, { color: theme.accent, fontFamily: theme.fonts.ui }]}>
-            ‹ Settings
-          </Text>
+        <Pressable
+          onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          style={styles.backBtn}
+        >
+          <MaterialIcons name="arrow-back" size={24} color={theme.colors.primary as string} />
         </Pressable>
         <Text style={[styles.headerTitle, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
           App filter
@@ -268,8 +272,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  backBtn: { minWidth: 80 },
-  backLabel: { fontSize: 16 },
+  backBtn: { width: 80, minHeight: 48, justifyContent: 'center' },
   headerTitle: { fontSize: 17 },
   // Info banner
   infoBanner: { marginHorizontal: 16, marginTop: 12 },

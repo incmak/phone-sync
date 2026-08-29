@@ -39,6 +39,14 @@ describe('app-filter persistence enforcement', () => {
     filterCore().removeFromDenylist = jest.fn(async () => undefined);
   });
 
+  test('uses a route-neutral accessible back action', async () => {
+    const screen = render(<FilterScreen />);
+
+    expect(await screen.findByRole('button', { name: 'Back' })).toBeTruthy();
+    await screen.findByText('Signal');
+    expect(screen.queryByText(/Settings/)).toBeNull();
+  });
+
   test('rolls back a rejected block and announces a content-free error', async () => {
     filterCore().addToDenylist.mockRejectedValueOnce(
       new Error('failed for package signal with private native details'),
