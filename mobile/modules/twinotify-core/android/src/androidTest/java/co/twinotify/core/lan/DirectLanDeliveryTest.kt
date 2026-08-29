@@ -207,6 +207,8 @@ class DirectLanDeliveryTest {
                 }
             },
             dialer = JsseLanDialer(LanTlsContextFactory.clientContext(pin), pin, handshake),
+            localDeviceId = local,
+            peerDeviceId = peer,
             arbitrationGraceMillis = 200,
             connectTimeoutMillis = 15_000,
         )
