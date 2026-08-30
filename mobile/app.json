@@ -13,6 +13,12 @@
     },
     "android": {
       "package": "com.twinotify.app",
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/brand/adaptive-foreground.png",
         "monochromeImage": "./assets/brand/adaptive-monochrome.png",
@@ -31,6 +37,7 @@
       ],
       "./plugins/with-optional-camera",
       "./plugins/with-android-toolchain-workarounds",
+      "./plugins/with-android-security",
       "expo-asset",
       "expo-font",
       "expo-image",
@@ -52,6 +59,13 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "eb10d340-9784-4257-80b2-1e4d3a36e74e"
+      }
+    },
+    "owner": "incmak"
   }
 }

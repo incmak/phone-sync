@@ -53,24 +53,12 @@ object PairProtocol {
         }
     }
 
-    /**
-     * Normalizes the user-entered relay URL (e.g. "ws://host:8080/ws") into a plain HTTP origin
-     * suitable for POSTs (e.g. "http://host:8080"). Strips any /ws suffix and swaps ws(s) schemes.
-     */
-    internal fun relayOrigin(relayUrl: String): String {
-        var u = relayUrl.trim().trimEnd('/')
-        u = u.replaceFirst(Regex("^wss://"), "https://")
-        u = u.replaceFirst(Regex("^ws://"), "http://")
-        // Drop a trailing "/ws" path segment if present (user-entered WS URL).
-        u = u.removeSuffix("/ws")
-        return u
-    }
-
     /** Called on Device A. Registers pending pair with relay. */
     fun initiate(
         relayUrl: String, token: String, deviceId: String,
         encPub: ByteArray, signPub: ByteArray,
         displayName: String? = null,
+        debug: Boolean = false,
     ) {
         val map = mutableMapOf<String, Any>(
             "pair_token" to token,
@@ -80,7 +68,7 @@ object PairProtocol {
         )
         if (!displayName.isNullOrBlank()) map["display_name"] = displayName
         val body = JSONObject(map.toMap()).toString().toRequestBody(JSON)
-        val resp = http.newCall(Request.Builder().url("${relayOrigin(relayUrl)}/pair/init").post(body).build()).execute()
+        val resp = http.newCall(Request.Builder().url(PairingRelayEndpoint.http(relayUrl, "pair", "init", debug = debug)).post(body).build()).execute()
         check(resp.isSuccessful) { "init HTTP ${resp.code}" }
         resp.close()
     }
@@ -90,6 +78,7 @@ object PairProtocol {
         relayUrl: String, token: String, deviceId: String,
         bEncPub: ByteArray, bSignPub: ByteArray,
         displayName: String? = null,
+        debug: Boolean = false,
     ) {
         val map = mutableMapOf<String, Any>(
             "pair_token" to token,
@@ -99,18 +88,18 @@ object PairProtocol {
         )
         if (!displayName.isNullOrBlank()) map["display_name"] = displayName
         val body = JSONObject(map.toMap()).toString().toRequestBody(JSON)
-        val resp = http.newCall(Request.Builder().url("${relayOrigin(relayUrl)}/pair/hello").post(body).build()).execute()
+        val resp = http.newCall(Request.Builder().url(PairingRelayEndpoint.http(relayUrl, "pair", "hello", debug = debug)).post(body).build()).execute()
         check(resp.isSuccessful) { "pair/hello HTTP ${resp.code}" }
         resp.close()
     }
 
     /** Device A → relay: push confirmation_sig. Relay forwards to B. */
-    fun sendConfirmationSig(relayUrl: String, token: String, sig: ByteArray) {
+    fun sendConfirmationSig(relayUrl: String, token: String, sig: ByteArray, debug: Boolean = false) {
         val body = JSONObject(mapOf(
             "pair_token" to token,
             "confirmation_sig" to Base64.getEncoder().encodeToString(sig),
         )).toString().toRequestBody(JSON)
-        val resp = http.newCall(Request.Builder().url("${relayOrigin(relayUrl)}/pair/send_sig").post(body).build()).execute()
+        val resp = http.newCall(Request.Builder().url(PairingRelayEndpoint.http(relayUrl, "pair", "send_sig", debug = debug)).post(body).build()).execute()
         check(resp.isSuccessful) { "pair/send_sig HTTP ${resp.code}" }
         resp.close()
     }
@@ -136,6 +125,7 @@ object PairProtocol {
         bEncPub: ByteArray, bSignPub: ByteArray,
         bSignSecret: ByteArray,
         confirmationSig: ByteArray,
+        debug: Boolean = false,
     ) {
         val responderSig = signDetached(
             PairConfirmation.responderMessage(
@@ -156,7 +146,7 @@ object PairProtocol {
             "confirmation_sig" to Base64.getEncoder().encodeToString(confirmationSig),
             "responder_confirmation_sig" to Base64.getEncoder().encodeToString(responderSig),
         )).toString().toRequestBody(JSON)
-        val resp = http.newCall(Request.Builder().url("${relayOrigin(relayUrl)}/pair/complete").post(body).build()).execute()
+        val resp = http.newCall(Request.Builder().url(PairingRelayEndpoint.http(relayUrl, "pair", "complete", debug = debug)).post(body).build()).execute()
         check(resp.isSuccessful) { "complete HTTP ${resp.code}" }
         resp.close()
     }

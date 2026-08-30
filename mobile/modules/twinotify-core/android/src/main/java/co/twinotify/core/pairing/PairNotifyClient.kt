@@ -32,15 +32,10 @@ object PairNotifyClient {
         role: String,
         expectedType: String,
         timeoutMs: Long = 5 * 60 * 1000L,
+        debug: Boolean = false,
     ): String {
         require(role == "A" || role == "B") { "role must be A or B, got $role" }
-        // Normalize to ws(s)://host[:port] — strip a trailing /ws path from user-entered URL,
-        // swap http(s)→ws(s), then append /pair/notify.
-        var origin = relayBaseUrl.trim().trimEnd('/').removeSuffix("/ws")
-        origin = origin.replaceFirst(Regex("^https://"), "wss://")
-        origin = origin.replaceFirst(Regex("^http://"), "ws://")
-        // If user entered ws:// or wss:// already, keep as-is.
-        val wsUrl = "$origin/pair/notify?token=$pairToken&role=$role"
+        val wsUrl = PairingRelayEndpoint.notify(relayBaseUrl, pairToken, role, debug = debug)
         val req = Request.Builder().url(wsUrl).build()
         val deferred = CompletableDeferred<String>()
         val ws = client.newWebSocket(req, object : WebSocketListener() {
@@ -86,9 +81,10 @@ object PairNotifyClient {
         deviceId: String,
         signSecretKey: ByteArray,
         timeoutMs: Long = 5 * 60 * 1000L,
+        debug: Boolean = false,
     ): String {
         val headers = authenticatedHeaders(pairToken, role, deviceId, signSecretKey)
-        return awaitFrameInternal(relayBaseUrl, pairToken, role, expectedType, timeoutMs, headers)
+        return awaitFrameInternal(relayBaseUrl, pairToken, role, expectedType, timeoutMs, headers, debug)
     }
 
     /** Backward-compat shim: waits for pair.sig on role=B and returns the decoded sig. */
@@ -96,8 +92,9 @@ object PairNotifyClient {
         relayBaseUrl: String,
         pairToken: String,
         timeoutMs: Long = 5 * 60 * 1000L,
+        debug: Boolean = false,
     ): ByteArray {
-        val frame = awaitFrame(relayBaseUrl, pairToken, "B", "pair.sig", timeoutMs)
+        val frame = awaitFrame(relayBaseUrl, pairToken, "B", "pair.sig", timeoutMs, debug)
         val sigB64 = JSONObject(frame).getString("confirmation_sig")
         return Base64.getDecoder().decode(sigB64)
     }
@@ -109,12 +106,10 @@ object PairNotifyClient {
         expectedType: String,
         timeoutMs: Long,
         headers: Map<String, String> = emptyMap(),
+        debug: Boolean = false,
     ): String {
         require(role == "A" || role == "B") { "role must be A or B, got $role" }
-        var origin = relayBaseUrl.trim().trimEnd('/').removeSuffix("/ws")
-        origin = origin.replaceFirst(Regex("^https://"), "wss://")
-        origin = origin.replaceFirst(Regex("^http://"), "ws://")
-        val wsUrl = "$origin/pair/notify?token=$pairToken&role=$role"
+        val wsUrl = PairingRelayEndpoint.notify(relayBaseUrl, pairToken, role, debug = debug)
         val requestBuilder = Request.Builder().url(wsUrl)
         headers.forEach { (name, value) -> requestBuilder.header(name, value) }
         val deferred = CompletableDeferred<String>()

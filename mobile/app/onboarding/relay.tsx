@@ -29,10 +29,16 @@ export default function RelayScreen() {
     let healthUrl: string;
     try {
       const u = new URL(trimmed);
-      const httpScheme = u.protocol === 'wss:' ? 'https:' : 'http:';
+      const secure = u.protocol === 'wss:' || u.protocol === 'https:';
+      const loopback = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
+      const debugLoopback = __DEV__ && loopback && (u.protocol === 'ws:' || u.protocol === 'http:');
+      if (!secure && !debugLoopback) {
+        throw new Error('secure relay required');
+      }
+      const httpScheme = secure ? 'https:' : 'http:';
       healthUrl = `${httpScheme}//${u.host}/health`;
     } catch {
-      setErrorMsg('Invalid URL. Expected ws://host:port/ws or wss://host:port/ws');
+      setErrorMsg('Use a secure wss:// or https:// relay URL');
       setTestState('error');
       return;
     }
@@ -89,7 +95,7 @@ export default function RelayScreen() {
               { color: theme.ink3, fontFamily: theme.fonts.ui },
             ]}
           >
-            Notifications are routed through a relay. Use the default or enter your own.
+            Notifications are routed through your relay over an encrypted connection.
           </Text>
         </View>
 
@@ -126,7 +132,7 @@ export default function RelayScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
-            placeholder="ws://192.168.x.y:8080/ws or wss://relay.example/ws"
+            placeholder="wss://relay.twinotify.nuvaynlabs.com/ws"
             placeholderTextColor={theme.ink4}
           />
 

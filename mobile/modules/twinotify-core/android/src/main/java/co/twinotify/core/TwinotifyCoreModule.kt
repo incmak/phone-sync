@@ -712,7 +712,8 @@ class TwinotifyCoreModule internal constructor(
                     val token = PairPayload.newToken()
                     PairProtocol.initiate(
                         relayUrl, token, deviceId, box.publicKey, sign.publicKey,
-                        displayName.takeIf { it.isNotBlank() }
+                        displayName.takeIf { it.isNotBlank() },
+                        debug = BuildConfig.DEBUG,
                     )
                     val payload = PairPayload(relayUrl, deviceId, box.publicKey, sign.publicKey, token).toJson()
                     promise.resolve(payload)
@@ -728,7 +729,8 @@ class TwinotifyCoreModule internal constructor(
                     val (box, sign) = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(ctx)
                     co.twinotify.core.pairing.PairProtocol.sendPeerHello(
                         relayUrl, pairToken, deviceId, box.publicKey, sign.publicKey,
-                        displayName.takeIf { it.isNotBlank() }
+                        displayName.takeIf { it.isNotBlank() },
+                        debug = BuildConfig.DEBUG,
                     )
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("PAIR_HELLO", e.message ?: "err", e) }
@@ -744,6 +746,7 @@ class TwinotifyCoreModule internal constructor(
                     val frame = co.twinotify.core.pairing.PairNotifyClient.awaitAuthenticatedFrame(
                         relayUrl, pairToken, role = "A", expectedType = "peer.hello",
                         deviceId = deviceId, signSecretKey = signSecret,
+                        debug = BuildConfig.DEBUG,
                     )
                     promise.resolve(frame)
                 } catch (e: Throwable) { promise.reject("PAIR_HELLO_WAIT", e.message ?: "err", e) }
@@ -754,7 +757,9 @@ class TwinotifyCoreModule internal constructor(
             moduleScope.launch {
                 try {
                     val sig = java.util.Base64.getDecoder().decode(sigB64)
-                    co.twinotify.core.pairing.PairProtocol.sendConfirmationSig(relayUrl, pairToken, sig)
+                    co.twinotify.core.pairing.PairProtocol.sendConfirmationSig(
+                        relayUrl, pairToken, sig, debug = BuildConfig.DEBUG,
+                    )
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("SEND_SIG", e.message ?: "err", e) }
             }
@@ -792,6 +797,7 @@ class TwinotifyCoreModule internal constructor(
                     val frame = co.twinotify.core.pairing.PairNotifyClient.awaitAuthenticatedFrame(
                         relayUrl, pairToken, role = "B", expectedType = "pair.sig",
                         deviceId = deviceId, signSecretKey = signSecret,
+                        debug = BuildConfig.DEBUG,
                     )
                     val sig = java.util.Base64.getDecoder().decode(org.json.JSONObject(frame).getString("confirmation_sig"))
                     promise.resolve(Base64.getEncoder().encodeToString(sig))
@@ -816,6 +822,7 @@ class TwinotifyCoreModule internal constructor(
                         sign.publicKey,
                         sign.secretKey,
                         sig,
+                        debug = BuildConfig.DEBUG,
                     )
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("COMPLETE_PAIR", e.message ?: "err", e) }

@@ -71,6 +71,18 @@ beforeEach(async () => {
 });
 
 describe('offline pairing UI behavior', () => {
+  test('rejects a cleartext non-loopback relay before testing the connection', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch');
+    renderScreen(<RelayScreen />);
+
+    fireEvent.changeText(screen.getByLabelText('Relay URL'), 'ws://relay.example/ws');
+    fireEvent.press(screen.getByRole('button', { name: 'Test connection' }));
+
+    expect(await screen.findByText('Use a secure wss:// or https:// relay URL')).toBeTruthy();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
   test('persists and routes both explicit connection choices', async () => {
     renderScreen(<ConnectScreen />);
 
