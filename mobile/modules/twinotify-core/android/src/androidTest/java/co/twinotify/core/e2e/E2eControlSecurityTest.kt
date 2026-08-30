@@ -1,8 +1,11 @@
 package co.twinotify.core.e2e
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ProviderInfo
+import android.os.ParcelFileDescriptor
 import android.system.Os
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -528,10 +531,33 @@ class E2eControlSecurityTest {
     }
 
     @Test
-    fun controlIntentUsesAuthenticatedDebugAction() {
+    fun debugComponentsUseShellPermissionAndApplicationAuthority() {
         val intent = Intent(E2eControlReceiver.ACTION_CONTROL)
         assertEquals(E2eControlReceiver.ACTION_CONTROL, intent.action)
-        assertEquals("co.twinotify.app.e2e", E2eStateProvider.AUTHORITY)
+        val receiver = context.packageManager.getReceiverInfo(
+            ComponentName(context, E2eControlReceiver::class.java),
+            PackageManager.ComponentInfoFlags.of(0),
+        )
+        assertEquals(android.Manifest.permission.DUMP, receiver.permission)
+        val provider = context.packageManager.resolveContentProvider(
+            "${context.packageName}.e2e",
+            PackageManager.ComponentInfoFlags.of(0),
+        )
+        assertEquals("${context.packageName}.e2e", assertNotNull(provider).authority)
+    }
+
+    @Test
+    fun shellControlIsClosedAndRejectsEverySecretHandle() = runBlocking {
+        val receiver = E2eControlReceiver()
+        assertEquals("unauthorized", receiver.executeForTest(context, E2eCommand("r", "STATUS")).code)
+        assertEquals("forbidden", receiver.executeShellForTest(context, E2eCommand("r", "PAIR_INIT")).code)
+        for (command in listOf(
+            E2eCommand("r", "STATUS", token = "forbidden"),
+            E2eCommand("r", "STATUS", params = mapOf("auth_input_id" to "r")),
+            E2eCommand("r", "STATUS", params = mapOf("secret_input_id" to "r")),
+        )) {
+            assertEquals("invalid", receiver.executeShellForTest(context, command).code)
+        }
     }
 
     @Test
@@ -614,15 +640,30 @@ class E2eControlSecurityTest {
     @Test
     fun exportedBroadcastAuthenticatesPublishesAndCleansPrivateFiles() {
         val token = E2eSessionToken.forTest(context, "exported-broadcast-boundary")
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        fun shellWord(value: String): String {
+            require(value.matches(Regex("[A-Za-z0-9._-]+")))
+            return value
+        }
+        fun sendFromShell(name: String?, handle: String?, extras: Map<String, String> = emptyMap()) {
+            val args = mutableListOf(
+                "am", "broadcast",
+                "-n", "${context.packageName}/${E2eControlReceiver::class.java.name}",
+                "-a", E2eControlReceiver.ACTION_CONTROL,
+            )
+            handle?.let { args += listOf("--es", E2eControlReceiver.EXTRA_REQUEST_ID, shellWord(it)) }
+            name?.let { args += listOf("--es", E2eControlReceiver.EXTRA_COMMAND, shellWord(it)) }
+            extras.toSortedMap().forEach { (key, value) ->
+                args += listOf("--es", shellWord(key), shellWord(value))
+            }
+            instrumentation.uiAutomation.executeShellCommand(args.joinToString(" ")).use { descriptor ->
+                ParcelFileDescriptor.AutoCloseInputStream(descriptor).readBytes()
+            }
+        }
         fun send(name: String, handle: String, extras: Map<String, String> = emptyMap()): JSONObject {
             val resultFile = File(context.filesDir, "e2e-results/$handle.json")
             Files.deleteIfExists(resultFile.toPath())
-            val intent = Intent(E2eControlReceiver.ACTION_CONTROL).setClass(context, E2eControlReceiver::class.java)
-                .putExtra(E2eControlReceiver.EXTRA_REQUEST_ID, handle)
-                .putExtra(E2eControlReceiver.EXTRA_COMMAND, name)
-                .putExtra("auth_input_id", handle)
-            extras.forEach { (key, value) -> intent.putExtra(key, value) }
-            context.sendBroadcast(intent)
+            sendFromShell(name, handle, extras + ("auth_input_id" to handle))
             val deadline = System.currentTimeMillis() + 5_000
             while (!resultFile.exists() && System.currentTimeMillis() < deadline) Thread.sleep(20)
             assertTrue(resultFile.exists(), "exported receiver did not finish and publish")
@@ -671,7 +712,7 @@ class E2eControlSecurityTest {
 
         val malformed = File(context.filesDir, "e2e-results/missing-request.json")
         Files.deleteIfExists(malformed.toPath())
-        context.sendBroadcast(Intent(E2eControlReceiver.ACTION_CONTROL).setClass(context, E2eControlReceiver::class.java))
+        sendFromShell(null, null, mapOf("auth_input_id" to "missing-request"))
         val deadline = System.currentTimeMillis() + 5_000
         while (!malformed.exists() && System.currentTimeMillis() < deadline) Thread.sleep(20)
         assertTrue(malformed.exists(), "malformed exported intent did not finish")

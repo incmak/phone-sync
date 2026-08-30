@@ -28,8 +28,6 @@ import org.json.JSONObject
 /** Content-free, debug-only durable state view for host-side E2E assertions. */
 class E2eStateProvider : ContentProvider() {
     companion object {
-        const val AUTHORITY = "co.twinotify.app.e2e"
-        val STATE_URI: Uri = "content://$AUTHORITY/state".toUri()
         val ALLOWED_EVENT_COUNT_KEYS: Set<String> = ProductObservationTracker.EVENT_KEYS
 
         fun stateUri(context: Context): Uri = "content://${context.packageName}.e2e/state".toUri()

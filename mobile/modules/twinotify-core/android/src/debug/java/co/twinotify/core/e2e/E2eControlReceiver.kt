@@ -1,5 +1,6 @@
 package co.twinotify.core.e2e
 
+import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -168,7 +169,7 @@ private object DefaultE2eNetworkControl : E2eNetworkControl {
     }
 }
 
-/** Debug-only command bridge. Every command is authenticated by the install-scoped token. */
+/** Debug-only bridge: private commands use the install token; shell commands use a strict safe subset. */
 class E2eControlReceiver internal constructor(
     private val controls: E2eProductionControls = DefaultE2eProductionControls,
     private val networkControl: E2eNetworkControl = DefaultE2eNetworkControl,
@@ -192,6 +193,9 @@ class E2eControlReceiver internal constructor(
             "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR",
             "OFFLINE_PAIR_START", "OFFLINE_PAIR_JOIN", "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL", "OFFLINE_PAIR_QUERY",
         )
+        private val SHELL_COMMANDS = setOf(
+            "STATUS", "NOTIFICATION_FIXTURE", "NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN",
+        )
 
         private fun safeRequestId(requestId: String): String = requestId
             .take(MAX_REQUEST_ID_LENGTH)
@@ -207,10 +211,16 @@ class E2eControlReceiver internal constructor(
         val appContext = context.applicationContext
         scope.launch {
             var requestId = "missing-request"
+            var shellResponse = intent.getStringExtra("auth_input_id") == null
             try {
                 val parsed = E2eCommand.fromIntent(intent)
                 requestId = safeRequestId(parsed.requestId)
                 val authId = parsed.param("auth_input_id")
+                shellResponse = authId == null
+                if (shellResponse) {
+                    publishShellResult(pending, executeShellForTest(appContext, parsed))
+                    return@launch
+                }
                 val auth = runCatching {
                     requireNotNull(authId)
                     consumePrivateInput(appContext, parsed.requestId, authId, "e2e-auth")
@@ -234,10 +244,32 @@ class E2eControlReceiver internal constructor(
                 }
                 writeResult(appContext, result)
             } catch (_: Throwable) {
-                runCatching { writeResult(appContext, E2eCommandResult(requestId, "error", "operation_failed")) }
+                val error = E2eCommandResult(requestId, "error", "operation_failed")
+                if (shellResponse) {
+                    runCatching { publishShellResult(pending, error) }
+                } else {
+                    runCatching { writeResult(appContext, error) }
+                }
             } finally {
                 pending.finish()
             }
+        }
+    }
+
+    internal suspend fun executeShellForTest(context: Context, command: E2eCommand): E2eCommandResult {
+        val requestId = safeRequestId(command.requestId)
+        if (command.token != null || command.params.keys.any { it == "auth_input_id" || it == "secret_input_id" }) {
+            return E2eCommandResult(requestId, "invalid", "private input is unavailable to shell control")
+        }
+        if (command.name !in SHELL_COMMANDS) {
+            return E2eCommandResult(requestId, "forbidden", "command is not shell-allowlisted")
+        }
+        validateOfflineParams(command)?.let { return E2eCommandResult(requestId, "invalid", it) }
+        return try {
+            executeAuthorized(context.applicationContext, command, requestId).copy(secretPayload = null)
+        } catch (error: Throwable) {
+            val detail = (error as? OfflinePairingApiException)?.error?.code ?: "operation_failed"
+            E2eCommandResult(requestId, "error", detail)
         }
     }
 
@@ -541,6 +573,13 @@ class E2eControlReceiver internal constructor(
         check(temporary.renameTo(target)) { "unable to atomically publish E2E result" }
     }
 
+    private fun publishShellResult(pending: PendingResult, result: E2eCommandResult) {
+        val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(result.toJson().toString().encodeToByteArray())
+        pending.setResultCode(Activity.RESULT_OK)
+        pending.setResultData(encoded)
+    }
+
     private fun validateOfflineParams(command: E2eCommand): String? {
         val allowed = when (command.name) {
             "OFFLINE_PAIR_START" -> setOf("display_name")
@@ -551,6 +590,7 @@ class E2eControlReceiver internal constructor(
             "SET_LAN_AVAILABLE" -> setOf("available")
             "NOTIFICATION_FIXTURE" -> setOf("fixture", "operation")
             "NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN" -> setOf("operation")
+            "STATUS" -> emptySet()
             "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR" -> emptySet()
             else -> return null
         }

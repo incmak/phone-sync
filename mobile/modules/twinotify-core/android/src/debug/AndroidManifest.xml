@@ -8,6 +8,7 @@
     <receiver
       android:name="co.twinotify.core.e2e.E2eControlReceiver"
       android:exported="true"
+      android:permission="android.permission.DUMP"
       tools:ignore="ExportedReceiver">
       <intent-filter>
         <action android:name="co.twinotify.e2e.CONTROL" />
@@ -16,7 +17,7 @@
 
     <provider
       android:name="co.twinotify.core.e2e.E2eStateProvider"
-      android:authorities="co.twinotify.app.e2e"
+      android:authorities="${applicationId}.e2e"
       android:exported="true"
       android:grantUriPermissions="false"
       tools:ignore="ExportedContentProvider" />
