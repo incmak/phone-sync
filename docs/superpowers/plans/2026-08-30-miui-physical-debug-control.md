@@ -257,11 +257,11 @@ git commit -m "test(e2e): support MIUI shell control"
 
 **Interfaces:** Uses the existing `action-origin-kill-after-claim` scenario with `-control-transport shell-broadcast`.
 
-- [ ] **Step 1: Run fresh static and artifact verification**
+- [x] **Step 1: Run fresh static and artifact verification**
 
 Run focused Android tests, Go race tests, release-manifest verification, `git diff --check`, and `git status --short`. Confirm only the user's pre-existing instruction-file changes remain outside committed work.
 
-- [ ] **Step 2: Build one evidence-bound arm64 debug APK**
+- [x] **Step 2: Build one evidence-bound arm64 debug APK**
 
 Run:
 
@@ -272,19 +272,30 @@ cd mobile/android
 
 Record SHA-256, install the same APK in place on MI 11X and POCO F1 through their live mDNS serials, and confirm pairing data survives. Use push plus `pm install -r` if streamed install drops the wireless route.
 
-- [ ] **Step 3: Run non-destructive physical control preflight**
+- [x] **Step 3: Run non-destructive physical control preflight**
 
 Run `status` with `-control-transport shell-broadcast` on both phones. Confirm paired state and authenticated LAN. Arm `pause_after_claim`, verify the control returns `ok`, then release it immediately and verify cleanup. Do not invoke the fixture action and do not force-stop.
 
-- [ ] **Step 4: Begin the real scenario and pause for fresh approval**
+- [x] **Step 4: Begin the real scenario and pause for fresh approval**
 
 Start `action-origin-kill-after-claim` with MI 11X as A and POCO F1 as B. Let it reset/post the fixed fixture, arm the pause, invoke mark-read, and observe exactly one new `CLAIMED` row. Immediately before its `A.force-stop` step, stop and request fresh user approval.
 
-- [ ] **Step 5: After approval, complete and audit the physical row**
+- [x] **Step 5: After approval, complete and audit the physical row**
 
 Force-stop and restart MI 11X, wait at least 65 seconds, require POCO to reach `OUTCOME_UNKNOWN`, prove the mark-read fixture count is unchanged, cancel the fixed fixture, and require terminal convergence. Record only safe counters, routes, timestamps, APK hash, and commit.
 
-- [ ] **Step 6: Perform final anti-slop and scope audit**
+Physical evidence recorded at `2026-08-30T14:26:52Z`:
+
+- Application source commit: `d48a069`; arm64 debug APK SHA-256: `8a898a82763f2170a4d826202ae5beaee335b4ee29b457af4a9130422a01a9c2`.
+- Origin: Xiaomi MI 11X, Android 16, build `BP4A.251205.006 release-keys`. Mirror: Xiaomi POCO F1, Android 15, build `BP1A.250505.005.D1 release-keys`. Both installed package version code 1 with the same APK.
+- Pairing survived both in-place installs. Both devices reached authenticated LAN with zero queued rows. The shell-control preflight returned `armed`, then `released`, without invoking an action.
+- The fixed mark-read fixture was reset and posted. Its dispatch count was 0. The real invocation advanced origin `execution_claimed` from 0 to 1 while the dispatch gate remained paused.
+- After explicit operator approval, the origin was force-stopped and restarted. The mirror advanced `invocation_outcome_unknown` from 0 to 1 and presented `OUTCOME_UNKNOWN`; the origin completion journal advanced once while the fixture mark-read dispatch count remained 0.
+- Cancelling the fixed fixture removed its action-bearing mirror from both active sets. Both active sets matched afterward, both routes remained authenticated LAN, and both queues were 0.
+- Evidence contained counters and state only. No notification/reply content, device identifier, token, key, or pairing secret was recorded. The two exact `/data/local/tmp/twinotify-miui-control.apk` transfer copies were removed and verified absent; app data and pairing were not cleared.
+- The point-by-point anti-slop audit found no UI impact: no screen, component, type, color, layout, icon, logo, motion, copy, accessibility control, or visual asset changed. The fresh release merged manifest contains no Twinotify E2E receiver, provider, control action, or authority.
+
+- [x] **Step 6: Perform final anti-slop and scope audit**
 
 Re-read the complete anti-slop law point by point. Confirm no UI or visual files changed, so no rendered UI regression was introduced. Confirm no debug-only component appears in release, no temporary control APK/file remains, and no user data or pairing was cleared.
 
@@ -293,4 +304,3 @@ Re-read the complete anti-slop law point by point. Confirm no UI or visual files
 ## Completion Standard
 
 Do not call this complete until the focused Android and Go gates pass, release exclusion is freshly verified, both phones pass shell-control preflight with the same APK hash, and the physical mid-claim row reaches `OUTCOME_UNKNOWN` without executing the fixture action after restart. The actual force-stop still requires fresh approval immediately before execution.
-
