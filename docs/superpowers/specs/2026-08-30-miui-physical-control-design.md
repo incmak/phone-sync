@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 
-**Status:** Approved in conversation; written review pending
+**Status:** Approved
 
 **Scope:** A secure, debug-only host control path for the remaining mirrored-notification action verification on the Xiaomi MI 11X and POCO F1 when the target ROM cannot execute Android `run-as`.
 
