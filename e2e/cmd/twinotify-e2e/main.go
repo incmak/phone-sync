@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,6 +39,7 @@ func main() {
 	internetBlocked := flag.Bool("internet-blocked", false, "assert operator-controlled internet isolation is active")
 	burstCount := flag.Int("burst-count", scenario.DefaultBurstCount, "bounded item count for direct LAN stress scenarios (2..1000)")
 	fixtureAPK := flag.String("fixture-apk", "", "path to the dedicated notification-action fixture APK")
+	controlTransport := flag.String("control-transport", "run-as", "debug control transport: run-as or shell-broadcast")
 	flag.Parse()
 	if *scenarioFlag == "" {
 		fmt.Fprintln(os.Stderr, "-scenario must not be empty")
@@ -50,6 +55,7 @@ func main() {
 	options.internetBlocked = *internetBlocked
 	options.burstCount = *burstCount
 	options.fixtureAPK = *fixtureAPK
+	options.controlTransport = *controlTransport
 	if err := runWithOptions(context.Background(), options); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -58,6 +64,7 @@ func main() {
 
 type options struct {
 	scenario, serialA, serialB, packageName, relayURL, fixtureAPK         string
+	controlTransport                                                      string
 	evidenceDir, scenarioEvidenceDir, packetEvidenceHash, dnsEvidenceHash string
 	internetBlocked                                                       bool
 	relayPort                                                             int
@@ -86,6 +93,12 @@ func runWithOptions(ctx context.Context, cfg options) error {
 		}
 		return err
 	}
+	if cfg.controlTransport == "" {
+		cfg.controlTransport = "run-as"
+	}
+	if err := validateControlTransport(cfg.controlTransport, cfg.scenario); err != nil {
+		return err
+	}
 	if strings.TrimSpace(cfg.serialA) == "" || strings.TrimSpace(cfg.serialB) == "" || cfg.serialA == cfg.serialB {
 		return errors.New("two distinct ADB serials are required")
 	}
@@ -103,16 +116,30 @@ func runWithOptions(ctx context.Context, cfg options) error {
 	}
 
 	adbA, adbB := adb.New(nil, cfg.serialA), adb.New(nil, cfg.serialB)
-	tokenA, err := readToken(ctx, adbA, cfg.packageName)
-	if err != nil {
-		return fmt.Errorf("read device A session token: %w", err)
+	var a, b *control.Client
+	if cfg.controlTransport == "run-as" {
+		tokenA, err := readToken(ctx, adbA, cfg.packageName)
+		if err != nil {
+			return fmt.Errorf("read device A session token: %w", err)
+		}
+		tokenB, err := readToken(ctx, adbB, cfg.packageName)
+		if err != nil {
+			return fmt.Errorf("read device B session token: %w", err)
+		}
+		a = control.New(adbDevice{client: adbA, packageName: cfg.packageName}, cfg.serialA, tokenA, cfg.timeout)
+		b = control.New(adbDevice{client: adbB, packageName: cfg.packageName}, cfg.serialB, tokenB, cfg.timeout)
+	} else {
+		keyA, err := newHostControlKey()
+		if err != nil {
+			return err
+		}
+		keyB, err := newHostControlKey()
+		if err != nil {
+			return err
+		}
+		a = control.New(newShellBroadcastDevice(adbA, cfg.packageName), cfg.serialA, keyA, cfg.timeout)
+		b = control.New(newShellBroadcastDevice(adbB, cfg.packageName), cfg.serialB, keyB, cfg.timeout)
 	}
-	tokenB, err := readToken(ctx, adbB, cfg.packageName)
-	if err != nil {
-		return fmt.Errorf("read device B session token: %w", err)
-	}
-	a := control.New(adbDevice{client: adbA, packageName: cfg.packageName}, cfg.serialA, tokenA, cfg.timeout)
-	b := control.New(adbDevice{client: adbB, packageName: cfg.packageName}, cfg.serialB, tokenB, cfg.timeout)
 	if cfg.scenario == "offline-pairing" {
 		host, err := newOfflineADBHost(a, b, adbA, adbB, cfg.packageName)
 		if err != nil {
@@ -175,6 +202,132 @@ func validateScenarioBeforeADBWithBurstCount(name string, burstCount int) error 
 		return err
 	}
 	return scenario.ValidateExecutablePlan(plan)
+}
+
+func validateControlTransport(transport, scenarioName string) error {
+	switch transport {
+	case "run-as":
+		return nil
+	case "shell-broadcast":
+		if scenarioName == "status" || scenarioName == "notification-actions-correctness" || strings.HasPrefix(scenarioName, "action-") {
+			return nil
+		}
+		return errors.New("shell-broadcast control is limited to status and notification-action scenarios")
+	default:
+		return errors.New("control transport must be run-as or shell-broadcast")
+	}
+}
+
+const maxShellResultBytes = 65_536
+
+var (
+	shellBroadcastResultPattern = regexp.MustCompile(`(?m)^Broadcast completed: result=(-?[0-9]+), data="([A-Za-z0-9_-]+)"\r?$`)
+	shellRequestIDPattern       = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+)
+
+type shellBroadcastDevice struct {
+	client      *adb.Client
+	packageName string
+	mu          sync.Mutex
+	results     map[string][]byte
+}
+
+func newShellBroadcastDevice(client *adb.Client, packageName string) *shellBroadcastDevice {
+	return &shellBroadcastDevice{client: client, packageName: packageName, results: make(map[string][]byte)}
+}
+
+func (d *shellBroadcastDevice) BoundRequestID(token, command string) (string, error) {
+	return control.NewBoundRequestID(token, command, time.Now(), rand.Reader)
+}
+
+func (d *shellBroadcastDevice) Broadcast(ctx context.Context, command control.Command) error {
+	if !shellRequestIDPattern.MatchString(command.RequestID) {
+		return errors.New("unsafe shell control request ID")
+	}
+	if command.Name != "STATUS" && command.Name != "NOTIFICATION_FIXTURE" && command.Name != "NOTIFICATION_MIRROR" && command.Name != "NOTIFICATION_ORIGIN" {
+		return errors.New("command is not shell-allowlisted")
+	}
+	for _, forbidden := range []string{"token", "auth_input_id", "secret_input_id"} {
+		if _, ok := command.Params[forbidden]; ok {
+			return errors.New("credentials and private handles are unavailable to shell control")
+		}
+	}
+	extras := map[string]string{"request_id": command.RequestID, "command": command.Name}
+	for key, value := range command.Params {
+		extras[key] = value
+	}
+	output, err := d.client.BroadcastReceiverResult(
+		ctx,
+		d.packageName,
+		"co.twinotify.core.e2e.E2eControlReceiver",
+		"co.twinotify.e2e.CONTROL",
+		extras,
+	)
+	if err != nil {
+		if errors.Is(err, adb.ErrDeviceOffline) {
+			return fmt.Errorf("%w: %v", control.ErrDeviceOffline, err)
+		}
+		return err
+	}
+	result, err := parseShellBroadcastResult(output, command.RequestID)
+	if err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.results[command.RequestID] = result
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *shellBroadcastDevice) ReadResult(_ context.Context, requestID string) ([]byte, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	result, ok := d.results[requestID]
+	if !ok {
+		return nil, control.ErrResultNotReady
+	}
+	delete(d.results, requestID)
+	return append([]byte(nil), result...), nil
+}
+
+func parseShellBroadcastResult(output []byte, requestID string) ([]byte, error) {
+	matches := shellBroadcastResultPattern.FindAllSubmatch(output, 2)
+	if len(matches) != 1 {
+		return nil, errors.New("invalid shell broadcast result")
+	}
+	code, err := strconv.Atoi(string(matches[0][1]))
+	if err != nil || code != -1 {
+		return nil, errors.New("shell broadcast was not accepted")
+	}
+	encoded := matches[0][2]
+	if len(encoded) > base64.RawURLEncoding.EncodedLen(maxShellResultBytes) {
+		return nil, errors.New("shell broadcast result exceeds bound")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(string(encoded))
+	if err != nil || len(decoded) > maxShellResultBytes {
+		return nil, errors.New("invalid shell broadcast result encoding")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(decoded))
+	decoder.DisallowUnknownFields()
+	var result control.Result
+	if err := decoder.Decode(&result); err != nil {
+		return nil, errors.New("invalid shell broadcast result JSON")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("shell broadcast result contains trailing JSON")
+	}
+	if result.RequestID != requestID || result.Code == "" {
+		return nil, errors.New("shell broadcast result identity mismatch")
+	}
+	return decoded, nil
+}
+
+func newHostControlKey() (string, error) {
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return "", errors.New("host control key unavailable")
+	}
+	return fmt.Sprintf("%x", key[:]), nil
 }
 
 type adbDevice struct {

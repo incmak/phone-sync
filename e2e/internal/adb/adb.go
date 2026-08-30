@@ -164,13 +164,20 @@ func (c *Client) Broadcast(ctx context.Context, action string, extras map[string
 // broadcast resolution is not reliable for this install-scoped control
 // surface, so the host harness must address the receiver explicitly.
 func (c *Client) BroadcastReceiver(ctx context.Context, packageName, receiver, action string, extras map[string]string) error {
+	_, err := c.BroadcastReceiverResult(ctx, packageName, receiver, action, extras)
+	return err
+}
+
+// BroadcastReceiverResult returns am's bounded ordered-broadcast summary to a
+// caller that validates the result contract. Existing broadcast callers ignore it.
+func (c *Client) BroadcastReceiverResult(ctx context.Context, packageName, receiver, action string, extras map[string]string) ([]byte, error) {
 	if !validComponentName(packageName) || !validComponentName(receiver) {
-		return errors.New("package and receiver must be valid Android component names")
+		return nil, errors.New("package and receiver must be valid Android component names")
 	}
 	// Keep the complete component one remote-shell word as defense in depth;
 	// validation above also prevents malformed CLI input from reaching adb.
 	args := []string{"shell", "am", "broadcast", "-n", shellQuote(packageName + "/" + receiver), "-a", action}
-	return c.broadcastArgs(ctx, args, extras)
+	return c.broadcastArgsResult(ctx, args, extras)
 }
 
 func validComponentName(value string) bool {
@@ -201,6 +208,11 @@ func ValidateComponentName(value string) error {
 }
 
 func (c *Client) broadcastArgs(ctx context.Context, args []string, extras map[string]string) error {
+	_, err := c.broadcastArgsResult(ctx, args, extras)
+	return err
+}
+
+func (c *Client) broadcastArgsResult(ctx context.Context, args []string, extras map[string]string) ([]byte, error) {
 	keys := make([]string, 0, len(extras))
 	for key := range extras {
 		keys = append(keys, key)
@@ -209,8 +221,7 @@ func (c *Client) broadcastArgs(ctx context.Context, args []string, extras map[st
 	for _, key := range keys {
 		args = append(args, "--es", key, shellQuote(extras[key]))
 	}
-	_, err := c.run(ctx, args...)
-	return err
+	return c.run(ctx, args...)
 }
 
 // adb shell reparses the command after the host process has assembled argv.

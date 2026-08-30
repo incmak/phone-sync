@@ -13,6 +13,17 @@ fail-fast order. The dedicated fixture APK owns all notification content. The
 host passes only closed operation enums; reply text is generated inside the
 debug Android process and never enters ADB arguments or retained evidence.
 
+On physical ROMs that block Android `run-as`, add
+`-control-transport shell-broadcast` to the `twinotify-e2e` command. This
+opt-in path targets the debug receiver explicitly and relies on Android's
+`android.permission.DUMP` check for the ADB shell UID. It accepts only
+`STATUS`, `NOTIFICATION_FIXTURE`, `NOTIFICATION_MIRROR`, and
+`NOTIFICATION_ORIGIN`; results are bounded and returned in memory. It carries
+no app token, private handle, notification text, or reply text. Pairing,
+offline pairing, LAN scenarios, and every secret-bearing control remain on the
+default `run-as` transport and are rejected in shell-broadcast mode. The
+receiver is absent from release builds.
+
 From the repository root, provide two distinct already-paired targets, the
 freshly built fixture APK, and a private evidence directory:
 

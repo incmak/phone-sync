@@ -151,6 +151,24 @@ func TestClientTargetsDebugControlReceiverForAuthenticatedBroadcast(t *testing.T
 	}
 }
 
+func TestClientReturnsOrderedDebugControlBroadcastOutput(t *testing.T) {
+	runner := &fakeRunner{output: []byte("Broadcast completed: result=-1, data=\"fixture\"\n")}
+	client := adb.New(runner, "physical-a")
+	got, err := client.BroadcastReceiverResult(
+		context.Background(),
+		"com.twinotify.app",
+		"co.twinotify.core.e2e.E2eControlReceiver",
+		"co.twinotify.e2e.CONTROL",
+		map[string]string{"request_id": "request-1"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(runner.output) {
+		t.Fatalf("output=%q want=%q", got, runner.output)
+	}
+}
+
 func TestClientShellQuotesStructuredBroadcastValues(t *testing.T) {
 	runner := &fakeRunner{}
 	client := adb.New(runner, "emulator-5554")

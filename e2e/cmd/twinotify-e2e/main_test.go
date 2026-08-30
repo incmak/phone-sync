@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -66,6 +67,73 @@ func TestADBDeviceBroadcastSendsInstallTokenThroughPrivateAuthFile(t *testing.T)
 	}
 	if len(runner.inputs) == 0 || string(runner.inputs[0]) != token {
 		t.Fatalf("token was not sent over private stdin: %q", runner.inputs)
+	}
+}
+
+func TestShellBroadcastDeviceUsesNoRunAsTokenOrPrivateHandle(t *testing.T) {
+	result := []byte(`{"request_id":"request-1","code":"ok","payload":{"active_outbox":0}}`)
+	runner := &privateRunner{output: []byte("Broadcast completed: result=-1, data=\"" + base64.RawURLEncoding.EncodeToString(result) + "\"\n")}
+	device := newShellBroadcastDevice(adb.New(runner, "physical-a"), "com.twinotify.app")
+	if err := device.Broadcast(context.Background(), control.Command{
+		RequestID: "request-1", Name: "STATUS", Token: "host-only-key",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := device.ReadResult(context.Background(), "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(result) {
+		t.Fatalf("result=%q want=%q", got, result)
+	}
+	if _, err := device.ReadResult(context.Background(), "request-1"); !errors.Is(err, control.ErrResultNotReady) {
+		t.Fatalf("second read error=%v", err)
+	}
+	joined := strings.Join(runner.args[0], " ")
+	for _, forbidden := range []string{"run-as", "host-only-key", "auth_input_id", "secret_input_id"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("shell broadcast contains %q: %s", forbidden, joined)
+		}
+	}
+	if !strings.Contains(joined, "com.twinotify.app/co.twinotify.core.e2e.E2eControlReceiver") {
+		t.Fatalf("explicit receiver missing: %s", joined)
+	}
+}
+
+func TestShellBroadcastResultRejectsMalformedAndOversizeData(t *testing.T) {
+	for _, output := range [][]byte{
+		[]byte("Broadcast completed: result=-1, data=\"not+base64\"\n"),
+		[]byte("Broadcast completed: result=-1, data=\"" + base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("x", 65_537))) + "\"\n"),
+	} {
+		if _, err := parseShellBroadcastResult(output, "request-1"); err == nil {
+			t.Fatalf("accepted invalid result of %d bytes", len(output))
+		}
+	}
+}
+
+func TestShellBroadcastDeviceRejectsCredentialsBeforeADB(t *testing.T) {
+	for _, key := range []string{"token", "auth_input_id", "secret_input_id"} {
+		runner := &privateRunner{}
+		device := newShellBroadcastDevice(adb.New(runner, "physical-a"), "com.twinotify.app")
+		err := device.Broadcast(context.Background(), control.Command{
+			RequestID: "request-1", Name: "STATUS", Params: map[string]string{key: "forbidden"},
+		})
+		if err == nil || len(runner.args) != 0 {
+			t.Fatalf("key=%s error=%v adb_calls=%d", key, err, len(runner.args))
+		}
+	}
+}
+
+func TestShellBroadcastTransportRejectsSecretScenarios(t *testing.T) {
+	for _, name := range []string{"pair", "offline-pairing", "lan-product-correctness"} {
+		if err := validateControlTransport("shell-broadcast", name); err == nil {
+			t.Fatalf("accepted shell transport for %s", name)
+		}
+	}
+	for _, name := range []string{"status", "notification-actions-correctness", "action-origin-kill-after-claim"} {
+		if err := validateControlTransport("shell-broadcast", name); err != nil {
+			t.Fatalf("rejected %s: %v", name, err)
+		}
 	}
 }
 
