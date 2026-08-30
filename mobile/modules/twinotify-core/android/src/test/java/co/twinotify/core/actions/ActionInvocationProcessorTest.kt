@@ -99,6 +99,21 @@ class ActionInvocationProcessorTest {
     }
 
     @Test
+    fun boundedFutureClockSkewPassesAndNextMillisecondExpires() = runBlocking {
+        val atBoundary = FakeStore()
+        assertEquals(
+            ActionProcessResult.Completed("dispatched"),
+            processor(atBoundary, now = 100_000).process(request(invokedAt = 130_000)),
+        )
+
+        val beyondBoundary = FakeStore()
+        assertEquals(
+            ActionProcessResult.Completed("expired"),
+            processor(beyondBoundary, now = 100_000).process(request(invokedAt = 130_001)),
+        )
+    }
+
+    @Test
     fun staleRegistryEntriesFailClosedAsActionGone() = runBlocking {
         for (lookup in listOf(
             ActionLookup.MissingGeneration,

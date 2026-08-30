@@ -153,7 +153,12 @@ class ActionInvocationProcessor<T>(
     }
 
     private fun validate(request: ActionInvokeRequest, now: Long): Validation<T> {
-        if (request.invokedAt > now || elapsedAfter(request.invokedAt, now) > INVOKE_TTL_MS) {
+        val outsideFreshnessWindow = if (request.invokedAt > now) {
+            elapsedAfter(now, request.invokedAt) > MAX_FUTURE_SKEW_MS
+        } else {
+            elapsedAfter(request.invokedAt, now) > INVOKE_TTL_MS
+        }
+        if (outsideFreshnessWindow) {
             return Validation.Failed("expired")
         }
         if (request.replyText != null && request.replyText.toByteArray(Charsets.UTF_8).size > MAX_REPLY_BYTES) {
@@ -200,6 +205,7 @@ class ActionInvocationProcessor<T>(
 
     private companion object {
         const val INVOKE_TTL_MS = 120_000L
+        const val MAX_FUTURE_SKEW_MS = 30_000L
         const val CLAIM_GRACE_MS = 60_000L
         const val MAX_REPLY_BYTES = 4_096
     }

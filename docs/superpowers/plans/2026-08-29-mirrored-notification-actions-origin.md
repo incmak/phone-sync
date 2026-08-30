@@ -380,3 +380,14 @@ git status --short
 ```
 
 Expected: all origin tests pass, schema 9 is committed, no executable Android capability is stored on disk, and the working tree is clean. Record unavailable connected-device coverage honestly and defer it to the verification plan rather than claiming success.
+
+---
+
+## Physical follow-up: bounded future clock skew
+
+The MI 11X and POCO F1 physical run found an 11-second wall-clock difference. The origin treated every positive difference as an expired invoke, so a fresh direct reply failed immediately.
+
+- Goal: accept a fresh invoke whose mirror clock is at most 30 seconds ahead while preserving the existing two-minute age limit.
+- Non-goals: no protocol, schema, storage, transport, UI, pairing, or action-lifecycle changes.
+- Acceptance: the focused processor test proves the 30-second boundary dispatches and the next millisecond fails closed; the existing action suite stays green; the same two-phone reply succeeds after installing the corrected build.
+- Scope not to change: at-most-once claiming, generation binding, reply bounds, and terminal-result handling.
