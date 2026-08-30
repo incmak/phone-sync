@@ -81,7 +81,7 @@ smoke_root=$(mktemp -d "${TMPDIR:-/tmp}/twinotify-relay-smoke.XXXXXX")
 trap 'rm -rf "$smoke_root"' EXIT HUP INT TERM
 
 if [[ "$base_url" == https://* ]]; then
-	protocol_args=(--proto '=https' --tlsv1.2)
+	protocol_args=(--proto '=https' --tlsv1.2 --http1.1)
 else
 	protocol_args=(--proto '=http')
 fi
