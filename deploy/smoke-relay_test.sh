@@ -24,13 +24,15 @@ headers=
 url=
 resolve=
 http1=false
+request_headers=
 while (($# > 0)); do
 	case "$1" in
-	--output | --dump-header | --write-out | --connect-timeout | --max-time | --proto | --resolve)
+	--output | --dump-header | --write-out | --connect-timeout | --max-time | --proto | --resolve | --header)
 		case "$1" in
 		--output) body=$2 ;;
 		--dump-header) headers=$2 ;;
 		--resolve) resolve=$2 ;;
+		--header) request_headers="$request_headers|$2" ;;
 		esac
 		shift 2
 		;;
@@ -61,8 +63,16 @@ case "$url" in
 */metrics) status=${FAKE_METRICS_STATUS:-404} ;;
 */not-public) status=404 ;;
 */ws)
-	status=426
-	upgrade_header=true
+	if [[ "$request_headers" == *'|Upgrade: websocket'* ]]; then
+		status=401
+		payload='invalid token'
+		if [[ -n "${FAKE_WS_UPGRADE_MARKER:-}" ]]; then
+			: >"$FAKE_WS_UPGRADE_MARKER"
+		fi
+	else
+		status=426
+		upgrade_header=true
+	fi
 	;;
 esac
 printf 'HTTP/1.1 %s fixture\r\n' "$status" >"$headers"
@@ -84,9 +94,11 @@ export TWINOTIFY_SMOKE_INTERVAL=0
 
 "$smoke_script" --allow-http --base-url http://relay.example.test --expected-version relay-v-test >/dev/null || fail "valid public surface failed"
 FAKE_EXPECT_RESOLVE=relay.example.test:443:127.0.0.1 FAKE_REQUIRE_HTTP1=true \
+	FAKE_WS_UPGRADE_MARKER="$test_root/ws-upgrade" \
 	TWINOTIFY_SMOKE_RESOLVE_IP=127.0.0.1 \
 	"$smoke_script" --base-url https://relay.example.test --expected-version relay-v-test >/dev/null || \
 	fail "HTTPS smoke did not resolve the production hostname through the requested local address"
+[[ -f "$test_root/ws-upgrade" ]] || fail "HTTPS smoke did not exercise the WebSocket upgrade path"
 if TWINOTIFY_SMOKE_RESOLVE_IP=999.1.1.1 \
 	"$smoke_script" --base-url https://relay.example.test --expected-version relay-v-test \
 	>"$test_root/resolve.out" 2>"$test_root/resolve.err"; then

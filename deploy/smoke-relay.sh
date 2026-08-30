@@ -96,6 +96,20 @@ request_status() {
 		--write-out '%{http_code}' "$base_url$path"
 }
 
+request_websocket_auth_status() {
+	local body=$1 headers=$2
+	local -a request_args=("${protocol_args[@]}" --silent --show-error --connect-timeout 5 --max-time 10)
+	if [[ -n "$resolve_spec" ]]; then
+		request_args+=(--resolve "$resolve_spec")
+	fi
+	"$curl_bin" "${request_args[@]}" \
+		--header 'Connection: Upgrade' \
+		--header 'Upgrade: websocket' \
+		--header 'Sec-WebSocket-Version: 13' \
+		--header 'Sec-WebSocket-Key: AQIDBAUGBwgJCgsMDQ4PEA==' \
+		--dump-header "$headers" --output "$body" --write-out '%{http_code}' "$base_url/ws"
+}
+
 check_once() {
 	local code
 	code=$(request_status /health/live "$smoke_root/live.json" "$smoke_root/live.headers") || return 1
@@ -124,7 +138,8 @@ check_once() {
 	[[ "$code" == 404 ]] || return 1
 	code=$(request_status /ws "$smoke_root/ws.body" "$smoke_root/ws.headers") || return 1
 	[[ "$code" == 426 ]] || return 1
-	grep -Eiq '^Upgrade:[[:space:]]*websocket[[:space:]]*$' "$smoke_root/ws.headers" || return 1
+	code=$(request_websocket_auth_status "$smoke_root/ws-auth.body" "$smoke_root/ws-auth.headers") || return 1
+	[[ "$code" == 401 ]] || return 1
 	return 0
 }
 
