@@ -94,6 +94,7 @@ if "$deploy_script" --image "$candidate" --version relay-v2 --domain relay.examp
 fi
 grep -Fq "image=$previous version=relay-v1 docker compose" "$FAKE_DOCKER_LOG" || fail "previous digest was not selected for rollback"
 grep -Fq ' up -d --no-deps relay' "$FAKE_DOCKER_LOG" || fail "relay was not restarted during rollback"
+grep -Fq ' up -d --force-recreate --no-deps caddy' "$FAKE_DOCKER_LOG" || fail "Caddy was not recreated during rollback"
 if grep -Fqi 'restore' "$FAKE_DOCKER_LOG"; then
 	fail "rollback attempted a database restore"
 fi
@@ -106,5 +107,6 @@ if ! "$deploy_script" --image "$candidate" --version relay-v2 --domain relay.exa
 	fail "first deployment failed"
 fi
 grep -Fq ' relay backup --from /data/twinotify-relay.db --to-dir /backups --retention 14 --allow-missing' "$FAKE_DOCKER_LOG" || fail "first deployment did not safely inspect and back up surviving data"
+grep -Fq ' up -d --force-recreate --no-deps caddy' "$FAKE_DOCKER_LOG" || fail "Caddy was not recreated to remount the release configuration"
 
 printf 'deploy-relay tests: ok\n'

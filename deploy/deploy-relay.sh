@@ -164,7 +164,7 @@ rollback_previous() {
 		write_record rollback_failed
 		return 1
 	fi
-	if ! compose_for "$previous_image" "$previous_version" up -d --no-deps caddy; then
+	if ! compose_for "$previous_image" "$previous_version" up -d --force-recreate --no-deps caddy; then
 		write_record rollback_failed
 		return 1
 	fi
@@ -226,7 +226,7 @@ if ! wait_for_relay "$image" "$version"; then
 	rollback_previous || die "candidate readiness and rollback both failed"
 	die "candidate readiness failed; previous digest restored"
 fi
-if ! compose_for "$image" "$version" up -d --no-deps caddy; then
+if ! compose_for "$image" "$version" up -d --force-recreate --no-deps caddy; then
 	rollback_previous || die "Caddy start and rollback both failed"
 	die "Caddy start failed; previous digest restored"
 fi
