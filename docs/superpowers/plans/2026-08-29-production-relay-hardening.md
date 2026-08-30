@@ -394,6 +394,16 @@ Fresh committed-head evidence at `f2e8961` on 2026-08-29:
 - Actionlint 1.7.7 and ShellCheck 0.11.0: exit 0.
 - A final AMD64/ARM64 OCI export with BuildKit maximum provenance and SBOM completed at manifest-list digest `sha256:c5d629c552bcf85e4db3c237cec890987b02cc6e595808935de7b663bfe025c0`; the local OCI archive SHA-256 is `26be8d609d1964138e56dc5ea3a05a06199a2d5f680c0b2e002cc7feb5d1ffc3`.
 
+Fresh hardening evidence at runtime source commit `f930dc9` on 2026-08-30:
+
+- `make relay-verify`: exit 0 after commit; workflow/shell contracts, `go vet`, all Go packages under `-race -count=1`, and the Docker image build passed.
+- `make deployment-test`, `make relay-ci-test`, and `cd mobile && npm run typecheck`: exit 0.
+- Actionlint 1.7.7 and ShellCheck 0.11.0 across the release workflow and deploy scripts: exit 0.
+- Legacy acceptance-sequence migration, concurrent hello/put serialization, shutdown admission, corruption fail-closed, and pair-scope tests passed 20 race-enabled repetitions.
+- The `linux/amd64,linux/arm64` OCI candidate has manifest-list digest `sha256:fe22a86e9be7462386e6cd69008739d521ca1a8b556b40152f42b5222186d560`, archive SHA-256 `67be5c66835c34abe17cbd51009eac36511fccf1efa68b8dba85538acce0585a`, and per-platform SBOM plus SLSA provenance attestations.
+- The exact image ran as UID/GID 65532 with a read-only root, no host ports, no network for the first health/shutdown check, all capabilities dropped, `no-new-privileges`, a 256 MiB memory limit, and a 128-PID limit. SIGTERM exited 0 without OOM.
+- A persistent-volume run proved readiness, mode-`0600` Bolt creation, pending-pair survival across restart, automatic snapshots, offline backup, restore validation, and healthy boot from the restored database. All synthetic containers, volumes, and the internal test network were removed afterward.
+
 - [x] **Step 2: Perform manual artifact inspection**
 
 Inspect the full diff, generated-schema cleanliness, Compose-resolved configuration, image user, read-only mounts, exposed ports, health state, backup file permissions, restore recovery copy, workflow action pins, and privacy scan.
@@ -410,6 +420,10 @@ The first fresh Sol audit of `a9b52d5..69ba092` returned `fix-first`. It found t
 
 The second fresh Sol audit at `0e97994` also returned `fix-first`. It found that the external smoke fixture still expected the pre-hardening non-upgrade `/ws` status and that process exit did not wait for hijacked WebSocket handlers to finish their close-control and writer cleanup. Commit `2e0a89b` updates the production smoke to require `426` plus `Upgrade: websocket` and adds a live smoke-script-to-real-router contract test. Commit `f2e8961` tracks all active and replaced connections, sends close code 1012 independently of a blocked data writer, joins every connection worker, and makes shutdown wait for drain completion. The deterministic blocked-writer test passed 20 race-enabled repetitions, the full race suite passed, and a focused independent review returned `CLEAR / APPROVE`. A new exact-head Sol audit is still required before checking this step.
 
+The next exact-head reviewer attempts after commits `94e743a` and `f930dc9` could not issue a verdict because the independent reviewer account reached its usage limit. A fresh local full-diff code review and all affected automated/runtime gates are being recorded, but they do not substitute for the required independent verdict. Keep this step open until a read-only Sol/High reviewer returns `ship`.
+
 - [ ] **Step 4: Mark plan complete and hand off deployment choice**
 
 Check completed steps, commit the evidence-ledger update if needed, and report the recommended free beta host plus the paid launch move with current official-source links.
+
+Deployment choice handed off on 2026-08-30: Oracle Always Free Ampere is suitable only for an invite-only beta when capacity is available. Move the same digest-pinned Compose service and validated snapshot to the 1 GiB DigitalOcean tier before broad Play Store availability. The independent exact-head audit and owner-controlled release evidence remain open, so this plan is not marked complete.

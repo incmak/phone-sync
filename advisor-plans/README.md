@@ -21,12 +21,16 @@ those pending items into a pass without the corresponding private device
 evidence.
 
 The Go relay production-hardening lane is source- and host-verified through
-`d1b98c6`: mutual pairing confirmation, persistent JWT replay state,
+runtime source commit `f930dc9`: mutual pairing confirmation, persistent JWT replay state,
 fail-closed capacity/readiness, graceful drain, private aggregate metrics,
 validated backups/restores, hardened digest-only Compose, and verified image
-publication/deployment automation are implemented. This is not live-host
-evidence. GHCR publication, public DNS/TLS, off-host backup transfer, monitoring
-alerts, and a real deployment remain operator-controlled launch steps.
+publication/deployment automation are implemented. Process-wide inbound and
+outbound WebSocket admission, complete reconnect backlog draining, and fail-closed
+legacy acceptance-sequence migration are covered by race and exact-image runtime
+evidence. The final independent exact-head review remains open because the
+reviewer account reached its usage limit. This is not live-host evidence. GHCR
+publication, public DNS/TLS, off-host backup transfer, monitoring alerts, and a
+real deployment remain operator-controlled launch steps.
 
 The protected Android producer remains externally blocked on the intended EAS
 project link and owner-controlled signing, token, certificate, and attestation

@@ -94,6 +94,8 @@ Replay records remain for twice the 60-second token lifetime. Cleanup is expiry-
 - `REQUIRE_MUTUAL_PAIR_SIGNATURES=true`;
 - a positive `MIN_FREE_DISK_BYTES`;
 - a positive `MAX_OPEN_CONNECTIONS`;
+- positive per-connection, process-wide outbound, process-wide inbound, and durable-transfer byte limits;
+- a positive relay memory limit whose controlled WebSocket envelope stays at or below 75 percent;
 - an absolute `BACKUP_DIR` distinct from the database directory;
 - a positive backup interval and retention count.
 
@@ -118,6 +120,30 @@ Existing per-recipient limits remain 2,000 items and 128 MiB. Before `relay.put`
 Accepted mailbox records are never evicted to recover capacity. A low-disk condition does not block acknowledgements, revocation, expiry cleanup, or backup cleanup because those operations release or preserve existing state.
 
 The HTTP listener caps simultaneously accepted TCP connections at `MAX_OPEN_CONNECTIONS`. The OS backlog absorbs short bursts; excess connections wait or time out instead of allocating unbounded Go state.
+
+WebSocket memory is bounded before allocation, not only after a frame reaches an individual writer queue. Production uses:
+
+- `WEBSOCKET_QUEUE_MAX_BYTES=8388608` for each live writer queue;
+- `WEBSOCKET_PROCESS_QUEUE_MAX_BYTES=67108864` across all live writer queues;
+- `WEBSOCKET_INBOUND_PROCESS_MAX_BYTES=33554432` for concurrent frame parsing and validation;
+- `DURABLE_TRANSFER_MAX_BYTES=4194304` for each of the two bounded mailbox handoff workspaces;
+- `RELAY_MEMORY_LIMIT_BYTES=268435456` as the 256 MiB container budget.
+
+The startup invariant is:
+
+```text
+(MAX_OPEN_CONNECTIONS * max control frame)
++ inbound process admission
++ outbound process queues
++ (2 * durable transfer workspace)
+<= 75% of relay memory limit
+```
+
+With the production values, the controlled envelope is 176,422,912 bytes, below the 201,326,592-byte ceiling. The remaining quarter is reserved for Go runtime state, Bolt, TLS, and other transient allocations. Each reader acquires a conservative `8 * maxRelayControlFrameSize` reservation before reading and releases it exactly once after the final consumer has copied or persisted the frame. Idle sockets hold no inbound reservation. Saturated readers wait on a cancellable process gate, so replacement, shutdown, or disconnect cannot leak admission.
+
+Outbound frames reserve their serialized bytes plus fixed allocation overhead against both the destination queue and the process-wide queue before enqueue. Reconnect handoff pages by an exclusive durable acceptance-sequence cursor and transfers one record at a time through the bounded workspace. It continues past the historical 64-record page boundary until a final empty query is observed while activation remains serialized with concurrent puts. Accepted sender responses are ordered after the corresponding durable handoff reservation, so acceptance cannot overtake a reconnecting recipient's delivery order.
+
+Databases written before acceptance sequences existed are upgraded in one pair-scoped Bolt transaction before cursor paging begins. Legacy `AcceptedAt` rows receive sequences `1..N` in their durable Bolt order, including deterministic same-millisecond ties, and the next allocator begins at `N+1`. Capacity rejection rolls the entire migration back. Pair mismatch, sender mismatch, malformed sequence state, or corrupt indexes fail closed without exposing or partially mutating mailbox data.
 
 ### 4.2 Health endpoints
 
@@ -145,6 +171,8 @@ Clients retain their local outboxes and reconnect. Durable mailbox items remain 
 The private Prometheus text endpoint exports bounded process-owned relay metrics:
 
 - current active WebSocket connections;
+- process-wide outbound queued bytes and admission rejections;
+- process-wide inbound reserved bytes and saturated-wait count;
 - accepted and rejected relay puts by bounded reason;
 - accepted and rejected pairing mutations by bounded stage and result;
 - authentication rejection counts by bounded reason;

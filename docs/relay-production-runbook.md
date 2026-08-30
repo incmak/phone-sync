@@ -4,11 +4,24 @@ This runbook operates the single-writer Go relay behind Caddy. It does not turn 
 
 ## Hosting choice
 
-For an invite-only beta, use one Oracle Cloud Infrastructure Always Free Ampere A1 VM in the account's home region. Allocate 1 OCPU, 6 GB RAM, and the default 50 GB boot volume. Oracle currently documents an Always Free allowance equivalent to 2 Ampere OCPUs and 12 GB RAM, 200 GB combined boot/block storage, and five volume backups. Capacity can be temporarily unavailable, so this is a beta convenience rather than an availability commitment: [OCI Always Free resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm).
+For an invite-only beta, use one Oracle Cloud Infrastructure Always Free Ampere A1 VM in the account's home region. Allocate 1 OCPU, 6 GB RAM, and a 47 GB boot volume. Oracle currently documents an Always Free allowance equivalent to 2 Ampere OCPUs and 12 GB RAM plus 200 GB combined boot/block storage. Capacity can be temporarily unavailable and idle instances may be reclaimed, so this is a beta convenience rather than an availability commitment: [OCI Always Free resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm).
 
 Before a broad Play Store launch, move the same Compose deployment and validated snapshot to a paid VM. A 1 GB DigitalOcean Basic Droplet is currently listed at USD 6/month with 25 GB SSD; select more disk or RAM when the mailbox/connection metrics justify it: [DigitalOcean Droplet pricing](https://www.digitalocean.com/pricing/droplets). Do not launch broadly on a host that may reclaim free capacity.
 
 The release workflow publishes both `linux/amd64` and `linux/arm64`, so the same image digest works on either host architecture.
+
+The production Compose limits are a single validated set. Do not increase one WebSocket limit independently:
+
+```text
+MAX_OPEN_CONNECTIONS=64
+WEBSOCKET_QUEUE_MAX_BYTES=8388608
+WEBSOCKET_PROCESS_QUEUE_MAX_BYTES=67108864
+WEBSOCKET_INBOUND_PROCESS_MAX_BYTES=33554432
+DURABLE_TRANSFER_MAX_BYTES=4194304
+RELAY_MEMORY_LIMIT_BYTES=268435456
+```
+
+Together they reserve at most 176,422,912 controlled bytes, below the 201,326,592-byte safety ceiling. Increasing connections, inbound admission, outbound queues, or transfer workspaces requires recalculating the whole envelope and increasing the container memory limit when needed.
 
 ## One-time prerequisites
 
@@ -141,6 +154,9 @@ Restore preserves the previous database as a timestamped recovery copy. Do not d
 - Check `/health/live` externally every minute. Alert after two consecutive failures.
 - Scrape `/metrics` only from a collector attached to `relay-internal`; never add it to Caddy.
 - Alert on readiness false, backup failures, authentication rejection changes, mailbox capacity rejections, connection saturation, disk usage above 80%, and absence of a fresh snapshot for more than eight hours.
+- Warn at 56 active WebSockets, which is 87.5 percent of the 64-connection limit.
+- Warn when `twinotify_websocket_outbound_bytes` remains above 50,331,648 bytes, which is 75 percent of the 64 MiB process queue, or when `twinotify_websocket_admission_rejected_total` increases.
+- Warn when `twinotify_websocket_inbound_bytes` remains above 25,165,824 bytes, which is 75 percent of the 32 MiB inbound gate, or when `twinotify_websocket_inbound_wait_total` increases. A rising wait counter means readers are reaching the process-wide parsing budget even if the gauge later falls.
 - Review `docker compose ... logs --since 1h relay caddy` for bounded operational events. Logs must not contain device IDs, message IDs, JWTs, pair tokens, keys, ciphertext, or notification plaintext.
 - Treat repeated `server_capacity` as an incident. Expand disk or move to the paid host; do not lower the reserved free-space threshold simply to resume admission.
 - If the VM is lost, provision a clean host, deploy the last verified digest, restore the latest validated off-host snapshot, run smoke plus two-phone delivery, then change DNS.
@@ -150,3 +166,5 @@ Restore preserves the previous database as a timestamped recovery copy. Do not d
 Use the Oracle VM only for the controlled beta. Before broad Play Store availability, restore the latest validated snapshot onto the paid VM, run the complete physical Pixel/Samsung release scenarios, lower DNS TTL, switch DNS, and keep the old VM powered on but not accepting traffic during the rollback window.
 
 Cloudflare is a later backend migration, not part of this launch. Preserve `/pair/*`, `/ws`, `/health/*`, pair/device identifiers, v1/v2 frames, exact encrypted envelope bytes, expiry behavior, and rejection reasons. Run the same protocol fixtures against the Go relay and Durable Objects implementation before moving traffic. A hosting change must not force users to re-pair.
+
+This is a rewrite behind the existing protocol contract, not a container lift-and-shift. Durable Objects must own pair-scoped state, use WebSocket hibernation, and pass the Go relay's contract fixtures before any traffic moves. Free-plan limits and overage behavior must be reassessed with real beta traffic before selecting a Cloudflare plan.
