@@ -97,15 +97,16 @@ jobs:
         shell: bash
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_VERSION: ${{ steps.identity.outputs.version }}
         run: |
           set -Eeuo pipefail
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           IMAGE="${REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
           printf 'image=%s\n' "$IMAGE" | tee "$RUNNER_TEMP/relay-image.txt"
           printf 'image=%s\n' "$IMAGE" >> "$GITHUB_OUTPUT"
-          printf 'version=%s\n' '${{ steps.identity.outputs.version }}' >> "$RUNNER_TEMP/relay-image.txt"
+          printf 'version=%s\n' "$IMAGE_VERSION" >> "$RUNNER_TEMP/relay-image.txt"
           docker buildx imagetools inspect "$IMAGE" >/dev/null
-          printf '### Twinotify relay image\n\n`%s`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          printf "### Twinotify relay image\n\n\`%s\`\n" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload immutable image reference
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
