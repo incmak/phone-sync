@@ -34,11 +34,15 @@ internal object ActionClaimRecoveryRuntime {
         synchronized(lock) {
             if (!earliest.claim(dueAt)) return
             job?.cancel()
-            persistAlarm(context, dueAt)
-            job = scope.launch {
-                delay((dueAt - System.currentTimeMillis()).coerceAtLeast(0L))
-                if (earliest.consume(dueAt)) recover(context)
-            }
+            armProcessDeadlineThenPersistAlarm(
+                armProcessDeadline = {
+                    job = scope.launch {
+                        delay((dueAt - System.currentTimeMillis()).coerceAtLeast(0L))
+                        if (earliest.consume(dueAt)) recover(context)
+                    }
+                },
+                persistAlarm = { persistAlarm(context, dueAt) },
+            )
         }
     }
 

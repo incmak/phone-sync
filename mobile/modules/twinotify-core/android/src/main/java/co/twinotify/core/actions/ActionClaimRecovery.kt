@@ -105,3 +105,15 @@ class EarliestActionClaimWake {
         return true
     }
 }
+
+internal inline fun armProcessDeadlineThenPersistAlarm(
+    armProcessDeadline: () -> Unit,
+    persistAlarm: () -> Unit,
+) {
+    armProcessDeadline()
+    try {
+        persistAlarm()
+    } catch (_: RuntimeException) {
+        // The process timer remains armed; service startup covers process death.
+    }
+}
