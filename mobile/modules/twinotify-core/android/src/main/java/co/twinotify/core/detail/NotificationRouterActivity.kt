@@ -90,7 +90,10 @@ class NotificationRouterActivity : Activity() {
                 withContext(Dispatchers.Main.immediate) {
                     runCatching {
                         startActivity(
-                            Intent(Intent.ACTION_VIEW, "$SCHEME://$NOTIFICATION_HOST/$id".toUri()).apply {
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                "$SCHEME://$NOTIFICATION_HOST/$id?sourceLaunchFailed=1".toUri(),
+                            ).apply {
                                 setPackage(packageName)
                                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                             },

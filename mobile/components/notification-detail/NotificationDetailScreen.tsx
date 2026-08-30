@@ -33,7 +33,13 @@ function appName(detail: NotificationDetail): string {
   return detail.sourceAppName?.trim() || detail.sourcePackage;
 }
 
-export function NotificationDetailScreen({ detailId }: { detailId: string }) {
+export function NotificationDetailScreen({
+  detailId,
+  sourceLaunchFailed = false,
+}: {
+  detailId: string;
+  sourceLaunchFailed?: boolean;
+}) {
   const theme = useTheme();
   const { width, fontScale } = useWindowDimensions();
   const [loadState, setLoadState] = useState<LoadState>('loading');
@@ -62,7 +68,7 @@ export function NotificationDetailScreen({ detailId }: { detailId: string }) {
     if (showLoading) setLoadState('loading');
     try {
       const next = await TwinotifyCoreModule.getNotificationDetail(detailId);
-      const canLaunch = next
+      const canLaunch = next && !sourceLaunchFailed
         ? await TwinotifyCoreModule.canLaunchSourceApp(next.sourcePackage).catch(() => false)
         : false;
       detailRef.current = next;
@@ -85,7 +91,7 @@ export function NotificationDetailScreen({ detailId }: { detailId: string }) {
     } catch {
       if (showLoading || !detailRef.current) setLoadState('error');
     }
-  }, [detailId]);
+  }, [detailId, sourceLaunchFailed]);
 
   useFocusEffect(useCallback(() => {
     setFocused(true);

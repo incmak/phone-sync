@@ -239,6 +239,16 @@ describe('notification detail screen', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Open WhatsApp' })).toBeNull());
   });
 
+  it('does not offer the source-app action after tap routing already failed', async () => {
+    global.__SET_SEARCH_PARAMS__({ detailId: DETAIL_ID, sourceLaunchFailed: '1' });
+    global.__TWINOTIFY_CORE__.canLaunchSourceApp.mockResolvedValue(true);
+
+    const screen = render(<NotificationDetailRoute />);
+
+    await screen.findByText('New message from Sam');
+    expect(screen.queryByRole('button', { name: 'Open WhatsApp' })).toBeNull();
+  });
+
   it('supports both app-bar and hardware back with 48-point targets', async () => {
     const screen = render(<NotificationDetailScreen detailId={DETAIL_ID} />);
     await screen.findByText('New message from Sam');

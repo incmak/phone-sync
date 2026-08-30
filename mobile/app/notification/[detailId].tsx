@@ -4,7 +4,16 @@ import { useLocalSearchParams } from 'expo-router';
 import { NotificationDetailScreen } from '../../components/notification-detail/NotificationDetailScreen';
 
 export default function NotificationDetailRoute() {
-  const { detailId } = useLocalSearchParams<{ detailId?: string | string[] }>();
+  const { detailId, sourceLaunchFailed } = useLocalSearchParams<{
+    detailId?: string | string[];
+    sourceLaunchFailed?: string | string[];
+  }>();
   const opaqueDetailId = Array.isArray(detailId) ? detailId[0] : detailId;
-  return <NotificationDetailScreen detailId={opaqueDetailId ?? ''} />;
+  const launchFailed = Array.isArray(sourceLaunchFailed) ? sourceLaunchFailed[0] : sourceLaunchFailed;
+  return (
+    <NotificationDetailScreen
+      detailId={opaqueDetailId ?? ''}
+      sourceLaunchFailed={launchFailed === '1'}
+    />
+  );
 }
