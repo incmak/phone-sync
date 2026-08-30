@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0c1713" />
+    <meta name="description" content="Twinotify mirrors notifications securely between two Android phones, with direct Wi-Fi delivery and encrypted relay fallback." />
+    <title>Twinotify - one notification, both phones</title>
+    <link rel="icon" href="assets/twinotify-mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header" data-site-header>
+      <a class="brand" href="#top" aria-label="Twinotify home">
+        <img src="assets/twinotify-mark.svg" alt="" width="26" height="24" />
+        <span>twinotify</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#features">Features</a>
+        <a href="#how-it-works">Set up</a>
+        <a class="nav-download" href="#download">Download</a>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero-atmosphere" aria-hidden="true">
+          <span class="signal signal-one"></span>
+          <span class="signal signal-two"></span>
+          <span class="signal signal-three"></span>
+        </div>
+
+        <div class="hero-copy">
+          <p class="hero-context">Android to Android, without the hand-off ritual.</p>
+          <h1 id="hero-title">One notification.<br /><span>Both phones.</span></h1>
+          <div class="hero-intro">
+            <p>Leave one phone charging. Carry the other. Twinotify keeps their alerts, dismissals, and supported actions in step.</p>
+            <a class="primary-action" href="https://github.com/incmak/phone-sync/releases">Check Android releases <span aria-hidden="true">↗</span></a>
+            <small>Android 14+ · Open source · No account</small>
+          </div>
+        </div>
+
+        <div class="hero-stage" data-hero-stage>
+          <svg class="hero-route" viewBox="0 0 1120 220" aria-hidden="true" preserveAspectRatio="none">
+            <path class="route-bed" d="M 52 148 C 270 148, 278 64, 514 64 S 812 174, 1070 92" />
+            <path class="route-live" d="M 52 148 C 270 148, 278 64, 514 64 S 812 174, 1070 92" />
+            <path class="route-ticket" d="M 500 50 h 30 l 8 8 v 22 l -8 8 h -30 l -8 -8 v -22 z" />
+          </svg>
+
+          <figure class="phone-figure hero-phone hero-phone-left" role="img" aria-label="Twinotify home screen showing a direct Wi-Fi connection to a paired phone">
+            <div class="phone phone-dark" aria-hidden="true">
+              <div class="phone-hardware"><span></span></div>
+              <div class="phone-screen home-screen">
+                <div class="status-bar"><span>9:41</span><span class="status-icons">▮ ᴡɪꜰɪ ▰</span></div>
+                <div class="app-bar">
+                  <div class="app-wordmark"><img src="assets/twinotify-mark.svg" alt="" /><strong>twinotify</strong></div>
+                  <span class="gear">⌁</span>
+                </div>
+                <div class="connection-panel">
+                  <div class="connection-heading">
+                    <div><b>Direct on Wi-Fi</b><span>Your phones can reach each other nearby.</span></div>
+                    <span class="screen-switch"><i></i></span>
+                  </div>
+                  <svg class="screen-route" viewBox="0 0 270 88">
+                    <path d="M 17 25 H 7 V 63 H 17 M 253 25 H 263 V 63 H 253" />
+                    <path class="active" d="M 21 44 H 249" />
+                    <path class="ticket" d="M 122 33 h 27 l 6 6 v 11 l -6 6 h -27 l -6 -6 v -11 z" />
+                  </svg>
+                  <div class="paired-row">
+                    <div><span>Paired phone</span><b>Pixel 9 Pro</b><em>Reachable now</em></div>
+                    <span>⌟</span>
+                  </div>
+                </div>
+                <div class="metrics-row">
+                  <div><span>Mirrored</span><b>12</b></div>
+                  <div><span>Latency</span><b>38 ms</b></div>
+                  <div><span>Blocked</span><b>4</b></div>
+                </div>
+                <div class="activity-preview">
+                  <div class="screen-section-title"><b>Recent activity</b><span>Local only</span></div>
+                  <div class="activity-row"><i class="app-dot sage">M</i><div><b>Messages mirrored</b><span>Delivered direct · now</span></div></div>
+                  <div class="activity-row"><i class="app-dot gold">C</i><div><b>Calendar dismissed</b><span>Synced to Pixel 9 Pro · 4m</span></div></div>
+                </div>
+              </div>
+            </div>
+          </figure>
+
+          <figure class="phone-figure hero-phone hero-phone-right" role="img" aria-label="Android lock screen showing a mirrored Messages notification from the paired phone">
+            <div class="phone phone-light" aria-hidden="true">
+              <div class="phone-hardware"><span></span></div>
+              <div class="phone-screen lock-screen">
+                <div class="status-bar"><span>9:41</span><span class="status-icons">▮ ᴡɪꜰɪ ▰</span></div>
+                <div class="lock-time"><strong>09:41</strong><span>Saturday, 30 August</span></div>
+                <div class="notification-card">
+                  <div class="notification-source"><i class="app-dot sage">M</i><b>Messages</b><span>now</span></div>
+                  <strong>Dinner at 8?</strong>
+                  <p>I found a place near the station.</p>
+                  <small>Mirrored from Mi 11X</small>
+                  <div class="notification-actions"><span>Mark read</span><span>Reply</span></div>
+                </div>
+                <div class="lock-footer"><span>◉</span><span>⌁</span></div>
+              </div>
+            </div>
+          </figure>
+        </div>
+
+        <div class="hero-facts" aria-label="Key product facts">
+          <span><b>Direct on Wi-Fi</b> when your phones are nearby</span>
+          <span><b>Encrypted relay</b> when they are apart</span>
+          <span><b>Private by design</b> with keys kept on-device</span>
+        </div>
+      </section>
+
+      <section class="manifesto" aria-label="Product promise">
+        <p>Your spare phone should not become a second inbox.</p>
+        <div class="manifesto-detail">
+          <span class="manifesto-mark" aria-hidden="true"><img src="assets/twinotify-mark.svg" alt="" /></span>
+          <p>Twinotify makes two Android phones behave like one calm notification surface. Read on either. Dismiss on either. Keep moving.</p>
+        </div>
+      </section>
+
+      <section class="feature-story" id="features" aria-labelledby="features-title">
+        <div class="story-heading">
+          <h2 id="features-title">The handoff is the product.</h2>
+          <p>No cloud dashboard to babysit. Twinotify chooses the best available route and shows you exactly what is happening.</p>
+        </div>
+
+        <article class="feature-chapter feature-route">
+          <div class="chapter-copy">
+            <span class="chapter-number">Route / 01</span>
+            <h3>Nearby feels instant.<br />Far away still arrives.</h3>
+            <p>On the same Wi-Fi, your phones connect directly. When that path disappears, the encrypted relay carries the notification and holds it until the other phone is ready.</p>
+            <ul class="plain-feature-list">
+              <li>Direct LAN preferred automatically</li>
+              <li>Durable 24-hour relay mailbox</li>
+              <li>Clear queued and reconnecting states</li>
+            </ul>
+          </div>
+          <figure class="showcase-frame route-showcase" role="img" aria-label="Twinotify home screen showing relay delivery with a waypoint between two phones">
+            <div class="showcase-caption"><span>Live route</span><b>Via relay</b></div>
+            <div class="route-diagram" aria-hidden="true">
+              <div class="route-phone left">Mi 11X</div>
+              <svg viewBox="0 0 620 180">
+                <path class="route-muted" d="M 70 104 L 310 48 L 550 104" />
+                <path class="route-active" d="M 70 104 L 310 48 L 550 104" />
+                <path class="waypoint" d="M 310 36 l 12 12 l -12 12 l -12 -12 z" />
+                <path class="moving-ticket" d="M 202 62 h 36 l 8 8 v 20 l -8 8 h -36 l -8 -8 v -20 z" />
+              </svg>
+              <div class="route-phone right">Pixel 9 Pro</div>
+              <span class="route-note">Ciphertext only</span>
+            </div>
+            <div class="showcase-metrics" aria-hidden="true">
+              <div><span>Status</span><b>Delivered</b></div>
+              <div><span>Typical route</span><b>Direct first</b></div>
+              <div><span>Queued</span><b>0</b></div>
+            </div>
+          </figure>
+        </article>
+
+        <article class="feature-chapter feature-privacy">
+          <figure class="privacy-artifact" role="img" aria-label="End-to-end encrypted notification packet crossing the Twinotify relay while readable content stays on the phones">
+            <div class="privacy-phone privacy-origin" aria-hidden="true">
+              <span>Origin phone</span>
+              <div class="tiny-notification"><b>Messages</b><strong>Dinner at 8?</strong><p>I found a place near the station.</p></div>
+            </div>
+            <div class="cipher-stream" aria-hidden="true">
+              <span>7F 2A 91 0C</span><span>AE 88 D4 61</span><span>3B 09 F2 C7</span>
+              <b>relay</b>
+            </div>
+            <div class="privacy-phone privacy-peer" aria-hidden="true">
+              <span>Paired phone</span>
+              <div class="tiny-notification"><b>Messages</b><strong>Dinner at 8?</strong><p>I found a place near the station.</p></div>
+            </div>
+          </figure>
+          <div class="chapter-copy">
+            <span class="chapter-number">Privacy / 02</span>
+            <h3>The relay cannot read<br />the alert it carries.</h3>
+            <p>Notification content is encrypted on the sending phone and authenticated on the receiving phone. The relay sees ciphertext and routing metadata, never the title or message body.</p>
+            <dl class="security-facts">
+              <div><dt>Keys</dt><dd>Stay on your phones</dd></div>
+              <div><dt>Pairing</dt><dd>Fingerprint verified</dd></div>
+              <div><dt>History</dt><dd>Local and content-free</dd></div>
+            </dl>
+          </div>
+        </article>
+
+        <article class="feature-chapter feature-control">
+          <div class="chapter-copy">
+            <span class="chapter-number">Control / 03</span>
+            <h3>Mirror what matters.<br />Block what does not.</h3>
+            <p>Choose apps one by one. Banking, password, and common one-time-code apps start protected by a hash-verified built-in denylist.</p>
+            <p class="chapter-note">Filtering happens before encryption and delivery.</p>
+          </div>
+          <figure class="phone-figure showcase-phone filter-phone" role="img" aria-label="Twinotify app filter screen with Messages and Calendar mirrored while a banking app is blocked">
+            <div class="phone phone-light" aria-hidden="true">
+              <div class="phone-hardware"><span></span></div>
+              <div class="phone-screen filter-screen">
+                <div class="status-bar"><span>9:41</span><span class="status-icons">▮ ᴡɪꜰɪ ▰</span></div>
+                <div class="screen-titlebar"><span>‹</span><b>App filter</b><i></i></div>
+                <div class="filter-info"><b>Built-in protection</b><p>Banking, OTP, and password apps start blocked.</p></div>
+                <div class="search-field">⌕ <span>Search apps</span></div>
+                <div class="filter-tabs"><b>All <i>8</i></b><span>Mirrored <i>5</i></span><span>Blocked <i>3</i></span></div>
+                <div class="verified-note">3 banking apps pre-blocked · <b>hash verified</b></div>
+                <div class="filter-list">
+                  <div class="filter-row"><i class="app-dot sage">M</i><b>Messages</b><span class="screen-switch"><i></i></span></div>
+                  <div class="filter-row"><i class="app-dot gold">C</i><b>Calendar</b><span class="screen-switch"><i></i></span></div>
+                  <div class="filter-row"><i class="app-dot blue">W</i><b>WhatsApp</b><span class="screen-switch"><i></i></span></div>
+                  <div class="filter-row"><i class="app-dot red">B</i><b>Banking</b><span class="screen-switch off"><i></i></span></div>
+                </div>
+              </div>
+            </div>
+          </figure>
+        </article>
+
+        <article class="feature-chapter feature-actions">
+          <figure class="phone-figure showcase-phone action-phone" role="img" aria-label="Twinotify notification detail screen with reply and mark read actions mirrored back to the source phone">
+            <div class="phone phone-dark" aria-hidden="true">
+              <div class="phone-hardware"><span></span></div>
+              <div class="phone-screen action-screen">
+                <div class="status-bar"><span>9:41</span><span class="status-icons">▮ ᴡɪꜰɪ ▰</span></div>
+                <div class="screen-titlebar"><span>‹</span><b>Notification</b><i></i></div>
+                <div class="source-heading"><i class="app-dot sage">M</i><div><b>Messages</b><span>From Mi 11X · just now</span></div></div>
+                <div class="message-body"><h4>Dinner at 8?</h4><p>I found a place near the station. Want me to book it?</p></div>
+                <div class="action-route"><span>Pixel 9 Pro</span><svg viewBox="0 0 230 36"><path d="M 8 18 H 222"/><path class="ticket" d="M 105 9 h 20 l 5 5 v 8 l -5 5 h -20 l -5 -5 v -8 z"/></svg><span>Mi 11X</span></div>
+                <div class="action-buttons"><span>Mark as read</span><b>Reply</b></div>
+              </div>
+            </div>
+          </figure>
+          <div class="chapter-copy">
+            <span class="chapter-number">Actions / 04</span>
+            <h3>Take action here.<br />It responds there.</h3>
+            <p>Dismissals stay synchronized. Supported notification actions, including reply and mark as read, travel securely back to the source phone.</p>
+            <p class="chapter-note">Available actions depend on the originating Android app.</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="setup" id="how-it-works" aria-labelledby="setup-title">
+        <div class="setup-heading">
+          <h2 id="setup-title">Pair once. Then forget the plumbing.</h2>
+          <p>Both phones verify the same fingerprint before either one is trusted.</p>
+        </div>
+        <ol class="setup-sequence">
+          <li>
+            <span class="step-index">1</span>
+            <div class="setup-visual qr-visual" aria-hidden="true">
+              <div class="mini-qr">
+                <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              </div>
+            </div>
+            <h3>Show the code</h3>
+            <p>Open Twinotify on your first phone and choose “Link another phone.”</p>
+          </li>
+          <li>
+            <span class="step-index">2</span>
+            <div class="setup-visual scan-visual" aria-hidden="true"><span></span><i></i></div>
+            <h3>Scan nearby</h3>
+            <p>Use the second phone to scan. Nearby pairing also works without internet.</p>
+          </li>
+          <li>
+            <span class="step-index">3</span>
+            <div class="setup-visual fingerprint-visual" aria-hidden="true">
+              <b>38A7</b><b>C90F</b><b>1D42</b><b>7BE3</b>
+            </div>
+            <h3>Match the fingerprint</h3>
+            <p>Confirm the same groups on both phones. That is the trust ceremony.</p>
+          </li>
+        </ol>
+        <figure class="setup-complete" role="img" aria-label="Twinotify pairing screen showing Mi 11X and Pixel 9 Pro verified and ready to mirror">
+          <img src="assets/twinotify-mark.svg" alt="" />
+          <span>Paired</span>
+          <b>Mi 11X</b>
+          <svg viewBox="0 0 260 48" aria-hidden="true"><path d="M 8 24 H 252"/><path d="M 119 14 h 22 l 6 6 v 8 l -6 6 h -22 l -6 -6 v -8 z"/></svg>
+          <b>Pixel 9 Pro</b>
+          <span>Ready to mirror</span>
+        </figure>
+      </section>
+
+      <section class="download" id="download" aria-labelledby="download-title">
+        <div class="download-shape" aria-hidden="true"></div>
+        <div class="download-copy">
+          <p>Android 14 and newer</p>
+          <h2 id="download-title">Put both phones on the same page.</h2>
+        </div>
+        <div class="download-actions">
+          <a class="download-primary" href="https://github.com/incmak/phone-sync/releases">
+            <span><small>Distribution</small>Check Android releases</span><b aria-hidden="true">↗</b>
+          </a>
+          <a class="download-source" href="https://github.com/incmak/phone-sync#start-here">
+            <span><small>Developers</small>Build from source</span><b aria-hidden="true">↗</b>
+          </a>
+          <p>Twinotify is not presented here as a Play Store release. Published builds, when available, appear on GitHub Releases.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-top">
+        <a class="brand footer-brand" href="#top" aria-label="Back to top">
+          <img src="assets/twinotify-mark.svg" alt="" width="28" height="26" />
+          <span>twinotify</span>
+        </a>
+        <p>Two phones. One notification surface.</p>
+        <div class="footer-links">
+          <a href="https://github.com/incmak/phone-sync">Source</a>
+          <a href="https://github.com/incmak/phone-sync/blob/main/docs/superpowers/specs/2026-04-20-phone-sync-design.md">Security design</a>
+          <a href="#how-it-works">Set up</a>
+        </div>
+      </div>
+      <div class="footer-bottom"><span>Open source software</span><span>© <span data-year>2026</span> Twinotify</span></div>
+      <div class="footer-wordmark" aria-hidden="true">twinotify</div>
+    </footer>
+  </body>
+</html>
