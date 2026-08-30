@@ -216,16 +216,18 @@ func (s *Server) pairIPRateLimit(next http.Handler) http.Handler {
 func (s *Server) requestRemoteAddr(r *http.Request) string {
 	remoteAddr := r.RemoteAddr
 	if s.trustProxyHeaders {
-		if forwardedIP := firstForwardedIP(r.Header.Values("X-Forwarded-For")); forwardedIP != "" {
+		if forwardedIP := lastForwardedIP(r.Header.Values("X-Forwarded-For")); forwardedIP != "" {
 			remoteAddr = forwardedIP
 		}
 	}
 	return remoteAddr
 }
 
-func firstForwardedIP(values []string) string {
-	for _, value := range values {
-		for _, candidate := range strings.Split(value, ",") {
+func lastForwardedIP(values []string) string {
+	for valueIndex := len(values) - 1; valueIndex >= 0; valueIndex-- {
+		candidates := strings.Split(values[valueIndex], ",")
+		for candidateIndex := len(candidates) - 1; candidateIndex >= 0; candidateIndex-- {
+			candidate := candidates[candidateIndex]
 			candidate = strings.TrimSpace(candidate)
 			if net.ParseIP(candidate) != nil {
 				return candidate

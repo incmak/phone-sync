@@ -14,7 +14,7 @@ stay on the phones.
 ## Start here
 
 Use this primary checkout directly. Do not create or switch to a Git worktree
-unless a task explicitly asks for one. Install Go 1.23, Node 20 with npm, the
+unless a task explicitly asks for one. Install Go 1.25.13, Node 20 with npm, the
 Android SDK for Android 14 / API 34, and Docker for relay or deployment work.
 
 Run the host-only suite first:

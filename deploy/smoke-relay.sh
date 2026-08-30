@@ -131,6 +131,13 @@ check_once() {
 	if grep -Eiq '^Server:' "$smoke_root/live.headers" "$smoke_root/ready.headers"; then
 		return 1
 	fi
+	if [[ "$base_url" == https://* ]]; then
+		grep -Eiq '^Strict-Transport-Security:[[:space:]]*max-age=31536000; includeSubDomains' "$smoke_root/live.headers" || return 1
+		grep -Eiq '^X-Content-Type-Options:[[:space:]]*nosniff' "$smoke_root/live.headers" || return 1
+		grep -Eiq '^Referrer-Policy:[[:space:]]*no-referrer' "$smoke_root/live.headers" || return 1
+		grep -Eiq "^Content-Security-Policy:[[:space:]]*default-src 'none'; frame-ancestors 'none'" "$smoke_root/live.headers" || return 1
+		grep -Eiq '^Cache-Control:[[:space:]]*no-store' "$smoke_root/live.headers" || return 1
+	fi
 
 	code=$(request_status /metrics "$smoke_root/metrics.body" "$smoke_root/metrics.headers") || return 1
 	[[ "$code" == 404 ]] || return 1

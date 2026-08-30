@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing `release-apk` EAS profile and `com.twinotify.app` identity. Establish and commit the owner-authorized EAS project link, let EAS create or reuse one Android signing identity, preserve the downloaded APK and build metadata outside Git, and assess the mobile, relay, protocol, deployment, and public endpoint without destructive load. The APK is a production-mode test candidate; only the protected GitHub workflow with certificate pinning and signed attestation may call an artifact a protected Play candidate.
 
-**Tech Stack:** Expo SDK 57, EAS CLI 22.0.0, Gradle/Android APK tooling, Go 1.23, GitHub Actions, Docker/Caddy, OCI, shell-based security checks.
+**Tech Stack:** Expo SDK 57, EAS CLI 22.0.0, Gradle/Android APK tooling, Go 1.25.13, GitHub Actions, Docker/Caddy, OCI, shell-based security checks.
 
 ## Global Constraints
 

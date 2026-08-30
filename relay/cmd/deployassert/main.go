@@ -257,11 +257,11 @@ func validateComposeJSON(raw []byte, mode, domain string) error {
 
 func validateCaddyfile(raw []byte) error {
 	type caddyState struct {
-		global, servers, headerLimit                      int
-		site, matcher, stripServer, relayHandle, fallback int
-		proxy, fallback404                                int
-		paths                                             []string
-		stack                                             []string
+		global, servers, headerLimit                        int
+		site, matcher, stripServer, securityHeaders         int
+		relayHandle, fallback, proxy, proxyXFF, fallback404 int
+		paths                                               []string
+		stack                                               []string
 	}
 	state := caddyState{}
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
@@ -298,9 +298,14 @@ func validateCaddyfile(raw []byte) error {
 			case len(state.stack) == 0 && header == "{$TWINOTIFY_DOMAIN}":
 				state.site++
 				state.stack = append(state.stack, "site")
+			case sameStrings(state.stack, []string{"site"}) && header == "header":
+				state.stack = append(state.stack, "headers")
 			case sameStrings(state.stack, []string{"site"}) && header == "handle @relay":
 				state.relayHandle++
 				state.stack = append(state.stack, "relay")
+			case sameStrings(state.stack, []string{"site", "relay"}) && header == "reverse_proxy relay:8080":
+				state.proxy++
+				state.stack = append(state.stack, "proxy")
 			case sameStrings(state.stack, []string{"site"}) && header == "handle":
 				state.fallback++
 				state.stack = append(state.stack, "fallback")
@@ -315,10 +320,12 @@ func validateCaddyfile(raw []byte) error {
 		case sameStrings(state.stack, []string{"site"}) && len(fields) >= 3 && fields[0] == "@relay" && fields[1] == "path":
 			state.matcher++
 			state.paths = append([]string(nil), fields[2:]...)
-		case sameStrings(state.stack, []string{"site"}) && len(fields) == 2 && fields[0] == "header" && fields[1] == "-Server":
+		case sameStrings(state.stack, []string{"site", "headers"}) && line == "-Server":
 			state.stripServer++
-		case sameStrings(state.stack, []string{"site", "relay"}) && len(fields) == 2 && fields[0] == "reverse_proxy" && fields[1] == "relay:8080":
-			state.proxy++
+		case sameStrings(state.stack, []string{"site", "headers"}) && isRequiredSecurityHeader(line):
+			state.securityHeaders++
+		case sameStrings(state.stack, []string{"site", "relay", "proxy"}) && line == "header_up X-Forwarded-For {remote_host}":
+			state.proxyXFF++
 		case sameStrings(state.stack, []string{"site", "fallback"}) && len(fields) == 2 && fields[0] == "respond" && fields[1] == "404":
 			state.fallback404++
 		default:
@@ -332,13 +339,27 @@ func validateCaddyfile(raw []byte) error {
 		return errors.New("unclosed Caddy block")
 	}
 	if state.global != 1 || state.servers != 1 || state.headerLimit != 1 || state.site != 1 || state.matcher != 1 ||
-		state.stripServer != 1 || state.relayHandle != 1 || state.fallback != 1 || state.proxy != 1 || state.fallback404 != 1 {
+		state.stripServer != 1 || state.securityHeaders != 5 || state.relayHandle != 1 || state.fallback != 1 ||
+		state.proxy != 1 || state.proxyXFF != 1 || state.fallback404 != 1 {
 		return fmt.Errorf("incomplete Caddy route graph: %+v", state)
 	}
 	if !sameStrings(state.paths, []string{"/health", "/health/*", "/pair/*", "/ws"}) {
 		return fmt.Errorf("allowed relay paths = %v", state.paths)
 	}
 	return nil
+}
+
+func isRequiredSecurityHeader(line string) bool {
+	switch line {
+	case `Strict-Transport-Security "max-age=31536000; includeSubDomains"`,
+		`X-Content-Type-Options "nosniff"`,
+		`Referrer-Policy "no-referrer"`,
+		`Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"`,
+		`Cache-Control "no-store"`:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateConstrainedService(name string, service composeService, requireNonRoot bool) error {

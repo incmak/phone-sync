@@ -267,6 +267,53 @@ func TestPairRateLimitUsesForwardedIPOnlyForTrustedProxy(t *testing.T) {
 	}
 }
 
+func TestLastForwardedIPUsesProxyAppendedValue(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{name: "comma separated spoof", values: []string{"198.51.100.7, 203.0.113.9"}, want: "203.0.113.9"},
+		{name: "duplicate headers", values: []string{"198.51.100.7", "203.0.113.9"}, want: "203.0.113.9"},
+		{name: "skip invalid tail", values: []string{"198.51.100.7, attacker"}, want: "198.51.100.7"},
+		{name: "no valid address", values: []string{"attacker"}, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := lastForwardedIP(test.values); got != test.want {
+				t.Fatalf("lastForwardedIP(%q) = %q, want %q", test.values, got, test.want)
+			}
+		})
+	}
+}
+
+func TestPairRateLimitIgnoresSpoofedForwardedPrefix(t *testing.T) {
+	config := DefaultConfig()
+	config.Now = func() time.Time { return time.Unix(1600, 0) }
+	config.PairingRateLimits.IPBurst = 1
+	config.PairingRateLimits.TokenBurst = 100
+	config.PairingRateLimits.RefillInterval = time.Hour
+	config.TrustProxyHeaders = true
+	srv := newConfiguredTestServer(t, config)
+
+	for index, spoofedIP := range []string{"198.51.100.7", "198.51.100.8"} {
+		request := httptest.NewRequest(http.MethodPost, "/pair/init", strings.NewReader(mustJSON(t, validPairInitBody("spoof-"+spoofedIP))))
+		request.RemoteAddr = "172.30.0.2:4000"
+		request.Header.Add("X-Forwarded-For", spoofedIP)
+		request.Header.Add("X-Forwarded-For", "203.0.113.9")
+		response := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, request)
+
+		want := http.StatusOK
+		if index == 1 {
+			want = http.StatusTooManyRequests
+		}
+		if response.Code != want {
+			t.Fatalf("request %d status = %d, want %d; body=%q", index+1, response.Code, want, response.Body.String())
+		}
+	}
+}
+
 func TestPairTokenRateLimitAppliesAcrossRemoteIPs(t *testing.T) {
 	now := time.Unix(2000, 0)
 	config := DefaultConfig()

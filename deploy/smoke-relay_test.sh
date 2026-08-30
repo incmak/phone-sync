@@ -82,6 +82,13 @@ fi
 if [[ "${FAKE_SERVER_HEADER:-false}" == true ]]; then
 	printf 'Server: fixture\r\n' >>"$headers"
 fi
+if [[ "${FAKE_SECURITY_HEADERS:-true}" == true ]]; then
+	printf 'Strict-Transport-Security: max-age=31536000; includeSubDomains\r\n' >>"$headers"
+	printf 'X-Content-Type-Options: nosniff\r\n' >>"$headers"
+	printf 'Referrer-Policy: no-referrer\r\n' >>"$headers"
+	printf "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\n" >>"$headers"
+	printf 'Cache-Control: no-store\r\n' >>"$headers"
+fi
 printf '\r\n' >>"$headers"
 printf '%s\n' "$payload" >"$body"
 printf '%s' "$status"
@@ -110,6 +117,9 @@ if FAKE_METRICS_STATUS=200 "$smoke_script" --allow-http --base-url http://relay.
 fi
 if FAKE_SERVER_HEADER=true "$smoke_script" --allow-http --base-url http://relay.example.test --expected-version relay-v-test >"$test_root/server.out" 2>"$test_root/server.err"; then
 	fail "server-identifying response header was accepted"
+fi
+if FAKE_SECURITY_HEADERS=false "$smoke_script" --base-url https://relay.example.test --expected-version relay-v-test >"$test_root/headers.out" 2>"$test_root/headers.err"; then
+	fail "missing production security headers were accepted"
 fi
 if "$smoke_script" --allow-http --base-url http://relay.example.test --expected-version wrong-version >"$test_root/version.out" 2>"$test_root/version.err"; then
 	fail "wrong build version was accepted"

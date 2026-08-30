@@ -46,9 +46,18 @@ const validCaddyfile = `{
 }
 {$TWINOTIFY_DOMAIN} {
     @relay path /health /health/* /pair/* /ws
-    header -Server
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+        Cache-Control "no-store"
+    }
     handle @relay {
-        reverse_proxy relay:8080
+        reverse_proxy relay:8080 {
+            header_up X-Forwarded-For {remote_host}
+        }
     }
     handle {
         respond 404
@@ -249,14 +258,15 @@ func TestValidateCaddyfileRejectsRouteMutations(t *testing.T) {
 		t.Fatalf("valid Caddyfile: %v", err)
 	}
 	tests := map[string]string{
-		"wrong upstream":       strings.Replace(validCaddyfile, "relay:8080", "relay:9090", 1),
-		"missing allowed path": strings.Replace(validCaddyfile, " /health/*", "", 1),
-		"extra allowed path":   strings.Replace(validCaddyfile, " /ws", " /ws /admin", 1),
-		"public metrics":       strings.Replace(validCaddyfile, " /ws", " /ws /metrics", 1),
-		"internal tls":         strings.Replace(validCaddyfile, "    handle @relay", "    tls internal\n    handle @relay", 1),
-		"missing fallback":     strings.Replace(validCaddyfile, "    handle {\n        respond 404\n    }\n", "", 1),
-		"missing header bound": strings.Replace(validCaddyfile, "        max_header_size 16KB\n", "", 1),
-		"missing server strip": strings.Replace(validCaddyfile, "    header -Server\n", "", 1),
+		"wrong upstream":        strings.Replace(validCaddyfile, "relay:8080", "relay:9090", 1),
+		"missing allowed path":  strings.Replace(validCaddyfile, " /health/*", "", 1),
+		"extra allowed path":    strings.Replace(validCaddyfile, " /ws", " /ws /admin", 1),
+		"public metrics":        strings.Replace(validCaddyfile, " /ws", " /ws /metrics", 1),
+		"internal tls":          strings.Replace(validCaddyfile, "    handle @relay", "    tls internal\n    handle @relay", 1),
+		"missing fallback":      strings.Replace(validCaddyfile, "    handle {\n        respond 404\n    }\n", "", 1),
+		"missing header bound":  strings.Replace(validCaddyfile, "        max_header_size 16KB\n", "", 1),
+		"missing server strip":  strings.Replace(validCaddyfile, "        -Server\n", "", 1),
+		"missing XFF overwrite": strings.Replace(validCaddyfile, "            header_up X-Forwarded-For {remote_host}\n", "", 1),
 	}
 	for name, config := range tests {
 		t.Run(name, func(t *testing.T) {

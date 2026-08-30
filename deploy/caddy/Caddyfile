@@ -6,9 +6,18 @@
 
 {$TWINOTIFY_DOMAIN} {
 	@relay path /health /health/* /pair/* /ws
-	header -Server
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		Cache-Control "no-store"
+	}
 	handle @relay {
-		reverse_proxy relay:8080
+		reverse_proxy relay:8080 {
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 	handle {
 		respond 404
