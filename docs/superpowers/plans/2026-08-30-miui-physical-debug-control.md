@@ -36,7 +36,7 @@
 - Produces: ordered broadcast result data containing `Base64.getUrlEncoder().withoutPadding().encodeToString(resultJson)`.
 - Preserves: `executeForTest`, token files, secret files, and all existing command implementations.
 
-- [ ] **Step 1: Write focused failing Android security tests**
+- [x] **Step 1: Write focused failing Android security tests**
 
 Change the authority assertion and add one shell allowlist test:
 
@@ -69,7 +69,7 @@ fun shellControlIsClosedAndRejectsEverySecretHandle() = runBlocking {
 
 Update the exported-broadcast test helper to send through `UiAutomation.executeShellCommand(...)`, because the target app UID must no longer be able to invoke its own exported receiver without DUMP.
 
-- [ ] **Step 2: Run the Android test compile and observe RED**
+- [x] **Step 2: Run the Android test compile and observe RED**
 
 Run:
 
@@ -80,7 +80,7 @@ cd mobile/android
 
 Expected: FAIL because `executeShellForTest` does not exist and the manifest has neither the DUMP permission nor the correct provider authority.
 
-- [ ] **Step 3: Implement the minimal Android shell branch**
+- [x] **Step 3: Implement the minimal Android shell branch**
 
 Set the manifest values:
 
@@ -123,7 +123,7 @@ internal suspend fun executeShellForTest(context: Context, command: E2eCommand):
 
 In `onReceive`, keep the current private-file path when `auth_input_id` exists. Otherwise call `executeShellForTest`, require `secretPayload == null`, encode `result.toJson().toString()` with base64url without padding, call `pending.setResultCode(Activity.RESULT_OK)` and `pending.setResultData(encoded)`, then finish. Preserve the current bounded error result on failure.
 
-- [ ] **Step 4: Run Android compile and focused tests GREEN**
+- [x] **Step 4: Run Android compile and focused tests GREEN**
 
 Run:
 
@@ -134,7 +134,7 @@ cd mobile/android
 
 Expected: PASS. Inspect the debug merged manifest for the receiver DUMP permission and `${applicationId}`-resolved authority, then inspect the release manifest to confirm both components remain absent.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```bash
 git add mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/e2e/E2eControlSecurityTest.kt \
@@ -162,7 +162,7 @@ git commit -m "test(mobile): add DUMP-protected physical control"
 - Produces: CLI `-control-transport run-as|shell-broadcast`, default `run-as`.
 - Produces: `shellBroadcastDevice`, implementing only `control.Device` and `control.SecureRequestDevice`, never `control.SecretDevice`.
 
-- [ ] **Step 1: Write the focused failing Go tests**
+- [x] **Step 1: Write the focused failing Go tests**
 
 Add one ADB test proving output is returned with the existing exact component arguments. Add one main-package test using:
 
@@ -177,7 +177,7 @@ err := device.Broadcast(context.Background(), control.Command{
 
 Assert the decoded result is returned, argv contains neither `run-as`, `token`, nor `auth_input_id`, and no stdin input occurs. Add one failure-path test proving malformed and oversized result data are rejected. Add a CLI validation test proving shell mode rejects `pair` and `offline-pairing` before ADB.
 
-- [ ] **Step 2: Run focused Go tests and observe RED**
+- [x] **Step 2: Run focused Go tests and observe RED**
 
 Run:
 
@@ -188,7 +188,7 @@ go test ./internal/adb ./cmd/twinotify-e2e -race -count=1
 
 Expected: FAIL because the result-returning ADB method, shell adapter, and transport validation do not exist.
 
-- [ ] **Step 3: Implement the result-returning ADB call**
+- [x] **Step 3: Implement the result-returning ADB call**
 
 Refactor `broadcastArgs` to delegate to a result-returning helper without changing existing callers:
 
@@ -204,7 +204,7 @@ func (c *Client) BroadcastReceiverResult(ctx context.Context, packageName, recei
 
 Sort and quote extras exactly as the existing helper does. Keep error redaction unchanged.
 
-- [ ] **Step 4: Implement shell adapter and CLI validation**
+- [x] **Step 4: Implement shell adapter and CLI validation**
 
 Add `shellBroadcastDevice` with a mutex-protected one-result map. Parse only:
 
@@ -224,7 +224,7 @@ controlTransport := flag.String("control-transport", "run-as", "debug control tr
 
 Construct the existing `adbDevice` after reading the install token for `run-as`. Construct `shellBroadcastDevice` without reading an Android token for `shell-broadcast`. Accept shell mode only for `status`, `notification-actions-correctness`, or names beginning `action-` that already pass scenario validation.
 
-- [ ] **Step 5: Document and run all host tests GREEN**
+- [x] **Step 5: Document and run all host tests GREEN**
 
 Document the physical-only flag, DUMP boundary, closed command set, and secret-scenario rejection in `e2e/README.md`.
 
@@ -241,7 +241,7 @@ git diff --check
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add e2e/internal/adb/adb.go e2e/internal/adb/adb_test.go \
