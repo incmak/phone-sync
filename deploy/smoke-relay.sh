@@ -8,10 +8,21 @@ attempts=${TWINOTIFY_SMOKE_ATTEMPTS:-12}
 interval=${TWINOTIFY_SMOKE_INTERVAL:-5}
 curl_bin=${TWINOTIFY_CURL_BIN:-curl}
 jq_bin=${TWINOTIFY_JQ_BIN:-jq}
+resolve_ip=${TWINOTIFY_SMOKE_RESOLVE_IP:-}
 
 usage() {
 	printf 'usage: %s --base-url https://relay.example.com [--expected-version VERSION] [--allow-http]\n' "$0" >&2
 	exit 2
+}
+
+valid_ipv4() {
+	local candidate=$1 octet
+	local -a octets
+	[[ "$candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+	IFS=. read -r -a octets <<<"$candidate"
+	for octet in "${octets[@]}"; do
+		((10#$octet <= 255)) || return 1
+	done
 }
 
 while (($# > 0)); do
@@ -50,6 +61,22 @@ fi
 command -v "$curl_bin" >/dev/null 2>&1 || { printf 'smoke-relay: curl is required\n' >&2; exit 2; }
 command -v "$jq_bin" >/dev/null 2>&1 || { printf 'smoke-relay: jq is required\n' >&2; exit 2; }
 
+resolve_spec=
+if [[ -n "$resolve_ip" ]]; then
+	[[ "$base_url" == https://* ]] || { printf 'smoke-relay: resolve override requires HTTPS\n' >&2; exit 2; }
+	valid_ipv4 "$resolve_ip" || {
+		printf 'smoke-relay: resolve override must be an IPv4 address\n' >&2
+		exit 2
+	}
+	smoke_host=${base_url#https://}
+	smoke_host=${smoke_host%%/*}
+	[[ "$smoke_host" =~ ^[A-Za-z0-9.-]+$ ]] || {
+		printf 'smoke-relay: resolve override requires a hostname without an explicit port\n' >&2
+		exit 2
+	}
+	resolve_spec="$smoke_host:443:$resolve_ip"
+fi
+
 smoke_root=$(mktemp -d "${TMPDIR:-/tmp}/twinotify-relay-smoke.XXXXXX")
 trap 'rm -rf "$smoke_root"' EXIT HUP INT TERM
 
@@ -61,8 +88,12 @@ fi
 
 request_status() {
 	local path=$1 body=$2 headers=$3
-	"$curl_bin" "${protocol_args[@]}" --silent --show-error --connect-timeout 5 --max-time 10 \
-		--dump-header "$headers" --output "$body" --write-out '%{http_code}' "$base_url$path"
+	local -a request_args=("${protocol_args[@]}" --silent --show-error --connect-timeout 5 --max-time 10)
+	if [[ -n "$resolve_spec" ]]; then
+		request_args+=(--resolve "$resolve_spec")
+	fi
+	"$curl_bin" "${request_args[@]}" --dump-header "$headers" --output "$body" \
+		--write-out '%{http_code}' "$base_url$path"
 }
 
 check_once() {
