@@ -58,6 +58,7 @@ func runRelay(getenv func(string) string) error {
 	config.BuildVersion = runtimeConfig.buildVersion
 	config.WebSocketQueueMaxBytes = runtimeConfig.webSocketQueueMaxBytes
 	config.WebSocketProcessQueueMaxBytes = runtimeConfig.webSocketProcessQueueMaxBytes
+	config.WebSocketInboundProcessMaxBytes = runtimeConfig.webSocketInboundProcessMaxBytes
 	config.DurableTransferMaxBytes = runtimeConfig.durableTransferMaxBytes
 	config.RelayMemoryLimitBytes = runtimeConfig.relayMemoryLimitBytes
 	config.MaxOpenConnections = runtimeConfig.maxOpenConnections

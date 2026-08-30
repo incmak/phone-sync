@@ -33,6 +33,17 @@ type durableNotification struct {
 	queued    bool
 }
 
+func (h *recipientHandoff) firstUnreadySequence() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, pending := range h.pending {
+		if !pending.ready {
+			return pending.sequence
+		}
+	}
+	return 0
+}
+
 func newDurableHandoffs(maxItems int, maxBytes uint64) *durableHandoffs {
 	return &durableHandoffs{
 		recipients: make(map[string]*recipientHandoff),

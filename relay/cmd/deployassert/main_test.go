@@ -11,7 +11,7 @@ const validProdComposeJSON = `{
   "services":{
     "relay":{
       "image":"ghcr.io/incmak/twinotify-relay@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "environment":{"TWINOTIFY_ENV":"production","LISTEN_ADDR":":8080","BOLT_PATH":"/data/twinotify-relay.db","TRUST_PROXY_HEADERS":"true","REQUIRE_MUTUAL_PAIR_SIGNATURES":"true","MIN_FREE_DISK_BYTES":"536870912","MAX_OPEN_CONNECTIONS":"64","WEBSOCKET_QUEUE_MAX_BYTES":"8388608","WEBSOCKET_PROCESS_QUEUE_MAX_BYTES":"67108864","DURABLE_TRANSFER_MAX_BYTES":"4194304","RELAY_MEMORY_LIMIT_BYTES":"268435456","BACKUP_DIR":"/backups","BACKUP_INTERVAL":"6h","BACKUP_RETENTION_COUNT":"14","BUILD_VERSION":"relay-v1.0.0"},
+      "environment":{"TWINOTIFY_ENV":"production","LISTEN_ADDR":":8080","BOLT_PATH":"/data/twinotify-relay.db","TRUST_PROXY_HEADERS":"true","REQUIRE_MUTUAL_PAIR_SIGNATURES":"true","MIN_FREE_DISK_BYTES":"536870912","MAX_OPEN_CONNECTIONS":"64","WEBSOCKET_QUEUE_MAX_BYTES":"8388608","WEBSOCKET_PROCESS_QUEUE_MAX_BYTES":"67108864","WEBSOCKET_INBOUND_PROCESS_MAX_BYTES":"33554432","DURABLE_TRANSFER_MAX_BYTES":"4194304","RELAY_MEMORY_LIMIT_BYTES":"268435456","BACKUP_DIR":"/backups","BACKUP_INTERVAL":"6h","BACKUP_RETENTION_COUNT":"14","BUILD_VERSION":"relay-v1.0.0"},
       "expose":["8080"],"networks":{"relay-internal":null},
       "volumes":[{"type":"volume","source":"relay-data","target":"/data"},{"type":"volume","source":"relay-backups","target":"/backups"}],
       "read_only":true,"user":"65532:65532","cap_drop":["ALL"],"security_opt":["no-new-privileges:true"],

@@ -2,14 +2,302 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http/httptest"
 	"path/filepath"
+	testingruntime "runtime"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/twinotify/relay/internal/store"
 )
+
+func TestInboundFrameGateExactBoundaryWaitAndCancellation(t *testing.T) {
+	gate := newInboundFrameGate(2*inboundFrameReservation, nil)
+	waitReached := make(chan struct{})
+	gate.beforeWait = func() { close(waitReached) }
+	releaseFirst, ok := gate.acquire(context.Background())
+	if !ok {
+		t.Fatal("first fixed reservation rejected")
+	}
+	releaseSecond, ok := gate.acquire(context.Background())
+	if !ok {
+		t.Fatal("second reservation at exact boundary rejected")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	waiting := make(chan bool, 1)
+	go func() {
+		_, acquired := gate.acquire(ctx)
+		waiting <- acquired
+	}()
+	<-waitReached
+	cancel()
+	if acquired := <-waiting; acquired {
+		t.Fatal("cancelled inbound waiter acquired memory")
+	}
+	if got := gate.bytesCharged(); got != 2*inboundFrameReservation {
+		t.Fatalf("charged after cancelled waiter = %d, want %d", got, 2*inboundFrameReservation)
+	}
+	releaseFirst()
+	releaseSecond()
+	if got := gate.bytesCharged(); got != 0 {
+		t.Fatalf("charged after exact releases = %d, want 0", got)
+	}
+}
+
+func TestHandshakeCapacityWaitWakesOnOtherClientGlobalRelease(t *testing.T) {
+	frame := bytes.Repeat([]byte{'x'}, 1024)
+	charge := outboundFrameCharge(frame)
+	hub := newClientHubWithMemoryLimits(2000, 128<<20, charge, charge, nil)
+	a := hub.Register("a", make(chan []byte, 1))
+	b := hub.Register("b", make(chan []byte, 1))
+	defer hub.Unregister(a)
+	defer hub.Unregister(b)
+	if !hub.SetProtocolAndCapabilities(a, protocolV2Handshake, []int{2, 1}) || !hub.Send("b", frame) {
+		t.Fatal("prepare globally saturated clients")
+	}
+	waitReached := make(chan struct{})
+	hub.capacityWaitBeforeBlock = func(client *wsClient) {
+		if client == a {
+			close(waitReached)
+		}
+	}
+	done := make(chan bool, 1)
+	go func() { done <- hub.waitForHandshakeCapacity(a, 1, charge) }()
+	<-waitReached
+	hub.releaseOutbound(b, outboundFrameCharge(<-b.outbound))
+	if !<-done {
+		t.Fatal("other client's global release did not wake handshake waiter")
+	}
+}
+
+func TestHandshakeCapacityWaitCancelsOnExactReplacement(t *testing.T) {
+	frame := bytes.Repeat([]byte{'x'}, 1024)
+	charge := outboundFrameCharge(frame)
+	hub := newClientHubWithMemoryLimits(2000, 128<<20, charge, charge, nil)
+	a := hub.Register("a", make(chan []byte, 1))
+	b := hub.Register("b", make(chan []byte, 1))
+	if !hub.SetProtocolAndCapabilities(a, protocolV2Handshake, []int{2, 1}) || !hub.Send("b", frame) {
+		t.Fatal("prepare globally saturated clients")
+	}
+	waitReached := make(chan struct{})
+	hub.capacityWaitBeforeBlock = func(client *wsClient) {
+		if client == a {
+			close(waitReached)
+		}
+	}
+	done := make(chan bool, 1)
+	go func() { done <- hub.waitForHandshakeCapacity(a, 1, charge) }()
+	<-waitReached
+	replacement := hub.Register("a", make(chan []byte, 1))
+	defer hub.Unregister(replacement)
+	if <-done {
+		t.Fatal("replaced catch-up waiter reported capacity")
+	}
+	hub.releaseOutbound(b, outboundFrameCharge(<-b.outbound))
+	hub.Unregister(b)
+}
+
+func TestInboundFrameGateIdleSocketIsUncharged(t *testing.T) {
+	gate := newInboundFrameGate(2*inboundFrameReservation, nil)
+	if got := gate.bytesCharged(); got != 0 {
+		t.Fatalf("idle gate bytes = %d, want 0", got)
+	}
+}
+
+func TestInboundFrameGateWaiterIsCancelledByExactClientReplacement(t *testing.T) {
+	gate := newInboundFrameGate(2*inboundFrameReservation, nil)
+	releaseOne, _ := gate.acquire(context.Background())
+	releaseTwo, _ := gate.acquire(context.Background())
+	hub := NewClientHub()
+	old := hub.Register("device", make(chan []byte, 1))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-old.admissionDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	done := make(chan bool, 1)
+	go func() {
+		_, admitted := gate.acquire(ctx)
+		done <- admitted
+	}()
+	hub.Register("device", make(chan []byte, 1))
+	if admitted := <-done; admitted {
+		t.Fatal("replaced client's blocked inbound reservation was admitted")
+	}
+	if got := gate.bytesCharged(); got != 2*inboundFrameReservation {
+		t.Fatalf("replacement cancellation changed owner bytes to %d", got)
+	}
+	releaseOne()
+	releaseTwo()
+}
+
+func TestInboundFrameGatePublishesAnonymousChargeAndWaitMetrics(t *testing.T) {
+	metrics := newRelayMetrics()
+	gate := newInboundFrameGate(2*inboundFrameReservation, metrics)
+	releaseOne, _ := gate.acquire(context.Background())
+	releaseTwo, _ := gate.acquire(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = gate.acquire(ctx)
+	}()
+	for metrics.websocketInboundWaits.Load() == 0 {
+		testingruntime.Gosched()
+	}
+	cancel()
+	<-done
+	if got := metrics.websocketInboundBytes.Load(); got != int64(2*inboundFrameReservation) {
+		t.Fatalf("inbound metric bytes = %d, want %d", got, 2*inboundFrameReservation)
+	}
+	releaseOne()
+	releaseTwo()
+	if got := metrics.websocketInboundBytes.Load(); got != 0 {
+		t.Fatalf("inbound metric after release = %d, want 0", got)
+	}
+}
+
+func TestRelayPutReleasesInboundReservationBeforeAcceptedWrite(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	client := srv.clientHub.RegisterPair(pair.deviceA, pair.pairID, make(chan []byte, 1))
+	defer srv.clientHub.Unregister(client)
+	if !srv.clientHub.SetProtocolAndCapabilities(client, protocolV2, []int{2, 1}) {
+		t.Fatal("set protocol")
+	}
+	put := RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, "88222222-2222-4222-8222-222222222222")}
+	raw, err := json.Marshal(put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, _ := srv.inboundFrames.acquire(context.Background())
+	acceptedEntered := make(chan struct{})
+	releaseAccepted := make(chan struct{})
+	done := make(chan bool, 1)
+	protocol := protocolV2
+	go func() {
+		done <- srv.processWebSocketMessage(pair.deviceA, pair.pairID, client, &protocol, websocket.TextMessage, raw, func(frame any) error {
+			if _, ok := frame.(RelayAccepted); ok {
+				close(acceptedEntered)
+				<-releaseAccepted
+			}
+			return nil
+		}, func(string, string) error { return nil }, release)
+	}()
+	<-acceptedEntered
+	if got := srv.inboundFrames.bytesCharged(); got != 0 {
+		t.Fatalf("blocked accepted write retained %d inbound bytes", got)
+	}
+	close(releaseAccepted)
+	if !<-done {
+		t.Fatal("put processing closed connection")
+	}
+}
+
+func TestRelayHelloReleasesInboundReservationBeforeBlockedCatchUpActivation(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	client := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, make(chan []byte, 1))
+	defer srv.clientHub.Unregister(client)
+	reached := make(chan struct{})
+	releaseActivation := make(chan struct{})
+	srv.relayHelloBeforeActivate = func(string) {
+		close(reached)
+		<-releaseActivation
+	}
+	release, _ := srv.inboundFrames.acquire(context.Background())
+	raw, err := json.Marshal(RelayHello{V: 2, Type: "relay.hello", Protocols: []int{2, 1}, AppVersion: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocol := protocolUnknown
+	done := make(chan bool, 1)
+	go func() {
+		done <- srv.processWebSocketMessage(pair.deviceB, pair.pairID, client, &protocol, websocket.TextMessage, raw, func(any) error { return nil }, func(string, string) error { return nil }, release)
+	}()
+	<-reached
+	if got := srv.inboundFrames.bytesCharged(); got != 0 {
+		t.Fatalf("blocked catch-up activation retained %d inbound bytes", got)
+	}
+	close(releaseActivation)
+	if !<-done {
+		t.Fatal("hello processing closed connection")
+	}
+}
+
+func TestLegacyForwardReleasesInboundReservationBeforeSenderWrite(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	sender := srv.clientHub.RegisterPair(pair.deviceA, pair.pairID, make(chan []byte, 1))
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, make(chan []byte, 1))
+	defer srv.clientHub.Unregister(sender)
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(sender, protocolV2, []int{2, 1}) || !srv.clientHub.SetProtocol(recipient, protocolLegacy) {
+		t.Fatal("set legacy forwarding protocols")
+	}
+	put := RelayPut{V: 2, Type: "relay.put", Envelope: validLegacyMailboxEnvelope(pair.deviceA, "88444444-4444-4444-8444-444444444444")}
+	raw, err := json.Marshal(put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, _ := srv.inboundFrames.acquire(context.Background())
+	writeEntered := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	protocol := protocolV2
+	done := make(chan bool, 1)
+	go func() {
+		done <- srv.processWebSocketMessage(pair.deviceA, pair.pairID, sender, &protocol, websocket.TextMessage, raw, func(frame any) error {
+			if _, ok := frame.(RelayLegacyForwarded); ok {
+				close(writeEntered)
+				<-releaseWrite
+			}
+			return nil
+		}, func(string, string) error { return nil }, release)
+	}()
+	<-writeEntered
+	if got := srv.inboundFrames.bytesCharged(); got != 0 {
+		t.Fatalf("blocked legacy response retained %d inbound bytes", got)
+	}
+	close(releaseWrite)
+	if !<-done {
+		t.Fatal("legacy processing closed connection")
+	}
+}
+
+func TestWebSocketWriterFailureCancelsCatchUp(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	msgID := "88333333-3333-4333-8333-333333333333"
+	putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, msgID), time.Now())
+	writeFailed := make(chan struct{})
+	srv.webSocketWriteBefore = func(messageType int, data []byte) error {
+		if messageType == websocket.TextMessage && bytes.Contains(data, []byte(`"type":"relay.deliver"`)) {
+			close(writeFailed)
+			return errors.New("injected writer failure")
+		}
+		return nil
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer recipient.Close()
+	sendMailboxHello(t, recipient)
+	<-writeFailed
+	_ = recipient.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := recipient.ReadMessage(); err == nil {
+		t.Fatal("writer failure left catch-up socket open")
+	}
+}
 
 // This unit test exercises exact arithmetic boundaries. Writer ownership and
 // release timing are proven with real blocked sockets in metrics_test.go.
@@ -50,6 +338,8 @@ func TestWebSocketMemoryConfigFailsClosed(t *testing.T) {
 	cases := map[string]func(*Config){
 		"zero connection queue":          func(c *Config) { c.WebSocketQueueMaxBytes = 0 },
 		"zero process queue":             func(c *Config) { c.WebSocketProcessQueueMaxBytes = 0 },
+		"inbound below two reservations": func(c *Config) { c.WebSocketInboundProcessMaxBytes = 2*inboundFrameReservation - 1 },
+		"inbound arithmetic overflow":    func(c *Config) { c.WebSocketInboundProcessMaxBytes = ^uint64(0) },
 		"zero transfer workspace":        func(c *Config) { c.DurableTransferMaxBytes = 0 },
 		"connection below maximum frame": func(c *Config) { c.WebSocketQueueMaxBytes = maxRelayDeliverFrameBytes - 1 },
 		"process below connection":       func(c *Config) { c.WebSocketProcessQueueMaxBytes = c.WebSocketQueueMaxBytes - 1 },

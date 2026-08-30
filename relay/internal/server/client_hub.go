@@ -20,8 +20,11 @@ type ClientHub struct {
 	queueMaxBytes   uint64
 	processMaxBytes uint64
 	outboundBytes   uint64
+	capacityChanged chan struct{}
 	metrics         *relayMetrics
 	resolveHandoff  func(*wsClient, []queuedV2Notification) error
+	// capacityWaitBeforeBlock is a deterministic test seam. Production leaves it nil.
+	capacityWaitBeforeBlock func(*wsClient)
 }
 
 // wsClient wraps a single authenticated WebSocket connection. Its queue is
@@ -43,7 +46,10 @@ type wsClient struct {
 	stopOnce            sync.Once
 	closed              chan struct{}
 	closedOnce          sync.Once
+	admissionDone       chan struct{}
+	admissionOnce       sync.Once
 	outboundBytes       uint64
+	deliveryCursor      uint64
 }
 
 type websocketDrain struct {
@@ -73,7 +79,10 @@ const (
 
 func (c *wsClient) stop() {
 	c.stopOnce.Do(func() { close(c.done) })
+	c.cancelAdmission()
 }
+
+func (c *wsClient) cancelAdmission() { c.admissionOnce.Do(func() { close(c.admissionDone) }) }
 
 func (c *wsClient) markClosed() {
 	c.closedOnce.Do(func() { close(c.closed) })
@@ -96,6 +105,7 @@ func newClientHubWithMemoryLimits(maxItems int, maxBytes, queueMaxBytes, process
 		queueMaxBytes:   queueMaxBytes,
 		processMaxBytes: processMaxBytes,
 		metrics:         metrics,
+		capacityChanged: make(chan struct{}),
 	}
 }
 
@@ -127,7 +137,7 @@ func (h *ClientHub) registerPair(deviceID, pairID string, out chan []byte) (*wsC
 	defer h.mu.Unlock()
 	c := &wsClient{
 		deviceID: deviceID, pairID: pairID, outbound: out,
-		done: make(chan struct{}), drain: make(chan websocketDrain, 1), closed: make(chan struct{}),
+		done: make(chan struct{}), drain: make(chan websocketDrain, 1), closed: make(chan struct{}), admissionDone: make(chan struct{}),
 	}
 	if h.draining {
 		c.stop()
@@ -162,6 +172,7 @@ func (h *ClientHub) Drain(code int, reason string) <-chan struct{} {
 	signal := websocketDrain{code: code, reason: reason}
 	for client := range h.active {
 		clients = append(clients, client)
+		client.cancelAdmission()
 		select {
 		case client.drain <- signal:
 		default:
@@ -226,9 +237,107 @@ func (h *ClientHub) releaseOutboundLocked(c *wsClient, bytes uint64) {
 	}
 	c.outboundBytes -= bytes
 	h.outboundBytes -= bytes
+	h.signalCapacityChangedLocked()
 	if h.metrics != nil {
 		h.metrics.addWebSocketOutboundBytes(-int64(bytes))
 	}
+}
+
+func (h *ClientHub) signalCapacityChangedLocked() {
+	close(h.capacityChanged)
+	h.capacityChanged = make(chan struct{})
+}
+
+func (h *ClientHub) waitForHandshakeCapacity(c *wsClient, items int, bytes uint64) bool {
+	for {
+		h.mu.Lock()
+		current, ok := h.clients[c.deviceID]
+		if !ok || current != c || c.protocol != protocolV2Handshake {
+			h.mu.Unlock()
+			return false
+		}
+		select {
+		case <-c.done:
+			h.mu.Unlock()
+			return false
+		case <-c.admissionDone:
+			h.mu.Unlock()
+			return false
+		default:
+		}
+		if h.capacityAvailableLocked(c, items, bytes) {
+			h.mu.Unlock()
+			return true
+		}
+		wake := h.capacityChanged
+		h.mu.Unlock()
+		if h.capacityWaitBeforeBlock != nil {
+			h.capacityWaitBeforeBlock(c)
+		}
+		select {
+		case <-c.done:
+			return false
+		case <-c.admissionDone:
+			return false
+		case <-wake:
+		}
+	}
+}
+
+func (h *ClientHub) activityChannel() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.capacityChanged
+}
+
+func (h *ClientHub) waitForHandshakeActivity(c *wsClient, wake <-chan struct{}) bool {
+	select {
+	case <-c.done:
+		return false
+	case <-c.admissionDone:
+		return false
+	case <-wake:
+		return true
+	}
+}
+
+func (h *ClientHub) advanceHandshakeCursor(c *wsClient, sequence uint64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	current, ok := h.clients[c.deviceID]
+	if !ok || current != c || c.protocol != protocolV2Handshake {
+		return false
+	}
+	if sequence > c.deliveryCursor {
+		c.deliveryCursor = sequence
+	}
+	return true
+}
+
+// tryActivateCaughtUpV2 is called only while the caller holds the recipient
+// commit lane and the process delivery-transfer mutex. This makes the final
+// empty durable query and activation one linearization point.
+func (h *ClientHub) tryActivateCaughtUpV2(c *wsClient) (activated, waitForSlot bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	current, ok := h.clients[c.deviceID]
+	if !ok || current != c || c.protocol != protocolV2Handshake {
+		return false, false
+	}
+	select {
+	case <-c.done:
+		return false, false
+	default:
+	}
+	for msgID := range c.handshakeNotices {
+		delete(c.handshakeNotices, msgID)
+	}
+	c.handshakeBytes = 0
+	if len(c.pendingCapabilities) > 0 && !h.transferPendingCapabilitiesLocked(c) {
+		return false, true
+	}
+	c.protocol = protocolV2
+	return true, false
 }
 
 func (h *ClientHub) outboundBytesCharged() uint64 {
@@ -386,11 +495,15 @@ func (h *ClientHub) TransferV2BatchForPair(deviceID, pairID string, notification
 			c.handshakeNotices[notification.msgID] = notification
 			c.handshakeBytes += notification.byteSize
 		}
+		h.signalCapacityChangedLocked()
 		return true
 	case protocolV2:
 		queueIndexes := make([]int, 0, len(notifications))
 		for i, notification := range notifications {
-			if _, suppress := c.handoffSuppress[notification.msgID]; !suppress {
+			if notification.sequence > c.deliveryCursor {
+				if _, suppress := c.handoffSuppress[notification.msgID]; suppress {
+					continue
+				}
 				queueIndexes = append(queueIndexes, i)
 			}
 		}
@@ -400,6 +513,9 @@ func (h *ClientHub) TransferV2BatchForPair(deviceID, pairID string, notification
 			return false
 		}
 		for i, notification := range notifications {
+			if notification.sequence <= c.deliveryCursor {
+				continue
+			}
 			if _, suppress := c.handoffSuppress[notification.msgID]; suppress {
 				delete(c.handoffSuppress, notification.msgID)
 				continue
@@ -431,7 +547,6 @@ func (h *ClientHub) TransferHandshakeV2Batch(c *wsClient, notifications []queued
 	}
 	queueBytes, ok := framesBytes(frames, nil)
 	if !ok || !h.canEnqueueLocked(c, len(frames), queueBytes) {
-		c.stop()
 		return false
 	}
 	for _, frame := range frames {
@@ -472,8 +587,12 @@ func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) bool {
 		drainedIDs = nil
 		queued := make([]queuedV2Notification, 0, len(c.handshakeNotices))
 		for msgID, notification := range c.handshakeNotices {
-			if _, alreadyDrained := drained[msgID]; !alreadyDrained {
-				queued = append(queued, notification)
+			if notification.sequence > c.deliveryCursor {
+				if _, alreadyDrained := drained[msgID]; !alreadyDrained {
+					queued = append(queued, notification)
+				}
+			} else {
+				c.handoffSuppress[msgID] = struct{}{}
 			}
 			delete(c.handshakeNotices, msgID)
 		}
@@ -487,9 +606,11 @@ func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) bool {
 		if len(queued) == 0 {
 			if len(c.pendingCapabilities) > 0 {
 				if !h.transferPendingCapabilitiesLocked(c) {
-					c.stop()
 					h.mu.Unlock()
-					return false
+					if !h.waitForHandshakeCapacity(c, 1, 0) {
+						return false
+					}
+					continue
 				}
 			}
 			c.protocol = protocolV2
@@ -538,12 +659,19 @@ func (h *ClientHub) enqueueLocked(c *wsClient, frame []byte) bool {
 }
 
 func (h *ClientHub) canEnqueueLocked(c *wsClient, items int, bytes uint64) bool {
-	if items < 0 || cap(c.outbound)-len(c.outbound) < items || bytes > h.queueMaxBytes ||
-		c.outboundBytes > h.queueMaxBytes-bytes || bytes > h.processMaxBytes ||
-		h.outboundBytes > h.processMaxBytes-bytes {
+	if !h.capacityAvailableLocked(c, items, bytes) {
 		if h.metrics != nil {
 			h.metrics.recordWebSocketAdmissionRejected()
 		}
+		return false
+	}
+	return true
+}
+
+func (h *ClientHub) capacityAvailableLocked(c *wsClient, items int, bytes uint64) bool {
+	if items < 0 || cap(c.outbound)-len(c.outbound) < items || bytes > h.queueMaxBytes ||
+		c.outboundBytes > h.queueMaxBytes-bytes || bytes > h.processMaxBytes ||
+		h.outboundBytes > h.processMaxBytes-bytes {
 		return false
 	}
 	return true

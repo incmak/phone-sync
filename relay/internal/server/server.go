@@ -32,6 +32,7 @@ type Server struct {
 	shuttingDown                atomic.Bool
 	metrics                     *relayMetrics
 	durableTransferMaxBytes     uint64
+	inboundFrames               *inboundFrameGate
 	now                         func() time.Time
 	mutationMu                  sync.RWMutex
 	maintenanceInterval         time.Duration
@@ -62,6 +63,12 @@ type Server struct {
 	// relayHelloBeforeMailboxStore is a deterministic test barrier before
 	// hello-triggered expiry and expiry-cursor mutations.
 	relayHelloBeforeMailboxStore func(operation string)
+	// relayHelloBeforeSequenceMigration is a deterministic test barrier before
+	// shutdown-linearized legacy acceptance-sequence migration.
+	relayHelloBeforeSequenceMigration func()
+	// relayHelloCatchUpBlocked is a deterministic test seam after an unready
+	// accepted-write barrier is observed and before catch-up waits.
+	relayHelloCatchUpBlocked func(sequence uint64)
 	// authBeforeJTIStore is a deterministic test barrier immediately before
 	// persistent replay admission acquires shutdown-linearized write admission.
 	authBeforeJTIStore func()
@@ -69,6 +76,8 @@ type Server struct {
 	// shutdown control frames and connection joining do not depend on a data
 	// writer releasing the application-level write mutex.
 	webSocketWriteAfterLock func()
+	// webSocketWriteBefore injects deterministic write failures in tests.
+	webSocketWriteBefore func(messageType int, data []byte) error
 	// pairNotifyReaderStarted and pairNotifyReaderBeforeExit are deterministic
 	// seams for proving that process-wide WebSocket drain joins pairing readers.
 	pairNotifyReaderStarted    func()
@@ -91,24 +100,25 @@ func NewWithDependencies(b *store.Bolt, mailboxLimits store.MailboxLimits) *Serv
 }
 
 type Config struct {
-	MailboxLimits                 store.MailboxLimits
-	PendingPairLimits             store.PendingPairLimits
-	PairingRateLimits             PairingRateLimitConfig
-	AuthenticationRateLimits      AuthenticationRateLimitConfig
-	JTI                           JTICacheConfig
-	MaintenanceInterval           time.Duration
-	MailboxExpiryBatch            int
-	StatusExpiryBatch             int
-	TrustProxyHeaders             bool
-	RequireMutualPairSignatures   bool
-	CapacityCheck                 CapacityCheck
-	BuildVersion                  string
-	WebSocketQueueMaxBytes        uint64
-	WebSocketProcessQueueMaxBytes uint64
-	DurableTransferMaxBytes       uint64
-	RelayMemoryLimitBytes         uint64
-	MaxOpenConnections            int
-	Now                           func() time.Time
+	MailboxLimits                   store.MailboxLimits
+	PendingPairLimits               store.PendingPairLimits
+	PairingRateLimits               PairingRateLimitConfig
+	AuthenticationRateLimits        AuthenticationRateLimitConfig
+	JTI                             JTICacheConfig
+	MaintenanceInterval             time.Duration
+	MailboxExpiryBatch              int
+	StatusExpiryBatch               int
+	TrustProxyHeaders               bool
+	RequireMutualPairSignatures     bool
+	CapacityCheck                   CapacityCheck
+	BuildVersion                    string
+	WebSocketQueueMaxBytes          uint64
+	WebSocketProcessQueueMaxBytes   uint64
+	WebSocketInboundProcessMaxBytes uint64
+	DurableTransferMaxBytes         uint64
+	RelayMemoryLimitBytes           uint64
+	MaxOpenConnections              int
+	Now                             func() time.Time
 }
 
 func DefaultConfig() Config {
@@ -123,18 +133,19 @@ func DefaultConfig() Config {
 			IPBurst: 2_000, DeviceBurst: 120, RefillInterval: time.Second, IdleTTL: 10 * time.Minute,
 			MaxEntries: 20_000, CleanupBatch: 256,
 		},
-		JTI:                           JTICacheConfig{TTL: 60 * time.Second, MaxEntries: 100_000, CleanupBatch: 256},
-		MaintenanceInterval:           time.Minute,
-		MailboxExpiryBatch:            256,
-		StatusExpiryBatch:             256,
-		CapacityCheck:                 noCapacityLimit,
-		BuildVersion:                  "dev",
-		WebSocketQueueMaxBytes:        defaultWebSocketQueueMaxBytes,
-		WebSocketProcessQueueMaxBytes: defaultWebSocketProcessQueueMaxBytes,
-		DurableTransferMaxBytes:       defaultDurableTransferMaxBytes,
-		RelayMemoryLimitBytes:         256 << 20,
-		MaxOpenConnections:            64,
-		Now:                           time.Now,
+		JTI:                             JTICacheConfig{TTL: 60 * time.Second, MaxEntries: 100_000, CleanupBatch: 256},
+		MaintenanceInterval:             time.Minute,
+		MailboxExpiryBatch:              256,
+		StatusExpiryBatch:               256,
+		CapacityCheck:                   noCapacityLimit,
+		BuildVersion:                    "dev",
+		WebSocketQueueMaxBytes:          defaultWebSocketQueueMaxBytes,
+		WebSocketProcessQueueMaxBytes:   defaultWebSocketProcessQueueMaxBytes,
+		WebSocketInboundProcessMaxBytes: 32 << 20,
+		DurableTransferMaxBytes:         defaultDurableTransferMaxBytes,
+		RelayMemoryLimitBytes:           256 << 20,
+		MaxOpenConnections:              64,
+		Now:                             time.Now,
 	}
 }
 
@@ -192,6 +203,7 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 		capacityCheck:               config.CapacityCheck,
 		buildVersion:                config.BuildVersion,
 		metrics:                     metrics,
+		inboundFrames:               newInboundFrameGate(config.WebSocketInboundProcessMaxBytes, metrics),
 		durableTransferMaxBytes:     config.DurableTransferMaxBytes,
 		now:                         config.Now,
 		maintenanceInterval:         config.MaintenanceInterval,
@@ -208,6 +220,7 @@ func NewWithConfigChecked(b *store.Bolt, config Config) (*Server, error) {
 func validateWebSocketMemoryConfig(config Config) error {
 	minimumFrameCharge := uint64(maxRelayDeliverFrameBytes + webSocketFrameMemoryOverhead)
 	if config.WebSocketQueueMaxBytes < minimumFrameCharge || config.WebSocketProcessQueueMaxBytes < config.WebSocketQueueMaxBytes ||
+		config.WebSocketInboundProcessMaxBytes < 2*inboundFrameReservation ||
 		config.DurableTransferMaxBytes < maxRelayDeliverFrameBytes || config.RelayMemoryLimitBytes == 0 || config.MaxOpenConnections <= 0 {
 		return errors.New("invalid WebSocket memory limits")
 	}
@@ -217,10 +230,10 @@ func validateWebSocketMemoryConfig(config Config) error {
 	}
 	inbound := connections * uint64(maxRelayControlFrameSize)
 	workspace := 2 * config.DurableTransferMaxBytes
-	if config.WebSocketProcessQueueMaxBytes > ^uint64(0)-inbound || workspace > ^uint64(0)-inbound-config.WebSocketProcessQueueMaxBytes {
+	if config.WebSocketInboundProcessMaxBytes > ^uint64(0)-inbound || config.WebSocketProcessQueueMaxBytes > ^uint64(0)-inbound-config.WebSocketInboundProcessMaxBytes || workspace > ^uint64(0)-inbound-config.WebSocketInboundProcessMaxBytes-config.WebSocketProcessQueueMaxBytes {
 		return errors.New("WebSocket controlled memory overflow")
 	}
-	controlled := inbound + config.WebSocketProcessQueueMaxBytes + workspace
+	controlled := inbound + config.WebSocketInboundProcessMaxBytes + config.WebSocketProcessQueueMaxBytes + workspace
 	if controlled > config.RelayMemoryLimitBytes-(config.RelayMemoryLimitBytes/4) {
 		return errors.New("WebSocket memory limits exceed safe container margin")
 	}

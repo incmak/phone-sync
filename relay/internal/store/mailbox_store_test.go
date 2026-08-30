@@ -82,6 +82,441 @@ func TestPendingMetadataForPairPreservesAuthorizationOrderAndOmitsEnvelope(t *te
 	}
 }
 
+func TestPendingMetadataAfterForPairIsExclusiveOrderedAndAuthorized(t *testing.T) {
+	bolt, err := OpenBolt(filepath.Join(t.TempDir(), "mailbox-cursor.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bolt.Close()
+	pairs, err := OpenPairStore(bolt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "pair-cursor", DeviceA: "dev-a", DeviceB: "dev-b"}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := OpenMailboxStore(bolt, DefaultMailboxLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 4; index++ {
+		record := testMailboxRecord(fmt.Sprintf("%08d-1111-4111-8111-111111111111", index), fmt.Sprintf("%d", index))
+		record.RecipientDevice, record.SenderDevice = "dev-b", "dev-a"
+		if _, err := mailbox.PutForPair("pair-cursor", record, time.UnixMilli(int64(index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := mailbox.PendingMetadataAfterForPair("pair-cursor", "dev-b", 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].AcceptanceSequence != 3 || page[1].AcceptanceSequence != 4 {
+		t.Fatalf("cursor page = %#v, want sequences [3 4]", page)
+	}
+	if _, err := mailbox.PendingMetadataAfterForPair("wrong-pair", "dev-b", 0, 2); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong-pair cursor query error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPendingMetadataAfterForPairRejectsOrderRecordCorruption(t *testing.T) {
+	b := openTestBolt(t)
+	pairs, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "pair-corrupt-cursor", DeviceA: "dev-a", DeviceB: "dev-b"}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	record := testMailboxRecord("89999999-9999-4999-8999-999999999999", "c")
+	record.RecipientDevice, record.SenderDevice = "dev-b", "dev-a"
+	if _, err := mailbox.PutForPair("pair-corrupt-cursor", record, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		order := tx.Bucket([]byte(bucketMailboxOrder))
+		if err := order.Delete(orderKey("dev-b", 1, record.MsgID)); err != nil {
+			return err
+		}
+		return order.Put(orderKey("dev-b", 2, record.MsgID), nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mailbox.PendingMetadataAfterForPair("pair-corrupt-cursor", "dev-b", 0, 2); err == nil {
+		t.Fatal("sequence-corrupt order index was accepted")
+	}
+}
+
+func TestPendingMetadataAfterForPairRejectsDecodedIdentityCorruption(t *testing.T) {
+	for name, mutate := range map[string]func(*MailboxRecord){
+		"recipient": func(record *MailboxRecord) { record.RecipientDevice = "other-device" },
+		"sender":    func(record *MailboxRecord) { record.SenderDevice = "other-device" },
+		"message":   func(record *MailboxRecord) { record.MsgID = "80000000-0000-4000-8000-000000000000" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := openTestBolt(t)
+			pairs, err := OpenPairStore(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pairs.Confirm(ConfirmedPair{PairID: "pair-corrupt-identity", DeviceA: "dev-a", DeviceB: "dev-b"}); err != nil {
+				t.Fatal(err)
+			}
+			mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+			record := testMailboxRecord("89888888-8888-4888-8888-888888888888", "d")
+			record.RecipientDevice, record.SenderDevice = "dev-b", "dev-a"
+			if _, err := mailbox.PutForPair("pair-corrupt-identity", record, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Update(func(tx *bbolt.Tx) error {
+				items := tx.Bucket([]byte(bucketMailboxItems))
+				raw := items.Get(itemKey("dev-b", record.MsgID))
+				var corrupt MailboxRecord
+				if err := json.Unmarshal(raw, &corrupt); err != nil {
+					return err
+				}
+				mutate(&corrupt)
+				encoded, err := json.Marshal(corrupt)
+				if err != nil {
+					return err
+				}
+				return items.Put(itemKey("dev-b", record.MsgID), encoded)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := mailbox.PendingMetadataAfterForPair("pair-corrupt-identity", "dev-b", 0, 2); err == nil {
+				t.Fatal("identity-corrupt mailbox record was accepted")
+			}
+		})
+	}
+}
+
+func TestEnsureAcceptanceSequencesMigratesLegacyRowsBeforeFirstNewPut(t *testing.T) {
+	b := openTestBolt(t)
+	pairs, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "legacy-pair", DeviceA: "legacy-a", DeviceB: "legacy-b"}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	want := []string{
+		"70000000-0000-4000-8000-000000000001",
+		"70000000-0000-4000-8000-000000000002",
+		"70000000-0000-4000-8000-000000000003",
+	}
+	seedLegacyMailboxRecords(t, b, "legacy-a", "legacy-b", want, 1234)
+	var admitted uint64
+	if err := mailbox.EnsureAcceptanceSequencesForPair("legacy-pair", "legacy-b", func(required uint64) error {
+		admitted = required
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if admitted == 0 {
+		t.Fatal("legacy migration made no capacity reservation")
+	}
+	var cursor uint64
+	var got []string
+	for {
+		page, err := mailbox.PendingMetadataAfterForPair("legacy-pair", "legacy-b", cursor, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		got = append(got, page[0].MsgID)
+		cursor = page[0].AcceptanceSequence
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("migrated same-millisecond pages = %v, want %v", got, want)
+	}
+	if err := mailbox.EnsureAcceptanceSequencesForPair("wrong-pair", "legacy-b", nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong-pair migration error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestEnsureAcceptanceSequencesCapacityFailureRollsBackExactly(t *testing.T) {
+	b := openTestBolt(t)
+	pairs, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "legacy-capacity-pair", DeviceA: "legacy-a", DeviceB: "legacy-b"}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	seedLegacyMailboxRecords(t, b, "legacy-a", "legacy-b", []string{
+		"71000000-0000-4000-8000-000000000001",
+		"71000000-0000-4000-8000-000000000002",
+	}, 2000)
+	before := snapshotMailboxBuckets(t, b)
+	capacityErr := errors.New("migration capacity unavailable")
+	if err := mailbox.EnsureAcceptanceSequencesForPair("legacy-capacity-pair", "legacy-b", func(required uint64) error {
+		if required == 0 {
+			t.Fatal("migration capacity reservation was zero")
+		}
+		return capacityErr
+	}); !errors.Is(err, capacityErr) {
+		t.Fatalf("migration error = %v, want capacity failure", err)
+	}
+	after := snapshotMailboxBuckets(t, b)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("capacity-rejected legacy migration mutated mailbox buckets")
+	}
+	if err := mailbox.EnsureAcceptanceSequencesForPair("legacy-capacity-pair", "legacy-b", func(uint64) error { return nil }); err != nil {
+		t.Fatalf("retry migration after capacity recovery: %v", err)
+	}
+	page, err := mailbox.PendingMetadataAfterForPair("legacy-capacity-pair", "legacy-b", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].AcceptanceSequence != 1 || page[1].AcceptanceSequence != 2 {
+		t.Fatalf("retry page = %#v, want sequences [1 2]", page)
+	}
+}
+
+func TestEnsureAcceptanceSequencesPersistsAcrossReopenAndIsIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-reopen.db")
+	b, err := OpenBolt(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairs, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "legacy-reopen-pair", DeviceA: "legacy-a", DeviceB: "legacy-b"}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := OpenMailboxStore(b, DefaultMailboxLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgIDs := []string{"72000000-0000-4000-8000-000000000001", "72000000-0000-4000-8000-000000000002"}
+	seedLegacyMailboxRecords(t, b, "legacy-a", "legacy-b", msgIDs, 3000)
+	if err := mailbox.EnsureAcceptanceSequencesForPair("legacy-reopen-pair", "legacy-b", func(uint64) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err = OpenBolt(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	mailbox, err = OpenMailboxStore(b, DefaultMailboxLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionCalled := false
+	if err := mailbox.EnsureAcceptanceSequencesForPair("legacy-reopen-pair", "legacy-b", func(uint64) error {
+		admissionCalled = true
+		return errors.New("idempotent migration requested capacity")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if admissionCalled {
+		t.Fatal("persisted migration was not an idempotent no-op")
+	}
+	page, err := mailbox.PendingMetadataAfterForPair("legacy-reopen-pair", "legacy-b", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].MsgID != msgIDs[0] || page[1].MsgID != msgIDs[1] {
+		t.Fatalf("reopened migration page = %#v", page)
+	}
+}
+
+func TestEnsureAcceptanceSequencesRejectsLegacyCorruptionWithoutMutation(t *testing.T) {
+	for name, corrupt := range map[string]func(*bbolt.Tx, string) error{
+		"wrong sender": func(tx *bbolt.Tx, msgID string) error {
+			items := tx.Bucket([]byte(bucketMailboxItems))
+			var rec MailboxRecord
+			if err := json.Unmarshal(items.Get(itemKey("legacy-b", msgID)), &rec); err != nil {
+				return err
+			}
+			rec.SenderDevice = "stranger"
+			encoded, err := json.Marshal(rec)
+			if err != nil {
+				return err
+			}
+			return items.Put(itemKey("legacy-b", msgID), encoded)
+		},
+		"mixed sequence": func(tx *bbolt.Tx, msgID string) error {
+			items := tx.Bucket([]byte(bucketMailboxItems))
+			var rec MailboxRecord
+			if err := json.Unmarshal(items.Get(itemKey("legacy-b", msgID)), &rec); err != nil {
+				return err
+			}
+			rec.AcceptanceSequence = 9
+			encoded, err := json.Marshal(rec)
+			if err != nil {
+				return err
+			}
+			return items.Put(itemKey("legacy-b", msgID), encoded)
+		},
+		"order timestamp": func(tx *bbolt.Tx, msgID string) error {
+			order := tx.Bucket([]byte(bucketMailboxOrder))
+			if err := order.Delete(orderKey("legacy-b", 4000, msgID)); err != nil {
+				return err
+			}
+			return order.Put(orderKey("legacy-b", 4001, msgID), nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := openTestBolt(t)
+			pairs, err := OpenPairStore(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pairs.Confirm(ConfirmedPair{PairID: "legacy-corrupt-pair", DeviceA: "legacy-a", DeviceB: "legacy-b"}); err != nil {
+				t.Fatal(err)
+			}
+			mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+			msgID := "73000000-0000-4000-8000-000000000001"
+			seedLegacyMailboxRecords(t, b, "legacy-a", "legacy-b", []string{msgID}, 4000)
+			if err := b.Update(func(tx *bbolt.Tx) error { return corrupt(tx, msgID) }); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotMailboxBuckets(t, b)
+			if err := mailbox.EnsureAcceptanceSequencesForPair("legacy-corrupt-pair", "legacy-b", nil); err == nil {
+				t.Fatal("corrupt legacy row was migrated")
+			}
+			if after := snapshotMailboxBuckets(t, b); !reflect.DeepEqual(after, before) {
+				t.Fatal("failed corrupt migration changed mailbox state")
+			}
+		})
+	}
+}
+
+func TestPairScopedPutRejectsCorruptLegacySenderDuringLazyMigration(t *testing.T) {
+	b := openTestBolt(t)
+	pairs, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "legacy-put-corrupt-pair", DeviceA: "legacy-a", DeviceB: "legacy-b"}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	legacyID := "73500000-0000-4000-8000-000000000001"
+	seedLegacyMailboxRecords(t, b, "stranger", "legacy-b", []string{legacyID}, 4500)
+	before := snapshotMailboxBuckets(t, b)
+	newRecord := testMailboxRecord("73500000-0000-4000-8000-000000000002", "a")
+	newRecord.SenderDevice, newRecord.RecipientDevice = "legacy-a", "legacy-b"
+	if _, err := mailbox.PutForPair("legacy-put-corrupt-pair", newRecord, time.UnixMilli(4501)); err == nil {
+		t.Fatal("pair-scoped put normalized a corrupt legacy sender")
+	}
+	if after := snapshotMailboxBuckets(t, b); !reflect.DeepEqual(after, before) {
+		t.Fatal("failed lazy migration changed mailbox state")
+	}
+}
+
+func TestEnsureAcceptanceSequencesExcludesRowsExpiredBeforeMigration(t *testing.T) {
+	b := openTestBolt(t)
+	pairs, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "legacy-expiry-pair", DeviceA: "legacy-a", DeviceB: "legacy-b"}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	msgID := "74000000-0000-4000-8000-000000000001"
+	seedLegacyMailboxRecords(t, b, "legacy-a", "legacy-b", []string{msgID}, 5000)
+	if _, err := mailbox.ExpireForPair("legacy-expiry-pair", "legacy-b", time.UnixMilli(5000).Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	admissionCalled := false
+	if err := mailbox.EnsureAcceptanceSequencesForPair("legacy-expiry-pair", "legacy-b", func(uint64) error {
+		admissionCalled = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if admissionCalled {
+		t.Fatal("empty post-expiry order performed a sequence mutation")
+	}
+	page, err := mailbox.PendingMetadataAfterForPair("legacy-expiry-pair", "legacy-b", 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 0 {
+		t.Fatalf("expired legacy row remained pageable: %#v", page)
+	}
+}
+
+func TestEnsureAcceptanceSequencesEmptyMailboxIsExactNoOp(t *testing.T) {
+	b := openTestBolt(t)
+	pairs, err := OpenPairStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pairs.Confirm(ConfirmedPair{PairID: "legacy-empty-pair", DeviceA: "legacy-a", DeviceB: "legacy-b"}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := NewMailboxStore(b, DefaultMailboxLimits())
+	before := snapshotMailboxBuckets(t, b)
+	admissionCalled := false
+	if err := mailbox.EnsureAcceptanceSequencesForPair("legacy-empty-pair", "legacy-b", func(uint64) error {
+		admissionCalled = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if admissionCalled {
+		t.Fatal("empty migration requested capacity")
+	}
+	if after := snapshotMailboxBuckets(t, b); !reflect.DeepEqual(after, before) {
+		t.Fatal("empty migration changed mailbox buckets")
+	}
+}
+
+func seedLegacyMailboxRecords(t *testing.T, b *Bolt, sender, recipient string, msgIDs []string, acceptedAt int64) {
+	t.Helper()
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		items, order, stats, _, err := mailboxBuckets(tx)
+		if err != nil {
+			return err
+		}
+		var totalBytes uint64
+		itemExpiry := tx.Bucket([]byte(bucketMailboxItemExpiry))
+		if itemExpiry == nil {
+			return errors.New("missing mailbox item expiry bucket")
+		}
+		for index, msgID := range msgIDs {
+			record := testMailboxRecord(msgID, fmt.Sprintf("%x", index+1))
+			record.SenderDevice, record.RecipientDevice = sender, recipient
+			record.AcceptedAt = acceptedAt
+			record.ExpiresAt = acceptedAt + int64(time.Hour/time.Millisecond)
+			record.AcceptanceSequence = 0
+			record.ByteSize = uint64(len(record.Envelope))
+			totalBytes += record.ByteSize
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				return err
+			}
+			if err := items.Put(itemKey(recipient, msgID), encoded); err != nil {
+				return err
+			}
+			if err := order.Put(orderKey(recipient, uint64(acceptedAt), msgID), nil); err != nil {
+				return err
+			}
+			canonicalKey := itemKey(recipient, msgID)
+			if err := itemExpiry.Put(maintenanceExpiryKey(record.ExpiresAt, canonicalKey), canonicalKey); err != nil {
+				return err
+			}
+		}
+		return stats.Put([]byte(recipient), encodeMailboxStats(uint64(len(msgIDs)), totalBytes))
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMailboxLiveByIDsCopiesAndOmitsExpiredRecords(t *testing.T) {
 	b := openTestBolt(t)
 	s := NewMailboxStore(b, MailboxLimits{MaxItems: 2, MaxBytes: 1024, Retention: time.Hour})

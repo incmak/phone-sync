@@ -17,21 +17,22 @@ const (
 var buildVersion = "dev"
 
 type runtimeConfig struct {
-	environment                   string
-	listenAddr                    string
-	boltPath                      string
-	trustProxyHeaders             bool
-	requireMutualPairSignatures   bool
-	minFreeDiskBytes              uint64
-	maxOpenConnections            int
-	webSocketQueueMaxBytes        uint64
-	webSocketProcessQueueMaxBytes uint64
-	durableTransferMaxBytes       uint64
-	relayMemoryLimitBytes         uint64
-	backupDir                     string
-	backupInterval                time.Duration
-	backupRetention               int
-	buildVersion                  string
+	environment                     string
+	listenAddr                      string
+	boltPath                        string
+	trustProxyHeaders               bool
+	requireMutualPairSignatures     bool
+	minFreeDiskBytes                uint64
+	maxOpenConnections              int
+	webSocketQueueMaxBytes          uint64
+	webSocketProcessQueueMaxBytes   uint64
+	webSocketInboundProcessMaxBytes uint64
+	durableTransferMaxBytes         uint64
+	relayMemoryLimitBytes           uint64
+	backupDir                       string
+	backupInterval                  time.Duration
+	backupRetention                 int
+	buildVersion                    string
 }
 
 func loadRuntimeConfig(getenv func(string) string) (runtimeConfig, error) {
@@ -47,15 +48,16 @@ func loadRuntimeConfig(getenv func(string) string) (runtimeConfig, error) {
 	}
 
 	config := runtimeConfig{
-		environment:                   environment,
-		listenAddr:                    ":8080",
-		boltPath:                      "/tmp/twinotify-relay.db",
-		maxOpenConnections:            64,
-		webSocketQueueMaxBytes:        8 << 20,
-		webSocketProcessQueueMaxBytes: 64 << 20,
-		durableTransferMaxBytes:       4 << 20,
-		relayMemoryLimitBytes:         256 << 20,
-		buildVersion:                  buildVersion,
+		environment:                     environment,
+		listenAddr:                      ":8080",
+		boltPath:                        "/tmp/twinotify-relay.db",
+		maxOpenConnections:              64,
+		webSocketQueueMaxBytes:          8 << 20,
+		webSocketProcessQueueMaxBytes:   64 << 20,
+		webSocketInboundProcessMaxBytes: 32 << 20,
+		durableTransferMaxBytes:         4 << 20,
+		relayMemoryLimitBytes:           256 << 20,
+		buildVersion:                    buildVersion,
 	}
 	if value := getenv("LISTEN_ADDR"); value != "" {
 		config.listenAddr = value
@@ -87,6 +89,9 @@ func loadRuntimeConfig(getenv func(string) string) (runtimeConfig, error) {
 	if config.webSocketProcessQueueMaxBytes, err = configUint64(getenv, "WEBSOCKET_PROCESS_QUEUE_MAX_BYTES", config.webSocketProcessQueueMaxBytes, production); err != nil {
 		return runtimeConfig{}, err
 	}
+	if config.webSocketInboundProcessMaxBytes, err = configUint64(getenv, "WEBSOCKET_INBOUND_PROCESS_MAX_BYTES", config.webSocketInboundProcessMaxBytes, production); err != nil {
+		return runtimeConfig{}, err
+	}
 	if config.durableTransferMaxBytes, err = configUint64(getenv, "DURABLE_TRANSFER_MAX_BYTES", config.durableTransferMaxBytes, production); err != nil {
 		return runtimeConfig{}, err
 	}
@@ -103,7 +108,7 @@ func loadRuntimeConfig(getenv func(string) string) (runtimeConfig, error) {
 		return runtimeConfig{}, err
 	}
 	if config.webSocketQueueMaxBytes < (1<<20)+(256)+(16<<10) ||
-		config.webSocketProcessQueueMaxBytes < config.webSocketQueueMaxBytes || config.durableTransferMaxBytes < (1<<20)+256 || config.relayMemoryLimitBytes == 0 {
+		config.webSocketProcessQueueMaxBytes < config.webSocketQueueMaxBytes || config.webSocketInboundProcessMaxBytes < 2*uint64(8*((1<<20)+(4<<10))) || config.durableTransferMaxBytes < (1<<20)+256 || config.relayMemoryLimitBytes == 0 {
 		return runtimeConfig{}, errors.New("invalid WebSocket memory limits")
 	}
 	connections := uint64(config.maxOpenConnections)
@@ -112,10 +117,10 @@ func loadRuntimeConfig(getenv func(string) string) (runtimeConfig, error) {
 	}
 	inbound := connections * uint64((1<<20)+(4<<10))
 	workspace := 2 * config.durableTransferMaxBytes
-	if config.webSocketProcessQueueMaxBytes > ^uint64(0)-inbound || workspace > ^uint64(0)-inbound-config.webSocketProcessQueueMaxBytes {
+	if config.webSocketInboundProcessMaxBytes > ^uint64(0)-inbound || config.webSocketProcessQueueMaxBytes > ^uint64(0)-inbound-config.webSocketInboundProcessMaxBytes || workspace > ^uint64(0)-inbound-config.webSocketInboundProcessMaxBytes-config.webSocketProcessQueueMaxBytes {
 		return runtimeConfig{}, errors.New("WebSocket memory limits overflow")
 	}
-	controlled := inbound + config.webSocketProcessQueueMaxBytes + workspace
+	controlled := inbound + config.webSocketInboundProcessMaxBytes + config.webSocketProcessQueueMaxBytes + workspace
 	if controlled > config.relayMemoryLimitBytes-(config.relayMemoryLimitBytes/4) {
 		return runtimeConfig{}, errors.New("WebSocket memory limits exceed safe container margin")
 	}

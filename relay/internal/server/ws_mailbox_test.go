@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -149,6 +150,64 @@ func corruptMailboxPairFloor(t *testing.T, b *store.Bolt, encoding []byte) {
 		return bucket.Put([]byte("mailbox-test-pair"), encoding)
 	}); err != nil {
 		t.Fatalf("corrupt protocol floor: %v", err)
+	}
+}
+
+func seedLegacyServerMailboxRecords(t *testing.T, b *store.Bolt, sender, recipient string, msgIDs []string, acceptedAt int64) {
+	t.Helper()
+	if err := b.Update(func(tx *bbolt.Tx) error {
+		buckets := make([]*bbolt.Bucket, 4)
+		for index, name := range []string{"mailbox_items", "mailbox_order", "mailbox_stats", "mailbox_item_expiry"} {
+			bucket, err := tx.CreateBucketIfNotExists([]byte(name))
+			if err != nil {
+				return err
+			}
+			buckets[index] = bucket
+		}
+		items, order, stats, itemExpiry := buckets[0], buckets[1], buckets[2], buckets[3]
+		var totalBytes uint64
+		for _, msgID := range msgIDs {
+			envelope := validMailboxEnvelope(sender, msgID)
+			digest := sha256.Sum256(envelope)
+			record := store.MailboxRecord{
+				RecipientDevice: recipient,
+				SenderDevice:    sender,
+				MsgID:           msgID,
+				EnvelopeSHA256:  hex.EncodeToString(digest[:]),
+				Envelope:        envelope,
+				ByteSize:        uint64(len(envelope)),
+				AcceptedAt:      acceptedAt,
+				ExpiresAt:       acceptedAt + int64(time.Hour/time.Millisecond),
+			}
+			totalBytes += record.ByteSize
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				return err
+			}
+			itemKey := []byte(recipient + "\x00" + msgID)
+			if err := items.Put(itemKey, encoded); err != nil {
+				return err
+			}
+			orderKey := make([]byte, len(recipient)+10+len(msgID))
+			copy(orderKey, recipient)
+			binary.BigEndian.PutUint64(orderKey[len(recipient)+1:len(recipient)+9], uint64(acceptedAt))
+			copy(orderKey[len(recipient)+10:], msgID)
+			if err := order.Put(orderKey, nil); err != nil {
+				return err
+			}
+			expiryKey := make([]byte, 9+len(itemKey))
+			binary.BigEndian.PutUint64(expiryKey[:8], uint64(record.ExpiresAt))
+			copy(expiryKey[9:], itemKey)
+			if err := itemExpiry.Put(expiryKey, itemKey); err != nil {
+				return err
+			}
+		}
+		var encodedStats [16]byte
+		binary.BigEndian.PutUint64(encodedStats[:8], uint64(len(msgIDs)))
+		binary.BigEndian.PutUint64(encodedStats[8:], totalBytes)
+		return stats.Put([]byte(recipient), encodedStats[:])
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -929,7 +988,7 @@ func TestWebSocketHelloPartialExpiryWriteDoesNotAdvanceCursor(t *testing.T) {
 	}
 }
 
-func TestWebSocketMailboxDrainIsBoundedTo64(t *testing.T) {
+func TestWebSocketMailboxCatchUpDeliversItem65WithoutReconnect(t *testing.T) {
 	srv := newTestServer(t)
 	pair := registerMailboxTestPair(t, srv)
 	for i := 1; i <= 65; i++ {
@@ -941,14 +1000,224 @@ func TestWebSocketMailboxDrainIsBoundedTo64(t *testing.T) {
 	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
 	defer recipient.Close()
 	sendMailboxHello(t, recipient)
-	for i := 1; i <= mailboxBatchSize; i++ {
+	for i := 1; i <= mailboxBatchSize+1; i++ {
 		if frame := readMailboxFrame(t, recipient); frame.Type != "relay.deliver" {
 			t.Fatalf("drain frame %d = %#v, want relay.deliver", i, frame)
 		}
 	}
-	_ = recipient.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-	if _, raw, err := recipient.ReadMessage(); err == nil {
-		t.Fatalf("mailbox drain exceeded %d: %s", mailboxBatchSize, raw)
+}
+
+func TestWebSocketHelloMigratesLegacyMailboxBeforeAnyNewPut(t *testing.T) {
+	srv, bolt := newMailboxTestServerWithBolt(t)
+	pair := registerMailboxTestPair(t, srv)
+	want := []string{
+		"87500000-0000-4000-8000-000000000001",
+		"87500000-0000-4000-8000-000000000002",
+		"87500000-0000-4000-8000-000000000003",
+	}
+	seedLegacyServerMailboxRecords(t, bolt, pair.deviceA, pair.deviceB, want, time.Now().UnixMilli())
+	outbound := make(chan []byte, len(want))
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set handshake protocol")
+	}
+	if err := srv.handleRelayHelloForPair(pair.deviceB, pair.pairID, recipient, RelayHello{
+		V: 2, Type: "relay.hello", Protocols: []int{2, 1}, AppVersion: "test",
+	}, func(any) error { return nil }, func([]string) {}); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(want))
+	for range want {
+		frame := decodeMailboxFrame(t, <-outbound)
+		var envelope struct {
+			MsgID string `json:"msg_id"`
+		}
+		if err := json.Unmarshal(frame.Envelope, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, envelope.MsgID)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy hello delivery order = %v, want %v", got, want)
+	}
+	page, err := srv.mailbox.PendingMetadataAfterForPair(pair.pairID, pair.deviceB, 0, len(want))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, metadata := range page {
+		if metadata.AcceptanceSequence != uint64(index+1) {
+			t.Fatalf("persisted sequence %d = %d", index, metadata.AcceptanceSequence)
+		}
+	}
+}
+
+func TestWebSocketHelloShutdownAdmissionPreventsLegacyMigration(t *testing.T) {
+	srv, bolt := newMailboxTestServerWithBolt(t)
+	pair := registerMailboxTestPair(t, srv)
+	msgID := "87600000-0000-4000-8000-000000000001"
+	seedLegacyServerMailboxRecords(t, bolt, pair.deviceA, pair.deviceB, []string{msgID}, time.Now().UnixMilli())
+	outbound := make(chan []byte, 1)
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set handshake protocol")
+	}
+	srv.relayHelloBeforeSequenceMigration = func() { srv.shuttingDown.Store(true) }
+	err := srv.handleRelayHelloForPair(pair.deviceB, pair.pairID, recipient, RelayHello{
+		V: 2, Type: "relay.hello", Protocols: []int{2, 1}, AppVersion: "test",
+	}, func(any) error { return nil }, func([]string) {})
+	if !errors.Is(err, ErrServerCapacity) {
+		t.Fatalf("shutdown migration error = %v, want ErrServerCapacity", err)
+	}
+	if _, err := srv.mailbox.PendingMetadataAfterForPair(pair.pairID, pair.deviceB, 0, 1); err == nil {
+		t.Fatal("shutdown-blocked legacy row became cursor-pageable")
+	}
+}
+
+func TestWebSocketLegacyMigrationSerializesBeforeConcurrentPut(t *testing.T) {
+	srv, bolt := newMailboxTestServerWithBolt(t)
+	pair := registerMailboxTestPair(t, srv)
+	legacyID := "87700000-0000-4000-8000-000000000001"
+	newID := "87700000-0000-4000-8000-000000000002"
+	seedLegacyServerMailboxRecords(t, bolt, pair.deviceA, pair.deviceB, []string{legacyID}, time.Now().UnixMilli())
+	migrationAdmitted := make(chan struct{})
+	releaseMigration := make(chan struct{})
+	var admissionOnce sync.Once
+	srv.capacityCheck = func(uint64) error {
+		admissionOnce.Do(func() {
+			close(migrationAdmitted)
+			<-releaseMigration
+		})
+		return nil
+	}
+	outbound := make(chan []byte, 2)
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
+	defer srv.clientHub.Unregister(recipient)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set handshake protocol")
+	}
+	helloDone := make(chan error, 1)
+	go func() {
+		helloDone <- srv.handleRelayHelloForPair(pair.deviceB, pair.pairID, recipient, RelayHello{
+			V: 2, Type: "relay.hello", Protocols: []int{2, 1}, AppVersion: "test",
+		}, func(any) error { return nil }, func([]string) {})
+	}()
+	<-migrationAdmitted
+	putStarted := make(chan struct{})
+	putDone := make(chan struct{})
+	go func() {
+		defer close(putDone)
+		close(putStarted)
+		srv.handleRelayPutForPair(pair.deviceA, pair.pairID, RelayPut{
+			V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, newID),
+		}, func(any) error { return nil }, func(string, string) error { return errors.New("unexpected rejection") })
+	}()
+	<-putStarted
+	close(releaseMigration)
+	if err := <-helloDone; err != nil {
+		t.Fatal(err)
+	}
+	<-putDone
+	page, err := srv.mailbox.PendingMetadataAfterForPair(pair.pairID, pair.deviceB, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].MsgID != legacyID || page[0].AcceptanceSequence != 1 || page[1].MsgID != newID || page[1].AcceptanceSequence != 2 {
+		t.Fatalf("serialized migration/put page = %#v", page)
+	}
+}
+
+func TestWebSocketCatchUpPausesAndResumesWithoutReconnect(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	ids := []string{"88000000-0000-4000-8000-000000000001", "88000000-0000-4000-8000-000000000002"}
+	for _, msgID := range ids {
+		putMailboxRecord(t, srv, pair.deviceB, pair.deviceA, validMailboxEnvelope(pair.deviceA, msgID), time.Now())
+	}
+	pending, err := srv.mailbox.PendingForPair(pair.pairID, pair.deviceB, 1)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending = %d, %v", len(pending), err)
+	}
+	frameCharge := outboundFrameCharge(marshalRelayDeliver(pending[0]))
+	srv.clientHub = newClientHubWithMemoryLimits(2000, 128<<20, frameCharge, frameCharge, srv.metrics)
+	srv.clientHub.SetHandoffResolver(srv.transferHandoffFrames)
+	outbound := make(chan []byte, outboundQueueSize)
+	client := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
+	if !srv.clientHub.SetProtocolAndCapabilities(client, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set handshake protocol")
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.handleRelayHelloForPair(pair.deviceB, pair.pairID, client, RelayHello{V: 2, Type: "relay.hello", Protocols: []int{2, 1}, AppVersion: "test"}, func(any) error { return nil }, func([]string) {})
+	}()
+	first := <-outbound
+	select {
+	case err := <-done:
+		t.Fatalf("catch-up finished while second frame had no capacity: %v", err)
+	default:
+	}
+	srv.clientHub.releaseOutbound(client, outboundFrameCharge(first))
+	second := <-outbound
+	srv.clientHub.releaseOutbound(client, outboundFrameCharge(second))
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-client.done:
+		t.Fatal("temporary catch-up pressure stopped the client")
+	default:
+	}
+}
+
+func TestWebSocketCatchUpWaitsForSenderAcceptedWriteAttempt(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPair(t, srv)
+	outbound := make(chan []byte, outboundQueueSize)
+	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
+	if !srv.clientHub.SetProtocolAndCapabilities(recipient, protocolV2Handshake, []int{2, 1}) {
+		t.Fatal("set handshake protocol")
+	}
+	acceptedEntered := make(chan struct{})
+	releaseAccepted := make(chan struct{})
+	catchUpBlocked := make(chan struct{})
+	srv.relayHelloCatchUpBlocked = func(uint64) { close(catchUpBlocked) }
+	putDone := make(chan struct{})
+	msgID := "88111111-1111-4111-8111-111111111111"
+	go func() {
+		defer close(putDone)
+		srv.handleRelayPutForPair(pair.deviceA, pair.pairID, RelayPut{V: 2, Type: "relay.put", Envelope: validMailboxEnvelope(pair.deviceA, msgID)}, func(frame any) error {
+			if _, ok := frame.(RelayAccepted); ok {
+				close(acceptedEntered)
+				<-releaseAccepted
+			}
+			return nil
+		}, func(string, string) error { return nil })
+	}()
+	<-acceptedEntered
+	helloDone := make(chan error, 1)
+	go func() {
+		helloDone <- srv.handleRelayHelloForPair(pair.deviceB, pair.pairID, recipient, RelayHello{V: 2, Type: "relay.hello", Protocols: []int{2, 1}, AppVersion: "test"}, func(any) error { return nil }, func([]string) {})
+	}()
+	<-catchUpBlocked
+	select {
+	case raw := <-outbound:
+		t.Fatalf("recipient delivery preceded sender accepted write attempt: %s", raw)
+	default:
+	}
+	close(releaseAccepted)
+	<-putDone
+	select {
+	case raw := <-outbound:
+		frame := decodeMailboxFrame(t, raw)
+		if frame.Type != "relay.deliver" {
+			t.Fatalf("post-accepted frame = %#v", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("delivery did not resume after sender accepted write attempt")
+	}
+	if err := <-helloDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -67,6 +67,7 @@ type MailboxRecord struct {
 // MailboxPendingMetadata is the bounded reconnect snapshot. It deliberately
 // omits Envelope so scanning an order index cannot retain mailbox ciphertext.
 type MailboxPendingMetadata struct {
+	RecipientDevice    string `json:"recipient_device"`
 	SenderDevice       string `json:"sender_device"`
 	MsgID              string `json:"msg_id"`
 	ByteSize           uint64 `json:"byte_size"`
@@ -234,7 +235,11 @@ func (s *MailboxStore) putForPair(expectedPairID string, rec MailboxRecord, now 
 		if s.limits.MaxItems <= 0 || count >= uint64(s.limits.MaxItems) || rec.ByteSize > s.limits.MaxBytes || bytes > s.limits.MaxBytes-rec.ByteSize {
 			return ErrMailboxFull
 		}
-		sequence, sequenceMutationBytes, err := allocateAcceptanceSequence(tx, rec.RecipientDevice, items, order)
+		expectedLegacySender := ""
+		if expectedPairID != "" {
+			expectedLegacySender = rec.SenderDevice
+		}
+		sequence, sequenceMutationBytes, err := allocateAcceptanceSequence(tx, rec.RecipientDevice, expectedLegacySender, items, order)
 		if err != nil {
 			return err
 		}
@@ -347,6 +352,43 @@ func (s *MailboxStore) pendingForPair(expectedPairID, recipient string, limit in
 // PendingMetadataForPair returns the oldest authorized routing metadata in
 // mailbox order without copying Envelope bytes out of Bolt's mmap.
 func (s *MailboxStore) PendingMetadataForPair(pairID, recipient string, limit int) ([]MailboxPendingMetadata, error) {
+	return s.PendingMetadataAfterForPair(pairID, recipient, 0, limit)
+}
+
+// EnsureAcceptanceSequencesForPair upgrades legacy AcceptedAt-indexed rows to
+// durable acceptance sequences before cursor paging. Authorization, migration,
+// capacity admission, and counter persistence share one Bolt transaction.
+func (s *MailboxStore) EnsureAcceptanceSequencesForPair(pairID, recipient string, admit MailboxPutAdmission) error {
+	if pairID == "" || recipient == "" || strings.ContainsRune(recipient, '\x00') {
+		return errors.New("invalid pair session")
+	}
+	return s.bolt.Update(func(tx *bbolt.Tx) error {
+		_, pair, err := confirmedPairForSessionTx(tx, recipient, pairID)
+		if err != nil {
+			return err
+		}
+		expectedSender := pair.DeviceA
+		if recipient == pair.DeviceA {
+			expectedSender = pair.DeviceB
+		}
+		items, order, _, _, err := mailboxBuckets(tx)
+		if err != nil {
+			return err
+		}
+		_, mutationBytes, err := ensureAcceptanceSequences(tx, recipient, expectedSender, items, order)
+		if err != nil || mutationBytes == 0 || admit == nil {
+			return err
+		}
+		if err := addMailboxReservation(&mutationBytes, mailboxBoltGrowthAllowance); err != nil {
+			return errors.New("mailbox capacity reservation overflow")
+		}
+		return admit(mutationBytes)
+	})
+}
+
+// PendingMetadataAfterForPair returns an exclusive acceptance-sequence page.
+// Pair authorization and cursor traversal occur in the same Bolt view.
+func (s *MailboxStore) PendingMetadataAfterForPair(pairID, recipient string, after uint64, limit int) ([]MailboxPendingMetadata, error) {
 	if pairID == "" || recipient == "" || strings.ContainsRune(recipient, '\x00') || limit <= 0 {
 		return nil, errors.New("invalid pair session")
 	}
@@ -367,8 +409,12 @@ func (s *MailboxStore) PendingMetadataForPair(pairID, recipient string, limit in
 		}
 		prefix := recipientPrefix(recipient)
 		cursor := order.Cursor()
-		for key, _ := cursor.Seek(prefix); key != nil && len(result) < limit && bytes.HasPrefix(key, prefix); key, _ = cursor.Next() {
-			_, msgID, ok := parseOrderKey(key)
+		seek := prefix
+		if after > 0 {
+			seek = orderKey(recipient, after, "\xff")
+		}
+		for key, _ := cursor.Seek(seek); key != nil && len(result) < limit && bytes.HasPrefix(key, prefix); key, _ = cursor.Next() {
+			keyRecipient, sequence, msgID, ok := parseOrderKeyWithSequence(key)
 			if !ok {
 				return errors.New("invalid mailbox order key")
 			}
@@ -380,9 +426,10 @@ func (s *MailboxStore) PendingMetadataForPair(pairID, recipient string, limit in
 			if err := json.Unmarshal(raw, &metadata); err != nil {
 				return fmt.Errorf("unmarshal mailbox metadata: %w", err)
 			}
-			if metadata.SenderDevice == expectedSender {
-				result = append(result, metadata)
+			if keyRecipient != recipient || sequence <= after || metadata.RecipientDevice != recipient || metadata.SenderDevice != expectedSender || metadata.MsgID != msgID || metadata.AcceptanceSequence != sequence {
+				return errors.New("mailbox order metadata mismatch")
 			}
+			result = append(result, metadata)
 		}
 		return nil
 	})
@@ -1411,32 +1458,36 @@ func recipientPrefix(recipient string) []byte {
 	return []byte(recipient + "\x00")
 }
 
-func allocateAcceptanceSequence(tx *bbolt.Tx, recipient string, items, order *bbolt.Bucket) (uint64, uint64, error) {
-	sequences, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxSequence))
-	if err != nil {
-		return 0, 0, err
-	}
-	rawCounter := sequences.Get([]byte(recipient))
+func ensureAcceptanceSequences(tx *bbolt.Tx, recipient, expectedSender string, items, order *bbolt.Bucket) (uint64, uint64, error) {
+	sequences := tx.Bucket([]byte(bucketMailboxSequence))
 	var current uint64
 	var mutationBytes uint64
-	if len(rawCounter) == 8 {
-		current = binary.BigEndian.Uint64(rawCounter)
-	} else if len(rawCounter) != 0 {
-		return 0, 0, errors.New("invalid mailbox acceptance sequence")
-	} else {
+	if sequences != nil {
+		rawCounter := sequences.Get([]byte(recipient))
+		if len(rawCounter) == 8 {
+			return binary.BigEndian.Uint64(rawCounter), 0, nil
+		} else if len(rawCounter) != 0 {
+			return 0, 0, errors.New("invalid mailbox acceptance sequence")
+		}
+	}
+	{
 		type orderEntry struct {
-			key   []byte
-			msgID string
+			key      []byte
+			sequence uint64
+			msgID    string
 		}
 		entries := []orderEntry{}
 		prefix := recipientPrefix(recipient)
 		cursor := order.Cursor()
 		for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), string(prefix)); key, _ = cursor.Next() {
-			_, msgID, ok := parseOrderKey(key)
+			keyRecipient, sequence, msgID, ok := parseOrderKeyWithSequence(key)
 			if !ok {
 				return 0, 0, errors.New("invalid mailbox order key")
 			}
-			entries = append(entries, orderEntry{key: append([]byte(nil), key...), msgID: msgID})
+			if keyRecipient != recipient {
+				return 0, 0, errors.New("mailbox order recipient mismatch")
+			}
+			entries = append(entries, orderEntry{key: append([]byte(nil), key...), sequence: sequence, msgID: msgID})
 		}
 		for _, entry := range entries {
 			if err := addMailboxReservation(&mutationBytes, uint64(len(entry.key))); err != nil {
@@ -1454,6 +1505,9 @@ func allocateAcceptanceSequence(tx *bbolt.Tx, recipient string, items, order *bb
 			var rec MailboxRecord
 			if err := json.Unmarshal(raw, &rec); err != nil {
 				return 0, 0, fmt.Errorf("unmarshal mailbox item: %w", err)
+			}
+			if rec.RecipientDevice != recipient || (expectedSender != "" && rec.SenderDevice != expectedSender) || rec.MsgID != entry.msgID || rec.AcceptanceSequence != 0 || rec.AcceptedAt < 0 || uint64(rec.AcceptedAt) != entry.sequence {
+				return 0, 0, errors.New("legacy mailbox order metadata mismatch")
 			}
 			rec.AcceptanceSequence = uint64(index + 1)
 			encoded, err := json.Marshal(rec)
@@ -1476,10 +1530,46 @@ func allocateAcceptanceSequence(tx *bbolt.Tx, recipient string, items, order *bb
 		}
 		current = uint64(len(entries))
 	}
+	if current == 0 {
+		return 0, 0, nil
+	}
+	if sequences == nil {
+		var err error
+		sequences, err = tx.CreateBucketIfNotExists([]byte(bucketMailboxSequence))
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], current)
+	if err := addMailboxReservation(&mutationBytes, uint64(len(recipient))); err != nil {
+		return 0, 0, err
+	}
+	if err := addMailboxReservation(&mutationBytes, uint64(len(encoded))); err != nil {
+		return 0, 0, err
+	}
+	if err := sequences.Put([]byte(recipient), encoded[:]); err != nil {
+		return 0, 0, err
+	}
+	return current, mutationBytes, nil
+}
+
+func allocateAcceptanceSequence(tx *bbolt.Tx, recipient, expectedSender string, items, order *bbolt.Bucket) (uint64, uint64, error) {
+	current, mutationBytes, err := ensureAcceptanceSequences(tx, recipient, expectedSender, items, order)
+	if err != nil {
+		return 0, 0, err
+	}
 	if current == ^uint64(0) {
 		return 0, 0, errors.New("mailbox acceptance sequence exhausted")
 	}
 	next := current + 1
+	sequences := tx.Bucket([]byte(bucketMailboxSequence))
+	if sequences == nil {
+		sequences, err = tx.CreateBucketIfNotExists([]byte(bucketMailboxSequence))
+		if err != nil {
+			return 0, 0, err
+		}
+	}
 	var encoded [8]byte
 	binary.BigEndian.PutUint64(encoded[:], next)
 	if err := addMailboxReservation(&mutationBytes, uint64(len(recipient))); err != nil {
@@ -1522,11 +1612,16 @@ func orderKey(recipient string, sequence uint64, msgID string) []byte {
 }
 
 func parseOrderKey(key []byte) (recipient, msgID string, ok bool) {
+	recipient, _, msgID, ok = parseOrderKeyWithSequence(key)
+	return recipient, msgID, ok
+}
+
+func parseOrderKeyWithSequence(key []byte) (recipient string, sequence uint64, msgID string, ok bool) {
 	firstSeparator := strings.IndexByte(string(key), 0)
 	if firstSeparator < 0 || len(key) < firstSeparator+10 || key[firstSeparator+9] != 0 {
-		return "", "", false
+		return "", 0, "", false
 	}
-	return string(key[:firstSeparator]), string(key[firstSeparator+10:]), true
+	return string(key[:firstSeparator]), binary.BigEndian.Uint64(key[firstSeparator+1 : firstSeparator+9]), string(key[firstSeparator+10:]), true
 }
 
 func readMailboxStats(raw []byte) (count, bytes uint64) {

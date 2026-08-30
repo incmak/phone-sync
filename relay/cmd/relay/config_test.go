@@ -21,7 +21,7 @@ func TestProductionConfigAcceptsCompleteSafeEnvironment(t *testing.T) {
 	if config.minFreeDiskBytes != 536870912 || config.maxOpenConnections != 64 {
 		t.Fatalf("capacity config = %#v", config)
 	}
-	if config.webSocketQueueMaxBytes != 8388608 || config.webSocketProcessQueueMaxBytes != 67108864 || config.durableTransferMaxBytes != 4194304 {
+	if config.webSocketQueueMaxBytes != 8388608 || config.webSocketProcessQueueMaxBytes != 67108864 || config.webSocketInboundProcessMaxBytes != 33554432 || config.durableTransferMaxBytes != 4194304 {
 		t.Fatalf("WebSocket memory config = %#v", config)
 	}
 	if config.backupDir != "/srv/twinotify/backups" || config.backupInterval != 6*time.Hour || config.backupRetention != 14 {
@@ -33,7 +33,7 @@ func TestProductionConfigFailsClosed(t *testing.T) {
 	required := []string{
 		"BOLT_PATH", "TRUST_PROXY_HEADERS", "REQUIRE_MUTUAL_PAIR_SIGNATURES", "MIN_FREE_DISK_BYTES",
 		"MAX_OPEN_CONNECTIONS", "BACKUP_DIR", "BACKUP_INTERVAL", "BACKUP_RETENTION_COUNT",
-		"WEBSOCKET_QUEUE_MAX_BYTES", "WEBSOCKET_PROCESS_QUEUE_MAX_BYTES", "DURABLE_TRANSFER_MAX_BYTES",
+		"WEBSOCKET_QUEUE_MAX_BYTES", "WEBSOCKET_PROCESS_QUEUE_MAX_BYTES", "WEBSOCKET_INBOUND_PROCESS_MAX_BYTES", "DURABLE_TRANSFER_MAX_BYTES",
 		"RELAY_MEMORY_LIMIT_BYTES",
 	}
 	for _, key := range required {
@@ -65,6 +65,8 @@ func TestProductionConfigFailsClosed(t *testing.T) {
 		"non-numeric connection limit":     {"MAX_OPEN_CONNECTIONS": "several"},
 		"queue below legal frame":          {"WEBSOCKET_QUEUE_MAX_BYTES": "1024"},
 		"process below connection":         {"WEBSOCKET_PROCESS_QUEUE_MAX_BYTES": "4194304"},
+		"inbound below two reservations":   {"WEBSOCKET_INBOUND_PROCESS_MAX_BYTES": "8388608"},
+		"unsafe inbound margin":            {"WEBSOCKET_INBOUND_PROCESS_MAX_BYTES": "18446744073709551615"},
 		"unsafe process margin":            {"WEBSOCKET_PROCESS_QUEUE_MAX_BYTES": "262144000"},
 	}
 	for name, overrides := range tests {
@@ -110,18 +112,19 @@ func (e testEnvironment) get(key string) string { return e[key] }
 
 func validProductionEnvironment() testEnvironment {
 	return testEnvironment{
-		"TWINOTIFY_ENV":                     "production",
-		"BOLT_PATH":                         "/srv/twinotify/data/relay.db",
-		"TRUST_PROXY_HEADERS":               "true",
-		"REQUIRE_MUTUAL_PAIR_SIGNATURES":    "true",
-		"MIN_FREE_DISK_BYTES":               "536870912",
-		"MAX_OPEN_CONNECTIONS":              "64",
-		"WEBSOCKET_QUEUE_MAX_BYTES":         "8388608",
-		"WEBSOCKET_PROCESS_QUEUE_MAX_BYTES": "67108864",
-		"DURABLE_TRANSFER_MAX_BYTES":        "4194304",
-		"RELAY_MEMORY_LIMIT_BYTES":          "268435456",
-		"BACKUP_DIR":                        "/srv/twinotify/backups",
-		"BACKUP_INTERVAL":                   "6h",
-		"BACKUP_RETENTION_COUNT":            "14",
+		"TWINOTIFY_ENV":                       "production",
+		"BOLT_PATH":                           "/srv/twinotify/data/relay.db",
+		"TRUST_PROXY_HEADERS":                 "true",
+		"REQUIRE_MUTUAL_PAIR_SIGNATURES":      "true",
+		"MIN_FREE_DISK_BYTES":                 "536870912",
+		"MAX_OPEN_CONNECTIONS":                "64",
+		"WEBSOCKET_QUEUE_MAX_BYTES":           "8388608",
+		"WEBSOCKET_PROCESS_QUEUE_MAX_BYTES":   "67108864",
+		"WEBSOCKET_INBOUND_PROCESS_MAX_BYTES": "33554432",
+		"DURABLE_TRANSFER_MAX_BYTES":          "4194304",
+		"RELAY_MEMORY_LIMIT_BYTES":            "268435456",
+		"BACKUP_DIR":                          "/srv/twinotify/backups",
+		"BACKUP_INTERVAL":                     "6h",
+		"BACKUP_RETENTION_COUNT":              "14",
 	}
 }
