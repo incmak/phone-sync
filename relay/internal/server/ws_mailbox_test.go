@@ -1206,9 +1206,14 @@ func TestWebSocketCatchUpPausesAndResumesWithoutReconnect(t *testing.T) {
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("pending = %d, %v", len(pending), err)
 	}
-	frameCharge := outboundFrameCharge(marshalRelayDeliver(pending[0]))
-	srv.clientHub = newClientHubWithMemoryLimits(2000, 128<<20, frameCharge, frameCharge, srv.metrics)
+	frameCapacity := durableNotificationCharge(pending[0].ByteSize)
+	srv.clientHub = newClientHubWithMemoryLimits(2000, 128<<20, frameCapacity, frameCapacity, srv.metrics)
 	srv.clientHub.SetHandoffResolver(srv.transferHandoffFrames)
+	waitReached := make(chan struct{})
+	var waitReachedOnce sync.Once
+	srv.clientHub.capacityWaitBeforeBlock = func(*wsClient) {
+		waitReachedOnce.Do(func() { close(waitReached) })
+	}
 	outbound := make(chan []byte, outboundQueueSize)
 	client := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
 	if !srv.clientHub.SetProtocolAndCapabilities(client, protocolV2Handshake, []int{2, 1}) {
@@ -1224,6 +1229,7 @@ func TestWebSocketCatchUpPausesAndResumesWithoutReconnect(t *testing.T) {
 		t.Fatalf("catch-up finished while second frame had no capacity: %v", err)
 	default:
 	}
+	<-waitReached
 	srv.clientHub.releaseOutbound(client, outboundFrameCharge(first))
 	second := <-outbound
 	srv.clientHub.releaseOutbound(client, outboundFrameCharge(second))
