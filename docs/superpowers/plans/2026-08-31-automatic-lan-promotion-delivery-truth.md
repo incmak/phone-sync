@@ -386,15 +386,15 @@ data class SyncRouteStatus(
 
 **Automated gates:**
 
-- [ ] Run `make sync-proto`.
-- [ ] Run `cd relay && go test ./... -race -count=1`.
-- [ ] Run `cd relay && go vet ./...`.
-- [ ] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest :twinotify-core:lintDebug :twinotify-core:assembleDebug`.
-- [ ] Run `cd mobile && npm test -- --runInBand`.
-- [ ] Run `cd mobile && npm run typecheck`.
-- [ ] Run `cd mobile && npm run lint`.
-- [ ] Run `make host-verify`.
-- [ ] Run `git diff --check` and inspect `git status --short` for generated or unrelated files.
+- [x] Run `make sync-proto`.
+- [x] Run `cd relay && go test ./... -race -count=1`.
+- [x] Run `cd relay && go vet ./...`.
+- [x] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest :twinotify-core:lintDebug :twinotify-core:assembleDebug`.
+- [x] Run `cd mobile && npm test -- --runInBand`.
+- [x] Run `cd mobile && npm run typecheck`.
+- [x] Run `cd mobile && npm run lint`.
+- [x] Run `make host-verify`.
+- [x] Run `git diff --check` and inspect `git status --short` for generated or unrelated files.
 
 **Physical two-phone gate:**
 
@@ -409,11 +409,22 @@ data class SyncRouteStatus(
 - [ ] Stop the peer service and record `recent -> stale` after 150 seconds with no “Reachable now” claim.
 - [ ] Restart both apps and record binding persistence plus idempotent bootstrap.
 - [ ] Capture light/dark screenshots and large-font interaction checks for direct, relay-held, no-route queued, and stale-peer states.
-- [ ] If ADB, relay deployment, or a named physical state is unavailable, leave that checkbox pending and state the exact unverified condition.
+- [x] If ADB, relay deployment, or a named physical state is unavailable, leave that checkbox pending and state the exact unverified condition.
+  - On 2026-08-31, `adb devices -l` returned an empty device list. No phone serial, installed APK, relay deployment, route transition, notification delivery, restart, or physical UI state could be inspected. All hardware-only checkboxes above therefore remain pending.
 
 **Final review:**
 
-- [ ] Compare every acceptance criterion in `docs/superpowers/specs/2026-08-31-automatic-lan-promotion-delivery-truth-design.md` against code and artifacts.
-- [ ] Invoke `superpowers:verification-before-completion`, run its required checks, and do not claim completion from stale output.
-- [ ] Review the complete diff for unrelated changes, secret/private-network leakage, Room version drift, generated schema files, and a second outbox-drain path.
-- [ ] Commit only any final test/documentation correction with a scoped conventional commit; otherwise leave the verified task commits unchanged.
+- [x] Compare every acceptance criterion in `docs/superpowers/specs/2026-08-31-automatic-lan-promotion-delivery-truth-design.md` against code and artifacts.
+  - Criteria 1-2 have protocol, bootstrap, lifecycle, coordinator, and host-scenario coverage; real binding creation and bounded same-Wi-Fi convergence remain unverified without two phones.
+  - Criteria 3-4 are covered by single-drainer route-generation evidence and deterministic coordinator promotion/fallback tests; physical route timing remains pending.
+  - Criteria 5-7 are covered by the classified delivery-state, presentation-table, screen, and accessibility tests.
+  - Criterion 8 is covered by trust-material comparison and conflict-preservation tests without weakening the established nearby-binding store checks.
+  - Criterion 9 is covered by legacy-shaped capability responses, feature fencing, mixed-version send gating, and documented relay-first rollout.
+  - Criterion 10 passed through the fresh automated commands above. The host gate reported the existing dependency-audit result of 12 vulnerabilities (1 low, 11 moderate); dependency upgrades are outside this approved scope.
+  - Criterion 11 passed the code/test interface review for hierarchy, spacing, copy, large-font layout, accessibility, and interaction rules; physical light/dark screenshots remain pending.
+  - Criterion 12 is satisfied honestly by the empty ADB result recorded above; it does not substitute for the pending two-phone scenarios.
+- [x] Invoke `superpowers:verification-before-completion`, run its required checks, and do not claim completion from stale output.
+- [x] Review the complete diff for unrelated changes, secret/private-network leakage, Room version drift, generated schema files, and a second outbox-drain path.
+  - Review found only scoped protocol, relay, Android transport/status, UI-copy, test, evidence, and documentation changes; Room remains version 9 with no entity migration; generated relay schemas remain ignored; route ownership remains inside `TransportCoordinator`; evidence sanitizers reject network/private payload fields.
+- [x] Commit only any final test/documentation correction with a scoped conventional commit; otherwise leave the verified task commits unchanged.
+  - Committed the deterministic catch-up backpressure regression correction as `test(relay): stabilize catch-up backpressure proof`; this checklist update records the final verification outcome.
