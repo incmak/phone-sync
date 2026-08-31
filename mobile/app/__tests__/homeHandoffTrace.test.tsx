@@ -23,32 +23,33 @@ type ScreenCase = {
   queued: number;
   label: string;
   explanation: string;
+  peerLine: 'Reachable now' | 'Checked in recently' | 'Not confirmed online' | null;
 };
 
 const cases: readonly ScreenCase[] = [
   {
     state: 'direct', paired: true, syncState: 'CONNECTED', route: 'lan', phase: 'authenticated', queued: 0,
-    label: 'Direct on Wi-Fi', explanation: 'Your phones are talking to each other directly over Wi-Fi.',
+    label: 'Direct on Wi-Fi', explanation: 'Your phones are talking directly over Wi-Fi.', peerLine: 'Reachable now',
   },
   {
     state: 'relay', paired: true, syncState: 'CONNECTED', route: 'relay', phase: 'authenticated', queued: 0,
-    label: 'Via relay', explanation: 'Going through the relay, still encrypted end to end.',
+    label: 'Via relay', explanation: 'Your other phone checked in recently. Delivery is encrypted end to end.', peerLine: 'Checked in recently',
   },
   {
     state: 'reconnecting', paired: true, syncState: 'CONNECTED', route: 'none', phase: 'idle', queued: 0,
-    label: 'Reconnecting', explanation: 'Looking for your other phone. This retries on its own.',
+    label: 'Reconnecting', explanation: 'Looking for your other phone. This retries on its own.', peerLine: 'Not confirmed online',
   },
   {
     state: 'queued', paired: true, syncState: 'CONNECTED', route: 'none', phase: 'idle', queued: 2,
-    label: 'Queued for delivery', explanation: '2 notifications are waiting for your other phone.',
+    label: 'Queued on this phone', explanation: '2 notifications will send when a connection is available.', peerLine: 'Not confirmed online',
   },
   {
     state: 'paused', paired: true, syncState: 'DISCONNECTED', route: 'lan', phase: 'authenticated', queued: 0,
-    label: 'Paused', explanation: 'Turn on mirroring when you want delivery to resume.',
+    label: 'Paused', explanation: 'Turn on mirroring when you want delivery to resume.', peerLine: null,
   },
   {
     state: 'unpaired', paired: false, syncState: 'DISCONNECTED', route: 'none', phase: 'idle', queued: 0,
-    label: 'Not paired', explanation: 'Link your other phone to start mirroring notifications.',
+    label: 'Not paired', explanation: 'Link your other phone to start mirroring notifications.', peerLine: null,
   },
 ];
 
@@ -63,6 +64,12 @@ function arrange(routeCase: ScreenCase) {
     route: routeCase.route,
     phase: routeCase.phase,
     queued_count: routeCase.queued,
+    pending_local_count: routeCase.queued,
+    awaiting_peer_count: 0,
+    held_by_relay_count: 0,
+    peer_evidence: routeCase.state === 'direct' ? 'direct' : routeCase.state === 'relay' ? 'recent' : 'unknown',
+    delivery_reason: routeCase.state === 'queued' ? 'no_route' : 'none',
+    user_content_kind: 'notifications',
     route_generation: 0,
   });
 }
@@ -90,7 +97,10 @@ describe('Home handoff trace', () => {
     expect(screen.getByTestId('connection-surface')).toBeTruthy();
     expect(screen.getAllByText(routeCase.label).length).toBeGreaterThan(0);
     expect(screen.getByText(routeCase.explanation)).toBeTruthy();
-    expect(screen.getByLabelText(`${routeCase.label}. ${routeCase.explanation}`).props.accessibilityLiveRegion).toBe('polite');
+    const liveLabel = routeCase.peerLine
+      ? `${routeCase.label}. ${routeCase.explanation} ${routeCase.peerLine}.`
+      : `${routeCase.label}. ${routeCase.explanation}`;
+    expect(screen.getByLabelText(liveLabel).props.accessibilityLiveRegion).toBe('polite');
   });
 
   it('keeps one pair action for an unpaired phone and no recovery action', async () => {
@@ -99,6 +109,14 @@ describe('Home handoff trace', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Link your other phone' })).toBeTruthy());
     expect(screen.queryByRole('button', { name: 'Try again now' })).toBeNull();
+  });
+
+  it('never claims relay reachability as Reachable now', async () => {
+    arrange(cases[1]);
+    const screen = render(<HomeScreen />);
+
+    expect(await screen.findByText('Checked in recently')).toBeTruthy();
+    expect(screen.queryByText('Reachable now')).toBeNull();
   });
 
   it('keeps native mirror and route actions wired to their original operations', async () => {
@@ -212,7 +230,7 @@ describe('Home handoff trace', () => {
       screen = render(<HomeScreen />);
 
       const liveStatus = await screen.findByLabelText(
-        'Reconnecting. Looking for your other phone. This retries on its own.',
+        'Reconnecting. Looking for your other phone. This retries on its own. Not confirmed online.',
       );
       expect(closestFlexDirection(liveStatus)).toBe('column');
       expect(
@@ -245,7 +263,7 @@ describe('Home handoff trace', () => {
 
     try {
       await screen.findByLabelText(
-        'Reconnecting. Looking for your other phone. This retries on its own.',
+        'Reconnecting. Looking for your other phone. This retries on its own. Not confirmed online.',
       );
       await new Promise((resolve) => setTimeout(resolve, 20));
 

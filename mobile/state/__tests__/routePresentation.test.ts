@@ -2,105 +2,119 @@ import { presentRoute } from '../routePresentation';
 import type { RouteStatus } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 
 const status = (over: Partial<RouteStatus> = {}): RouteStatus => ({
-  route: 'none',
-  phase: 'idle',
-  queued_count: 0,
-  pending_local_count: 0,
-  awaiting_peer_count: 0,
-  held_by_relay_count: 0,
-  peer_evidence: 'unknown',
-  delivery_reason: 'none',
-  user_content_kind: 'notifications',
-  route_generation: 0,
+  route: 'none', phase: 'idle', queued_count: 0, pending_local_count: 0,
+  awaiting_peer_count: 0, held_by_relay_count: 0, peer_evidence: 'unknown',
+  delivery_reason: 'none', user_content_kind: 'notifications', route_generation: 0,
   ...over,
 });
 
-describe('presentRoute', () => {
-  it('reports a paired idle service as paused when mirroring is disabled', () => {
-    const p = presentRoute(status({ route: 'none', phase: 'idle' }), true, false);
+describe('presentRoute delivery truth table', () => {
+  it.each([
+    {
+      name: 'direct',
+      value: status({ route: 'lan', phase: 'authenticated', peer_evidence: 'direct' }),
+      expected: ['Direct on Wi-Fi', 'Your phones are talking directly over Wi-Fi.', 'Reachable now', undefined],
+    },
+    {
+      name: 'fresh relay',
+      value: status({ route: 'relay', phase: 'authenticated', peer_evidence: 'recent' }),
+      expected: ['Via relay', 'Your other phone checked in recently. Delivery is encrypted end to end.', 'Checked in recently', undefined],
+    },
+    {
+      name: 'stale relay empty',
+      value: status({ route: 'relay', phase: 'authenticated', peer_evidence: 'stale' }),
+      expected: ['Via relay', 'Connected to the relay. Waiting for your other phone to check in.', 'Not confirmed online', undefined],
+    },
+    {
+      name: 'relay-held',
+      value: status({
+        route: 'relay', phase: 'authenticated', awaiting_peer_count: 2, held_by_relay_count: 2,
+        peer_evidence: 'stale', delivery_reason: 'relay_holding', user_content_kind: 'sync_updates',
+      }),
+      expected: ['Via relay', '2 sync updates are stored securely and waiting for your other phone.', 'Not confirmed online', undefined],
+    },
+    {
+      name: 'bootstrap waiting',
+      value: status({ route: 'relay', phase: 'authenticated', peer_evidence: 'recent', delivery_reason: 'lan_bootstrap_waiting' }),
+      expected: ['Via relay', 'Setting up direct Wi-Fi in the background. Delivery is encrypted end to end.', 'Checked in recently', undefined],
+    },
+    {
+      name: 'incompatible peer',
+      value: status({ route: 'relay', phase: 'authenticated', delivery_reason: 'peer_version_incompatible' }),
+      expected: ['Via relay', 'Update Twinotify on your other phone to enable direct Wi-Fi.', 'Not confirmed online', undefined],
+    },
+    {
+      name: 'binding conflict',
+      value: status({ route: 'relay', phase: 'authenticated', peer_evidence: 'recent', delivery_reason: 'lan_binding_conflict' }),
+      expected: ['Via relay', 'Direct Wi-Fi needs attention. Relay delivery remains encrypted end to end.', 'Checked in recently', undefined],
+    },
+    {
+      name: 'no route pending local',
+      value: status({ phase: 'reconnecting', queued_count: 2, pending_local_count: 2, delivery_reason: 'no_route' }),
+      expected: ['Queued on this phone', '2 notifications will send when a connection is available.', 'Not confirmed online', 'retry'],
+    },
+    {
+      name: 'no route relay-held',
+      value: status({
+        phase: 'reconnecting', awaiting_peer_count: 3, held_by_relay_count: 3,
+        delivery_reason: 'relay_holding', user_content_kind: 'sync_updates',
+      }),
+      expected: ['Reconnecting', '3 sync updates are stored securely while this phone reconnects.', 'Not confirmed online', 'retry'],
+    },
+    {
+      name: 'reconnecting empty',
+      value: status({ phase: 'reconnecting' }),
+      expected: ['Reconnecting', 'Looking for your other phone. This retries on its own.', 'Not confirmed online', undefined],
+    },
+  ])('$name', ({ value, expected }) => {
+    const presentation = presentRoute(value, true);
+    expect([presentation.label, presentation.explanation, presentation.peerLine, presentation.action])
+      .toEqual(expected);
+  });
 
-    expect(p).toMatchObject({
-      state: 'paused',
-      label: 'Paused',
-      explanation: 'Turn on mirroring when you want delivery to resume.',
+  it('reports paused without making a reachability claim', () => {
+    expect(presentRoute(status({ route: 'lan', phase: 'authenticated' }), true, false)).toMatchObject({
+      state: 'paused', label: 'Paused',
+      explanation: 'Turn on mirroring when you want delivery to resume.', peerLine: null,
     });
   });
 
-  it('reports Direct on Wi-Fi for an authenticated LAN route', () => {
-    const p = presentRoute(status({ route: 'lan', phase: 'authenticated' }), true);
-
-    expect(p.state).toBe('direct');
-    expect(p.label).toBe('Direct on Wi-Fi');
-    expect(p.action).toBeUndefined();
+  it('uses notification grammar only for notification-only work', () => {
+    expect(presentRoute(status({ pending_local_count: 1, queued_count: 1 }), true).explanation)
+      .toBe('1 notification will send when a connection is available.');
+    expect(presentRoute(status({
+      pending_local_count: 1, queued_count: 1, user_content_kind: 'sync_updates',
+    }), true).explanation).toBe('1 sync update will send when a connection is available.');
+    expect(presentRoute(status({
+      route: 'relay', phase: 'authenticated', held_by_relay_count: 2, awaiting_peer_count: 2,
+      delivery_reason: 'relay_holding', user_content_kind: 'notifications',
+    }), true).explanation).toBe('2 notifications are stored securely and waiting for your other phone.');
   });
 
-  it('reports Via relay for an authenticated relay route', () => {
-    const p = presentRoute(status({ route: 'relay', phase: 'authenticated' }), true);
-
-    expect(p.state).toBe('relay');
-    expect(p.label).toBe('Via relay');
-    expect(p.action).toBeUndefined();
+  it('never calls relay-held work queued on this phone', () => {
+    const presentation = presentRoute(status({
+      route: 'relay', phase: 'authenticated', held_by_relay_count: 1, awaiting_peer_count: 1,
+      delivery_reason: 'relay_holding',
+    }), true);
+    expect(presentation.label).toBe('Via relay');
+    expect(presentation.label).not.toMatch(/queued/i);
   });
 
-  it('never shows offline merely because the relay is down while LAN is healthy', () => {
-    const p = presentRoute(status({ route: 'lan', phase: 'authenticated' }), true);
-
-    expect(p.label).not.toMatch(/offline/i);
-    expect(p.state).toBe('direct');
-  });
-
-  it('reports Reconnecting while recovering with no queued work', () => {
-    const p = presentRoute(status({ route: 'none', phase: 'reconnecting' }), true);
-
-    expect(p.state).toBe('reconnecting');
-    expect(p.label).toBe('Reconnecting');
-    expect(p.action).toBeUndefined();
-  });
-
-  it('reports Queued for delivery with the count and a single retry control', () => {
-    const p = presentRoute(status({ route: 'none', phase: 'reconnecting', queued_count: 4 }), true);
-
-    expect(p.state).toBe('queued');
-    expect(p.label).toBe('Queued for delivery');
-    expect(p.explanation).toContain('4');
-    expect(p.action).toBe('retry');
-  });
-
-  it('says one notification in the singular', () => {
-    const p = presentRoute(status({ queued_count: 1 }), true);
-
-    expect(p.explanation).toBe('1 notification is waiting for your other phone.');
-  });
-
-  it('reports Not paired before anything is linked', () => {
-    const p = presentRoute(status({ route: 'lan', phase: 'authenticated' }), false);
-
-    expect(p.state).toBe('unpaired');
-    expect(p.label).toBe('Not paired');
-    expect(p.action).toBe('pair');
-  });
-
-  it('offers no action in the two healthy states', () => {
-    expect(presentRoute(status({ route: 'lan', phase: 'authenticated' }), true).action).toBeUndefined();
-    expect(presentRoute(status({ route: 'relay', phase: 'authenticated' }), true).action).toBeUndefined();
-  });
-
-  it('treats a missing or negative queue count as empty', () => {
-    expect(presentRoute(status({ queued_count: -3 }), true).queuedCount).toBe(0);
-    expect(presentRoute({ route: 'none', phase: 'idle' } as RouteStatus, true).queuedCount).toBe(0);
+  it('reports not paired before anything is linked', () => {
+    expect(presentRoute(status({ route: 'lan', phase: 'authenticated' }), false)).toMatchObject({
+      state: 'unpaired', label: 'Not paired', action: 'pair', peerLine: null,
+    });
   });
 
   it('exposes no network detail in any user-facing string', () => {
     const all = [
       presentRoute(status({ route: 'lan', phase: 'authenticated' }), true),
       presentRoute(status({ route: 'relay', phase: 'authenticated' }), true),
-      presentRoute(status({ phase: 'reconnecting' }), true),
-      presentRoute(status({ queued_count: 2 }), true),
-      presentRoute(status(), false),
+      presentRoute(status({ phase: 'reconnecting', pending_local_count: 2 }), true),
     ];
-
-    for (const p of all) {
-      expect(`${p.label} ${p.explanation}`).not.toMatch(/\d+\.\d+\.\d+\.\d+|wss?:|ssid|port|:\d{2,5}\b/i);
+    for (const presentation of all) {
+      expect(`${presentation.label} ${presentation.explanation} ${presentation.peerLine ?? ''}`)
+        .not.toMatch(/\d+\.\d+\.\d+\.\d+|wss?:|ssid|port|:\d{2,5}\b/i);
     }
   });
 });

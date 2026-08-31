@@ -12,14 +12,13 @@ interface ConnectionSurfaceProps {
   enabled: boolean;
   onToggle: (next: boolean) => void;
   peerName: string;
-  peerReachable: boolean;
   onOpenPeer: () => void;
   traceWidth: number;
   onRetry?: () => void;
   onPair?: () => void;
 }
 
-export function ConnectionSurface({ route, enabled, onToggle, peerName, peerReachable, onOpenPeer, traceWidth, onRetry, onPair }: ConnectionSurfaceProps) {
+export function ConnectionSurface({ route, enabled, onToggle, peerName, onOpenPeer, traceWidth, onRetry, onPair }: ConnectionSurfaceProps) {
   const theme = useTheme();
   const { width, fontScale } = useWindowDimensions();
   const narrow = width <= 360 || fontScale >= 1.6;
@@ -30,7 +29,7 @@ export function ConnectionSurface({ route, enabled, onToggle, peerName, peerReac
           accessible
           accessibilityRole="text"
           accessibilityLiveRegion="polite"
-          accessibilityLabel={`${route.label}. ${route.explanation}`}
+          accessibilityLabel={`${route.label}. ${route.explanation}${route.peerLine ? ` ${route.peerLine}.` : ''}`}
           style={styles.routeCopy}
         >
           <Text style={[styles.routeLabel, { color: theme.colors.onSurface, fontFamily: theme.fonts.display }]}>{route.label}</Text>
@@ -54,7 +53,7 @@ export function ConnectionSurface({ route, enabled, onToggle, peerName, peerReac
         <View style={styles.peerCopy}>
           <Text style={[styles.peerRole, { color: theme.colors.onSurfaceVariant, fontFamily: theme.fonts.ui }]}>Paired phone</Text>
           <Text style={[styles.peerName, { color: theme.colors.onSurface, fontFamily: theme.fonts.uiSemi }]}>{peerName}</Text>
-          {peerReachable && <Text style={[styles.reachable, { color: theme.colors.primary, fontFamily: theme.fonts.ui }]}>Reachable now</Text>}
+          {route.peerLine && <Text style={[styles.peerStatus, { color: theme.colors.primary, fontFamily: theme.fonts.ui }]}>{route.peerLine}</Text>}
         </View>
         <HandoffDisclosureMark color={theme.colors.primary} />
       </Pressable>
@@ -80,5 +79,5 @@ const styles = StyleSheet.create({
   peerCopy: { flex: 1, minWidth: 0 },
   peerRole: { fontSize: 13, lineHeight: 18 },
   peerName: { marginTop: 1, fontSize: 17, lineHeight: 24 },
-  reachable: { marginTop: 1, fontSize: 13, lineHeight: 18 },
+  peerStatus: { marginTop: 1, fontSize: 13, lineHeight: 18 },
 });

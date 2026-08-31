@@ -71,7 +71,6 @@ export default function HomeScreen() {
 
   const route = presentRoute(routeStatus, pairStatus.paired, mirrorOn);
   const peerName = pairStatus.paired ? (pairStatus.peerDisplayName?.trim() || 'Unknown device') : 'Not paired';
-  const peerReachable = route.state === 'direct' || route.state === 'relay';
   const gutter = width <= 360 ? 16 : 24;
   const connectionWidth = Math.max(232, width - gutter * 2);
   const traceWidth = Math.max(192, connectionWidth - 40);
@@ -85,7 +84,6 @@ export default function HomeScreen() {
           enabled={mirrorOn}
           onToggle={handleMirrorToggle}
           peerName={peerName}
-          peerReachable={peerReachable}
           onOpenPeer={() => router.push('/settings/pair')}
           traceWidth={traceWidth}
           onRetry={handleRetry}

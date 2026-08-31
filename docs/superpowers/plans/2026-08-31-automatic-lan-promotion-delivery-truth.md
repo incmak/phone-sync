@@ -352,14 +352,15 @@ data class SyncRouteStatus(
 
 **Presentation rule:** `DeliveryPresentation` gains a `peerLine: 'Reachable now' | 'Checked in recently' | 'Not confirmed online' | null`; `ConnectionSurface` renders that value and includes it in its accessibility label. `home.tsx` no longer infers reachability from route kind.
 
-- [ ] Add RED presentation tests covering every table row in section 8.3 of the approved design: direct, fresh relay, stale relay empty, relay-held, bootstrap waiting, incompatible peer, binding conflict, no-route pending local, no-route relay-held, reconnecting empty, and paused.
-- [ ] Add RED grammar tests: one/many notifications only when `user_content_kind=notifications`; otherwise one/many sync updates. Prove relay-held work remains “Via relay,” and only no-route pending-local work becomes “Queued on this phone.”
-- [ ] Add RED screen tests proving relay never renders “Reachable now,” direct does, fresh relay uses “Checked in recently,” stale/unknown uses “Not confirmed online,” the accessibility live label includes all three copy lines, retry appears only where the approved table permits, and existing switch/button targets remain at least 48 dp.
-- [ ] Run `cd mobile && npm test -- --runInBand state/__tests__/routePresentation.test.ts app/__tests__/homeHandoffTrace.test.tsx components/home/__tests__/ConnectionSurface.test.tsx` and confirm failure.
-- [ ] Implement the mapping in `routePresentation.ts` as the sole UI wording authority. Remove `peerReachable` from `home.tsx` and `ConnectionSurface`; pass/render the approved `peerLine` instead.
-- [ ] Keep the current spacing, trace geometry, typography tokens, theme colors, and primitive controls. At narrow width or large font scale, retain the existing stacked header and untruncated multiline text.
-- [ ] Run the focused Jest command, `cd mobile && npm run typecheck`, `cd mobile && npm run lint`, and `git diff --check`.
-- [ ] Complete the anti-slop point-by-point review for hierarchy, restraint, copy truth, spacing, typography, color, light/dark behavior, 2x font, accessibility labels, and pressed/disabled/retry states. Record any physical-only item as pending rather than inferring success.
+- [x] Add RED presentation tests covering every table row in section 8.3 of the approved design: direct, fresh relay, stale relay empty, relay-held, bootstrap waiting, incompatible peer, binding conflict, no-route pending local, no-route relay-held, reconnecting empty, and paused.
+- [x] Add RED grammar tests: one/many notifications only when `user_content_kind=notifications`; otherwise one/many sync updates. Prove relay-held work remains “Via relay,” and only no-route pending-local work becomes “Queued on this phone.”
+- [x] Add RED screen tests proving relay never renders “Reachable now,” direct does, fresh relay uses “Checked in recently,” stale/unknown uses “Not confirmed online,” the accessibility live label includes all three copy lines, retry appears only where the approved table permits, and existing switch/button targets remain at least 48 dp.
+- [x] Run `cd mobile && npm test -- --runInBand state/__tests__/routePresentation.test.ts app/__tests__/homeHandoffTrace.test.tsx components/home/__tests__/ConnectionSurface.test.tsx` and confirm failure.
+- [x] Implement the mapping in `routePresentation.ts` as the sole UI wording authority. Remove `peerReachable` from `home.tsx` and `ConnectionSurface`; pass/render the approved `peerLine` instead.
+- [x] Keep the current spacing, trace geometry, typography tokens, theme colors, and primitive controls. At narrow width or large font scale, retain the existing stacked header and untruncated multiline text.
+- [x] Run the focused Jest command, `cd mobile && npm run typecheck`, `cd mobile && npm run lint`, and `git diff --check`.
+- [x] Complete the anti-slop point-by-point review for hierarchy, restraint, copy truth, spacing, typography, color, light/dark behavior, 2x font, accessibility labels, and pressed/disabled/retry states. Record any physical-only item as pending rather than inferring success.
+  - Code/test review passed without adding hierarchy, containers, icons, typography, color, spacing, or trace changes. Narrow/2x-font stacking, multiline copy, live-region labels, 48 dp controls, and action-state rules are covered. Light/dark physical screenshots and pressed-state visual inspection remain part of Task 10's two-phone physical gate.
 - [ ] Commit with `fix(mobile/home): show delivery truth`.
 
 ### Task 9: Add deterministic end-to-end evidence and operator guidance

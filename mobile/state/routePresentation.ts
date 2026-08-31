@@ -13,6 +13,22 @@ export interface DeliveryPresentation {
   /** Present only when recovery genuinely needs the user. */
   action?: DeliveryAction;
   queuedCount: number;
+  peerLine: 'Reachable now' | 'Checked in recently' | 'Not confirmed online' | null;
+}
+
+function count(value: number | undefined): number {
+  return Math.max(0, value ?? 0);
+}
+
+function itemName(total: number, kind: RouteStatus['user_content_kind']): string {
+  const noun = kind === 'notifications' ? 'notification' : 'sync update';
+  return `${total} ${noun}${total === 1 ? '' : 's'}`;
+}
+
+function evidenceLine(status: RouteStatus): DeliveryPresentation['peerLine'] {
+  if (status.route === 'lan' && status.phase === 'authenticated') return 'Reachable now';
+  if (status.peer_evidence === 'recent') return 'Checked in recently';
+  return 'Not confirmed online';
 }
 
 /**
@@ -23,7 +39,10 @@ export interface DeliveryPresentation {
  * Wi-Fi even with no relay connection at all.
  */
 export function presentRoute(status: RouteStatus, paired: boolean, enabled: boolean = true): DeliveryPresentation {
-  const queuedCount = Math.max(0, status.queued_count ?? 0);
+  const queuedCount = count(status.pending_local_count ?? status.queued_count);
+  const awaitingPeer = count(status.awaiting_peer_count);
+  const heldByRelay = count(status.held_by_relay_count);
+  const contentKind = status.user_content_kind ?? 'notifications';
 
   if (!paired) {
     return {
@@ -32,6 +51,7 @@ export function presentRoute(status: RouteStatus, paired: boolean, enabled: bool
       explanation: 'Link your other phone to start mirroring notifications.',
       action: 'pair',
       queuedCount: 0,
+      peerLine: null,
     };
   }
 
@@ -41,6 +61,7 @@ export function presentRoute(status: RouteStatus, paired: boolean, enabled: bool
       label: 'Paused',
       explanation: 'Turn on mirroring when you want delivery to resume.',
       queuedCount,
+      peerLine: null,
     };
   }
 
@@ -48,17 +69,36 @@ export function presentRoute(status: RouteStatus, paired: boolean, enabled: bool
     return {
       state: 'direct',
       label: 'Direct on Wi-Fi',
-      explanation: 'Your phones are talking to each other directly over Wi-Fi.',
+      explanation: 'Your phones are talking directly over Wi-Fi.',
       queuedCount,
+      peerLine: 'Reachable now',
     };
   }
 
   if (status.phase === 'authenticated' && status.route === 'relay') {
+    const peerLine = evidenceLine(status);
+    let explanation: string;
+    if (status.delivery_reason === 'lan_binding_conflict') {
+      explanation = 'Direct Wi-Fi needs attention. Relay delivery remains encrypted end to end.';
+    } else if (status.delivery_reason === 'peer_version_incompatible') {
+      explanation = 'Update Twinotify on your other phone to enable direct Wi-Fi.';
+    } else if (heldByRelay > 0) {
+      explanation = `${itemName(heldByRelay, contentKind)} ${heldByRelay === 1 ? 'is' : 'are'} stored securely and waiting for your other phone.`;
+    } else if (awaitingPeer > 0) {
+      explanation = `${itemName(awaitingPeer, contentKind)} ${awaitingPeer === 1 ? 'is' : 'are'} waiting for confirmation from your other phone.`;
+    } else if (status.delivery_reason === 'lan_bootstrap_waiting') {
+      explanation = 'Setting up direct Wi-Fi in the background. Delivery is encrypted end to end.';
+    } else if (status.peer_evidence === 'recent') {
+      explanation = 'Your other phone checked in recently. Delivery is encrypted end to end.';
+    } else {
+      explanation = 'Connected to the relay. Waiting for your other phone to check in.';
+    }
     return {
       state: 'relay',
       label: 'Via relay',
-      explanation: 'Going through the relay, still encrypted end to end.',
+      explanation,
       queuedCount,
+      peerLine,
     };
   }
 
@@ -67,13 +107,22 @@ export function presentRoute(status: RouteStatus, paired: boolean, enabled: bool
   if (queuedCount > 0) {
     return {
       state: 'queued',
-      label: 'Queued for delivery',
-      explanation:
-        queuedCount === 1
-          ? '1 notification is waiting for your other phone.'
-          : `${queuedCount} notifications are waiting for your other phone.`,
+      label: 'Queued on this phone',
+      explanation: `${itemName(queuedCount, contentKind)} will send when a connection is available.`,
       action: 'retry',
       queuedCount,
+      peerLine: 'Not confirmed online',
+    };
+  }
+
+  if (heldByRelay > 0) {
+    return {
+      state: 'reconnecting',
+      label: 'Reconnecting',
+      explanation: `${itemName(heldByRelay, contentKind)} ${heldByRelay === 1 ? 'is' : 'are'} stored securely while this phone reconnects.`,
+      action: 'retry',
+      queuedCount,
+      peerLine: 'Not confirmed online',
     };
   }
 
@@ -82,5 +131,6 @@ export function presentRoute(status: RouteStatus, paired: boolean, enabled: bool
     label: 'Reconnecting',
     explanation: 'Looking for your other phone. This retries on its own.',
     queuedCount,
+    peerLine: 'Not confirmed online',
   };
 }
