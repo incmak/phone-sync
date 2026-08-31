@@ -34,6 +34,8 @@
 - Modify: `relay/internal/store/pair_store.go`
 - Modify: `relay/internal/store/pair_store_test.go`
 - Modify: `relay/internal/server/relay_frame.go`
+- Modify: `relay/internal/server/client_hub.go`
+- Modify: `relay/internal/server/websocket_memory_test.go`
 - Modify: `relay/internal/server/ws.go`
 - Modify: `relay/internal/server/ws_mailbox_test.go`
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/RelayFrameCodec.kt`
@@ -80,11 +82,11 @@ data class TransportEvent.Authenticated(
 ```
 
 - [ ] Add RED Go storage tests proving feature lists are copied, persisted, pair-scoped, purged on revoke/rebind, and decoded as empty from legacy records. Run `cd relay && go test ./internal/store -run 'TestPairCapabilities|TestRevokeByDevice' -race -count=1` and confirm the new assertions fail because features are absent.
-- [ ] Add RED WebSocket tests proving a legacy hello receives exactly `v,type,self,peer,floor`, a feature hello receives `self_features` and `peer_features`, peer feature changes propagate live, duplicates/unknown/oversized features are rejected, and the protocol floor remains monotonic. Run `cd relay && go test ./internal/server -run 'TestWebSocket.*Capabilities|TestProtocolFixtures' -race -count=1` and confirm failure.
+- [ ] Add RED WebSocket tests proving a legacy hello receives exactly `v,type,self,peer,floor`, a feature hello receives `self_features` and `peer_features`, peer feature changes propagate live, stale/replaced sockets with the same protocol list but different feature lists cannot receive a mis-shaped update, duplicates/unknown/oversized features are rejected, and the protocol floor remains monotonic. Run `cd relay && go test ./internal/server -run 'TestWebSocket.*Capabilities|TestClientHub.*Capabilities|TestProtocolFixtures' -race -count=1` and confirm failure.
 - [ ] Add RED Kotlin codec/transport tests proving legacy capability frames decode with empty feature sets, feature-bearing frames round-trip strictly, old-shape hello remains decodable, and `TransportEvent.Authenticated` carries the peer feature snapshot. Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.service.RelayFrameCodecTest' --tests 'co.twinotify.core.service.RelayTransportTest'` and confirm failure.
 - [ ] Extend `relay-control.schema.json`: hello accepts an optional unique two-item maximum `features` array whose items are the two approved names; capabilities accepts optional paired `self_features`/`peer_features` arrays. Keep all other frames closed-world.
 - [ ] Extend pair capability persistence and pair-scoped APIs to copy feature slices on input/output. Preserve decoding of old JSON records with a missing field.
-- [ ] Shape capability responses per recipient: include feature keys only when that recipient advertised a non-empty feature set. Include feature fields in capability equality so a live peer update is propagated.
+- [ ] Shape capability responses per recipient: include feature keys only when that recipient advertised a non-empty feature set. Include feature fields in capability equality and the hub's connection-generation fence so a live peer update reaches only the matching current socket.
 - [ ] Extend the Kotlin codec with the same bounded allowlist, advertise `RelayFeatures.CURRENT`, decode absent fields as empty, and carry peer features with authenticated transport events.
 - [ ] Run `make sync-proto`, the three focused RED-to-GREEN commands above, then `git diff --check`.
 - [ ] Commit with `feat(relay): negotiate transport features`.
