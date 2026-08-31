@@ -102,6 +102,7 @@ class PeerControlOutboxTest {
 
         assertFalse(outbox.acceptProbeReceipt(probe.msgId, "f".repeat(64), generation = 8, now = 2_000))
         assertFalse(outbox.acceptProbeReceipt(probe.msgId, probe.envelopeSha256, generation = 9, now = 2_000))
+        assertFalse(outbox.acceptProbeReceipt("ordinary-notification", probe.envelopeSha256, generation = 8, now = 2_000))
         assertEquals(PeerEvidence.UNKNOWN, outbox.peerEvidence(generation = 8, now = 2_000))
         assertTrue(outbox.acceptProbeReceipt(probe.msgId, probe.envelopeSha256, generation = 8, now = 2_000))
         store.inserted.clear() // The ordinary receipt transition deletes this durable row.

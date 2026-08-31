@@ -36,6 +36,82 @@ import kotlin.test.assertTrue
 
 class InboundDispatcherControlTest {
     @Test
+    fun authenticatedBootstrapAndProbeCommitAppliedReceiptsBeforePostCommitSignals() = runTest {
+        val bootstrap = lanBootstrapEvent()
+        val probe = peerProbeEvent()
+        val plaintextByMsgId = listOf(bootstrap, probe).associate { event ->
+            event.msgId to ProtocolJson.encodeInner(event).encodeToByteArray()
+        }
+        val authenticator = EnvelopeAuthenticator(PayloadDecryptor { envelope ->
+            requireNotNull(plaintextByMsgId[envelope.msgId])
+        }, "peer-device", clock = { 2_000 })
+        val context = object : ContextWrapper(null) {
+            override fun getApplicationContext(): Context = this
+        }
+        val committed = mutableListOf<Pair<InboundMessage, co.twinotify.core.storage.OutboundMessage>>()
+        val signals = mutableListOf<String>()
+        val events = mutableListOf<String>()
+        var materializationRequests = 0
+        var nextReceipt = 70
+        val dispatcher = InboundDispatcher(
+            ctx = context,
+            snapshotCoordinator = SnapshotCoordinator(NoAccessSnapshotStore),
+            onAuthenticatedEvent = events::add,
+            authenticatedV2Opener = authenticator::open,
+            directControlJournal = null,
+            materializationRequester = MaterializationRequester { materializationRequests += 1 },
+            receiptBackedControlJournal = ReceiptBackedControlJournal { inbound, receipt, process ->
+                assertSame(ReceiptBackedControlResult.Applied, process())
+                committed += inbound to receipt
+                DirectControlCommitResult.Committed
+            },
+            appliedReceiptFactory = AppliedControlReceiptFactory { ackedMsgId, digest ->
+                outboundPeerReceipt((nextReceipt++).canonicalUuid()).copy(
+                    envelopeSha256 = digest,
+                    envelopeJson = ackedMsgId,
+                )
+            },
+            lanBootstrapProcessor = LanBootstrapProcessor {
+                LanBootstrapProcessResult.Applied(bindingChanged = true)
+            },
+            transportGeneration = { 9 },
+            requestDirectAttempt = { signals += "direct" },
+            requestRouteReload = { signals += "reload" },
+        )
+
+        assertIs<InboundDispatchResult.Accepted>(dispatcher.dispatch(envelopeFor(bootstrap)))
+        assertEquals(listOf("reload"), signals)
+        assertIs<InboundDispatchResult.Accepted>(dispatcher.dispatch(envelopeFor(probe)))
+
+        assertEquals(listOf("reload", "direct"), signals)
+        assertEquals(0, materializationRequests)
+        assertEquals(listOf("lan.bootstrap", "peer.probe"), events)
+        assertEquals(listOf("lan.bootstrap", "peer.probe"), committed.map { it.first.eventType })
+        committed.forEach { (inbound, receipt) ->
+            assertEquals(receipt.msgId, inbound.receiptMsgId)
+            assertEquals("READY", inbound.relayAckState)
+            assertEquals("peer.receipt", receipt.eventType)
+        }
+    }
+
+    @Test
+    fun duplicateReceiptBackedControlDoesNotReprocessOrSignal() = runTest {
+        val event = peerProbeEvent()
+        val result = dispatchAuthenticatedReceiptBackedControl(
+            inner = event,
+            envelopeSha256 = "a".repeat(64),
+            committedAt = 2_000,
+            receiptFactory = AppliedControlReceiptFactory { _, _ ->
+                outboundPeerReceipt(80.canonicalUuid())
+            },
+            journal = ReceiptBackedControlJournal { _, _, _ -> DirectControlCommitResult.Duplicate },
+            process = { error("duplicate must not process") },
+        )
+
+        assertIs<InboundDispatchResult.Duplicate>(result)
+    }
+
+    @Test
     fun authenticatedActionResultUsesDedicatedProcessor() = runTest {
         val event = actionResultEvent()
         var request: ActionResultRequest? = null
@@ -791,6 +867,30 @@ class InboundDispatcherControlTest {
             ),
         )
     }
+
+    private fun lanBootstrapEvent() = InnerEventV2(
+        msgId = 50.canonicalUuid(),
+        originDevice = "peer-device",
+        type = "lan.bootstrap",
+        canonId = null,
+        sequence = null,
+        createdAt = 1_000,
+        expiresAt = 601_000,
+        payloadJson = """{"protocol_version":1,"tls_spki_sha256":"${"1".repeat(64)}","binding_context_sha256":"${"2".repeat(64)}"}""",
+    )
+
+    private fun peerProbeEvent() = InnerEventV2(
+        msgId = 60.canonicalUuid(),
+        originDevice = "peer-device",
+        type = "peer.probe",
+        canonId = null,
+        sequence = null,
+        createdAt = 1_000,
+        expiresAt = 121_000,
+        payloadJson = """{"probe_id":"${60.canonicalUuid()}","sent_at":1000,"request_direct":true}""",
+    )
+
+    private fun Int.canonicalUuid() = "%08d-0000-4000-8000-000000000000".format(this)
 }
 
 private fun outboundPeerReceipt(msgId: String) = co.twinotify.core.storage.OutboundMessage(

@@ -33,6 +33,7 @@ import co.twinotify.core.protocol.ProtocolJson
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.InboundMessage
 import co.twinotify.core.storage.NotificationDb
+import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.storage.ReplayGuard
 import kotlinx.coroutines.sync.Mutex
@@ -85,6 +86,23 @@ fun interface DirectControlJournal {
         row: InboundMessage,
         process: suspend () -> DirectControlProcessingResult,
     ): DirectControlCommitResult
+}
+
+sealed interface ReceiptBackedControlResult {
+    data object Applied : ReceiptBackedControlResult
+    data class Rejected(val code: String) : ReceiptBackedControlResult
+}
+
+fun interface ReceiptBackedControlJournal {
+    suspend fun commit(
+        inbound: InboundMessage,
+        receipt: OutboundMessage,
+        process: suspend () -> ReceiptBackedControlResult,
+    ): DirectControlCommitResult
+}
+
+fun interface AppliedControlReceiptFactory {
+    suspend fun createApplied(ackedMsgId: String, envelopeSha256: String): OutboundMessage?
 }
 
 sealed interface ActionInvokeRejectionCommitResult {
@@ -325,6 +343,39 @@ internal suspend fun dispatchAuthenticatedDirectControl(
     }
 }
 
+internal suspend fun dispatchAuthenticatedReceiptBackedControl(
+    inner: co.twinotify.core.protocol.InnerEventV2,
+    envelopeSha256: String,
+    committedAt: Long,
+    receiptFactory: AppliedControlReceiptFactory,
+    journal: ReceiptBackedControlJournal,
+    process: suspend () -> ReceiptBackedControlResult,
+): InboundDispatchResult {
+    require(inner.type in RECEIPT_BACKED_CONTROL_TYPES)
+    val receipt = receiptFactory.createApplied(inner.msgId, envelopeSha256)
+        ?: return InboundDispatchResult.Rejected("control_receipt_unavailable")
+    val inbound = InboundMessage(
+        msgId = inner.msgId,
+        originDevice = inner.originDevice,
+        envelopeSha256 = envelopeSha256,
+        eventType = inner.type,
+        canonId = null,
+        sequence = null,
+        outcome = "APPLIED",
+        committedAt = committedAt,
+        appliedAt = committedAt,
+        receiptMsgId = receipt.msgId,
+        relayAckState = "READY",
+    )
+    return when (val result = journal.commit(inbound, receipt, process)) {
+        DirectControlCommitResult.Committed -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+        DirectControlCommitResult.Duplicate -> InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+        DirectControlCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        DirectControlCommitResult.NotEligible -> InboundDispatchResult.Rejected("unsupported_control")
+        is DirectControlCommitResult.Rejected -> InboundDispatchResult.Rejected(result.code)
+    }
+}
+
 internal suspend fun processAuthenticatedControl(
     rejectedCode: String,
     process: suspend () -> DirectControlProcessingResult,
@@ -377,6 +428,13 @@ class InboundDispatcher internal constructor(
     private val authenticatedV2Opener: ((String) -> AuthenticatedEnvelope)?,
     private val directControlJournal: DirectControlJournal?,
     private val materializationRequester: MaterializationRequester,
+    private val receiptBackedControlJournal: ReceiptBackedControlJournal? = null,
+    private val appliedReceiptFactory: AppliedControlReceiptFactory? = null,
+    private val lanBootstrapProcessor: LanBootstrapProcessor? = null,
+    private val peerControlOutbox: PeerControlOutbox? = null,
+    private val transportGeneration: () -> Int = { SyncServiceStatus.routeStatus.value.routeGeneration },
+    private val requestDirectAttempt: () -> Unit = {},
+    private val requestRouteReload: () -> Unit = {},
 ) {
     internal constructor(
         ctx: Context,
@@ -385,10 +443,38 @@ class InboundDispatcher internal constructor(
         ),
         onAuthenticatedEvent: (String) -> Unit = {},
         materializationRequester: MaterializationRequester,
-    ) : this(ctx, snapshotCoordinator, onAuthenticatedEvent, null, null, materializationRequester)
+        peerControlOutbox: PeerControlOutbox? = null,
+        transportGeneration: () -> Int = { SyncServiceStatus.routeStatus.value.routeGeneration },
+        requestDirectAttempt: () -> Unit = {},
+        requestRouteReload: () -> Unit = {},
+    ) : this(
+        ctx = ctx,
+        snapshotCoordinator = snapshotCoordinator,
+        onAuthenticatedEvent = onAuthenticatedEvent,
+        authenticatedV2Opener = null,
+        directControlJournal = null,
+        materializationRequester = materializationRequester,
+        peerControlOutbox = peerControlOutbox,
+        transportGeneration = transportGeneration,
+        requestDirectAttempt = requestDirectAttempt,
+        requestRouteReload = requestRouteReload,
+    )
 
     private val reliableDao by lazy { NotificationDb.get(ctx.applicationContext).reliableDeliveryDao() }
     private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao)) }
+    private val controls by lazy { peerControlOutbox ?: PeerControlOutbox(ctx.applicationContext, reliableDao) }
+    private val bootstrapProcessor by lazy {
+        lanBootstrapProcessor ?: DefaultLanBootstrapProcessor(
+            ctx.applicationContext,
+            controls,
+            transportGeneration,
+        )
+    }
+    private val controlReceiptFactory by lazy {
+        appliedReceiptFactory ?: DurableReceiptFactory(ctx.applicationContext).let { factory ->
+            AppliedControlReceiptFactory(factory::createApplied)
+        }
+    }
     private val stateMutex = Mutex()
     private val snapshots get() = snapshotCoordinator
     private val actionProcessor by lazy {
@@ -521,8 +607,53 @@ class InboundDispatcher internal constructor(
             onAuthenticatedEvent(inner.type)
             return it
         }
+        if (inner.type in RECEIPT_BACKED_CONTROL_TYPES) {
+            var bindingChanged = false
+            var requestDirect = false
+            val result = dispatchAuthenticatedReceiptBackedControl(
+                inner = inner,
+                envelopeSha256 = opened.envelopeSha256,
+                committedAt = System.currentTimeMillis().coerceAtLeast(0L),
+                receiptFactory = controlReceiptFactory,
+                journal = receiptBackedControlJournal
+                    ?: ReceiptBackedControlJournal(reliableDao::commitReceiptBackedControl),
+            ) {
+                when (inner.type) {
+                    "lan.bootstrap" -> {
+                        val payload = inner.payloadObject()
+                        when (val processed = bootstrapProcessor.process(
+                            LanBootstrapPayload(
+                                protocolVersion = payload.getInt("protocol_version"),
+                                tlsSpkiSha256 = payload.getString("tls_spki_sha256"),
+                                bindingContextSha256 = payload.getString("binding_context_sha256"),
+                            ),
+                        )) {
+                            is LanBootstrapProcessResult.Applied -> {
+                                bindingChanged = processed.bindingChanged
+                                ReceiptBackedControlResult.Applied
+                            }
+                            is LanBootstrapProcessResult.Rejected ->
+                                ReceiptBackedControlResult.Rejected(processed.code)
+                        }
+                    }
+                    "peer.probe" -> {
+                        requestDirect = inner.payloadObject().getBoolean("request_direct")
+                        ReceiptBackedControlResult.Applied
+                    }
+                    else -> error("receipt-backed control allowlist drift")
+                }
+            }
+            if (result is InboundDispatchResult.Accepted) {
+                if (bindingChanged) requestRouteReload()
+                if (requestDirect) requestDirectAttempt()
+            }
+            onAuthenticatedEvent(inner.type)
+            return result
+        }
         if (inner.type in DIRECT_ACK_CONTROL_TYPES) {
             var snapshotCommitted = false
+            var acceptedProbeReceipt: Pair<String, String>? = null
+            val controlNow = System.currentTimeMillis().coerceAtLeast(0L)
             val result = dispatchAuthenticatedDirectControl(
                 msgId = inner.msgId,
                 originDevice = inner.originDevice,
@@ -548,6 +679,10 @@ class InboundDispatcher internal constructor(
                             status = payload.getString("status"),
                             reason = payload.optString("reason").takeIf { it.isNotEmpty() },
                         )
+                        if (transition is OutboxTransition.Deleted) {
+                            acceptedProbeReceipt = payload.getString("acked_msg_id") to
+                                payload.getString("envelope_sha256")
+                        }
                         peerReceiptControlResult(transition)
                     }
                     "state.digest" -> snapshots.onDigest(inner).toDirectControlResult("digest_rejected")
@@ -562,8 +697,13 @@ class InboundDispatcher internal constructor(
                 } }
             }
             if (inner.type == "peer.receipt" && result !is InboundDispatchResult.Rejected) {
-                SyncServiceStatus.setLastReceiptAt(System.currentTimeMillis())
-                SyncServiceStatus.setQueueStats(reliableDao.activeOutboundCount(), reliableDao.activeOutboundBytes())
+                acceptedProbeReceipt?.let { (msgId, digest) ->
+                    if (controls.acceptProbeReceipt(msgId, digest, transportGeneration(), controlNow)) {
+                        SyncServiceStatus.setLastReceiptAt(controlNow)
+                    }
+                }
+                val snapshot = reliableDao.deliveryQueueSnapshot()
+                SyncServiceStatus.setQueueStats(snapshot.pendingLocal, snapshot.totalActiveBytes)
             }
             if (snapshotCommitted) {
                 ProductObservationTracker.recordSnapshotCommit()
@@ -982,3 +1122,5 @@ private val DIRECT_ACK_CONTROL_TYPES = setOf(
     "state.snapshot.item",
     "state.snapshot.end",
 )
+
+private val RECEIPT_BACKED_CONTROL_TYPES = setOf("lan.bootstrap", "peer.probe")

@@ -471,8 +471,11 @@ class DurableReceiptFactory(private val context: Context) : ReceiptFactory {
         pendingInbound: List<InboundMessage>,
     ): OutboundMessage? {
         val inbound = pendingInbound.firstOrNull() ?: return null
-        return createReceipt(inbound.msgId, inbound.envelopeSha256, "applied", null)
+        return createApplied(inbound.msgId, inbound.envelopeSha256)
     }
+
+    suspend fun createApplied(ackedMsgId: String, envelopeSha256: String): OutboundMessage? =
+        createReceipt(ackedMsgId, envelopeSha256, "applied", null)
 
     override suspend fun createRejected(
         ackedMsgId: String,

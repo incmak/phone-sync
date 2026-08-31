@@ -21,6 +21,7 @@ import co.twinotify.core.call.gracefullyShutdownCallCapture
 import co.twinotify.core.service.CustodyRoute
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
+import co.twinotify.core.service.ReceiptBackedControlResult
 import kotlinx.coroutines.runBlocking
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -104,6 +105,73 @@ class ReliableDeliveryTransactionTest {
         assertEquals(166, mixed.totalActiveBytes)
         assertEquals(mixed.totalActive, dao.activeOutboundCount())
         assertEquals(mixed.totalActiveBytes, dao.activeOutboundBytes())
+    }
+
+    @Test
+    fun receiptBackedControlCommitsJournalAndReceiptAtomicallyAndDuplicatesSafely() = runBlocking {
+        val receipt = controlOutbound("bootstrap-receipt", "peer.receipt").copy(
+            envelopeSha256 = "receipt-digest",
+        )
+        val inbound = receiptBackedInbound("bootstrap", "digest-a", receipt.msgId)
+        var processed = 0
+
+        assertEquals(
+            DirectControlCommitResult.Committed,
+            dao.commitReceiptBackedControl(inbound, receipt) {
+                processed += 1
+                ReceiptBackedControlResult.Applied
+            },
+        )
+        assertEquals(receipt.msgId, dao.inbound(inbound.msgId)?.receiptMsgId)
+        assertEquals(receipt.envelopeSha256, dao.outboundMessage(receipt.msgId)?.envelopeSha256)
+        assertEquals(emptyList(), dao.recentUiActivity(20))
+        assertEquals(
+            DirectControlCommitResult.Duplicate,
+            dao.commitReceiptBackedControl(inbound, receipt) {
+                error("duplicate must not process twice")
+            },
+        )
+        assertEquals(1, processed)
+
+        assertEquals(
+            DirectControlCommitResult.IdConflict,
+            dao.commitReceiptBackedControl(inbound.copy(envelopeSha256 = "digest-b"), receipt) {
+                error("ID conflict must not process")
+            },
+        )
+    }
+
+    @Test
+    fun rejectedOrReceiptConflictingControlLeavesNoInboundOrNewReceipt() = runBlocking {
+        val rejectedReceipt = controlOutbound("rejected-receipt", "peer.receipt")
+        val rejected = receiptBackedInbound("rejected-bootstrap", "digest-a", rejectedReceipt.msgId)
+        assertEquals(
+            DirectControlCommitResult.Rejected("lan_binding_conflict"),
+            dao.commitReceiptBackedControl(rejected, rejectedReceipt) {
+                ReceiptBackedControlResult.Rejected("lan_binding_conflict")
+            },
+        )
+        assertNull(dao.inbound(rejected.msgId))
+        assertNull(dao.outboundMessage(rejectedReceipt.msgId))
+
+        val existingReceipt = controlOutbound("conflict-receipt", "peer.receipt").copy(
+            envelopeSha256 = "existing-digest",
+        )
+        dao.insertOutbound(existingReceipt)
+        val conflicted = receiptBackedInbound(
+            "conflicted-probe",
+            "digest-b",
+            existingReceipt.msgId,
+        ).copy(eventType = "peer.probe")
+        assertEquals(
+            DirectControlCommitResult.Rejected("receipt_conflict"),
+            dao.commitReceiptBackedControl(
+                conflicted,
+                existingReceipt.copy(envelopeSha256 = "different-digest"),
+            ) { ReceiptBackedControlResult.Applied },
+        )
+        assertNull(dao.inbound(conflicted.msgId))
+        assertEquals("existing-digest", dao.outboundMessage(existingReceipt.msgId)?.envelopeSha256)
     }
 
     @Test
@@ -1560,6 +1628,20 @@ class ReliableDeliveryTransactionTest {
         state = "NEW",
         lastError = null,
         requiresPeerReceipt = eventType !in setOf("peer.receipt", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"),
+    )
+
+    private fun receiptBackedInbound(msgId: String, digest: String, receiptMsgId: String) = InboundMessage(
+        msgId = msgId,
+        originDevice = ORIGIN,
+        envelopeSha256 = digest,
+        eventType = "lan.bootstrap",
+        canonId = null,
+        sequence = null,
+        outcome = "APPLIED",
+        committedAt = 1_000,
+        appliedAt = 1_000,
+        receiptMsgId = receiptMsgId,
+        relayAckState = "READY",
     )
 
     private fun controlOutbound(msgId: String, eventType: String) = outbound(

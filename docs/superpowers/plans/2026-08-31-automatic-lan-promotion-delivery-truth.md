@@ -221,10 +221,11 @@ class PeerControlOutbox {
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/NotificationMaterializer.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/storage/ReliableDeliveryDao.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/InboundDispatcher.kt`
+- Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/SyncService.kt`
 - Create: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/LanBootstrapProcessor.kt`
 - Create: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/LanBootstrapProcessorTest.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/InboundDispatcherControlTest.kt`
-- Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/storage/ReliableDeliveryTransactionTest.kt`
+- Modify: `mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/storage/ReliableDeliveryTransactionTest.kt`
 
 **Interfaces:**
 
@@ -246,16 +247,16 @@ interface LanBootstrapProcessor {
 }
 ```
 
-- [ ] Add RED DAO tests proving process success inserts inbound journal plus one receipt in one Room transaction, duplicate digest is idempotent, message-ID conflict is rejected, process rejection inserts neither row, and receipt conflict rolls back.
-- [ ] Add RED bootstrap processor tests for context mismatch, absent-binding commit, same-trust idempotence, binding conflict preservation, nearby-random binding preservation, own announcement durability before commit, store failure mapping, and “binding changed” signaling only after a successful commit.
-- [ ] Add RED dispatcher tests proving both new controls require authenticated v2 opening, produce durable peer receipts, never materialize, never enter Recent activity, duplicate safely, probe `request_direct` uses the bounded signal seam, and only a matching probe receipt updates evidence. Prove ordinary notification receipts do not set relay peer evidence.
-- [ ] Run all three focused test classes and confirm the new tests fail.
-- [ ] Expose `DurableReceiptFactory.createApplied(ackedMsgId, envelopeSha256)` and add `commitReceiptBackedControl` without changing existing notification materialization ordering.
-- [ ] Implement `DefaultLanBootstrapProcessor`: load paired identities, recompute context/secret, validate conflict, ensure the local announcement, commit through `LanPairStore`, and return a post-commit route-reload flag. Never clear relay pairing on failure.
-- [ ] Route `lan.bootstrap` and `peer.probe` before the existing direct-control allowlist. Create the receipt before entering the Room transaction; run the processor inside it; emit route-reload/direct-attempt signals only after the transaction returns committed.
-- [ ] Replace unconditional `setLastReceiptAt` with generation/digest/expiry-correlated probe evidence. Continue updating delivery classification for every valid peer receipt.
-- [ ] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.service.LanBootstrapProcessorTest' --tests 'co.twinotify.core.service.InboundDispatcherControlTest' --tests 'co.twinotify.core.storage.ReliableDeliveryTransactionTest'` and `git diff --check`.
-- [ ] Commit with `feat(mobile/lan): bootstrap relay pairs`.
+- [x] Add RED DAO tests proving process success inserts inbound journal plus one receipt in one Room transaction, duplicate digest is idempotent, message-ID conflict is rejected, process rejection inserts neither row, and receipt conflict rolls back.
+- [x] Add RED bootstrap processor tests for context mismatch, absent-binding commit, same-trust idempotence, binding conflict preservation, nearby-random binding preservation, own announcement durability before commit, store failure mapping, and “binding changed” signaling only after a successful commit.
+- [x] Add RED dispatcher tests proving both new controls require authenticated v2 opening, produce durable peer receipts, never materialize, never enter Recent activity, duplicate safely, probe `request_direct` uses the bounded signal seam, and only a matching probe receipt updates evidence. Prove ordinary notification receipts do not set relay peer evidence.
+- [x] Run the two JVM classes and compile the instrumented Room class; confirm the new tests fail.
+- [x] Expose `DurableReceiptFactory.createApplied(ackedMsgId, envelopeSha256)` and add `commitReceiptBackedControl` without changing existing notification materialization ordering.
+- [x] Implement `DefaultLanBootstrapProcessor`: load paired identities, recompute context/secret, validate conflict, ensure the local announcement, commit through `LanPairStore`, and return a post-commit route-reload flag. Never clear relay pairing on failure.
+- [x] Route `lan.bootstrap` and `peer.probe` before the existing direct-control allowlist. Create the receipt before entering the Room transaction; run the processor inside it; emit route-reload/direct-attempt signals only after the transaction returns committed.
+- [x] Replace unconditional `setLastReceiptAt` with generation/digest/expiry-correlated probe evidence. Continue updating delivery classification for every valid peer receipt.
+- [x] Run the two focused JVM classes, compile the Android suite, run all 52 `ReliableDeliveryTransactionTest` cases on the connected M2012K11AI, and run `git diff --check`.
+- [x] Commit with `feat(mobile/lan): bootstrap relay pairs`.
 
 ### Task 6: Promote relay to LAN without overlapping drainers
 

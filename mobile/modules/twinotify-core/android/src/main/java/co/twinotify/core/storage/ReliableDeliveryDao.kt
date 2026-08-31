@@ -12,6 +12,7 @@ import co.twinotify.core.actions.ActionResultRepost
 import co.twinotify.core.actions.ActionResultRequest
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
+import co.twinotify.core.service.ReceiptBackedControlResult
 import co.twinotify.core.service.CallRejectionCommitResult
 import co.twinotify.core.service.ActionInvokeRejectionCommitResult
 import org.json.JSONObject
@@ -731,6 +732,38 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             }
             is DirectControlProcessingResult.Rejected -> DirectControlCommitResult.Rejected(processed.code)
         }
+    }
+
+    @Transaction
+    open suspend fun commitReceiptBackedControl(
+        inbound: InboundMessage,
+        receipt: OutboundMessage,
+        process: suspend () -> ReceiptBackedControlResult,
+    ): DirectControlCommitResult {
+        if (inbound.eventType !in RECEIPT_BACKED_CONTROL_TYPES) return DirectControlCommitResult.NotEligible
+        require(inbound.canonId == null && inbound.sequence == null)
+        require(inbound.outcome == "APPLIED" && inbound.appliedAt != null && inbound.relayAckState == "READY")
+        require(inbound.receiptMsgId == receipt.msgId)
+        require(receipt.eventType == "peer.receipt" && !receipt.requiresPeerReceipt)
+
+        inbound(inbound.msgId)?.let { existing ->
+            return if (existing.envelopeSha256 == inbound.envelopeSha256) {
+                DirectControlCommitResult.Duplicate
+            } else {
+                DirectControlCommitResult.IdConflict
+            }
+        }
+        val existingReceipt = outbound(receipt.msgId)
+        if (existingReceipt != null && existingReceipt.envelopeSha256 != receipt.envelopeSha256) {
+            return DirectControlCommitResult.Rejected("receipt_conflict")
+        }
+        when (val result = process()) {
+            ReceiptBackedControlResult.Applied -> Unit
+            is ReceiptBackedControlResult.Rejected -> return DirectControlCommitResult.Rejected(result.code)
+        }
+        if (existingReceipt == null) insertOutbound(receipt)
+        insertInbound(inbound)
+        return DirectControlCommitResult.Committed
     }
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
@@ -1874,6 +1907,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             "state.snapshot.item",
             "state.snapshot.end",
         )
+        val RECEIPT_BACKED_CONTROL_TYPES = setOf("lan.bootstrap", "peer.probe")
         val ACTION_RESULT_STATUSES = setOf(
             "dispatched",
             "outcome_unknown",

@@ -958,6 +958,7 @@ class SyncService : Service() {
     private lateinit var legacyStore: co.twinotify.core.storage.LegacyOutboxStore
     private lateinit var reliableDao: co.twinotify.core.storage.ReliableDeliveryDao
     private lateinit var outbox: OutboxRepository
+    private lateinit var peerControls: PeerControlOutbox
     private lateinit var dispatcher: InboundDispatcher
     private lateinit var snapshotCoordinator: SnapshotCoordinator
     private val routePreferenceRestarter = SerializedTransportRestarter(
@@ -977,6 +978,7 @@ class SyncService : Service() {
         val dao = reliableDao
         legacyStore = dao
         outbox = OutboxRepository(DaoOutboxStore(dao))
+        peerControls = PeerControlOutbox(applicationContext, dao)
         val localDevice = kotlinx.coroutines.runBlocking { DeviceIdentity.getOrCreate(applicationContext) }
         val capturePersister = co.twinotify.core.listener.DurableCapturePersister(applicationContext)
         snapshotCoordinator = SnapshotCoordinator(
@@ -995,6 +997,8 @@ class SyncService : Service() {
             materializationRequester = MaterializationRequester {
                 requestPendingMaterialization(MaterializationTrigger.ROUTINE)
             },
+            peerControlOutbox = peerControls,
+            requestRouteReload = routePreferenceRestarter::forceRestart,
         )
         // Every health transition refreshes the foreground text from the same native snapshot.
         healthJob = scope.launch {
