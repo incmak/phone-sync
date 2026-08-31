@@ -359,7 +359,7 @@ class RelayTransport(
         if (!flushReadyAcks(socket)) return false
         // Floor 2 can durably carry both v2 and migrated v1 envelopes. The codec
         // validates each version while preserving the envelope bytes.
-        for (row in outbox.sendable(limit = 32, now = clock())) {
+        for (row in outbox.sendable(limit = OUTBOX_FLUSH_MAX_ITEMS, now = clock())) {
             pendingEventTypes[row.msgId] = row.eventType
             if (!socket.send(RelayFrameCodec.encode(RelayFrame.Put(row.envelopeJson)))) {
                 pendingEventTypes.remove(row.msgId)
@@ -404,6 +404,9 @@ class RelayTransport(
         // Four frames per ingress lane keeps the aggregate worst-case payload below roughly
         // 17 MiB of UTF-16 storage (the flow boundary itself is rendezvous-buffered).
         const val RAW_FRAME_CAPACITY = 4
+        // A legal relay frame can approach 1 MiB, while OkHttp closes a WebSocket whose
+        // pending send queue exceeds 16 MiB. Keep each flush comfortably below that bound.
+        const val OUTBOX_FLUSH_MAX_ITEMS = 4
         const val MIN_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 60_000L
         const val AUTH_RESET_MS = 30_000L

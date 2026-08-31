@@ -385,6 +385,31 @@ class RelayTransportTest {
     }
 
     @Test
+    fun oneFlushDoesNotOverrunAFourFrameSocketBurst() = runTest {
+        val store = RecordingStore().apply {
+            repeat(8) { index ->
+                rows += outbound("44444444-4444-4444-8444-${(index + 1).toString().padStart(12, '0')}")
+            }
+        }
+        var putWrites = 0
+        val connector = ManualConnector(sendResult = { frame ->
+            frame !is RelayFrame.Put || ++putWrites <= 4
+        })
+        val job = backgroundScope.launch {
+            RelayTransport(store.repo, connector = connector, reconnect = false).run(endpoint).collect()
+        }
+        runCurrent()
+        connector.text(RelayFrame.Capabilities(listOf(2, 1), listOf(2), 2))
+
+        advanceTimeBy(1_000L)
+        runCurrent()
+
+        assertEquals(4, connector.socket.frames.filterIsInstance<RelayFrame.Put>().size)
+        assertEquals(0, connector.socket.closeCalls)
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun duplicateCapabilitiesDoNotRestartHealthySessionClock() = runTest {
         val store = RecordingStore()
         val connector = ManualConnector()
