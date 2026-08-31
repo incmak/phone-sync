@@ -1,0 +1,13 @@
+{
+  "v": 2,
+  "msg_id": "62222222-2222-4222-8222-222222222222",
+  "origin_device": "dev-a",
+  "type": "peer.probe",
+  "created_at": 1000,
+  "expires_at": 121000,
+  "payload": {
+    "probe_id": "62222222-2222-4222-8222-222222222222",
+    "sent_at": 1000,
+    "request_direct": true
+  }
+}

@@ -42,7 +42,7 @@ class ProtocolFixtureTest {
                         )
                     }
                 }
-                "peer_receipt_inner" -> {
+                "peer_receipt_inner", "lan_bootstrap_inner", "peer_probe_inner" -> {
                     val event = ProtocolJson.decodeInner(raw)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
                 }
@@ -51,7 +51,7 @@ class ProtocolFixtureTest {
                     assertEquals("call.state", event.type)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
                 }
-                "notif_action_invoke", "notif_action_result" -> {
+                "notif_action_invoke", "notif_action_result", "lan_bootstrap_inner", "peer_probe_inner" -> {
                     val event = ProtocolJson.decodeInner(raw)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
                 }
@@ -101,7 +101,7 @@ class ProtocolFixtureTest {
                     val error = assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
                     assertEquals(expectedCode, observedFixtureCode(error))
                 }
-                "notif_action_invoke", "notif_action_result" -> {
+                "notif_action_invoke", "notif_action_result", "lan_bootstrap_inner", "peer_probe_inner" -> {
                     val error = assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
                     assertEquals(expectedCode, observedFixtureCode(error))
                 }
@@ -123,6 +123,10 @@ class ProtocolFixtureTest {
         error is IllegalArgumentException && error.message?.contains("call.state") == true ->
             "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("notif.action") == true ->
+            "invalid_frame"
+        error is IllegalArgumentException && error.message?.contains("lan.bootstrap") == true ->
+            "invalid_frame"
+        error is IllegalArgumentException && error.message?.contains("peer.probe") == true ->
             "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("notification payload") == true ->
             "invalid_frame"

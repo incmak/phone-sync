@@ -132,6 +132,55 @@ class ProtocolValidationTest {
         }
     }
 
+    @Test
+    fun lanBootstrapAndPeerProbe_roundTripAsStrictReceiptBackedControls() {
+        val bootstrap = ProtocolJson.decodeInner(lanBootstrapJson())
+        val probe = ProtocolJson.decodeInner(peerProbeJson())
+
+        assertEquals("lan.bootstrap", bootstrap.type)
+        assertEquals(null, bootstrap.canonId)
+        assertEquals(null, bootstrap.sequence)
+        assertEquals("peer.probe", probe.type)
+        assertEquals(probe.msgId, JSONObject(probe.payloadJson).getString("probe_id"))
+        assertEquals(bootstrap, ProtocolJson.decodeInner(ProtocolJson.encodeInner(bootstrap)))
+        assertEquals(probe, ProtocolJson.decodeInner(ProtocolJson.encodeInner(probe)))
+    }
+
+    @Test
+    fun lanBootstrap_rejectsInvalidShapeIdentityAndLifetime() {
+        val invalid = listOf(
+            lanBootstrapJson().replace("\"protocol_version\":1,", ""),
+            lanBootstrapJson().replace("\"protocol_version\":1", "\"protocol_version\":2"),
+            lanBootstrapJson().replace("a".repeat(64), "A".repeat(64)),
+            lanBootstrapJson().replace("b".repeat(64), "bad"),
+            lanBootstrapJson().replace("\"binding_context_sha256\":\"${"b".repeat(64)}\"", "\"binding_context_sha256\":\"${"b".repeat(64)}\",\"address\":\"192.0.2.1\""),
+            lanBootstrapJson().replace("\"expires_at\":601000", "\"expires_at\":600999"),
+            lanBootstrapJson().replace("\"created_at\":1000", "\"canon_id\":\"not-allowed\",\"created_at\":1000"),
+            lanBootstrapJson().replace("\"created_at\":1000", "\"sequence\":1,\"created_at\":1000"),
+        )
+
+        invalid.forEach { raw -> assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) } }
+    }
+
+    @Test
+    fun peerProbe_rejectsInvalidShapeCorrelationAndLifetime() {
+        val invalid = listOf(
+            peerProbeJson().replace(",\"request_direct\":true", ""),
+            peerProbeJson().replace(
+                "\"probe_id\":\"$PROBE_ID\"",
+                "\"probe_id\":\"66666666-6666-4666-8666-666666666666\"",
+            ),
+            peerProbeJson().replace("\"sent_at\":1000", "\"sent_at\":-1"),
+            peerProbeJson().replace("\"request_direct\":true", "\"request_direct\":\"true\""),
+            peerProbeJson().replace("\"request_direct\":true", "\"request_direct\":true,\"ssid\":\"private\""),
+            peerProbeJson().replace("\"expires_at\":121000", "\"expires_at\":120999"),
+            peerProbeJson().replace("\"created_at\":1000", "\"canon_id\":\"not-allowed\",\"created_at\":1000"),
+            peerProbeJson().replace(PROBE_ID, PROBE_ID.uppercase()),
+        )
+
+        invalid.forEach { raw -> assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) } }
+    }
+
     private companion object {
         fun callStateJson() = """
             {"v":2,"msg_id":"22222222-2222-4222-8222-222222222222","origin_device":"dev-a","type":"call.state","canon_id":"call:11111111-1111-4111-8111-111111111111","sequence":1,"created_at":1000,"expires_at":2000,"payload":{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming"}}
@@ -148,6 +197,16 @@ class ProtocolValidationTest {
 
         fun actionResultJson() = """
             {"v":2,"msg_id":"7ddc4c03-951f-4e7b-ad09-6c5b1c1df6f5","origin_device":"origin-device","type":"notif.action.result","created_at":1000,"expires_at":601000,"payload":{"invocation_id":"fd2fb70b-829a-4701-8956-61611bc9c701","canon_id":"origin-device:com.example.chat:42:thread-7","status":"dispatched"}}
+        """.trimIndent()
+
+        fun lanBootstrapJson() = """
+            {"v":2,"msg_id":"61111111-1111-4111-8111-111111111111","origin_device":"dev-a","type":"lan.bootstrap","created_at":1000,"expires_at":601000,"payload":{"protocol_version":1,"tls_spki_sha256":"${"a".repeat(64)}","binding_context_sha256":"${"b".repeat(64)}"}}
+        """.trimIndent()
+
+        const val PROBE_ID = "62aaaaaa-2222-4222-8222-222222222222"
+
+        fun peerProbeJson() = """
+            {"v":2,"msg_id":"$PROBE_ID","origin_device":"dev-a","type":"peer.probe","created_at":1000,"expires_at":121000,"payload":{"probe_id":"$PROBE_ID","sent_at":1000,"request_direct":true}}
         """.trimIndent()
 
         const val validReceipt = """

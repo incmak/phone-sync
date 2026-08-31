@@ -1,0 +1,13 @@
+{
+  "v": 2,
+  "msg_id": "64444444-4444-4444-8444-444444444444",
+  "origin_device": "dev-a",
+  "type": "lan.bootstrap",
+  "created_at": 1000,
+  "expires_at": 601000,
+  "payload": {
+    "protocol_version": 1,
+    "tls_spki_sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "binding_context_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

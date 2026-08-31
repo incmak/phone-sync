@@ -19,6 +19,8 @@ object ProtocolJson {
     private const val MAX_REPLY_BYTES = 4096
     private const val ACTION_INVOKE_TTL_MS = 120_000L
     private const val ACTION_RESULT_TTL_MS = 600_000L
+    private const val LAN_BOOTSTRAP_TTL_MS = 600_000L
+    private const val PEER_PROBE_TTL_MS = 120_000L
     private const val ENVELOPE_TYPE = "enc"
     private val receiptStatuses = setOf("applied", "expired", "rejected", "decrypt_failed")
     private val actionResultStatuses = setOf(
@@ -38,6 +40,8 @@ object ProtocolJson {
         "notif.action.result",
         "call.state",
         "peer.receipt",
+        "peer.probe",
+        "lan.bootstrap",
         "state.digest",
         "state.snapshot.begin",
         "state.snapshot.item",
@@ -173,6 +177,24 @@ object ProtocolJson {
             throw ProtocolException("inner event payload must be a JSON object", error)
         }
         if (event.type == "peer.receipt") validateReceiptPayload(payload)
+        if (event.type == "lan.bootstrap") {
+            require(event.canonId == null && event.sequence == null) {
+                "lan.bootstrap must not carry canon_id or sequence"
+            }
+            validateLanBootstrapPayload(payload)
+            require(event.expiresAt - event.createdAt == LAN_BOOTSTRAP_TTL_MS) {
+                "lan.bootstrap expires_at must be created_at + $LAN_BOOTSTRAP_TTL_MS"
+            }
+        }
+        if (event.type == "peer.probe") {
+            require(event.canonId == null && event.sequence == null) {
+                "peer.probe must not carry canon_id or sequence"
+            }
+            validatePeerProbePayload(payload, event.msgId)
+            require(event.expiresAt - event.createdAt == PEER_PROBE_TTL_MS) {
+                "peer.probe expires_at must be created_at + $PEER_PROBE_TTL_MS"
+            }
+        }
         if (event.type == "call.state") validateCallStatePayload(payload, event.canonId, event.sequence)
         if (event.type == "notif.action.invoke") {
             validateActionInvokePayload(payload)
@@ -224,6 +246,38 @@ object ProtocolJson {
                 "peer.receipt payload reason must be at most $MAX_RECEIPT_REASON_LENGTH characters"
             }
         }
+    }
+
+    private fun validateLanBootstrapPayload(payload: JSONObject) {
+        requireOnlyKeys(
+            payload,
+            setOf("protocol_version", "tls_spki_sha256", "binding_context_sha256"),
+            "lan.bootstrap payload",
+        )
+        require(requiredInt(payload, "protocol_version", "lan.bootstrap payload") == 1) {
+            "lan.bootstrap payload protocol_version must be 1"
+        }
+        for (key in listOf("tls_spki_sha256", "binding_context_sha256")) {
+            val digest = requiredString(payload, key, "lan.bootstrap payload")
+            require(digest.matches(Regex("^[0-9a-f]{64}$"))) {
+                "lan.bootstrap payload $key must be lower-case SHA-256"
+            }
+        }
+    }
+
+    private fun validatePeerProbePayload(payload: JSONObject, msgId: String) {
+        requireOnlyKeys(
+            payload,
+            setOf("probe_id", "sent_at", "request_direct"),
+            "peer.probe payload",
+        )
+        val probeId = requiredUuid(payload, "probe_id", "peer.probe payload")
+        require(UUID.fromString(probeId).toString() == probeId) {
+            "peer.probe payload probe_id must be a lower-case canonical UUID"
+        }
+        require(probeId == msgId) { "peer.probe payload probe_id must equal msg_id" }
+        requiredNonNegativeLong(payload, "sent_at", "peer.probe payload")
+        requiredBoolean(payload, "request_direct", "peer.probe payload")
     }
 
     private fun validateCallStatePayload(payload: JSONObject, canonId: String?, sequence: Long?) {
@@ -356,6 +410,15 @@ object ProtocolJson {
         val long = number.toLong()
         if (number.toDouble() != long.toDouble()) throw ProtocolException("$label $key must be an integer")
         long
+    } catch (error: JSONException) {
+        throw ProtocolException("$label requires $key", error)
+    }
+
+    private fun requiredBoolean(value: JSONObject, key: String, label: String): Boolean = try {
+        value.get(key).let {
+            if (it !is Boolean) throw ProtocolException("$label $key must be a boolean")
+            it
+        }
     } catch (error: JSONException) {
         throw ProtocolException("$label requires $key", error)
     }

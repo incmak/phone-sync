@@ -105,6 +105,7 @@ data class TransportEvent.Authenticated(
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/protocol/ProtocolJson.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/protocol/ProtocolFixtureTest.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/protocol/ProtocolValidationTest.kt`
+- Modify: `relay/internal/server/fixture_test.go`
 
 **Contracts:**
 
@@ -116,12 +117,12 @@ data class TransportEvent.Authenticated(
 {"probe_id":"<same canonical UUID as msg_id>","sent_at":1788160800000,"request_direct":true}
 ```
 
-- [ ] Add valid/invalid fixtures and manifest entries first. Extend fixture tests to route `lan_bootstrap_inner` and `peer_probe_inner` through `ProtocolJson.decodeInner`. Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.protocol.ProtocolFixtureTest'` and confirm the valid fixtures fail as unsupported.
-- [ ] Add direct RED validation tests for missing fields, extra fields, uppercase/non-hex digests, protocol versions other than 1, noncanonical probe UUIDs, `probe_id != msg_id`, negative `sent_at`, and non-Boolean `request_direct`. Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.protocol.ProtocolValidationTest'` and confirm failure.
-- [ ] Add both names to the schema and Kotlin inner-type allowlists. Add closed-world schema branches and matching `validateLanBootstrapPayload` / `validatePeerProbePayload` functions; both types forbid `canon_id` and `sequence`.
-- [ ] Run `make sync-proto`, `cd relay && go test ./internal/server -run TestProtocolFixtures -race -count=1`, and both Kotlin protocol test classes.
-- [ ] Run `git diff --check` and verify `git status --short` does not list generated relay schemas.
-- [ ] Commit with `feat(proto): define LAN bootstrap controls`.
+- [x] Add valid/invalid fixtures and manifest entries first. Extend fixture tests to route `lan_bootstrap_inner` and `peer_probe_inner` through `ProtocolJson.decodeInner`. Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.protocol.ProtocolFixtureTest'` and confirm the valid fixtures fail as unsupported.
+- [x] Add direct RED validation tests for missing fields, extra fields, uppercase/non-hex digests, protocol versions other than 1, noncanonical probe UUIDs, `probe_id != msg_id`, negative `sent_at`, and non-Boolean `request_direct`. Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.protocol.ProtocolValidationTest'` and confirm failure.
+- [x] Add both names to the schema and Kotlin inner-type allowlists. Add closed-world schema branches and matching `validateLanBootstrapPayload` / `validatePeerProbePayload` functions; both types forbid `canon_id` and `sequence`.
+- [x] Run `make sync-proto`, `cd relay && go test ./internal/server -run TestProtocolFixtures -race -count=1`, and both Kotlin protocol test classes.
+- [x] Run `git diff --check` and verify `git status --short` does not list generated relay schemas.
+- [x] Commit with `feat(proto): define LAN bootstrap controls`.
 
 ### Task 3: Derive and compare bootstrap LAN trust safely
 

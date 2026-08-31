@@ -7,7 +7,7 @@
     "v": { "const": 2 },
     "msg_id": { "type": "string", "format": "uuid" },
     "origin_device": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "notif.action.invoke", "notif.action.result", "call.state", "peer.receipt", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
+    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "notif.action.invoke", "notif.action.result", "call.state", "peer.receipt", "peer.probe", "lan.bootstrap", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
     "canon_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
     "sequence": { "type": "integer", "minimum": 1 },
     "created_at": { "type": "integer", "minimum": 0 },
@@ -72,6 +72,51 @@
                 "type": "string",
                 "enum": ["dispatched", "outcome_unknown", "action_gone", "notification_gone", "expired", "failed"]
               }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["lan.bootstrap", "peer.probe"] } } },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["canon_id"] },
+            { "required": ["sequence"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "lan.bootstrap" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["protocol_version", "tls_spki_sha256", "binding_context_sha256"],
+            "properties": {
+              "protocol_version": { "const": 1 },
+              "tls_spki_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "binding_context_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "peer.probe" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["probe_id", "sent_at", "request_direct"],
+            "properties": {
+              "probe_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+              "sent_at": { "type": "integer", "minimum": 0 },
+              "request_direct": { "type": "boolean" }
             },
             "additionalProperties": false
           }

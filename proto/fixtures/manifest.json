@@ -49,6 +49,18 @@
       "valid": true
     },
     {
+      "file": "v2-valid/lan-bootstrap-inner.json",
+      "scope": "cross_layer",
+      "type": "lan_bootstrap_inner",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/peer-probe-inner.json",
+      "scope": "cross_layer",
+      "type": "peer_probe_inner",
+      "valid": true
+    },
+    {
       "file": "v2-invalid/relay-ack-bad-digest.json",
       "scope": "server",
       "type": "relay_control",
@@ -166,6 +178,30 @@
       "file": "v2-invalid/notif-action-result-extra-field.json",
       "scope": "cross_layer",
       "type": "notif_action_result",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/lan-bootstrap-extra-field.json",
+      "scope": "cross_layer",
+      "type": "lan_bootstrap_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/lan-bootstrap-bad-digest.json",
+      "scope": "cross_layer",
+      "type": "lan_bootstrap_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-probe-id-mismatch.json",
+      "scope": "cross_layer",
+      "type": "peer_probe_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-probe-extra-field.json",
+      "scope": "cross_layer",
+      "type": "peer_probe_inner",
       "expected_code": "invalid_frame"
     }
   ]

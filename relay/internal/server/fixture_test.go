@@ -101,13 +101,13 @@ func validateFixtureDeclaration(fixture protocolFixture) error {
 			return fmt.Errorf("unsupported server fixture code %q", fixture.ExpectedCode)
 		}
 	case "cross_layer":
-		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" && fixture.Type != "notif_action_invoke" && fixture.Type != "notif_action_result" {
+		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" && fixture.Type != "notif_action_invoke" && fixture.Type != "notif_action_result" && fixture.Type != "lan_bootstrap_inner" && fixture.Type != "peer_probe_inner" {
 			return fmt.Errorf("unknown cross-layer fixture type %q", fixture.Type)
 		}
 		if !fixture.Valid && fixture.Type == "outer_inner_pair" && fixture.ExpectedCode != "outer_inner_id_mismatch" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
-		if !fixture.Valid && (fixture.Type == "call_state" || fixture.Type == "notif_post_payload" || fixture.Type == "notif_action_invoke" || fixture.Type == "notif_action_result") && fixture.ExpectedCode != "invalid_frame" {
+		if !fixture.Valid && (fixture.Type == "call_state" || fixture.Type == "notif_post_payload" || fixture.Type == "notif_action_invoke" || fixture.Type == "notif_action_result" || fixture.Type == "lan_bootstrap_inner" || fixture.Type == "peer_probe_inner") && fixture.ExpectedCode != "invalid_frame" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
 	default:
@@ -356,6 +356,28 @@ func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []b
 			"notif_action_result": "notif.action.result",
 		}[fixtureType]
 		if inner.Type != expectedType {
+			return fixtureCodeError("invalid_frame")
+		}
+		return nil
+	case "lan_bootstrap_inner", "peer_probe_inner":
+		if err := validateJSON(validator.innerV2, raw); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		var inner struct {
+			MsgID   string `json:"msg_id"`
+			Type    string `json:"type"`
+			Payload struct {
+				ProbeID string `json:"probe_id"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		expectedType := map[string]string{
+			"lan_bootstrap_inner": "lan.bootstrap",
+			"peer_probe_inner":    "peer.probe",
+		}[fixtureType]
+		if inner.Type != expectedType || (fixtureType == "peer_probe_inner" && inner.Payload.ProbeID != inner.MsgID) {
 			return fixtureCodeError("invalid_frame")
 		}
 		return nil
