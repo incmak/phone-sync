@@ -276,15 +276,15 @@ data class LanRetryPolicy(
 )
 ```
 
-- [ ] Add RED deterministic coroutine tests for: relay promotion to an already authenticated LAN candidate; relay `close`/join completing before the first LAN `sendable()` call; failed candidates leaving relay active; failed probes using 15/30/60/120/300-second cooldown; a 30-second LAN session resetting only LAN failures; LAN loss opening relay before cooldown; retry interrupting cooldown without resetting its count; inbound direct requests respecting a 15-second floor; `preferLan=false` never probing; stop/cancel closing relay, candidate, and LAN exactly once; and `maxConcurrentDrains == 1` through stress handoffs.
-- [ ] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.service.TransportCoordinatorTest'` and confirm the promotion tests fail against the static coordinator.
-- [ ] Refactor `carry` into explicit granted-session ownership. A relay session may coexist only with an ungranted LAN `open()` candidate; no candidate pump starts during authentication.
-- [ ] On candidate success, close relay with `route_promoted_to_lan`, await its fully joined session, publish LAN authenticated, and only then start the coordinator LAN pump.
-- [ ] Track LAN failure/cooldown separately from general relay reconnect state. On LAN loss, set the next LAN due time and open relay immediately. Keep existing route stability semantics for nonpromotion failures.
-- [ ] Race cooldown with explicit retry, inbound direct-attempt requests, relay closure, and cancellation using structured concurrency. Preserve cancellation identity and close all owned sessions in `NonCancellable` cleanup where required.
-- [ ] Call the relay probe scheduler immediately and at its due interval while relay is active; set `request_direct=true` only when the LAN cooldown is due.
-- [ ] Run the focused coordinator/route tests repeatedly (`--rerun-tasks` once), then `git diff --check`.
-- [ ] Commit with `feat(mobile/transport): promote relay sessions to LAN`.
+- [x] Add RED deterministic coroutine tests for: relay promotion to an already authenticated LAN candidate; relay `close`/join completing before the first LAN `sendable()` call; failed candidates leaving relay active; failed probes using 15/30/60/120/300-second cooldown; a 30-second LAN session resetting only LAN failures; LAN loss opening relay before cooldown; retry interrupting cooldown without resetting its count; inbound direct requests respecting a 15-second floor; `preferLan=false` never probing; stop/cancel closing relay, candidate, and LAN exactly once; and `maxConcurrentDrains == 1` through stress handoffs.
+- [x] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.service.TransportCoordinatorTest'` and confirm the promotion tests fail against the static coordinator.
+- [x] Refactor `carry` into explicit granted-session ownership. A relay session may coexist only with an ungranted LAN `open()` candidate; no candidate pump starts during authentication.
+- [x] On candidate success, close relay with `route_promoted_to_lan`, await its fully joined session, publish LAN authenticated, and only then start the coordinator LAN pump.
+- [x] Track LAN failure/cooldown separately from general relay reconnect state. On LAN loss, set the next LAN due time and open relay immediately. Keep existing route stability semantics for nonpromotion failures.
+- [x] Race cooldown with explicit retry, inbound direct-attempt requests, relay closure, and cancellation using structured concurrency. Preserve cancellation identity and close all owned sessions in `NonCancellable` cleanup where required.
+- [x] Call the relay probe scheduler immediately and at its due interval while relay is active; set `request_direct=true` only when the LAN cooldown is due.
+- [x] Run the focused coordinator/route tests repeatedly (`--rerun-tasks` once), then `git diff --check`.
+- [x] Commit with `feat(mobile/transport): promote relay sessions to LAN`.
 
 ### Task 7: Reload routes and publish one truthful native status
 

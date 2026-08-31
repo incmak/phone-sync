@@ -259,11 +259,8 @@ class TransportCoordinatorTest {
         assertEquals(listOf("a"), lan.session().sendAttempts.map { it.msgId })
         assertEquals(1, lan.session().closeCount)
         assertEquals(listOf("established_route_failure"), lan.session().closeCodes)
-        assertEquals(RoutePhase.RECONNECTING, coordinator.health.value.phase)
-
-        advanceTimeBy(5_001)
-        runCurrent()
-
+        // Relay fallback is immediate; only the next LAN promotion attempt cools down.
+        assertEquals(RoutePhase.AUTHENTICATED, coordinator.health.value.phase)
         assertEquals(1, relay.opens)
         assertEquals(listOf("a"), relay.session().sent.map { it.msgId })
         job.cancelAndJoin()
@@ -452,6 +449,281 @@ class TransportCoordinatorTest {
         job.cancelAndJoin()
     }
 
+    @Test
+    fun relayPromotesToAuthenticatedLanCandidate() = runTest {
+        val store = FakeStore(rows = listOf(row("a")))
+        val lan = FakeRoute(RouteKind.LAN, openFailuresRemaining = 1)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val probes = FakeRelayProbeScheduler()
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = probes,
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+
+        advanceTimeBy(15_001)
+        runCurrent()
+
+        assertEquals(RouteKind.LAN, coordinator.health.value.active)
+        assertEquals(listOf("route_promoted_to_lan"), relay.session().closeCodes)
+        assertEquals(listOf("a"), lan.session().sent.map { it.msgId })
+        assertTrue(probes.requests.contains(true))
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun relayCloseCompletesBeforePromotedLanReadsOutbox() = runTest {
+        val allowRelayClose = CompletableDeferred<Unit>()
+        val store = FakeStore(rows = listOf(row("a")))
+        val lan = FakeRoute(RouteKind.LAN, openFailuresRemaining = 1)
+        val relay = FakeRoute(
+            RouteKind.RELAY,
+            selfDraining = true,
+            sessionFactory = {
+                FakeSession(RouteKind.RELAY, selfDraining = true, allowClose = allowRelayClose)
+            },
+        )
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        advanceTimeBy(15_001)
+        runCurrent()
+
+        assertTrue(relay.session().closeStarted.isCompleted)
+        assertFalse(relay.session().closeCompleted.isCompleted)
+        assertTrue(lan.session().sent.isEmpty(), "LAN drained before relay close joined")
+
+        allowRelayClose.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("a"), lan.session().sent.map { it.msgId })
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun failedLanCandidatesLeaveRelayActiveAndUseLanCooldownSequence() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+        assertEquals(15_000L, coordinator.lastLanBackoffMs)
+
+        val expectedDelays = listOf(15_000L, 30_000L, 60_000L, 120_000L, 300_000L, 300_000L)
+        for (expected in expectedDelays.drop(1)) {
+            advanceTimeBy(coordinator.lastLanBackoffMs + 1)
+            runCurrent()
+            assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+            assertEquals(expected, coordinator.lastLanBackoffMs)
+        }
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun lanLossOpensRelayImmediatelyBeforeLanCooldown() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = coordinator(store, lan, relay)
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        lan.session().finish("wifi_lost")
+        runCurrent()
+
+        assertEquals(1, relay.opens)
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+        assertEquals(15_000L, coordinator.lastLanBackoffMs)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun explicitRetryInterruptsLanCooldownWithoutResettingFailureCount() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val retries = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            retryRequests = retries,
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        assertEquals(1, lan.opens)
+
+        retries.emit(Unit)
+        runCurrent()
+
+        assertEquals(2, lan.opens)
+        assertEquals(30_000L, coordinator.lastLanBackoffMs)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun inboundDirectRequestsRespectFifteenSecondAttemptFloor() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val direct = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            directAttemptRequests = direct,
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        assertEquals(1, lan.opens)
+
+        direct.emit(Unit)
+        runCurrent()
+        assertEquals(1, lan.opens, "request bypassed the anti-storm floor")
+
+        advanceTimeBy(15_001)
+        direct.emit(Unit)
+        runCurrent()
+        assertEquals(2, lan.opens)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun relayPreferenceNeverSchedulesPromotionProbes() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val probes = FakeRelayProbeScheduler()
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            preferLan = false,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = probes,
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        advanceTimeBy(120_000)
+        runCurrent()
+
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+        assertEquals(0, lan.opens)
+        assertTrue(probes.requests.isEmpty())
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun sustainedPromotedLanResetsOnlyTheLanCooldown() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN, openFailuresRemaining = 1)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        advanceTimeBy(15_001)
+        runCurrent()
+        assertEquals(RouteKind.LAN, coordinator.health.value.active)
+
+        advanceTimeBy(TransportCoordinator.STABILITY_WINDOW_MS + 1)
+        lan.session().finish("wifi_lost")
+        runCurrent()
+
+        assertEquals(0L, coordinator.lastLanBackoffMs)
+        assertTrue(relay.opens >= 2, "LAN loss did not open a fresh relay immediately")
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun cancellationDuringPromotionClosesRelayAndCandidateExactlyOnce() = runTest {
+        val allowRelayClose = CompletableDeferred<Unit>()
+        val store = FakeStore(rows = emptyList())
+        val lan = FakeRoute(RouteKind.LAN, openFailuresRemaining = 1)
+        val relay = FakeRoute(
+            RouteKind.RELAY,
+            selfDraining = true,
+            sessionFactory = {
+                FakeSession(RouteKind.RELAY, selfDraining = true, allowClose = allowRelayClose)
+            },
+        )
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        advanceTimeBy(15_001)
+        runCurrent()
+        assertTrue(relay.session().closeStarted.isCompleted)
+
+        job.cancel()
+        runCurrent()
+        allowRelayClose.complete(Unit)
+        job.join()
+
+        assertEquals(1, relay.session().closeCount)
+        assertEquals(1, lan.session().closeCount)
+    }
+
+    @Test
+    fun repeatedRelayLanHandoffsNeverOverlapOutboxDrainers() = runTest {
+        val store = FakeStore(rows = listOf(row("a"), row("b")))
+        val lan = FakeRoute(RouteKind.LAN)
+        val relay = FakeRoute(RouteKind.RELAY)
+        val coordinator = coordinator(store, lan, relay)
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        repeat(4) {
+            lan.session().finish("wifi_lost")
+            runCurrent()
+            advanceTimeBy(15_001)
+            runCurrent()
+        }
+
+        assertTrue(store.maxConcurrentDrains <= 1, "handoffs overlapped outbox selection")
+        job.cancelAndJoin()
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     // The coordinator and the outbox both read the test's virtual clock, so retry
@@ -491,13 +763,15 @@ class TransportCoordinatorTest {
         private val selfDraining: Boolean = false,
         private val successfulOpens: Int = Int.MAX_VALUE,
         private val sessionFactory: (() -> FakeSession)? = null,
+        openFailuresRemaining: Int = 0,
     ) : TransportRoute {
         var opens = 0
+        private var failuresRemaining = openFailuresRemaining
         private val sessions = mutableListOf<FakeSession>()
 
         override suspend fun open(): AuthenticatedRouteSession {
             opens += 1
-            if (failOpen || sessions.size >= successfulOpens) {
+            if (failOpen || failuresRemaining-- > 0 || sessions.size >= successfulOpens) {
                 throw IllegalStateException("route_unavailable")
             }
             return (sessionFactory?.invoke() ?: FakeSession(kind, selfDraining)).also { sessions += it }
@@ -547,6 +821,13 @@ class TransportCoordinatorTest {
 
         fun finish(code: String) { closed.complete(code) }
         fun failAwaitClosed(error: Throwable) { closed.completeExceptionally(error) }
+    }
+
+    private class FakeRelayProbeScheduler : RelayProbeScheduler {
+        val requests = mutableListOf<Boolean>()
+        override suspend fun ensureProbe(requestDirect: Boolean) {
+            requests += requestDirect
+        }
     }
 
     private class FakeStore(
