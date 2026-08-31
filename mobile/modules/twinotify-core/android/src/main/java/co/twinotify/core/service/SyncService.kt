@@ -56,6 +56,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.coroutineScope
@@ -310,6 +311,45 @@ internal fun recordLanCustodyObservation(
     ProductObservationTracker.recordCustody("lan", event.eventType)
 }
 
+/** Per-route-generation feature gate shared by relay authentication and LAN probe scheduling. */
+internal class RelayPeerFeatureSession(
+    private val ensureBootstrap: suspend () -> DeliveryConditions,
+    private val ensureProbe: suspend (Boolean) -> Unit,
+    private val publishConditions: (DeliveryConditions) -> Unit,
+    private val onFailure: (String) -> Unit,
+) : RelayProbeScheduler {
+    @Volatile
+    private var compatible = false
+
+    suspend fun onAuthenticated(floor: Int, peerFeatures: Set<String>) {
+        compatible = floor >= 2 && peerFeatures.containsAll(RelayFeatures.CURRENT)
+        if (!compatible) {
+            publishConditions(DeliveryConditions(peerVersionIncompatible = true))
+            return
+        }
+        val conditions = try {
+            ensureBootstrap()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            onFailure("lan_bootstrap_store_failed")
+            DeliveryConditions(bootstrapWaiting = true)
+        }
+        publishConditions(conditions)
+    }
+
+    override suspend fun ensureProbe(requestDirect: Boolean) {
+        if (!compatible) return
+        try {
+            ensureProbe.invoke(requestDirect)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            onFailure("peer_probe_failed")
+        }
+    }
+}
+
 /**
  * Lifecycle-independent service transport loop. One coordinator owns both route selection and
  * outbox draining; the Android Service owns only this loop's Job.
@@ -319,6 +359,8 @@ internal class LiveServiceTransportLoop(
     private val loadRoutes: suspend () -> LiveTransportRoutes,
     private val queuedCount: suspend () -> Int,
     private val retryRequests: Flow<Unit> = emptyFlow(),
+    private val directAttemptRequests: Flow<Unit> = emptyFlow(),
+    private val relayProbeScheduler: RelayProbeScheduler = RelayProbeScheduler {},
     private val onAuthenticatedRoute: suspend (RouteKind) -> Unit = {},
     private val onEstablishedFailure: (Throwable) -> Unit = {},
     private val publishHealth: suspend (RouteHealth) -> Unit,
@@ -335,6 +377,8 @@ internal class LiveServiceTransportLoop(
             preferLan = preferLan,
             queuedCount = queuedCount,
             retryRequests = retryRequests,
+            directAttemptRequests = directAttemptRequests,
+            relayProbeScheduler = relayProbeScheduler,
             onEstablishedFailure = onEstablishedFailure,
         )
         coroutineScope {
@@ -959,6 +1003,7 @@ class SyncService : Service() {
     private lateinit var reliableDao: co.twinotify.core.storage.ReliableDeliveryDao
     private lateinit var outbox: OutboxRepository
     private lateinit var peerControls: PeerControlOutbox
+    private val directAttemptRequests = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     private lateinit var dispatcher: InboundDispatcher
     private lateinit var snapshotCoordinator: SnapshotCoordinator
     private val routePreferenceRestarter = SerializedTransportRestarter(
@@ -998,6 +1043,7 @@ class SyncService : Service() {
                 requestPendingMaterialization(MaterializationTrigger.ROUTINE)
             },
             peerControlOutbox = peerControls,
+            requestDirectAttempt = { directAttemptRequests.tryEmit(Unit) },
             requestRouteReload = routePreferenceRestarter::forceRestart,
         )
         // Every health transition refreshes the foreground text from the same native snapshot.
@@ -1219,6 +1265,7 @@ class SyncService : Service() {
 
     private fun startTransport(relayInput: String?, preferLan: Boolean) {
         if (!admitTransportGeneration(transportJob?.isActive == true, SyncServiceStatus::beginRouteGeneration)) return
+        val routeGeneration = SyncServiceStatus.routeStatus.value.routeGeneration
         transportJob = scope.launch {
             while (isActive) {
                 try {
@@ -1235,6 +1282,38 @@ class SyncService : Service() {
             }
             if (!isActive) return@launch
             val deviceId = DeviceIdentity.getOrCreate(applicationContext)
+            val bootstrapSource = DefaultLocalLanBootstrapSource(applicationContext)
+            val relayFeatures = RelayPeerFeatureSession(
+                ensureBootstrap = {
+                    when (val result = bootstrapSource.create()) {
+                        is LocalLanBootstrapResult.Announce -> {
+                            peerControls.ensureBootstrap(routeGeneration, result.payload)
+                            updateQueueHealthNow(routeGeneration)
+                            DeliveryConditions(bootstrapWaiting = !result.bindingAlreadyPresent)
+                        }
+                        LocalLanBootstrapResult.BindingConflict -> {
+                            SyncServiceStatus.setLastError("lan_binding_conflict")
+                            DeliveryConditions(bindingConflict = true)
+                        }
+                        is LocalLanBootstrapResult.Failed -> {
+                            SyncServiceStatus.setLastError(result.code)
+                            DeliveryConditions(bootstrapWaiting = true)
+                        }
+                    }
+                },
+                ensureProbe = { requestDirect ->
+                    peerControls.ensureProbe(routeGeneration, requestDirect)
+                    SyncServiceStatus.setPeerEvidence(
+                        peerControls.peerEvidence(routeGeneration, System.currentTimeMillis().coerceAtLeast(0L)),
+                        routeGeneration,
+                    )
+                    updateQueueHealthNow(routeGeneration)
+                },
+                publishConditions = { conditions ->
+                    SyncServiceStatus.setDeliveryConditions(conditions, routeGeneration)
+                },
+                onFailure = SyncServiceStatus::setLastError,
+            )
             val relayConfig = relayInput?.let { input ->
                 val endpoints = try {
                     RelayUrlPolicy.parse(
@@ -1281,9 +1360,10 @@ class SyncService : Service() {
                                 else -> Unit
                             }
                         },
-                        onAuthenticated = { floor ->
+                        onAuthenticated = { floor, peerFeatures ->
                             SyncServiceStatus.setProtocolFloor(floor)
-                            updateQueueHealthNow()
+                            relayFeatures.onAuthenticated(floor, peerFeatures)
+                            updateQueueHealthNow(routeGeneration)
                         },
                         onExpired = {
                             updateQueueHealthNow()
@@ -1313,8 +1393,10 @@ class SyncService : Service() {
             LiveServiceTransportLoop(
                 outbox = outbox,
                 loadRoutes = { routeFactory.create(relayConfig) },
-                queuedCount = { reliableDao.activeOutboundCount() },
+                queuedCount = { reliableDao.deliveryQueueSnapshot().pendingLocal },
                 retryRequests = SyncServiceStatus.routeRetryRequested,
+                directAttemptRequests = directAttemptRequests,
+                relayProbeScheduler = relayFeatures,
                 onAuthenticatedRoute = {
                     try {
                         snapshotCoordinator.emitLocalDigest(deviceId)
@@ -1334,17 +1416,22 @@ class SyncService : Service() {
                 },
                 publishHealth = { routeHealth ->
                     val status = routeHealth.toSyncRouteStatus()
-                    SyncServiceStatus.setRouteStatus(status)
+                    val snapshot = reliableDao.deliveryQueueSnapshot()
+                    SyncServiceStatus.setRouteSnapshot(
+                        status,
+                        snapshot,
+                        peerControls.peerEvidence(
+                            routeGeneration,
+                            System.currentTimeMillis().coerceAtLeast(0L),
+                        ),
+                        routeGeneration,
+                    )
                     SyncServiceStatus.setState(
                         status.toSyncState(SyncServiceStatus.health.value.protocolFloor),
                     )
-                    SyncServiceStatus.setQueueStats(
-                        routeHealth.queuedCount,
-                        reliableDao.activeOutboundBytes(),
-                    )
                     ProductObservationTracker.recordQueue(
-                        routeHealth.queuedCount,
-                        reliableDao.activeOutboundBytes(),
+                        snapshot.pendingLocal,
+                        snapshot.totalActiveBytes,
                     )
                 },
             ).run(preferLan)
@@ -1366,18 +1453,16 @@ class SyncService : Service() {
         }
     }
 
-    private suspend fun updateQueueHealthNow() {
+    private suspend fun updateQueueHealthNow(
+        generation: Int = SyncServiceStatus.routeStatus.value.routeGeneration,
+    ) {
         runTransportSideEffect(
             block = {
-                val activeCount = reliableDao.activeOutboundCount()
-                val activeBytes = reliableDao.activeOutboundBytes()
-                SyncServiceStatus.setQueueStats(
-                    activeCount,
-                    activeBytes,
-                )
+                val snapshot = reliableDao.deliveryQueueSnapshot()
+                SyncServiceStatus.setQueueSnapshot(snapshot, generation)
                 ProductObservationTracker.recordQueue(
-                    activeCount,
-                    activeBytes,
+                    snapshot.pendingLocal,
+                    snapshot.totalActiveBytes,
                 )
             },
             onFailure = { SyncServiceStatus.setLastError("queue_health") },

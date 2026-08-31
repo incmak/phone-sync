@@ -21,6 +21,19 @@ export type DeliveryRoutePhase =
   | 'authenticated'
   | 'reconnecting';
 
+export type PeerEvidence = 'direct' | 'recent' | 'stale' | 'unknown';
+
+export type DeliveryReason =
+  | 'none'
+  | 'no_route'
+  | 'waiting_for_peer'
+  | 'relay_holding'
+  | 'lan_bootstrap_waiting'
+  | 'lan_binding_conflict'
+  | 'peer_version_incompatible';
+
+export type UserContentKind = 'notifications' | 'sync_updates';
+
 /**
  * The complete public description of delivery. It deliberately carries no
  * endpoint, address, SSID, port, or peer identifier, so rendering it cannot
@@ -30,7 +43,13 @@ export interface RouteStatus {
   route: DeliveryRoute;
   phase: DeliveryRoutePhase;
   queued_count: number;
-  route_generation?: number;
+  pending_local_count: number;
+  awaiting_peer_count: number;
+  held_by_relay_count: number;
+  peer_evidence: PeerEvidence;
+  delivery_reason: DeliveryReason;
+  user_content_kind: UserContentKind;
+  route_generation: number;
 }
 
 export type RouteStatusEvent = (status: RouteStatus) => void;

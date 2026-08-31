@@ -646,6 +646,11 @@ class InboundDispatcher internal constructor(
             if (result is InboundDispatchResult.Accepted) {
                 if (bindingChanged) requestRouteReload()
                 if (requestDirect) requestDirectAttempt()
+            } else if (result is InboundDispatchResult.Rejected && result.code == "lan_binding_conflict") {
+                SyncServiceStatus.setDeliveryConditions(
+                    DeliveryConditions(bindingConflict = true),
+                    transportGeneration(),
+                )
             }
             onAuthenticatedEvent(inner.type)
             return result
@@ -698,12 +703,17 @@ class InboundDispatcher internal constructor(
             }
             if (inner.type == "peer.receipt" && result !is InboundDispatchResult.Rejected) {
                 acceptedProbeReceipt?.let { (msgId, digest) ->
-                    if (controls.acceptProbeReceipt(msgId, digest, transportGeneration(), controlNow)) {
+                    val generation = transportGeneration()
+                    if (controls.acceptProbeReceipt(msgId, digest, generation, controlNow)) {
                         SyncServiceStatus.setLastReceiptAt(controlNow)
+                        SyncServiceStatus.setPeerEvidence(
+                            controls.peerEvidence(generation, controlNow),
+                            generation,
+                        )
                     }
                 }
                 val snapshot = reliableDao.deliveryQueueSnapshot()
-                SyncServiceStatus.setQueueStats(snapshot.pendingLocal, snapshot.totalActiveBytes)
+                SyncServiceStatus.setQueueSnapshot(snapshot)
             }
             if (snapshotCommitted) {
                 ProductObservationTracker.recordSnapshotCommit()
@@ -728,7 +738,7 @@ class InboundDispatcher internal constructor(
                 rejectionJournal = ActionInvokeRejectionJournal(reliableDao::commitActionInvokeRejection),
             )
             if (result !is InboundDispatchResult.Rejected) {
-                SyncServiceStatus.setQueueStats(reliableDao.activeOutboundCount(), reliableDao.activeOutboundBytes())
+                SyncServiceStatus.setQueueSnapshot(reliableDao.deliveryQueueSnapshot())
             }
             onAuthenticatedEvent(inner.type)
             return result

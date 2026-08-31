@@ -1,6 +1,8 @@
 package co.twinotify.core.service
 
 import co.twinotify.core.call.CallShutdownConfigIntent
+import co.twinotify.core.storage.DeliveryQueueSnapshot
+import co.twinotify.core.storage.UserContentKind
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -591,7 +593,14 @@ class ServiceLifecycleTest {
 
         val rendered = SyncServiceStatus.routeStatus.value.toPublicMap()
 
-        assertEquals(setOf("route", "phase", "queued_count", "route_generation"), rendered.keys)
+        assertEquals(
+            setOf(
+                "route", "phase", "queued_count", "pending_local_count", "awaiting_peer_count",
+                "held_by_relay_count", "peer_evidence", "delivery_reason", "user_content_kind",
+                "route_generation",
+            ),
+            rendered.keys,
+        )
         assertEquals("lan", rendered["route"])
         assertEquals("authenticated", rendered["phase"])
     }
@@ -631,5 +640,167 @@ class ServiceLifecycleTest {
         observer.join()
 
         assertEquals(maximum.get(), SyncServiceStatus.routeStatus.value.routeGeneration)
+    }
+
+    @Test
+    fun deliveryReasonUsesTheApprovedPriorityOrder() {
+        val waiting = DeliveryQueueSnapshot(
+            pendingLocal = 1,
+            awaitingPeer = 3,
+            heldByRelay = 2,
+            internalActive = 7,
+            totalActive = 11,
+            totalActiveBytes = 99,
+            userContentKind = UserContentKind.SYNC_UPDATES,
+        )
+        val base = SyncRouteStatus(RouteKind.NONE, RoutePhase.RECONNECTING)
+
+        assertEquals(
+            DeliveryReason.LAN_BINDING_CONFLICT,
+            DeliveryStatusModel.resolve(
+                base,
+                waiting,
+                DeliveryConditions(bindingConflict = true, peerVersionIncompatible = true, bootstrapWaiting = true),
+                PeerEvidence.RECENT,
+            ).deliveryReason,
+        )
+        assertEquals(
+            DeliveryReason.PEER_VERSION_INCOMPATIBLE,
+            DeliveryStatusModel.resolve(
+                base,
+                waiting,
+                DeliveryConditions(peerVersionIncompatible = true, bootstrapWaiting = true),
+                PeerEvidence.RECENT,
+            ).deliveryReason,
+        )
+        assertEquals(
+            DeliveryReason.NO_ROUTE,
+            DeliveryStatusModel.resolve(
+                base,
+                waiting,
+                DeliveryConditions(bootstrapWaiting = true),
+                PeerEvidence.RECENT,
+            ).deliveryReason,
+        )
+        assertEquals(
+            DeliveryReason.RELAY_HOLDING,
+            DeliveryStatusModel.resolve(
+                base.copy(route = RouteKind.RELAY, phase = RoutePhase.AUTHENTICATED),
+                waiting.copy(pendingLocal = 0),
+                DeliveryConditions(bootstrapWaiting = true),
+                PeerEvidence.RECENT,
+            ).deliveryReason,
+        )
+        assertEquals(
+            DeliveryReason.WAITING_FOR_PEER,
+            DeliveryStatusModel.resolve(
+                base.copy(route = RouteKind.RELAY, phase = RoutePhase.AUTHENTICATED),
+                waiting.copy(pendingLocal = 0, heldByRelay = 0),
+                DeliveryConditions(bootstrapWaiting = true),
+                PeerEvidence.RECENT,
+            ).deliveryReason,
+        )
+        assertEquals(
+            DeliveryReason.LAN_BOOTSTRAP_WAITING,
+            DeliveryStatusModel.resolve(
+                base.copy(route = RouteKind.RELAY, phase = RoutePhase.AUTHENTICATED),
+                waiting.copy(pendingLocal = 0, awaitingPeer = 0, heldByRelay = 0),
+                DeliveryConditions(bootstrapWaiting = true),
+                PeerEvidence.RECENT,
+            ).deliveryReason,
+        )
+    }
+
+    @Test
+    fun classifiedQueueKeepsProductAndEngineeringCountsSeparate() {
+        val generation = SyncServiceStatus.beginRouteGeneration()
+        val snapshot = DeliveryQueueSnapshot(
+            pendingLocal = 2,
+            awaitingPeer = 3,
+            heldByRelay = 1,
+            internalActive = 9,
+            totalActive = 14,
+            totalActiveBytes = 456,
+            userContentKind = UserContentKind.NOTIFICATIONS,
+        )
+
+        SyncServiceStatus.setQueueSnapshot(snapshot, generation)
+
+        val route = SyncServiceStatus.routeStatus.value
+        assertEquals(2, route.queuedCount)
+        assertEquals(route.pendingLocalCount, route.queuedCount)
+        assertEquals(3, route.awaitingPeerCount)
+        assertEquals(1, route.heldByRelayCount)
+        assertEquals("notifications", route.toPublicMap()["user_content_kind"])
+        assertEquals(2, SyncServiceStatus.health.value.queuedCount)
+        assertEquals(14, SyncServiceStatus.health.value.totalActiveCount)
+        assertEquals(456, SyncServiceStatus.health.value.totalActiveBytes)
+    }
+
+    @Test
+    fun publicPeerEvidenceDistinguishesDirectRecentStaleAndUnknown() {
+        val empty = DeliveryQueueSnapshot(0, 0, 0, 0, 0, 0, UserContentKind.NOTIFICATIONS)
+        val relay = SyncRouteStatus(RouteKind.RELAY, RoutePhase.AUTHENTICATED)
+
+        assertEquals(
+            PeerEvidence.DIRECT,
+            DeliveryStatusModel.resolve(
+                relay.copy(route = RouteKind.LAN), empty, DeliveryConditions(), PeerEvidence.UNKNOWN,
+            ).peerEvidence,
+        )
+        assertEquals(
+            PeerEvidence.RECENT,
+            DeliveryStatusModel.resolve(relay, empty, DeliveryConditions(), PeerEvidence.RECENT).peerEvidence,
+        )
+        assertEquals(
+            PeerEvidence.STALE,
+            DeliveryStatusModel.resolve(relay, empty, DeliveryConditions(), PeerEvidence.STALE).peerEvidence,
+        )
+        assertEquals(
+            PeerEvidence.UNKNOWN,
+            DeliveryStatusModel.resolve(relay, empty, DeliveryConditions(), PeerEvidence.UNKNOWN).peerEvidence,
+        )
+    }
+
+    @Test
+    fun staleGenerationCannotOverwriteRouteOrQueueTruth() {
+        val current = SyncServiceStatus.beginRouteGeneration()
+        SyncServiceStatus.setRouteStatus(
+            SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED),
+            current,
+        )
+        val stale = current - 1
+        SyncServiceStatus.setRouteStatus(
+            SyncRouteStatus(RouteKind.RELAY, RoutePhase.AUTHENTICATED),
+            stale,
+        )
+        SyncServiceStatus.setQueueSnapshot(
+            DeliveryQueueSnapshot(8, 0, 0, 0, 8, 80, UserContentKind.NOTIFICATIONS),
+            stale,
+        )
+
+        assertEquals(RouteKind.LAN, SyncServiceStatus.routeStatus.value.route)
+        assertEquals(0, SyncServiceStatus.routeStatus.value.pendingLocalCount)
+        assertEquals(current, SyncServiceStatus.routeStatus.value.routeGeneration)
+    }
+
+    @Test
+    fun publicRouteStatusContainsOnlyApprovedPrivacySafeFields() {
+        val rendered = DeliveryStatusModel.resolve(
+            SyncRouteStatus(RouteKind.RELAY, RoutePhase.AUTHENTICATED, routeGeneration = 7),
+            DeliveryQueueSnapshot(1, 2, 2, 4, 7, 700, UserContentKind.SYNC_UPDATES),
+            DeliveryConditions(),
+            PeerEvidence.RECENT,
+        ).toPublicMap()
+
+        assertEquals(
+            setOf(
+                "route", "phase", "queued_count", "pending_local_count", "awaiting_peer_count",
+                "held_by_relay_count", "peer_evidence", "delivery_reason", "user_content_kind",
+                "route_generation",
+            ),
+            rendered.keys,
+        )
+        assertFalse(rendered.keys.any { it.contains("url") || it.contains("ip") || it.contains("ssid") })
     }
 }

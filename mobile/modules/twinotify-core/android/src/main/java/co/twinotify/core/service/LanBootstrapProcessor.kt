@@ -24,6 +24,87 @@ fun interface LanBootstrapProcessor {
     suspend fun process(payload: LanBootstrapPayload): LanBootstrapProcessResult
 }
 
+internal sealed interface LocalLanBootstrapResult {
+    data class Announce(
+        val payload: LanBootstrapPayload,
+        val bindingAlreadyPresent: Boolean,
+    ) : LocalLanBootstrapResult
+
+    data object BindingConflict : LocalLanBootstrapResult
+    data class Failed(val code: String) : LocalLanBootstrapResult
+}
+
+internal fun interface LocalLanBootstrapSource {
+    suspend fun create(): LocalLanBootstrapResult
+}
+
+/** Builds only our public bootstrap announcement; the derived secret never leaves native memory. */
+internal class DefaultLocalLanBootstrapSource(
+    private val context: Context,
+) : LocalLanBootstrapSource {
+    override suspend fun create(): LocalLanBootstrapResult {
+        var localSecret: ByteArray? = null
+        var derivedSecret: ByteArray? = null
+        var derivedContext: ByteArray? = null
+        var ownPin: ByteArray? = null
+        var existingSecret: ByteArray? = null
+        return try {
+            val peer = PeerStore.load(context) ?: return LocalLanBootstrapResult.Failed(CRYPTO_UNAVAILABLE)
+            val localDevice = DeviceIdentity.getOrCreate(context)
+            val (box, sign) = CryptoStore.loadOrGenerate(context)
+            val secretCopy = box.secretKey.copyOf()
+            localSecret = secretCopy
+            val material = LanBootstrapCrypto.derive(
+                LanBootstrapIdentity(localDevice, box.publicKey, sign.publicKey),
+                LanBootstrapIdentity(peer.deviceId, peer.encPubkey, peer.signPubkey),
+                secretCopy,
+            )
+            val secret = material.lanSecret
+            val contextDigest = material.bindingContextSha256
+            derivedSecret = secret
+            derivedContext = contextDigest
+            val existing = LanPairStore.loadValidated(context, peer)
+            if (existing != null) {
+                val boundSecret = existing.lanSecret
+                existingSecret = boundSecret
+                if (existing.protocolVersion != 1 || !MessageDigest.isEqual(boundSecret, secret)) {
+                    return LocalLanBootstrapResult.BindingConflict
+                }
+            }
+            val pin = LanIdentityStore.loadOrCreate().spkiSha256
+            ownPin = pin
+            if (pin.size != 32 || contextDigest.size != 32) {
+                return LocalLanBootstrapResult.Failed(STORE_FAILED)
+            }
+            LocalLanBootstrapResult.Announce(
+                payload = LanBootstrapPayload(
+                    tlsSpkiSha256 = pin.toHexString(),
+                    bindingContextSha256 = contextDigest.toHexString(),
+                ),
+                bindingAlreadyPresent = existing != null,
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            LocalLanBootstrapResult.Failed(CRYPTO_UNAVAILABLE)
+        } finally {
+            localSecret?.fill(0)
+            derivedSecret?.fill(0)
+            derivedContext?.fill(0)
+            ownPin?.fill(0)
+            existingSecret?.fill(0)
+        }
+    }
+
+    private fun ByteArray.toHexString(): String =
+        joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+    private companion object {
+        const val CRYPTO_UNAVAILABLE = "lan_bootstrap_crypto_unavailable"
+        const val STORE_FAILED = "lan_bootstrap_store_failed"
+    }
+}
+
 internal data class LanBootstrapIdentityState(
     val local: LanBootstrapIdentity,
     val peer: PeerRecord,

@@ -313,12 +313,13 @@ class LiveTransportRoutesTest {
         val observed = mutableListOf<String>()
         val lifecycle = mutableListOf<String>()
         var authenticatedFloor = 0
+        var authenticatedFeatures = emptySet<String>()
         var expiries = 0
         var upstreamCleanups = 0
         val events = flow {
             try {
                 emit(TransportEvent.Connected)
-                emit(TransportEvent.Authenticated(2))
+                emit(TransportEvent.Authenticated(2, RelayFeatures.CURRENT))
                 emit(TransportEvent.RelayAccepted("out", 1))
                 emit(TransportEvent.Delivery(1, "first"))
                 emit(TransportEvent.Delivery(2, "second"))
@@ -332,7 +333,10 @@ class LiveTransportRoutesTest {
             events = { events },
             hooks = LiveRelayRouteHooks(
                 dispatch = { observed += it; null },
-                onAuthenticated = { authenticatedFloor = it },
+                onAuthenticated = { floor, features ->
+                    authenticatedFloor = floor
+                    authenticatedFeatures = features
+                },
                 onExpired = { expiries++ },
                 onEvent = { lifecycle += it.javaClass.simpleName },
             ),
@@ -343,6 +347,7 @@ class LiveTransportRoutesTest {
 
         assertTrue(session.selfDraining)
         assertEquals(2, authenticatedFloor)
+        assertEquals(RelayFeatures.CURRENT, authenticatedFeatures)
         assertEquals(listOf("first", "second"), observed)
         assertEquals(1, expiries)
         assertEquals(

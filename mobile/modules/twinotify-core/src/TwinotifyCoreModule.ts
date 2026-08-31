@@ -12,6 +12,9 @@ import type {
 export type {
   DeliveryRoute,
   DeliveryRoutePhase,
+  PeerEvidence,
+  DeliveryReason,
+  UserContentKind,
   RouteStatus,
   RouteStatusEvent,
   OfflinePairingErrorCode,
@@ -45,6 +48,8 @@ export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'LEGACY_ON
 export interface SyncStatus {
   state: SyncState;
   queuedCount: number;
+  totalActiveCount?: number;
+  totalActiveBytes?: number;
   callCaptureEnabled?: boolean;
   callCaptureDisabledReason?: string | null;
   callCaptureHealthCode?: string | null;

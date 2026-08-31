@@ -138,7 +138,7 @@ class LiveLanRouteConfig(
 class LiveRelayRouteHooks(
     val dispatch: suspend (String) -> InboundDispatchResult?,
     val onEvent: suspend (TransportEvent) -> Unit = {},
-    val onAuthenticated: suspend (Int) -> Unit = {},
+    val onAuthenticated: suspend (Int, Set<String>) -> Unit = { _, _ -> },
     val onExpired: suspend () -> Unit = {},
 )
 
@@ -484,7 +484,7 @@ class LiveRelayTransportRoute(
                             }
                         }
                         is TransportEvent.Authenticated -> {
-                            hooks.onAuthenticated(event.floor)
+                            hooks.onAuthenticated(event.floor, event.peerFeatures)
                             authenticated.complete(Unit)
                         }
                         is TransportEvent.RelayExpired -> hooks.onExpired()

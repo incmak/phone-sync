@@ -14,6 +14,19 @@ jest.mock('../../modules/twinotify-core/src/TwinotifyCoreModule', () => ({
 
 import { useRouteStatus } from '../useRouteStatus';
 
+const notConnected = {
+  route: 'none',
+  phase: 'idle',
+  queued_count: 0,
+  pending_local_count: 0,
+  awaiting_peer_count: 0,
+  held_by_relay_count: 0,
+  peer_evidence: 'unknown',
+  delivery_reason: 'none',
+  user_content_kind: 'notifications',
+  route_generation: 0,
+};
+
 describe('useRouteStatus', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -26,7 +39,7 @@ describe('useRouteStatus', () => {
 
     const { result } = renderHook(() => useRouteStatus());
 
-    expect(result.current).toEqual({ route: 'none', phase: 'idle', queued_count: 0, route_generation: 0 });
+    expect(result.current).toEqual(notConnected);
   });
 
   it('reports the direct route when the native status says so', async () => {
@@ -43,11 +56,39 @@ describe('useRouteStatus', () => {
     await waitFor(() => expect(mockAddListener).toHaveBeenCalledWith('onRouteStatus', expect.any(Function)));
     const emit = mockAddListener.mock.calls[0][1] as (s: unknown) => void;
 
-    act(() => emit({ route: 'relay', phase: 'authenticated', queued_count: 2 }));
-    expect(result.current).toEqual({ route: 'relay', phase: 'authenticated', queued_count: 2 });
+    act(() => emit({
+      route: 'relay',
+      phase: 'authenticated',
+      queued_count: 0,
+      pending_local_count: 0,
+      awaiting_peer_count: 2,
+      held_by_relay_count: 2,
+      peer_evidence: 'recent',
+      delivery_reason: 'relay_holding',
+      user_content_kind: 'sync_updates',
+      route_generation: 4,
+    }));
+    expect(result.current).toEqual({
+      route: 'relay',
+      phase: 'authenticated',
+      queued_count: 0,
+      pending_local_count: 0,
+      awaiting_peer_count: 2,
+      held_by_relay_count: 2,
+      peer_evidence: 'recent',
+      delivery_reason: 'relay_holding',
+      user_content_kind: 'sync_updates',
+      route_generation: 4,
+    });
 
     act(() => emit({ route: 'none', phase: 'reconnecting', queued_count: 5 }));
-    expect(result.current).toEqual({ route: 'none', phase: 'reconnecting', queued_count: 5 });
+    expect(result.current).toEqual({
+      ...notConnected,
+      route: 'none',
+      phase: 'reconnecting',
+      queued_count: 5,
+      pending_local_count: 5,
+    });
   });
 
   it('keeps the not-connected default when the native call fails', async () => {

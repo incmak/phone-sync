@@ -5,6 +5,13 @@ const status = (over: Partial<RouteStatus> = {}): RouteStatus => ({
   route: 'none',
   phase: 'idle',
   queued_count: 0,
+  pending_local_count: 0,
+  awaiting_peer_count: 0,
+  held_by_relay_count: 0,
+  peer_evidence: 'unknown',
+  delivery_reason: 'none',
+  user_content_kind: 'notifications',
+  route_generation: 0,
   ...over,
 });
 

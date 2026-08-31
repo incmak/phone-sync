@@ -324,6 +324,53 @@ class LiveServiceTransportTest {
         worker.cancelAndJoin()
     }
 
+    @Test
+    fun compatibleRelayPeerEnablesBootstrapAndCoordinatorProbes() = runTest {
+        var bootstraps = 0
+        val probes = mutableListOf<Boolean>()
+        val conditions = mutableListOf<DeliveryConditions>()
+        val session = RelayPeerFeatureSession(
+            ensureBootstrap = {
+                bootstraps += 1
+                DeliveryConditions(bootstrapWaiting = true)
+            },
+            ensureProbe = probes::add,
+            publishConditions = conditions::add,
+            onFailure = { error("unexpected failure: $it") },
+        )
+
+        session.onAuthenticated(2, RelayFeatures.CURRENT)
+        session.ensureProbe(requestDirect = false)
+        session.ensureProbe(requestDirect = true)
+
+        assertEquals(1, bootstraps)
+        assertEquals(listOf(false, true), probes)
+        assertEquals(DeliveryConditions(bootstrapWaiting = true), conditions.last())
+    }
+
+    @Test
+    fun incompatibleRelayPeerNeverReceivesUnknownBootstrapOrProbeControls() = runTest {
+        var bootstraps = 0
+        var probes = 0
+        val conditions = mutableListOf<DeliveryConditions>()
+        val session = RelayPeerFeatureSession(
+            ensureBootstrap = {
+                bootstraps += 1
+                DeliveryConditions()
+            },
+            ensureProbe = { probes += 1 },
+            publishConditions = conditions::add,
+            onFailure = { error("unexpected failure: $it") },
+        )
+
+        session.onAuthenticated(2, setOf(RelayFeatures.LAN_BOOTSTRAP_V1))
+        session.ensureProbe(requestDirect = true)
+
+        assertEquals(0, bootstraps)
+        assertEquals(0, probes)
+        assertEquals(DeliveryConditions(peerVersionIncompatible = true), conditions.last())
+    }
+
     private class FakeRoute(
         override val kind: RouteKind,
         private val failOpen: Boolean = false,

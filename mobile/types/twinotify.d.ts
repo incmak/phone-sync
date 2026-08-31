@@ -12,6 +12,8 @@ export interface SyncStatus {
   transport?: 'offline' | 'connecting' | 'online';
   protocolFloor?: number;
   queuedBytes?: number;
+  totalActiveCount?: number;
+  totalActiveBytes?: number;
   listenerConnected?: boolean;
   listenerPermission?: boolean;
   postPermission?: boolean;

@@ -330,15 +330,15 @@ data class SyncRouteStatus(
 )
 ```
 
-- [ ] Add RED status tests for reason priority, `queued_count == pending_local_count`, internal exclusion, total-active engineering fields, direct/recent/stale/unknown evidence, 150-second expiry, generation fencing, and no private transport fields in `toPublicMap()`.
-- [ ] Add RED lifecycle tests proving floor-2 plus both peer features triggers bootstrap/probe, a missing peer feature yields `peer_version_incompatible` without enqueueing an unknown control, a new binding invokes the conflated restarter after dispatch returns, and a route reload cancels/joins the old coordinator before constructing the next.
-- [ ] Add RED hook/native-bridge tests for defaults and every added snake_case field. Run the focused Kotlin tests and `cd mobile && npm test -- --runInBand hooks/__tests__/useRouteStatus.test.ts` and confirm failure.
-- [ ] Replace product callers of `activeOutboundCount()` with `deliveryQueueSnapshot().pendingLocal`; retain explicit totals/bytes for retention, storage pressure, and diagnostics. Add `setQueueSnapshot` rather than overloading `setQueueStats` with conflicting meanings.
-- [ ] Wire one service-owned `PeerControlOutbox` into relay feature handling, `InboundDispatcher`, and `TransportCoordinator`. Capture the route generation once and reject stale callbacks.
-- [ ] Use `SerializedTransportRestarter.forceRestart()` for LAN-binding changes. The signal producer must return without joining its own transport job; the restarter remains the only join/reload owner.
-- [ ] Publish evidence/reason/classified counts through native maps and TypeScript types. `SyncHealth.queuedCount` stays the pending-local alias; add explicit total-active count/bytes fields for engineering health.
-- [ ] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.service.ServiceLifecycleTest' --tests 'co.twinotify.core.service.LiveServiceTransportTest' --tests 'co.twinotify.core.service.LiveTransportRoutesTest'`, the focused Jest hook test, `cd mobile && npm run typecheck`, and `git diff --check`.
-- [ ] Commit with `feat(mobile/status): report delivery custody truth`.
+- [x] Add RED status tests for reason priority, `queued_count == pending_local_count`, internal exclusion, total-active engineering fields, direct/recent/stale/unknown evidence, 150-second expiry, generation fencing, and no private transport fields in `toPublicMap()`.
+- [x] Add RED lifecycle tests proving floor-2 plus both peer features triggers bootstrap/probe, a missing peer feature yields `peer_version_incompatible` without enqueueing an unknown control, a new binding invokes the conflated restarter after dispatch returns, and a route reload cancels/joins the old coordinator before constructing the next.
+- [x] Add RED hook/native-bridge tests for defaults and every added snake_case field. Run the focused Kotlin tests and `cd mobile && npm test -- --runInBand hooks/__tests__/useRouteStatus.test.ts` and confirm failure.
+- [x] Replace product callers of `activeOutboundCount()` with `deliveryQueueSnapshot().pendingLocal`; retain explicit totals/bytes for retention, storage pressure, and diagnostics. Add `setQueueSnapshot` rather than overloading `setQueueStats` with conflicting meanings.
+- [x] Wire one service-owned `PeerControlOutbox` into relay feature handling, `InboundDispatcher`, and `TransportCoordinator`. Capture the route generation once and reject stale callbacks.
+- [x] Use `SerializedTransportRestarter.forceRestart()` for LAN-binding changes. The signal producer must return without joining its own transport job; the restarter remains the only join/reload owner.
+- [x] Publish evidence/reason/classified counts through native maps and TypeScript types. `SyncHealth.queuedCount` stays the pending-local alias; add explicit total-active count/bytes fields for engineering health.
+- [x] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.service.ServiceLifecycleTest' --tests 'co.twinotify.core.service.LiveServiceTransportTest' --tests 'co.twinotify.core.service.LiveTransportRoutesTest'`, the focused Jest hook test, `cd mobile && npm run typecheck`, and `git diff --check`.
+- [x] Commit with `feat(mobile/status): report delivery custody truth`.
 
 ### Task 8: Render truthful route, custody, and peer copy
 
