@@ -399,11 +399,15 @@ data class SyncRouteStatus(
 **Physical two-phone gate:**
 
 - [x] Confirm both attached serials, app version, version code, and installed APK SHA-256; sanitize serials in committed evidence.
-  - On 2026-08-31, the attached POCO F1 and MI 11X were confirmed as two distinct physical devices. Both retained `com.twinotify.app` version `0.1.0` / version code `1` and the same installed APK SHA-256 `496d8277f4672409418e2936cdc8035bf6efea8cf7622c80bd9af3cb6525c232` after the in-place update. Raw ADB serials and private-network addresses are intentionally omitted.
+  - On 2026-08-31, the attached POCO F1 and MI 11X were confirmed as two distinct physical devices. Both retained `com.twinotify.app` version `0.1.0` / version code `1` and the same installed APK SHA-256 `3df48d32a0677f14e392cad2395fe7fc1641b2d290083ccec8e9c5882cca9e12` after the in-place burst-control update. The APK signer SHA-256 remained `a94183d1a8471e700c0aa9542a40ffd49b3a07c84e40a46daf60deca39b77983`. Raw ADB serials and private-network addresses are intentionally omitted.
 - [x] Preserve pairing and app data. Clear only diagnostic logs/evidence.
-  - Both installs used Android's data-preserving update path and retained their original first-install timestamps. No package data, pairing state, application database, OS radio state, or diagnostic log was cleared. Both notification-listener grants and foreground sync services remained present after mirroring was re-enabled through the visible home switches.
-- [ ] Deploy or point both phones at the capability-aware relay before installing the new APK.
-  - Physical preflight found both phones configured for the same healthy relay with direct Wi-Fi preference enabled, but its reported build `relay-manual-98ef20ddd95d` is based on repository commit `98ef20d`. That commit is an ancestor of, and predates, capability negotiation commit `f3fe6af`; relay-first rollout is therefore not satisfied. No production deployment was attempted without explicit operator approval.
+  - Both installs used Android's data-preserving update path and retained their original first-install timestamps. No package data, pairing state, application database, OS radio state, or diagnostic log was cleared. Both notification-listener grants remained present. Android stopped the foreground services during package replacement; the POCO service was restarted through the visible home switch, while the securely locked MI 11X was left untouched pending user unlock.
+- [x] Deploy or point both phones at the capability-aware relay before installing the new APK.
+  - After explicit operator approval, repository commit `30b99c6` passed fresh relay race/vet, Docker, deployment, and protected image-release gates. The pinned capability-aware image was deployed with a pre-deploy Bolt backup and rollback record. Public readiness and smoke checks reported `relay-manual-30b99c6f3ea6`, and immediate relay/Caddy error counts were zero.
+- [x] Reproduce and correct reconnect burst overflow before continuing the two-phone route gate.
+  - With both preserved queues active, privacy-safe relay sampling showed a connection lasting roughly two seconds while 4.5-6.3 MiB of mailbox frames were handed off and 53-64 puts were accepted. The client then disconnected before processing custody responses, leaving the visible local counts unchanged and repeating on retry.
+  - A failing `RelayTransportTest` first proved that one flush attempted a fifth large put and closed a four-frame-capacity socket. `RelayTransport` now caps v2 puts at four per one-second flush, keeping a legal worst-case burst comfortably below OkHttp's 16 MiB send-queue limit. The focused test, full `RelayTransportTest`, complete core JVM suite, core Android lint, and release-signed EAS APK build passed.
+  - On the updated POCO, relay accepts advanced in exact four-item increments while the WebSocket admission-rejection counter remained unchanged. The UI moved from 11 pending-local items to `Via relay` with relay-held custody. This is single-phone evidence only; it does not satisfy peer-receipt, automatic LAN promotion, or fallback acceptance.
 - [ ] Start on different networks and record relay fallback plus non-reachable peer wording.
 - [ ] Put both unlocked phones on the same Wi-Fi without touching Twinotify and record automatic binding creation and `RELAY -> LAN` within the configured bound.
 - [ ] Send multiple notifications in both directions and confirm each logical message reaches a peer receipt without duplicate delivery or notification-replacement regression.
@@ -413,7 +417,7 @@ data class SyncRouteStatus(
 - [ ] Restart both apps and record binding persistence plus idempotent bootstrap.
 - [ ] Capture light/dark screenshots and large-font interaction checks for direct, relay-held, no-route queued, and stale-peer states.
 - [x] If ADB, relay deployment, or a named physical state is unavailable, leave that checkbox pending and state the exact unverified condition.
-  - On 2026-08-31, `adb devices -l` returned an empty device list. No phone serial, installed APK, relay deployment, route transition, notification delivery, restart, or physical UI state could be inspected. All hardware-only checkboxes above therefore remain pending.
+  - Both phones remained attached, but the MI 11X entered its secure keyguard during the signed release build. Android correctly rejected a shell `BOOT_COMPLETED` broadcast and the non-exported sync service cannot be started through ADB. No credential or lock-screen bypass was attempted. The remaining two-phone relay, bootstrap, direct-LAN, fallback, restart, notification, call, and physical UI checks therefore remain pending until the MI 11X is unlocked and mirroring is enabled through Twinotify.
 
 **Final review:**
 
