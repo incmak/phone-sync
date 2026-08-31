@@ -398,9 +398,12 @@ data class SyncRouteStatus(
 
 **Physical two-phone gate:**
 
-- [ ] Confirm both attached serials, app version, version code, and installed APK SHA-256; sanitize serials in committed evidence.
-- [ ] Preserve pairing and app data. Clear only diagnostic logs/evidence.
+- [x] Confirm both attached serials, app version, version code, and installed APK SHA-256; sanitize serials in committed evidence.
+  - On 2026-08-31, the attached POCO F1 and MI 11X were confirmed as two distinct physical devices. Both retained `com.twinotify.app` version `0.1.0` / version code `1` and the same installed APK SHA-256 `496d8277f4672409418e2936cdc8035bf6efea8cf7622c80bd9af3cb6525c232` after the in-place update. Raw ADB serials and private-network addresses are intentionally omitted.
+- [x] Preserve pairing and app data. Clear only diagnostic logs/evidence.
+  - Both installs used Android's data-preserving update path and retained their original first-install timestamps. No package data, pairing state, application database, OS radio state, or diagnostic log was cleared. Both notification-listener grants and foreground sync services remained present after mirroring was re-enabled through the visible home switches.
 - [ ] Deploy or point both phones at the capability-aware relay before installing the new APK.
+  - Physical preflight found both phones configured for the same healthy relay with direct Wi-Fi preference enabled, but its reported build `relay-manual-98ef20ddd95d` is based on repository commit `98ef20d`. That commit is an ancestor of, and predates, capability negotiation commit `f3fe6af`; relay-first rollout is therefore not satisfied. No production deployment was attempted without explicit operator approval.
 - [ ] Start on different networks and record relay fallback plus non-reachable peer wording.
 - [ ] Put both unlocked phones on the same Wi-Fi without touching Twinotify and record automatic binding creation and `RELAY -> LAN` within the configured bound.
 - [ ] Send multiple notifications in both directions and confirm each logical message reaches a peer receipt without duplicate delivery or notification-replacement regression.
