@@ -130,7 +130,7 @@ data class TransportEvent.Authenticated(
 - Create: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/lan/LanBootstrapCrypto.kt`
 - Create: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/lan/LanBootstrapCryptoTest.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/storage/LanPairStore.kt`
-- Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/storage/LanPairStoreTest.kt`
+- Verify unchanged: `mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/storage/LanPairStoreTest.kt`
 
 **Interfaces:**
 
@@ -161,13 +161,13 @@ object LanBootstrapCrypto {
 internal fun LanBinding.sameTrustMaterial(other: LanBinding): Boolean
 ```
 
-- [ ] Add RED tests for A/B symmetry, unsigned UTF-8 device ordering, length-delimited context bytes, identity collision, 31/33-byte key rejection, mutation resistance of returned arrays, and changed device/encryption/signing identity changing the context and secret. Use a deterministic `BoxPrecomputer` in JVM tests. Run the new test class and confirm it fails to compile before production types exist.
-- [ ] Add RED `LanPairStoreTest` coverage proving `sameTrustMaterial` ignores `pairedAtMillis`, requires the same protocol/pin/secret, and existing commit replacement rejection remains unchanged.
-- [ ] Implement canonical context encoding with unsigned 32-bit big-endian lengths. Use `SodiumAndroid.crypto_box_beforenm` for the 32-byte shared key and JCA `HmacSHA256` for the specified extract/expand steps.
-- [ ] Zero `shared_key`, `prk`, temporary context buffers containing derived material, and local copies in `finally`; return defensive copies only. Map native failures to `lan_bootstrap_crypto_unavailable` without logging key material.
-- [ ] Add the trust-material comparison helper without weakening `LanPairStore.commit` replacement checks.
-- [ ] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.lan.LanBootstrapCryptoTest' --tests 'co.twinotify.core.storage.LanPairStoreTest'` and `git diff --check`.
-- [ ] Commit with `feat(mobile/lan): derive bootstrap trust`.
+- [x] Add RED tests for A/B symmetry, unsigned UTF-8 device ordering, length-delimited context bytes, identity collision, 31/33-byte key rejection, mutation resistance of returned arrays, and changed device/encryption/signing identity changing the context and secret. Use a deterministic `BoxPrecomputer` in JVM tests. Run the new test class and confirm it fails to compile before production types exist.
+- [x] Add RED JVM coverage proving `sameTrustMaterial` ignores `pairedAtMillis` and requires the same protocol/pin/secret; retain the existing instrumented replacement-rejection coverage unchanged.
+- [x] Implement canonical context encoding with unsigned 32-bit big-endian lengths. Use `SodiumAndroid.crypto_box_beforenm` for the 32-byte shared key and JCA `HmacSHA256` for the specified extract/expand steps.
+- [x] Zero `shared_key`, `prk`, temporary context buffers containing derived material, and local copies in `finally`; return defensive copies only. Map native failures to `lan_bootstrap_crypto_unavailable` without logging key material.
+- [x] Add the trust-material comparison helper without weakening `LanPairStore.commit` replacement checks.
+- [x] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.lan.LanBootstrapCryptoTest'` and `git diff --check`; retain the existing instrumented store suite for the final device gate.
+- [x] Commit with `feat(mobile/lan): derive bootstrap trust`.
 
 ### Task 4: Persist reliable controls and classify delivery state in Room v9
 

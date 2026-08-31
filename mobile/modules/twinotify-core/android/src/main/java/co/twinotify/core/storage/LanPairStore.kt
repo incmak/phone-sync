@@ -59,6 +59,24 @@ class LanBinding(
     }
 }
 
+internal fun LanBinding.sameTrustMaterial(other: LanBinding): Boolean {
+    if (protocolVersion != other.protocolVersion) return false
+    val leftPin = peerTlsSpkiSha256
+    val rightPin = other.peerTlsSpkiSha256
+    val leftSecret = lanSecret
+    val rightSecret = other.lanSecret
+    return try {
+        val samePin = MessageDigest.isEqual(leftPin, rightPin)
+        val sameSecret = MessageDigest.isEqual(leftSecret, rightSecret)
+        samePin && sameSecret
+    } finally {
+        leftPin.fill(0)
+        rightPin.fill(0)
+        leftSecret.fill(0)
+        rightSecret.fill(0)
+    }
+}
+
 class PreparedLanBinding internal constructor(
     internal val peer: PeerRecord,
     internal val bindingId: String,
