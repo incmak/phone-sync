@@ -175,8 +175,9 @@ internal fun LanBinding.sameTrustMaterial(other: LanBinding): Boolean
 - Create: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/PeerControlOutbox.kt`
 - Create: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/PeerControlOutboxTest.kt`
 - Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/storage/ReliableDeliveryDao.kt`
-- Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/storage/ReliableDeliveryTransactionTest.kt`
-- Modify: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/OutboxRepositoryTest.kt` only where total/user count semantics are asserted
+- Modify: `mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/storage/ReliableDeliveryTransactionTest.kt`
+- Verify unchanged: `mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/service/OutboxRepositoryTest.kt`
+- Modify: `mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/actions/ActionControlEncoder.kt`
 
 **Interfaces:**
 
@@ -205,14 +206,14 @@ class PeerControlOutbox {
 }
 ```
 
-- [ ] Add RED encoder/controller tests proving a bootstrap has a ten-minute TTL, a probe has a two-minute TTL, `probe_id == msg_id`, both require peer receipts, encryption uses the stored peer, one bootstrap is reused within a generation, one unexpired probe is active, and current-generation digest-matching receipts alone create 150-second evidence.
-- [ ] Add RED Room transaction tests for the classification truth table: `NEW` without custody is pending local; `ACCEPTED` is awaiting peer; relay-custody `ACCEPTED` is held by relay; receipts/snapshots/bootstrap/probe/unpair are internal; notification-only work uses `NOTIFICATIONS`; call/action/mixed work uses `SYNC_UPDATES`; totals and bytes still include every active row.
-- [ ] Run the two focused test classes and confirm failure before implementation.
-- [ ] Implement a reusable control sealer by extracting the existing envelope construction pattern without changing notification/action wire bytes. Use `NonceSource`, `ProtocolJson`, X25519 encryption, lowercase SHA-256, defensive JSON, and `requiresPeerReceipt=true` for the two new controls.
-- [ ] Add only DAO queries/projections and `@Transaction` composition methods; do not change entities or database version. Keep `activeOutboundCount/Bytes` for engineering/retention callers and add explicit `deliveryQueueSnapshot()` for product status.
-- [ ] Make probe tracking process-local and generation-scoped. Register only after durable insert succeeds; an old accepted probe after restart cannot assert liveness and blocks no fresh probe once its inner expiry passes.
-- [ ] Run `cd mobile/android && ./gradlew :twinotify-core:testDebugUnitTest --tests 'co.twinotify.core.service.PeerControlOutboxTest' --tests 'co.twinotify.core.storage.ReliableDeliveryTransactionTest' --tests 'co.twinotify.core.service.OutboxRepositoryTest'` and `git diff --check`.
-- [ ] Commit with `feat(mobile/delivery): persist peer controls`.
+- [x] Add RED encoder/controller tests proving a bootstrap has a ten-minute TTL, a probe has a two-minute TTL, `probe_id == msg_id`, both require peer receipts, encryption uses the stored peer, one bootstrap is reused within a generation, one unexpired probe is active, and current-generation digest-matching receipts alone create 150-second evidence.
+- [x] Add RED Room transaction tests for the classification truth table: `NEW` without custody is pending local; `ACCEPTED` is awaiting peer; relay-custody `ACCEPTED` is held by relay; receipts/snapshots/bootstrap/probe/unpair are internal; notification-only work uses `NOTIFICATIONS`; call/action/mixed work uses `SYNC_UPDATES`; totals and bytes still include every active row.
+- [x] Run the focused JVM controller test and compile the instrumented Room test; confirm failure before implementation.
+- [x] Implement a reusable control sealer by extracting the existing envelope construction pattern without changing notification/action wire bytes. Use `NonceSource`, `ProtocolJson`, X25519 encryption, lowercase SHA-256, defensive JSON, and `requiresPeerReceipt=true` for the two new controls.
+- [x] Add only DAO queries/projections and `@Transaction` composition methods; do not change entities or database version. Keep `activeOutboundCount/Bytes` for engineering/retention callers and add explicit `deliveryQueueSnapshot()` for product status.
+- [x] Make probe tracking process-local and generation-scoped. Register only after durable insert succeeds; an old accepted probe after restart cannot assert liveness and blocks no fresh probe once its inner expiry passes.
+- [x] Run the focused controller/action JVM tests, compile the Android suite, run all 50 `ReliableDeliveryTransactionTest` cases on the connected M2012K11AI, and run `git diff --check`.
+- [x] Commit with `feat(mobile/delivery): persist peer controls`.
 
 ### Task 5: Apply bootstrap/probes and receipt them atomically
 

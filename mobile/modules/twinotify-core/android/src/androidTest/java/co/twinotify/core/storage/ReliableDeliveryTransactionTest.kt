@@ -55,6 +55,58 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun deliveryQueueSnapshotClassifiesUserCustodyAndInternalRowsWithoutLosingTotals() = runBlocking {
+        dao.insertOutbound(queueRow("pending", "notif.post", byteSize = 10))
+        dao.insertOutbound(queueRow("lan-awaiting", "notif.update", byteSize = 11).copy(
+            state = "ACCEPTED",
+            custodyAcceptedAt = 1_000,
+            custodyRoute = "LAN",
+        ))
+        dao.insertOutbound(queueRow("relay-held", "notif.cancel", byteSize = 12).copy(
+            state = "ACCEPTED",
+            custodyAcceptedAt = 1_000,
+            custodyRoute = "RELAY",
+            relayCustodyState = "ACCEPTED",
+        ))
+        listOf(
+            "peer.receipt",
+            "state.digest",
+            "state.snapshot.begin",
+            "state.snapshot.item",
+            "state.snapshot.end",
+            "lan.bootstrap",
+            "peer.probe",
+            "unpair",
+        ).forEachIndexed { index, type ->
+            dao.insertOutbound(queueRow("internal-$index", type, byteSize = 13))
+        }
+        dao.insertOutbound(queueRow("terminal", "call.state", byteSize = 99).copy(state = "TERMINAL"))
+
+        assertEquals(
+            DeliveryQueueSnapshot(
+                pendingLocal = 1,
+                awaitingPeer = 2,
+                heldByRelay = 1,
+                internalActive = 8,
+                totalActive = 11,
+                totalActiveBytes = 137,
+                userContentKind = UserContentKind.NOTIFICATIONS,
+            ),
+            dao.deliveryQueueSnapshot(),
+        )
+
+        dao.insertOutbound(queueRow("call", "call.state", byteSize = 14))
+        dao.insertOutbound(queueRow("action", "notif.action.invoke", byteSize = 15))
+        val mixed = dao.deliveryQueueSnapshot()
+        assertEquals(UserContentKind.SYNC_UPDATES, mixed.userContentKind)
+        assertEquals(3, mixed.pendingLocal)
+        assertEquals(13, mixed.totalActive)
+        assertEquals(166, mixed.totalActiveBytes)
+        assertEquals(mixed.totalActive, dao.activeOutboundCount())
+        assertEquals(mixed.totalActiveBytes, dao.activeOutboundBytes())
+    }
+
+    @Test
     fun emptyAuthoritativeSnapshotCancelsExistingMirror() = runBlocking {
         dao.putCanonical(canonical(sequence = 4, state = "ACTIVE", payload = "payload"))
         dao.beginSnapshot(
@@ -1488,6 +1540,26 @@ class ReliableDeliveryTransactionTest {
         state = "NEW",
         lastError = null,
         requiresPeerReceipt = true,
+    )
+
+    private fun queueRow(msgId: String, eventType: String, byteSize: Long) = OutboundMessage(
+        msgId = msgId,
+        canonId = if (eventType.startsWith("notif.") || eventType == "call.state") CANON_ID else null,
+        sequence = if (eventType in setOf("notif.post", "notif.update", "notif.cancel", "call.state")) 1 else null,
+        eventType = eventType,
+        protocolVersion = 2,
+        envelopeJson = "{}",
+        envelopeSha256 = "sha-$msgId",
+        byteSize = byteSize,
+        createdAt = 1_000,
+        expiresAt = 100_000,
+        custodyAcceptedAt = null,
+        custodyRoute = null,
+        attempts = 0,
+        nextAttemptAt = 1_000,
+        state = "NEW",
+        lastError = null,
+        requiresPeerReceipt = eventType !in setOf("peer.receipt", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"),
     )
 
     private fun controlOutbound(msgId: String, eventType: String) = outbound(

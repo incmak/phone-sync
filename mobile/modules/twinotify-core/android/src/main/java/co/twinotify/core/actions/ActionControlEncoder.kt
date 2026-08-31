@@ -1,17 +1,11 @@
 package co.twinotify.core.actions
 
 import android.content.Context
-import android.util.Base64
-import co.twinotify.core.crypto.CryptoStore
-import co.twinotify.core.crypto.Encrypter
-import co.twinotify.core.crypto.NonceSource
-import co.twinotify.core.protocol.EncryptedEnvelope
 import co.twinotify.core.protocol.InnerEventV2
 import co.twinotify.core.protocol.ProtocolJson
+import co.twinotify.core.service.DurablePeerControlSealer
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.OutboundMessage
-import co.twinotify.core.storage.PeerStore
-import java.security.MessageDigest
 import java.util.UUID
 import org.json.JSONObject
 
@@ -105,48 +99,8 @@ class ActionControlEncoder(
 }
 
 private class DurableActionControlSealer(private val context: Context) : ActionControlSealer {
-    override suspend fun seal(event: InnerEventV2): OutboundMessage {
-        val peer = PeerStore.load(context) ?: throw IllegalStateException("action control requires a paired peer")
-        val (box, _) = CryptoStore.loadOrGenerate(context)
-        val nonce = NonceSource.next(context)
-        val ciphertext = Encrypter.encrypt(
-            plain = ProtocolJson.encodeInner(event).toByteArray(Charsets.UTF_8),
-            nonce = nonce,
-            peerPubkey = peer.encPubkey,
-            ownSecret = box.secretKey,
-        )
-        val envelope = ProtocolJson.encodeEnvelope(
-            EncryptedEnvelope(
-                version = ProtocolJson.VERSION,
-                msgId = event.msgId,
-                originDevice = event.originDevice,
-                createdAt = event.createdAt,
-                nonceB64 = Base64.encodeToString(nonce, Base64.NO_WRAP),
-                ciphertextB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP),
-            ),
-        )
-        return OutboundMessage(
-            msgId = event.msgId,
-            canonId = null,
-            sequence = null,
-            eventType = event.type,
-            protocolVersion = ProtocolJson.VERSION,
-            envelopeJson = envelope,
-            envelopeSha256 = sha256(envelope),
-            byteSize = envelope.toByteArray(Charsets.UTF_8).size.toLong(),
-            createdAt = event.createdAt,
-            expiresAt = event.expiresAt,
-            custodyAcceptedAt = null,
-            custodyRoute = null,
-            attempts = 0,
-            nextAttemptAt = event.createdAt,
-            state = "NEW",
-            lastError = null,
-            requiresPeerReceipt = false,
-        )
-    }
+    private val delegate = DurablePeerControlSealer(context)
 
-    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    override suspend fun seal(event: InnerEventV2): OutboundMessage =
+        delegate.seal(event, requiresPeerReceipt = false)
 }

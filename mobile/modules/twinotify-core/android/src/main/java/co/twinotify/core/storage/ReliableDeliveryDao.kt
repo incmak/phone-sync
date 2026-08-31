@@ -80,6 +80,28 @@ internal fun boundedMaterializationRetryDelay(attempt: Int): Long {
 internal fun saturatingMaterializationRetryDue(nowMs: Long, delayMs: Long): Long =
     if (nowMs > Long.MAX_VALUE - delayMs) Long.MAX_VALUE else nowMs + delayMs
 
+enum class UserContentKind { NOTIFICATIONS, SYNC_UPDATES }
+
+data class DeliveryQueueSnapshot(
+    val pendingLocal: Int,
+    val awaitingPeer: Int,
+    val heldByRelay: Int,
+    val internalActive: Int,
+    val totalActive: Int,
+    val totalActiveBytes: Long,
+    val userContentKind: UserContentKind,
+)
+
+data class DeliveryQueueProjection(
+    val pendingLocal: Int,
+    val awaitingPeer: Int,
+    val heldByRelay: Int,
+    val internalActive: Int,
+    val totalActive: Int,
+    val totalActiveBytes: Long,
+    val nonNotificationUser: Int,
+)
+
 sealed interface ReceiptTransitionResult {
     data object ReadyForRelayAck : ReceiptTransitionResult
     data object AlreadyTransitioned : ReceiptTransitionResult
@@ -491,11 +513,51 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("SELECT * FROM outbound_message WHERE msgId=:msgId")
     abstract suspend fun outboundMessage(msgId: String): OutboundMessage?
 
+    @Query(
+        "SELECT * FROM outbound_message WHERE eventType=:eventType AND " +
+            "state NOT IN ('TERMINAL','EXPIRED') AND expiresAt > :now " +
+            "ORDER BY createdAt DESC, rowid DESC LIMIT 1",
+    )
+    abstract suspend fun activeOutboundControl(eventType: String, now: Long): OutboundMessage?
+
     @Query("SELECT COUNT(*) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED')")
     abstract suspend fun activeOutboundCount(): Int
 
     @Query("SELECT COALESCE(SUM(byteSize), 0) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED')")
     abstract suspend fun activeOutboundBytes(): Long
+
+    @Query(
+        "SELECT " +
+            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state') " +
+            "AND state='NEW' AND custodyAcceptedAt IS NULL THEN 1 END) AS pendingLocal, " +
+            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state') " +
+            "AND state='ACCEPTED' AND custodyAcceptedAt IS NOT NULL THEN 1 END) AS awaitingPeer, " +
+            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state') " +
+            "AND state='ACCEPTED' AND custodyAcceptedAt IS NOT NULL AND relayCustodyState='ACCEPTED' THEN 1 END) AS heldByRelay, " +
+            "COUNT(CASE WHEN eventType NOT IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state') THEN 1 END) AS internalActive, " +
+            "COUNT(*) AS totalActive, COALESCE(SUM(byteSize), 0) AS totalActiveBytes, " +
+            "COUNT(CASE WHEN eventType IN ('notif.action.invoke','notif.action.result','call.state') THEN 1 END) AS nonNotificationUser " +
+            "FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED')",
+    )
+    protected abstract suspend fun deliveryQueueProjection(): DeliveryQueueProjection
+
+    @Transaction
+    open suspend fun deliveryQueueSnapshot(): DeliveryQueueSnapshot {
+        val value = deliveryQueueProjection()
+        return DeliveryQueueSnapshot(
+            pendingLocal = value.pendingLocal,
+            awaitingPeer = value.awaitingPeer,
+            heldByRelay = value.heldByRelay,
+            internalActive = value.internalActive,
+            totalActive = value.totalActive,
+            totalActiveBytes = value.totalActiveBytes,
+            userContentKind = if (value.nonNotificationUser == 0) {
+                UserContentKind.NOTIFICATIONS
+            } else {
+                UserContentKind.SYNC_UPDATES
+            },
+        )
+    }
 
     @Query("DELETE FROM activity_event WHERE occurredAt < :cutoff")
     protected abstract suspend fun deleteActivityBefore(cutoff: Long): Int
