@@ -361,7 +361,7 @@ data class SyncRouteStatus(
 - [x] Run the focused Jest command, `cd mobile && npm run typecheck`, `cd mobile && npm run lint`, and `git diff --check`.
 - [x] Complete the anti-slop point-by-point review for hierarchy, restraint, copy truth, spacing, typography, color, light/dark behavior, 2x font, accessibility labels, and pressed/disabled/retry states. Record any physical-only item as pending rather than inferring success.
   - Code/test review passed without adding hierarchy, containers, icons, typography, color, spacing, or trace changes. Narrow/2x-font stacking, multiline copy, live-region labels, 48 dp controls, and action-state rules are covered. Light/dark physical screenshots and pressed-state visual inspection remain part of Task 10's two-phone physical gate.
-- [ ] Commit with `fix(mobile/home): show delivery truth`.
+- [x] Commit with `fix(mobile/home): show delivery truth`.
 
 ### Task 9: Add deterministic end-to-end evidence and operator guidance
 
@@ -375,12 +375,12 @@ data class SyncRouteStatus(
 - Modify: `e2e/internal/scenario/scenario_test.go`
 - Modify: `docs/test-scenarios.md`
 
-- [ ] Add RED host verifier tests for a sanitized route transition sequence `RELAY -> LAN -> RELAY -> LAN`, strictly increasing route generations, no overlapping drainer evidence, classified counts, and relay evidence becoming stale when the peer stops.
-- [ ] Add debug-only evidence fields for route kind/phase/generation, peer-evidence enum, classified counts, and stable bounded reason code. Reject URLs, IPs, SSIDs, ports, tokens, pins, certificates, raw keys, ciphertext, titles, and notification text.
-- [ ] Extend the existing direct-LAN fallback scenario rather than creating a duplicate runner where possible. Add automatic relay-bootstrap and peer-stale assertions; keep artifacts from every completed child when a later child fails.
-- [ ] Document rollout order (relay first), mixed-version behavior, no-touch automatic promotion, and the exact two-phone ADB steps from the approved design.
-- [ ] Run focused Go tests under `e2e/`, `make host-verify`, and `git diff --check`.
-- [ ] Commit with `test(e2e): verify automatic LAN promotion`.
+- [x] Add RED host verifier tests for a sanitized route transition sequence `RELAY -> LAN -> RELAY -> LAN`, strictly increasing route generations, no overlapping drainer evidence, classified counts, and relay evidence becoming stale when the peer stops.
+- [x] Add debug-only evidence fields for route kind/phase/generation, peer-evidence enum, classified counts, and stable bounded reason code. Reject URLs, IPs, SSIDs, ports, tokens, pins, certificates, raw keys, ciphertext, titles, and notification text.
+- [x] Extend the existing direct-LAN fallback scenario rather than creating a duplicate runner where possible. Add automatic relay-bootstrap and peer-stale assertions; keep artifacts from every completed child when a later child fails.
+- [x] Document rollout order (relay first), mixed-version behavior, no-touch automatic promotion, and the exact two-phone ADB steps from the approved design.
+- [x] Run focused Go tests under `e2e/`, `make host-verify`, and `git diff --check`.
+- [x] Commit with `test(e2e): verify automatic LAN promotion`.
 
 ### Task 10: Run release-proportionate verification and physical acceptance
 

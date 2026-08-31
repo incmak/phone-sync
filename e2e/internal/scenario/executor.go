@@ -373,6 +373,7 @@ type Executor struct {
 	lanFaulted            map[string]bool
 	networkFaulted        map[string]bool
 	deliveryRoute         *RouteEvidence
+	routeTransitions      []RouteEvidence
 	trackedHash           string
 	trackedTag            string
 	trackedHashes         map[string]bool
@@ -427,6 +428,7 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.lanFaulted = map[string]bool{}
 		e.networkFaulted = map[string]bool{}
 		e.deliveryRoute = nil
+		e.routeTransitions = nil
 		e.trackedHash = ""
 		e.trackedTag = ""
 		e.trackedHashes = map[string]bool{}
@@ -513,6 +515,12 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 				runErr = evidenceErr
 			}
 		}
+		result.RouteTransitions = append([]RouteEvidence(nil), e.routeTransitions...)
+		if runErr == nil && plan.Name == "lan-relay-fallback-return" {
+			if evidenceErr := VerifyAutomaticPromotion(result.RouteTransitions); evidenceErr != nil {
+				runErr = evidenceErr
+			}
+		}
 		if runErr != nil {
 			result.ErrorCode = scenarioExecutionErrorCode(runErr)
 		} else {
@@ -586,6 +594,14 @@ func deriveRouteEvidence(plan ScenarioPlan, before, states map[string]Observatio
 		receipt = a.ReceiptAtMs
 	}
 	result := *delivery
+	terminalEvidence := routeEvidenceFromObservation(a)
+	result.PeerEvidence = terminalEvidence.PeerEvidence
+	result.PendingLocalCount = terminalEvidence.PendingLocalCount
+	result.QueuedCount = terminalEvidence.PendingLocalCount
+	result.AwaitingPeerCount = terminalEvidence.AwaitingPeerCount
+	result.HeldByRelayCount = terminalEvidence.HeldByRelayCount
+	result.DeliveryReason = terminalEvidence.DeliveryReason
+	result.UserContentKind = terminalEvidence.UserContentKind
 	result.ReceiptAtMs = receipt
 	result.ErrorCode = a.ErrorCode
 	return result, nil
@@ -915,11 +931,13 @@ func (e *Executor) observeDeliveryRoute(ctx context.Context, a action) (string, 
 	if observed.Route == "" || observed.Route == "none" {
 		return "", nil
 	}
-	e.deliveryRoute = &RouteEvidence{Route: observed.Route, Phase: observed.RoutePhase, Generation: observed.RouteGeneration, QueuedCount: observed.Outbox, QueuedBytes: observed.QueuedBytes}
+	evidence := routeEvidenceFromObservation(observed)
+	e.deliveryRoute = &evidence
 	return fmt.Sprintf("route:%s:%s:g%d", a.eventID(), observed.Route, observed.RouteGeneration), nil
 }
 
 func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) error {
+	var matchedA Observation
 	err := Eventually(ctx, 200*time.Millisecond, e.stepTimeout, func() (bool, error) {
 		stateA, err := e.bridge.Snapshot(ctx, "A")
 		if err != nil {
@@ -929,12 +947,58 @@ func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) er
 		if err != nil {
 			return false, err
 		}
-		return e.predicateSatisfied(name, predicate, stateA, stateB), nil
+		matched := e.predicateSatisfied(name, predicate, stateA, stateB)
+		if matched {
+			matchedA = stateA
+		}
+		return matched, nil
 	})
+	if err == nil && name == "lan-relay-fallback-return" &&
+		(predicate == "A.route.relay" || predicate == "A.route.lan") {
+		e.recordRouteTransition(matchedA)
+	}
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		return oracleFailure(oracleCode(predicate))
 	}
 	return err
+}
+
+func (e *Executor) recordRouteTransition(observed Observation) {
+	transition := routeEvidenceFromObservation(observed)
+	if len(e.routeTransitions) != 0 {
+		last := e.routeTransitions[len(e.routeTransitions)-1]
+		if last.Route == transition.Route && last.Generation == transition.Generation {
+			return
+		}
+	}
+	e.routeTransitions = append(e.routeTransitions, transition)
+}
+
+func routeEvidenceFromObservation(observed Observation) RouteEvidence {
+	peerEvidence := observed.PeerEvidence
+	if peerEvidence == "" {
+		if observed.Route == "lan" && observed.RoutePhase == "authenticated" {
+			peerEvidence = "direct"
+		} else {
+			peerEvidence = "unknown"
+		}
+	}
+	deliveryReason := observed.DeliveryReason
+	if deliveryReason == "" {
+		deliveryReason = "none"
+	}
+	userContentKind := observed.UserContentKind
+	if userContentKind == "" {
+		userContentKind = "notifications"
+	}
+	return RouteEvidence{
+		Route: observed.Route, Phase: observed.RoutePhase, Generation: observed.RouteGeneration,
+		QueuedCount: observed.PendingLocalCount, QueuedBytes: observed.QueuedBytes,
+		PeerEvidence: peerEvidence, PendingLocalCount: observed.PendingLocalCount,
+		AwaitingPeerCount: observed.AwaitingPeerCount, HeldByRelayCount: observed.HeldByRelayCount,
+		DeliveryReason: deliveryReason, UserContentKind: userContentKind,
+		ReceiptAtMs: observed.ReceiptAtMs, ErrorCode: observed.ErrorCode,
+	}
 }
 
 func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) bool {

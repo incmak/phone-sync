@@ -61,6 +61,25 @@ func TestParseObservationReadsClosedWorldCallSemanticState(t *testing.T) {
 	}
 }
 
+func TestParseObservationReadsClassifiedDeliveryEvidence(t *testing.T) {
+	payload := validObservationPayloadForTest()
+	payload["route_evidence"] = map[string]any{
+		"route": "relay", "phase": "authenticated", "route_generation": 9.0,
+		"queued_count": 2.0, "queued_bytes": 120.0, "receipt_at_ms": 0.0, "error_code": "",
+		"peer_evidence": "stale", "pending_local_count": 2.0, "awaiting_peer_count": 4.0,
+		"held_by_relay_count": 3.0, "delivery_reason": "relay_holding", "user_content_kind": "sync_updates",
+	}
+	encoded, _ := json.Marshal(payload)
+	state, err := scenario.ParseObservation(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.PeerEvidence != "stale" || state.PendingLocalCount != 2 || state.AwaitingPeerCount != 4 ||
+		state.HeldByRelayCount != 3 || state.DeliveryReason != "relay_holding" || state.UserContentKind != "sync_updates" {
+		t.Fatalf("classified delivery evidence was not parsed: %+v", state)
+	}
+}
+
 func TestParseObservationRejectsMalformedCallSemanticState(t *testing.T) {
 	base := validObservationPayloadForTest()
 	hash := strings.Repeat("a", 64)
@@ -91,8 +110,14 @@ func validObservationPayloadForTest() map[string]any {
 		"offline_pairing": map[string]any{},
 		"health":          map[string]any{"service": "connected", "transport": "online", "callCaptureEnabled": false, "callCaptureHealthCode": "call_capture_disabled"},
 		"route":           map[string]any{"route": "lan", "phase": "authenticated"},
-		"route_evidence":  map[string]any{"route": "lan", "phase": "authenticated", "route_generation": 1.0, "queued_count": 0.0, "queued_bytes": 0.0, "receipt_at_ms": 0.0, "error_code": ""},
-		"outbox_bytes":    0.0, "active_outbox": 0.0, "active_inbound": 0.0, "pending_materialization": 0.0,
+		"route_evidence": map[string]any{
+			"route": "lan", "phase": "authenticated", "route_generation": 1.0,
+			"queued_count": 0.0, "queued_bytes": 0.0, "peer_evidence": "direct",
+			"pending_local_count": 0.0, "awaiting_peer_count": 0.0, "held_by_relay_count": 0.0,
+			"delivery_reason": "none", "user_content_kind": "notifications",
+			"receipt_at_ms": 0.0, "error_code": "",
+		},
+		"outbox_bytes": 0.0, "active_outbox": 0.0, "active_inbound": 0.0, "pending_materialization": 0.0,
 		"canonical": []any{}, "activity": []any{},
 		"notification_action_fixture": map[string]any{
 			"available": true, "reply_dispatch_count": 0.0, "mark_read_dispatch_count": 0.0,
@@ -891,6 +916,15 @@ func TestFallbackEvidenceRecordsRelayDeliveryThenLanReturn(t *testing.T) {
 	}
 	if result.Route.Route != "lan" || result.After["A"].Route != "lan" || result.After["B"].Route != "lan" {
 		t.Fatalf("delivery and return evidence disagree: route=%+v after=%+v", result.Route, result.After)
+	}
+	if len(result.RouteTransitions) != 4 {
+		t.Fatalf("automatic promotion transitions=%+v", result.RouteTransitions)
+	}
+	for index, want := range []string{"relay", "lan", "relay", "lan"} {
+		if result.RouteTransitions[index].Route != want ||
+			(index > 0 && result.RouteTransitions[index].Generation <= result.RouteTransitions[index-1].Generation) {
+			t.Fatalf("invalid ordered transition evidence: %+v", result.RouteTransitions)
+		}
 	}
 	events := strings.Join(result.Events, "\n")
 	relayEvent := strings.Index(events, "route:post:A:n1-relay:relay:")

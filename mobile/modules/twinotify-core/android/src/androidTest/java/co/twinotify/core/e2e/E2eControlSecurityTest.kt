@@ -485,7 +485,11 @@ class E2eControlSecurityTest {
             }
             assertFalse(state.contains("tls_pin", ignoreCase = true))
             assertEquals(
-                setOf("route", "phase", "route_generation", "queued_count", "queued_bytes", "receipt_at_ms", "error_code"),
+                setOf(
+                    "route", "phase", "route_generation", "queued_count", "queued_bytes", "peer_evidence",
+                    "pending_local_count", "awaiting_peer_count", "held_by_relay_count", "delivery_reason",
+                    "user_content_kind", "receipt_at_ms", "error_code",
+                ),
                 root.getJSONObject("route_evidence").keys().asSequence().toSet(),
             )
         }

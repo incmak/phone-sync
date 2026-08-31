@@ -168,6 +168,9 @@ var plans = map[string][]Step{
 		{Predicate: "direct.terminal"},
 	},
 	"lan-relay-fallback-return": {
+		{Action: "A.lan.fail"}, {Action: "B.lan.fail"},
+		{Predicate: "A.route.relay"}, {Predicate: "B.route.relay"},
+		{Action: "A.lan.restore"}, {Action: "B.lan.restore"},
 		{Predicate: "A.route.lan"}, {Predicate: "B.route.lan"},
 		{Action: "A.lan.fail"}, {Action: "B.lan.fail"},
 		{Predicate: "A.route.relay"}, {Predicate: "B.route.relay"},
@@ -302,6 +305,12 @@ type Observation struct {
 	RoutePhase                     string                      `json:"route_phase"`
 	QueuedBytes                    int64                       `json:"queued_bytes"`
 	RouteGeneration                int                         `json:"route_generation"`
+	PeerEvidence                   string                      `json:"peer_evidence"`
+	PendingLocalCount              int                         `json:"pending_local_count"`
+	AwaitingPeerCount              int                         `json:"awaiting_peer_count"`
+	HeldByRelayCount               int                         `json:"held_by_relay_count"`
+	DeliveryReason                 string                      `json:"delivery_reason"`
+	UserContentKind                string                      `json:"user_content_kind"`
 	ReceiptAtMs                    int64                       `json:"receipt_at_ms,omitempty"`
 	ErrorCode                      string                      `json:"error_code,omitempty"`
 	Paired                         bool                        `json:"paired"`
@@ -388,13 +397,19 @@ func ParseObservation(payload []byte) (Observation, error) {
 			Phase string `json:"phase"`
 		} `json:"route"`
 		RouteEvidence struct {
-			Route       string `json:"route"`
-			Phase       string `json:"phase"`
-			Generation  int    `json:"route_generation"`
-			QueuedCount int    `json:"queued_count"`
-			QueuedBytes int64  `json:"queued_bytes"`
-			ReceiptAtMs int64  `json:"receipt_at_ms"`
-			ErrorCode   string `json:"error_code"`
+			Route             string `json:"route"`
+			Phase             string `json:"phase"`
+			Generation        int    `json:"route_generation"`
+			QueuedCount       int    `json:"queued_count"`
+			QueuedBytes       int64  `json:"queued_bytes"`
+			PeerEvidence      string `json:"peer_evidence"`
+			PendingLocalCount int    `json:"pending_local_count"`
+			AwaitingPeerCount int    `json:"awaiting_peer_count"`
+			HeldByRelayCount  int    `json:"held_by_relay_count"`
+			DeliveryReason    string `json:"delivery_reason"`
+			UserContentKind   string `json:"user_content_kind"`
+			ReceiptAtMs       int64  `json:"receipt_at_ms"`
+			ErrorCode         string `json:"error_code"`
 		} `json:"route_evidence"`
 		OutboxBytes            int64             `json:"outbox_bytes"`
 		ActiveOutbox           int               `json:"active_outbox"`
@@ -411,11 +426,40 @@ func ParseObservation(payload []byte) (Observation, error) {
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return Observation{}, fmt.Errorf("decode E2E state: %w", err)
 	}
+	var routeFields map[string]json.RawMessage
+	if err := json.Unmarshal(root["route_evidence"], &routeFields); err != nil {
+		return Observation{}, errors.New("E2E state malformed route_evidence")
+	}
+	routeEvidenceKeys := map[string]bool{
+		"route": true, "phase": true, "route_generation": true, "queued_count": true, "queued_bytes": true,
+		"peer_evidence": true, "pending_local_count": true, "awaiting_peer_count": true,
+		"held_by_relay_count": true, "delivery_reason": true, "user_content_kind": true,
+		"receipt_at_ms": true, "error_code": true,
+	}
+	if len(routeFields) != len(routeEvidenceKeys) {
+		return Observation{}, errors.New("E2E state malformed route_evidence")
+	}
+	for key := range routeFields {
+		if !routeEvidenceKeys[key] {
+			return Observation{}, fmt.Errorf("E2E state unknown route evidence %q", key)
+		}
+	}
 	if raw.Health.Service == "" {
 		return Observation{}, errors.New("E2E state missing health.service")
 	}
 	if !map[string]bool{"offline": true, "connecting": true, "online": true}[raw.Health.Transport] {
 		return Observation{}, errors.New("E2E state malformed health.transport")
+	}
+	parsedRoute := RouteEvidence{
+		Route: raw.RouteEvidence.Route, Phase: raw.RouteEvidence.Phase, Generation: raw.RouteEvidence.Generation,
+		QueuedCount: raw.RouteEvidence.QueuedCount, QueuedBytes: raw.RouteEvidence.QueuedBytes,
+		PeerEvidence: raw.RouteEvidence.PeerEvidence, PendingLocalCount: raw.RouteEvidence.PendingLocalCount,
+		AwaitingPeerCount: raw.RouteEvidence.AwaitingPeerCount, HeldByRelayCount: raw.RouteEvidence.HeldByRelayCount,
+		DeliveryReason: raw.RouteEvidence.DeliveryReason, UserContentKind: raw.RouteEvidence.UserContentKind,
+		ReceiptAtMs: raw.RouteEvidence.ReceiptAtMs, ErrorCode: raw.RouteEvidence.ErrorCode,
+	}
+	if err := parsedRoute.Validate(); err != nil {
+		return Observation{}, fmt.Errorf("E2E state malformed route_evidence: %w", err)
 	}
 	product, err := parseProductObservations(raw.Product)
 	if err != nil {
@@ -441,6 +485,12 @@ func ParseObservation(payload []byte) (Observation, error) {
 		RoutePhase:                     raw.RouteEvidence.Phase,
 		QueuedBytes:                    raw.RouteEvidence.QueuedBytes,
 		RouteGeneration:                raw.RouteEvidence.Generation,
+		PeerEvidence:                   raw.RouteEvidence.PeerEvidence,
+		PendingLocalCount:              raw.RouteEvidence.PendingLocalCount,
+		AwaitingPeerCount:              raw.RouteEvidence.AwaitingPeerCount,
+		HeldByRelayCount:               raw.RouteEvidence.HeldByRelayCount,
+		DeliveryReason:                 raw.RouteEvidence.DeliveryReason,
+		UserContentKind:                raw.RouteEvidence.UserContentKind,
 		ReceiptAtMs:                    raw.RouteEvidence.ReceiptAtMs,
 		ErrorCode:                      raw.RouteEvidence.ErrorCode,
 		Paired:                         product.Paired,

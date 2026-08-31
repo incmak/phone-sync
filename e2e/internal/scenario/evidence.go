@@ -23,6 +23,8 @@ type ScenarioResult struct {
 	ErrorCode string                 `json:"error_code,omitempty"`
 	// Route records which path actually carried the scenario.
 	Route RouteEvidence `json:"route"`
+	// RouteTransitions is present only for an ordered route-handoff proof.
+	RouteTransitions []RouteEvidence `json:"route_transitions,omitempty"`
 	// Children are persisted as independent artifact subtrees rather than nested
 	// into the aggregate JSON, keeping the closed-world evidence schema stable.
 	Children []ScenarioResult `json:"-"`
@@ -68,6 +70,11 @@ func validateEvidenceResult(result ScenarioResult) error {
 	// must fail the write rather than reach an uploaded artifact.
 	if err := result.Route.Validate(); err != nil {
 		return fmt.Errorf("invalid route evidence: %w", err)
+	}
+	for index, transition := range result.RouteTransitions {
+		if err := transition.Validate(); err != nil {
+			return fmt.Errorf("invalid route transition %d: %w", index, err)
+		}
 	}
 	if err := RejectSensitiveEvidence(result); err != nil {
 		return fmt.Errorf("refusing to persist evidence: %w", err)

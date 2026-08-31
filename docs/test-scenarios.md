@@ -409,7 +409,7 @@ each one asserts the observed route as well.
 | `lan-direct-peer-dismiss` | A user dismissal on the mirror returns one cancel without resurrection |
 | `lan-direct-call-state` | Synthetic ringing, active, and idle states converge with LAN custody and receipts |
 | `lan-direct-snapshot-receipt` | Digest, begin, item, end, commit, and receipt evidence converge |
-| `lan-relay-fallback-return` | App-internal LAN availability is disabled on both peers, one tagged delivery proves relay custody, LAN is restored, and a second tagged delivery proves LAN custody |
+| `lan-relay-fallback-return` | Starts on relay through the app-internal LAN fault, automatically promotes to LAN, falls back to relay, and promotes to LAN again; tagged deliveries prove relay custody followed by LAN custody |
 | `lan-restart-persistence` | Durable work survives A force-stop and typed-launcher restart, then B is restarted the same way and a second LAN delivery converges without clearing data |
 | `lan-direct-burst-backpressure` | A bounded unique burst stays below 2,000 rows and 128 MiB, then reaches terminal zero |
 | `lan-direct-unpair-during-traffic` | A nonzero producer is joined, one unpair reaches LAN custody, both peers wipe, and state does not recreate |
@@ -439,7 +439,9 @@ make e2e-lan-product
 The target invokes `e2e/cmd/twinotify-e2e` with `-scenario lan-product-correctness`, writes the aggregate artifacts under the supplied directory, and then runs `scripts/verify-lan-product-evidence.sh`. The root and each `children/NN-<scenario>/` directory must contain `scenario-result.json`, `state.json`, `timeline.json`, and `metrics.json`. A missing, failed, unsafe, secret-bearing, or semantically incomplete artifact fails the run.
 
 The fallback child changes only the app-internal route availability preference;
-it never mutates an OS radio. The restart child issues separate, bounded
+it never mutates an OS radio. Its content-free `route_transitions` evidence must
+be exactly `relay -> lan -> relay -> lan`, authenticated at every step, with
+strictly increasing route generations. The restart child issues separate, bounded
 force-stop and typed-launcher actions for each package and never clears app
 data. Ordered content-free route events retain both fallback deliveries, while
 the final route block describes the last delivery only.
@@ -457,7 +459,13 @@ Every scenario result may carry a `route` block:
 | `route` | `lan`, `relay`, or `none` |
 | `phase` | `idle`, `connecting`, `authenticated`, or `reconnecting` |
 | `route_generation` | How many times the route has been re-established |
-| `queued_count` / `queued_bytes` | Durable work still awaiting delivery |
+| `queued_count` / `pending_local_count` | User-visible work still stored on this phone; these values must match |
+| `awaiting_peer_count` | User-visible work awaiting an authenticated peer receipt |
+| `held_by_relay_count` | User-visible work already accepted into durable relay custody |
+| `peer_evidence` | `direct`, `recent`, `stale`, or `unknown`; relay must never claim `direct` |
+| `delivery_reason` | Bounded reason code used by the delivery-state model |
+| `user_content_kind` | `notifications` only when every counted row is a notification; otherwise `sync_updates` |
+| `queued_bytes` | Engineering total for active durable work, not a user-visible count |
 | `receipt_at_ms` | When the peer receipt landed |
 | `error_code` | A stable code, never free-form text |
 
@@ -468,6 +476,53 @@ addresses, SSIDs, key or token fields, private-key blocks, or long base64 runs).
 A 64-character hex digest is allowed, because it is bounded and not reversible.
 A scenario that observed no route at all omits the block rather than inventing
 one.
+
+### Automatic LAN promotion rollout and two-phone run
+
+Deploy the capability-aware relay before installing a mobile build that
+advertises `lan-bootstrap-v1` and `peer-probe-v1`. This ordering preserves the
+legacy capability-frame shape for old clients. A mixed-version pair stays on
+relay and the current phone reports `peer_version_incompatible`; it must not
+enqueue bootstrap/probe controls until both phones advertise both features.
+After the second phone updates, bootstrap and direct promotion happen in the
+background without re-pairing.
+
+Use two distinct, unlocked, already relay-paired phones. Replace only the
+placeholders below, keep the evidence directory outside the repository, and do
+not uninstall or clear app data:
+
+```bash
+adb devices -l
+adb -s '<serial-a>' shell dumpsys package com.twinotify.app | sed -n '/versionCode=/p;/versionName=/p'
+adb -s '<serial-b>' shell dumpsys package com.twinotify.app | sed -n '/versionCode=/p;/versionName=/p'
+adb -s '<serial-a>' shell pm path com.twinotify.app
+adb -s '<serial-b>' shell pm path com.twinotify.app
+
+adb -s '<serial-a>' install -r '/private/path/twinotify-debug.apk'
+adb -s '<serial-b>' install -r '/private/path/twinotify-debug.apk'
+
+cd e2e
+go run ./cmd/twinotify-e2e \
+  -scenario lan-relay-fallback-return \
+  -serial-a '<serial-a>' \
+  -serial-b '<serial-b>' \
+  -timeout 45s \
+  -scenario-evidence-dir '/private/path/automatic-lan-promotion'
+```
+
+For the no-touch topology observation, first put the phones on different
+networks and record authenticated relay plus `recent`, `stale`, or `unknown`
+peer evidence. Then put both phones on the same operator-controlled Wi-Fi and
+touch neither Twinotify screen; poll the debug `STATUS` command until both
+report `lan/authenticated`. Record timestamps and sanitized generations.
+
+For stale-peer evidence, return both phones to relay, wait for `recent`, stop
+the peer app with `adb -s '<serial-b>' shell am force-stop com.twinotify.app`,
+wait at least 150 seconds, and confirm phone A reports `stale` and never
+`direct`/“Reachable now.” Restart B with
+`adb -s '<serial-b>' shell am start -n com.twinotify.app/.MainActivity` and
+confirm recovery. This is physical evidence only when captured from two actual
+phones; host tests validate the contract but do not replace the run.
 
 ### Automated scenarios with physical acceptance pending
 

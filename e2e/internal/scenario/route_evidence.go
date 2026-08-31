@@ -16,13 +16,19 @@ import (
 // uploaded from CI and shared, and a route record is not worth leaking a network
 // map for.
 type RouteEvidence struct {
-	Route       string `json:"route"`
-	Phase       string `json:"phase"`
-	Generation  int    `json:"route_generation"`
-	QueuedCount int    `json:"queued_count"`
-	QueuedBytes int64  `json:"queued_bytes"`
-	ReceiptAtMs int64  `json:"receipt_at_ms,omitempty"`
-	ErrorCode   string `json:"error_code,omitempty"`
+	Route             string `json:"route"`
+	Phase             string `json:"phase"`
+	Generation        int    `json:"route_generation"`
+	QueuedCount       int    `json:"queued_count"`
+	QueuedBytes       int64  `json:"queued_bytes"`
+	PeerEvidence      string `json:"peer_evidence"`
+	PendingLocalCount int    `json:"pending_local_count"`
+	AwaitingPeerCount int    `json:"awaiting_peer_count"`
+	HeldByRelayCount  int    `json:"held_by_relay_count"`
+	DeliveryReason    string `json:"delivery_reason"`
+	UserContentKind   string `json:"user_content_kind"`
+	ReceiptAtMs       int64  `json:"receipt_at_ms,omitempty"`
+	ErrorCode         string `json:"error_code,omitempty"`
 }
 
 var (
@@ -30,6 +36,12 @@ var (
 	routePhases = map[string]bool{
 		"idle": true, "connecting": true, "authenticated": true, "reconnecting": true,
 	}
+	peerEvidenceKinds = map[string]bool{"direct": true, "recent": true, "stale": true, "unknown": true}
+	deliveryReasons   = map[string]bool{
+		"none": true, "no_route": true, "waiting_for_peer": true, "relay_holding": true,
+		"lan_bootstrap_waiting": true, "lan_binding_conflict": true, "peer_version_incompatible": true,
+	}
+	userContentKinds  = map[string]bool{"notifications": true, "sync_updates": true}
 	stableCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 )
 
@@ -58,11 +70,71 @@ func (r RouteEvidence) Validate() error {
 	if !routePhases[r.Phase] {
 		return fmt.Errorf("unknown route phase %q", r.Phase)
 	}
-	if r.Generation < 0 || r.QueuedCount < 0 || r.QueuedBytes < 0 || r.ReceiptAtMs < 0 {
+	if !peerEvidenceKinds[r.PeerEvidence] {
+		return fmt.Errorf("unknown peer evidence %q", r.PeerEvidence)
+	}
+	if !deliveryReasons[r.DeliveryReason] {
+		return fmt.Errorf("unknown delivery reason %q", r.DeliveryReason)
+	}
+	if !userContentKinds[r.UserContentKind] {
+		return fmt.Errorf("unknown user content kind %q", r.UserContentKind)
+	}
+	if r.Generation < 0 || r.QueuedCount < 0 || r.QueuedBytes < 0 || r.ReceiptAtMs < 0 ||
+		r.PendingLocalCount < 0 || r.AwaitingPeerCount < 0 || r.HeldByRelayCount < 0 {
 		return fmt.Errorf("route evidence counters must not be negative")
+	}
+	if r.QueuedCount != r.PendingLocalCount {
+		return errors.New("queued_count must equal pending_local_count")
 	}
 	if r.ErrorCode != "" && !stableCodePattern.MatchString(r.ErrorCode) {
 		return fmt.Errorf("error code %q is not a stable code", r.ErrorCode)
+	}
+	return nil
+}
+
+// VerifyAutomaticPromotion validates the content-free route sequence emitted by
+// the fallback/return scenario. A single enum-valued route per generation is
+// also the host-side evidence that no observation claims two active drainers.
+func VerifyAutomaticPromotion(transitions []RouteEvidence) error {
+	want := []string{"relay", "lan", "relay", "lan"}
+	if len(transitions) != len(want) {
+		return fmt.Errorf("automatic promotion requires %d transitions", len(want))
+	}
+	for index, transition := range transitions {
+		if err := transition.Validate(); err != nil {
+			return fmt.Errorf("transition %d: %w", index, err)
+		}
+		if transition.Route != want[index] || transition.Phase != "authenticated" {
+			return fmt.Errorf("transition %d is not authenticated %s", index, want[index])
+		}
+		if index > 0 && transition.Generation <= transitions[index-1].Generation {
+			return errors.New("route generations are not strictly increasing")
+		}
+		if transition.Route == "lan" && transition.PeerEvidence != "direct" {
+			return errors.New("authenticated LAN lacks direct peer evidence")
+		}
+		if transition.Route == "relay" && transition.PeerEvidence == "direct" {
+			return errors.New("relay must not claim direct peer evidence")
+		}
+	}
+	return nil
+}
+
+func VerifyRelayEvidenceStaled(recent, stale RouteEvidence) error {
+	if err := recent.Validate(); err != nil {
+		return err
+	}
+	if err := stale.Validate(); err != nil {
+		return err
+	}
+	if recent.Route != "relay" || stale.Route != "relay" || recent.Phase != "authenticated" || stale.Phase != "authenticated" {
+		return errors.New("peer-stale evidence requires authenticated relay observations")
+	}
+	if recent.PeerEvidence != "recent" || stale.PeerEvidence != "stale" {
+		return errors.New("relay peer evidence did not transition recent to stale")
+	}
+	if stale.Generation < recent.Generation {
+		return errors.New("stale peer evidence cannot come from an older route generation")
 	}
 	return nil
 }
@@ -87,8 +159,10 @@ var sensitiveValuePatterns = []struct {
 
 // Field names that must never carry a value, whatever that value looks like.
 var sensitiveKeyPattern = regexp.MustCompile(
-	`(?i)(secret|token|password|passphrase|private_?key|seed|nonce|ssid|bssid|pin|credential|cookie|signature)`,
+	`(?i)(secret|token|password|passphrase|private_?key|seed|nonce|ssid|bssid|pin|credential|cookie|signature|certificate|ciphertext|notification_?text|title)`,
 )
+
+var sensitivePortKeyPattern = regexp.MustCompile(`(?i)(^|_)port($|_)`)
 
 var hexDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -114,7 +188,10 @@ func RejectSensitiveEvidence(value any) error {
 }
 
 func inspectClosedWorldScenario(root map[string]any) error {
-	allowedRoot := map[string]bool{"scenario": true, "status": true, "events": true, "before": true, "after": true, "error_code": true, "route": true}
+	allowedRoot := map[string]bool{
+		"scenario": true, "status": true, "events": true, "before": true, "after": true,
+		"error_code": true, "route": true, "route_transitions": true,
+	}
 	for key := range root {
 		if !allowedRoot[key] {
 			return fmt.Errorf("evidence field %q is not allowlisted", key)
@@ -141,6 +218,8 @@ func inspectClosedWorldScenario(root map[string]any) error {
 		"outbox": true, "active_inbound": true, "pending_materialization": true,
 		"mirror": true, "sequence": true, "terminal": true, "loop_events": true,
 		"route": true, "route_phase": true, "queued_bytes": true, "route_generation": true,
+		"peer_evidence": true, "pending_local_count": true, "awaiting_peer_count": true,
+		"held_by_relay_count": true, "delivery_reason": true, "user_content_kind": true,
 		"receipt_at_ms": true, "error_code": true,
 		"paired": true, "custody_counts": true, "peer_receipt_count": true,
 		"snapshot_digest_count": true, "snapshot_begin_count": true,
@@ -185,7 +264,12 @@ func inspectClosedWorldScenario(root map[string]any) error {
 			}
 		}
 	}
-	allowedRoute := map[string]bool{"route": true, "phase": true, "route_generation": true, "queued_count": true, "queued_bytes": true, "receipt_at_ms": true, "error_code": true}
+	allowedRoute := map[string]bool{
+		"route": true, "phase": true, "route_generation": true, "queued_count": true, "queued_bytes": true,
+		"peer_evidence": true, "pending_local_count": true, "awaiting_peer_count": true,
+		"held_by_relay_count": true, "delivery_reason": true, "user_content_kind": true,
+		"receipt_at_ms": true, "error_code": true,
+	}
 	route, ok := root["route"].(map[string]any)
 	if !ok {
 		if status == "failed" && root["route"] == nil {
@@ -200,7 +284,10 @@ func inspectClosedWorldScenario(root map[string]any) error {
 			}
 		}
 		if len(route) != 0 {
-			for _, key := range []string{"route", "phase", "route_generation", "queued_count", "queued_bytes"} {
+			for _, key := range []string{
+				"route", "phase", "route_generation", "queued_count", "queued_bytes", "peer_evidence",
+				"pending_local_count", "awaiting_peer_count", "held_by_relay_count", "delivery_reason", "user_content_kind",
+			} {
 				if _, present := route[key]; !present {
 					return fmt.Errorf("evidence route missing %s", key)
 				}
@@ -212,6 +299,31 @@ func inspectClosedWorldScenario(root map[string]any) error {
 			}
 			if err := typed.Validate(); err != nil {
 				return fmt.Errorf("evidence route is invalid: %w", err)
+			}
+		}
+	}
+	if rawTransitions, present := root["route_transitions"]; present {
+		transitions, ok := rawTransitions.([]any)
+		if !ok {
+			return errors.New("evidence route_transitions must be an array")
+		}
+		for index, raw := range transitions {
+			transition, ok := raw.(map[string]any)
+			if !ok {
+				return fmt.Errorf("evidence route transition %d must be an object", index)
+			}
+			for key := range transition {
+				if !allowedRoute[key] {
+					return fmt.Errorf("evidence route transition field %q is not allowlisted", key)
+				}
+			}
+			encoded, _ := json.Marshal(transition)
+			var typed RouteEvidence
+			if err := json.Unmarshal(encoded, &typed); err != nil {
+				return fmt.Errorf("evidence route transition %d has invalid shape", index)
+			}
+			if err := typed.Validate(); err != nil {
+				return fmt.Errorf("evidence route transition %d is invalid: %w", index, err)
 			}
 		}
 	}
@@ -240,6 +352,15 @@ func validateObservationShape(value map[string]any) error {
 	if err := stringEnum("route_phase", routePhases); err != nil {
 		return err
 	}
+	for key, allowed := range map[string]map[string]bool{
+		"peer_evidence": peerEvidenceKinds, "delivery_reason": deliveryReasons, "user_content_kind": userContentKinds,
+	} {
+		if raw, present := value[key]; present && raw != "" {
+			if err := stringEnum(key, allowed); err != nil {
+				return err
+			}
+		}
+	}
 	for _, key := range []string{"mirror", "terminal", "call_capture_enabled"} {
 		if _, ok := value[key].(bool); !ok {
 			return fmt.Errorf("%s must be boolean", key)
@@ -249,6 +370,14 @@ func validateObservationShape(value map[string]any) error {
 		number, ok := value[key].(float64)
 		if !ok || number < 0 || number > math.MaxInt64 || number != float64(int64(number)) {
 			return fmt.Errorf("%s must be a nonnegative integer", key)
+		}
+	}
+	for _, key := range []string{"pending_local_count", "awaiting_peer_count", "held_by_relay_count"} {
+		if raw, present := value[key]; present {
+			number, ok := raw.(float64)
+			if !ok || number < 0 || number > 2_000 || number != float64(int64(number)) {
+				return fmt.Errorf("%s must be a production-bounded nonnegative integer", key)
+			}
 		}
 	}
 	if receipt, present := value["receipt_at_ms"]; present {
@@ -369,7 +498,7 @@ func inspectEvidence(path string, value any) error {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, nested := range typed {
-			if sensitiveKeyPattern.MatchString(key) {
+			if sensitiveKeyPattern.MatchString(key) || sensitivePortKeyPattern.MatchString(key) {
 				return fmt.Errorf("evidence field %q may not be persisted", join(path, key))
 			}
 			if err := inspectEvidence(join(path, key), nested); err != nil {

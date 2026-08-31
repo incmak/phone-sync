@@ -31,7 +31,7 @@ scan_artifact() {
   [[ -f "$file" && ! -L "$file" && "$(mode_of "$file")" == 600 ]] || die "$label missing or unsafe"
   [[ $(wc -c <"$file") -le 1048576 ]] || die "$label exceeds size bound"
   jq -e . "$file" >/dev/null || die "$label is not valid JSON"
-  ! grep -Eqi '(^|[^a-z])(ssid|bssid|secret|token|password|private_key|seed|nonce|credential|cookie|signature)([^a-z]|$)|([0-9]{1,3}\.){3}[0-9]{1,3}|(wss?|https?)://|authorization[[:space:]]*:[[:space:]]*bearer' "$file" || die "$label contains forbidden evidence"
+  ! grep -Eqi '(^|[^a-z])(ssid|bssid|secret|token|password|private_key|seed|nonce|credential|cookie|signature|certificate|ciphertext|notification_text|title|port)([^a-z]|$)|([0-9]{1,3}\.){3}[0-9]{1,3}|(wss?|https?)://|authorization[[:space:]]*:[[:space:]]*bearer' "$file" || die "$label contains forbidden evidence"
 }
 
 verify_artifact_set() {
@@ -58,13 +58,16 @@ verify_common_result() {
       (has($key) | not) or (.[$key] | type == "string" and test("^[a-z][a-z0-9_]{0,63}$"));
     def observation:
       type == "object" and
-      ((keys - ["health","call_capture_enabled","call_capture_health_code","outbox","active_inbound","pending_materialization","mirror","sequence","terminal","loop_events","route","route_phase","queued_bytes","route_generation","receipt_at_ms","error_code","paired","custody_counts","peer_receipt_count","snapshot_digest_count","snapshot_begin_count","snapshot_end_count","snapshot_commit_count","user_dismiss_count","unpair_inbound_count","unpair_outcome","active_queue_count","active_queue_bytes","peak_queue_count","peak_queue_bytes"]) | length == 0) and
-      ([has("health"),has("call_capture_enabled"),has("outbox"),has("active_inbound"),has("pending_materialization"),has("mirror"),has("sequence"),has("terminal"),has("loop_events"),has("route"),has("route_phase"),has("queued_bytes"),has("route_generation"),has("paired"),has("custody_counts"),has("peer_receipt_count"),has("snapshot_digest_count"),has("snapshot_begin_count"),has("snapshot_end_count"),has("snapshot_commit_count"),has("user_dismiss_count"),has("unpair_inbound_count"),has("active_queue_count"),has("active_queue_bytes"),has("peak_queue_count"),has("peak_queue_bytes")] | all) and
+      ((keys - ["health","transport","call_capture_enabled","call_capture_health_code","outbox","active_inbound","pending_materialization","mirror","sequence","terminal","loop_events","route","route_phase","queued_bytes","route_generation","peer_evidence","pending_local_count","awaiting_peer_count","held_by_relay_count","delivery_reason","user_content_kind","receipt_at_ms","error_code","paired","custody_counts","peer_receipt_count","snapshot_digest_count","snapshot_begin_count","snapshot_end_count","snapshot_commit_count","user_dismiss_count","unpair_inbound_count","unpair_outcome","active_queue_count","active_queue_bytes","peak_queue_count","peak_queue_bytes"]) | length == 0) and
+      ([has("health"),has("call_capture_enabled"),has("outbox"),has("active_inbound"),has("pending_materialization"),has("mirror"),has("sequence"),has("terminal"),has("loop_events"),has("route"),has("route_phase"),has("queued_bytes"),has("route_generation"),has("peer_evidence"),has("pending_local_count"),has("awaiting_peer_count"),has("held_by_relay_count"),has("delivery_reason"),has("user_content_kind"),has("paired"),has("custody_counts"),has("peer_receipt_count"),has("snapshot_digest_count"),has("snapshot_begin_count"),has("snapshot_end_count"),has("snapshot_commit_count"),has("user_dismiss_count"),has("unpair_inbound_count"),has("active_queue_count"),has("active_queue_bytes"),has("peak_queue_count"),has("peak_queue_bytes")] | all) and
       (.health | type == "string" and test("^[a-z][a-z0-9_-]{0,63}$")) and
       (.call_capture_enabled | type == "boolean") and (.mirror | type == "boolean") and
       (.terminal | type == "boolean") and (.paired | type == "boolean") and
       (.route == "lan" or .route == "relay" or .route == "none") and
       (.route_phase == "idle" or .route_phase == "connecting" or .route_phase == "authenticated" or .route_phase == "reconnecting") and
+      (.peer_evidence == "direct" or .peer_evidence == "recent" or .peer_evidence == "stale" or .peer_evidence == "unknown") and
+      (.delivery_reason == "none" or .delivery_reason == "no_route" or .delivery_reason == "waiting_for_peer" or .delivery_reason == "relay_holding" or .delivery_reason == "lan_bootstrap_waiting" or .delivery_reason == "lan_binding_conflict" or .delivery_reason == "peer_version_incompatible") and
+      (.user_content_kind == "notifications" or .user_content_kind == "sync_updates") and
       (.outbox | integer_between(0; 2000)) and
       (.active_inbound | integer_between(0; 1000000000)) and
       (.pending_materialization | integer_between(0; 1000000000)) and
@@ -72,6 +75,9 @@ verify_common_result() {
       (.loop_events | integer_between(0; 1000000000)) and
       (.queued_bytes | integer_between(0; 134217728)) and
       (.route_generation | integer_between(0; 1000000000)) and
+      (.pending_local_count | integer_between(0; 2000)) and
+      (.awaiting_peer_count | integer_between(0; 2000)) and
+      (.held_by_relay_count | integer_between(0; 2000)) and
       (.active_queue_count | integer_between(0; 2000)) and
       (.active_queue_bytes | integer_between(0; 134217728)) and
       (.peak_queue_count | integer_between(0; 2000)) and
@@ -87,22 +93,30 @@ verify_common_result() {
         )));
     def route_evidence:
       type == "object" and
-      ((keys - ["route","phase","route_generation","queued_count","queued_bytes","receipt_at_ms","error_code"]) | length == 0) and
-      ([has("route"),has("phase"),has("route_generation"),has("queued_count"),has("queued_bytes")] | all) and
-      .route == "lan" and .phase == "authenticated" and
+      ((keys - ["route","phase","route_generation","queued_count","queued_bytes","peer_evidence","pending_local_count","awaiting_peer_count","held_by_relay_count","delivery_reason","user_content_kind","receipt_at_ms","error_code"]) | length == 0) and
+      ([has("route"),has("phase"),has("route_generation"),has("queued_count"),has("queued_bytes"),has("peer_evidence"),has("pending_local_count"),has("awaiting_peer_count"),has("held_by_relay_count"),has("delivery_reason"),has("user_content_kind")] | all) and
+      (.route == "lan" or .route == "relay") and .phase == "authenticated" and
       (.route_generation | integer_between(0; 1000000000)) and
       (.queued_count | integer_between(0; 2000)) and
+      .queued_count == .pending_local_count and
+      (.pending_local_count | integer_between(0; 2000)) and
+      (.awaiting_peer_count | integer_between(0; 2000)) and
+      (.held_by_relay_count | integer_between(0; 2000)) and
+      (.peer_evidence == "direct" or .peer_evidence == "recent" or .peer_evidence == "stale" or .peer_evidence == "unknown") and
+      (.delivery_reason == "none" or .delivery_reason == "no_route" or .delivery_reason == "waiting_for_peer" or .delivery_reason == "relay_holding" or .delivery_reason == "lan_bootstrap_waiting" or .delivery_reason == "lan_binding_conflict" or .delivery_reason == "peer_version_incompatible") and
+      (.user_content_kind == "notifications" or .user_content_kind == "sync_updates") and
       (.queued_bytes | integer_between(0; 134217728)) and
       ((has("receipt_at_ms") | not) or (.receipt_at_ms | integer_between(0; 9999999999999))) and
       optional_stable_code("error_code");
     type == "object" and
-    ((keys - ["scenario","status","events","before","after","error_code","route"]) | length == 0) and
+    ((keys - ["scenario","status","events","before","after","error_code","route","route_transitions"]) | length == 0) and
     ([has("scenario"),has("status"),has("events"),has("before"),has("after"),has("route")] | all) and
     .scenario == $name and .status == "passed" and (has("error_code") | not) and
     (.events | type == "array" and length <= 10000 and all(.[]; type == "string" and length <= 256)) and
     (.before | type == "object" and keys == (["A","B"] | sort) and all(.[]; observation)) and
     (.after | type == "object" and keys == (["A","B"] | sort) and all(.[]; observation)) and
-    (.route | route_evidence)
+    (.route | route_evidence) and .route.route == "lan" and
+    ((has("route_transitions") | not) or (.route_transitions | type == "array" and length <= 16 and all(.[]; route_evidence)))
   ' "$file" >/dev/null || die "$name result failed common closed-world assertions"
 }
 
@@ -197,6 +211,11 @@ verify_child() {
         (.after.A.custody_counts.relay.notif_post - .before.A.custody_counts.relay.notif_post) >= 1 and
         (.after.A.custody_counts.lan.notif_post - .before.A.custody_counts.lan.notif_post) >= 1 and
         (.after.A.peer_receipt_count - .before.A.peer_receipt_count) >= 2 and
+        (.route_transitions | length == 4) and
+        ([.route_transitions[].route] == ["relay","lan","relay","lan"]) and
+        ([range(1; .route_transitions | length) as $i | .route_transitions[$i].route_generation > .route_transitions[$i-1].route_generation] | all) and
+        ([.route_transitions[] | select(.route == "lan")] | all(.[]; .peer_evidence == "direct")) and
+        ([.route_transitions[] | select(.route == "relay")] | all(.[]; .peer_evidence != "direct")) and
         ([.after.A,.after.B] | all(.[]; .route == "lan" and .route_phase == "authenticated" and .terminal == true))
       ' "$file" >/dev/null || die "$name ordered relay-return evidence is incomplete"
       ;;
@@ -378,9 +397,9 @@ write_fixture() {
   rm -rf -- "$base"
   mkdir -m 700 -p "$base/children"
   chmod 700 "$base" "$base/children"
-  local base_obs route index name dir events after_a after_b
-  base_obs='{"health":"connected","call_capture_enabled":false,"outbox":0,"active_inbound":0,"pending_materialization":0,"mirror":false,"sequence":0,"terminal":true,"loop_events":0,"route":"lan","route_phase":"authenticated","queued_bytes":0,"route_generation":1,"paired":true,"custody_counts":{"lan":{"notif_post":0,"notif_update":0,"notif_cancel":0,"call_state":0,"state_digest":0,"state_snapshot_begin":0,"state_snapshot_item":0,"state_snapshot_end":0,"unpair":0,"peer_receipt":0},"relay":{"notif_post":0,"notif_update":0,"notif_cancel":0,"call_state":0,"state_digest":0,"state_snapshot_begin":0,"state_snapshot_item":0,"state_snapshot_end":0,"unpair":0,"peer_receipt":0}},"peer_receipt_count":0,"snapshot_digest_count":0,"snapshot_begin_count":0,"snapshot_end_count":0,"snapshot_commit_count":0,"user_dismiss_count":0,"unpair_inbound_count":0,"active_queue_count":0,"active_queue_bytes":0,"peak_queue_count":0,"peak_queue_bytes":0}'
-  route='{"route":"lan","phase":"authenticated","route_generation":1,"queued_count":0,"queued_bytes":0}'
+  local base_obs route transitions index name dir events after_a after_b
+  base_obs='{"health":"connected","call_capture_enabled":false,"outbox":0,"active_inbound":0,"pending_materialization":0,"mirror":false,"sequence":0,"terminal":true,"loop_events":0,"route":"lan","route_phase":"authenticated","queued_bytes":0,"route_generation":1,"peer_evidence":"direct","pending_local_count":0,"awaiting_peer_count":0,"held_by_relay_count":0,"delivery_reason":"none","user_content_kind":"notifications","paired":true,"custody_counts":{"lan":{"notif_post":0,"notif_update":0,"notif_cancel":0,"call_state":0,"state_digest":0,"state_snapshot_begin":0,"state_snapshot_item":0,"state_snapshot_end":0,"unpair":0,"peer_receipt":0},"relay":{"notif_post":0,"notif_update":0,"notif_cancel":0,"call_state":0,"state_digest":0,"state_snapshot_begin":0,"state_snapshot_item":0,"state_snapshot_end":0,"unpair":0,"peer_receipt":0}},"peer_receipt_count":0,"snapshot_digest_count":0,"snapshot_begin_count":0,"snapshot_end_count":0,"snapshot_commit_count":0,"user_dismiss_count":0,"unpair_inbound_count":0,"active_queue_count":0,"active_queue_bytes":0,"peak_queue_count":0,"peak_queue_bytes":0}'
+  route='{"route":"lan","phase":"authenticated","route_generation":1,"queued_count":0,"queued_bytes":0,"peer_evidence":"direct","pending_local_count":0,"awaiting_peer_count":0,"held_by_relay_count":0,"delivery_reason":"none","user_content_kind":"notifications"}'
   jq -cn --argjson observation "$base_obs" --argjson route "$route" '{scenario:"lan-product-correctness",status:"passed",events:[],before:{A:$observation,B:$observation},after:{A:$observation,B:$observation},route:$route}' >"$base/scenario-result.json"
   chmod 600 "$base/scenario-result.json"
   write_derived_fixture "$base"
@@ -413,7 +432,7 @@ write_fixture() {
         after_a=$(jq -cn --argjson v "$base_obs" '$v | .custody_counts.lan.state_digest=1 | .custody_counts.lan.state_snapshot_begin=1 | .custody_counts.lan.state_snapshot_item=1 | .custody_counts.lan.state_snapshot_end=1')
         after_b=$(jq -cn --argjson v "$base_obs" '$v | .snapshot_digest_count=1 | .snapshot_begin_count=1 | .snapshot_end_count=1 | .snapshot_commit_count=1') ;;
       lan-relay-fallback-return)
-        events='["predicate:A.route.lan","predicate:B.route.lan","lan-available:A:false","lan-available:B:false","predicate:A.route.relay","predicate:B.route.relay","post:A:n-lan-relay-fallback-return-relay","route:post:A:n-lan-relay-fallback-return-relay:relay:g2","predicate:B.tracked.sequence:1","predicate:A.custody.relay:notif_post:1","predicate:A.peer-receipt.delta:1","lan-available:A:true","lan-available:B:true","predicate:A.route.lan","predicate:B.route.lan","post:A:n-lan-relay-fallback-return-lan","route:post:A:n-lan-relay-fallback-return-lan:lan:g3","predicate:B.tracked.sequence:1","predicate:A.custody.lan:notif_post:1","predicate:A.peer-receipt.delta:2","predicate:direct.terminal"]'
+        events='["lan-available:A:false","lan-available:B:false","predicate:A.route.relay","predicate:B.route.relay","lan-available:A:true","lan-available:B:true","predicate:A.route.lan","predicate:B.route.lan","lan-available:A:false","lan-available:B:false","predicate:A.route.relay","predicate:B.route.relay","post:A:n-lan-relay-fallback-return-relay","route:post:A:n-lan-relay-fallback-return-relay:relay:g4","predicate:B.tracked.sequence:1","predicate:A.custody.relay:notif_post:1","predicate:A.peer-receipt.delta:1","lan-available:A:true","lan-available:B:true","predicate:A.route.lan","predicate:B.route.lan","post:A:n-lan-relay-fallback-return-lan","route:post:A:n-lan-relay-fallback-return-lan:lan:g5","predicate:B.tracked.sequence:1","predicate:A.custody.lan:notif_post:1","predicate:A.peer-receipt.delta:2","predicate:direct.terminal"]'
         after_a=$(jq -cn --argjson v "$base_obs" '$v | .custody_counts.relay.notif_post=1 | .custody_counts.lan.notif_post=1 | .peer_receipt_count=2') ;;
       lan-restart-persistence)
         events='["predicate:A.route.lan","predicate:B.route.lan","post:A:n-lan-restart-persistence-before-a-restart","route:post:A:n-lan-restart-persistence-before-a-restart:lan:g1","predicate:A.outbox.nonzero","force-stop:A","restart:A","predicate:A.route.lan","predicate:B.route.lan","predicate:B.tracked.sequence:1","predicate:A.custody.lan:notif_post:1","predicate:A.peer-receipt.delta:1","force-stop:B","restart:B","predicate:A.route.lan","predicate:B.route.lan","post:A:n-lan-restart-persistence-after-b-restart","route:post:A:n-lan-restart-persistence-after-b-restart:lan:g2","predicate:B.tracked.sequence:1","predicate:A.custody.lan:notif_post:2","predicate:A.peer-receipt.delta:2","predicate:direct.terminal"]'
@@ -428,8 +447,14 @@ write_fixture() {
         after_b=$(jq -cn --argjson v "$base_obs" '$v + {health:"stopped",terminal:false,paired:false,unpair_inbound_count:1}')
         ;;
     esac
-    jq -cn --arg name "$name" --argjson events "$events" --argjson before "$base_obs" --argjson afterA "$after_a" --argjson afterB "$after_b" --argjson route "$route" \
-      '{scenario:$name,status:"passed",events:$events,before:{A:$before,B:$before},after:{A:$afterA,B:$afterB},route:$route}' >"$dir/scenario-result.json"
+    if [[ "$name" == lan-relay-fallback-return ]]; then
+      transitions='[{"route":"relay","phase":"authenticated","route_generation":2,"queued_count":0,"queued_bytes":0,"peer_evidence":"recent","pending_local_count":0,"awaiting_peer_count":0,"held_by_relay_count":0,"delivery_reason":"none","user_content_kind":"notifications"},{"route":"lan","phase":"authenticated","route_generation":3,"queued_count":0,"queued_bytes":0,"peer_evidence":"direct","pending_local_count":0,"awaiting_peer_count":0,"held_by_relay_count":0,"delivery_reason":"none","user_content_kind":"notifications"},{"route":"relay","phase":"authenticated","route_generation":4,"queued_count":0,"queued_bytes":0,"peer_evidence":"recent","pending_local_count":0,"awaiting_peer_count":0,"held_by_relay_count":0,"delivery_reason":"none","user_content_kind":"notifications"},{"route":"lan","phase":"authenticated","route_generation":5,"queued_count":0,"queued_bytes":0,"peer_evidence":"direct","pending_local_count":0,"awaiting_peer_count":0,"held_by_relay_count":0,"delivery_reason":"none","user_content_kind":"notifications"}]'
+      jq -cn --arg name "$name" --argjson events "$events" --argjson before "$base_obs" --argjson afterA "$after_a" --argjson afterB "$after_b" --argjson route "$route" --argjson transitions "$transitions" \
+        '{scenario:$name,status:"passed",events:$events,before:{A:$before,B:$before},after:{A:$afterA,B:$afterB},route:$route,route_transitions:$transitions}' >"$dir/scenario-result.json"
+    else
+      jq -cn --arg name "$name" --argjson events "$events" --argjson before "$base_obs" --argjson afterA "$after_a" --argjson afterB "$after_b" --argjson route "$route" \
+        '{scenario:$name,status:"passed",events:$events,before:{A:$before,B:$before},after:{A:$afterA,B:$afterB},route:$route}' >"$dir/scenario-result.json"
+    fi
     chmod 600 "$dir/scenario-result.json"
     write_derived_fixture "$dir"
   done
@@ -474,6 +499,10 @@ self_test() {
   mv "$tmp/fallback-custody.json" "$base/children/08-lan-relay-fallback-return/scenario-result.json"; chmod 600 "$base/children/08-lan-relay-fallback-return/scenario-result.json"
   write_derived_fixture "$base/children/08-lan-relay-fallback-return"
   if "$0" "$base" >/dev/null 2>"$tmp/fallback-custody.err"; then die "self-test expected hollow fallback evidence failure"; fi
+  write_fixture "$base"
+  jq '.route_transitions[2].route_generation=.route_transitions[1].route_generation' "$base/children/08-lan-relay-fallback-return/scenario-result.json" >"$tmp/fallback-generation.json"
+  mv "$tmp/fallback-generation.json" "$base/children/08-lan-relay-fallback-return/scenario-result.json"; chmod 600 "$base/children/08-lan-relay-fallback-return/scenario-result.json"
+  if "$0" "$base" >/dev/null 2>"$tmp/fallback-generation.err"; then die "self-test expected non-increasing fallback generation failure"; fi
   write_fixture "$base"
   jq '.events |= map(select(. != "restart:B"))' "$base/children/09-lan-restart-persistence/scenario-result.json" >"$tmp/restart-order.json"
   mv "$tmp/restart-order.json" "$base/children/09-lan-restart-persistence/scenario-result.json"; chmod 600 "$base/children/09-lan-restart-persistence/scenario-result.json"

@@ -9,12 +9,59 @@ import (
 
 func validRoute() RouteEvidence {
 	return RouteEvidence{
-		Route:       "lan",
-		Phase:       "authenticated",
-		Generation:  3,
-		QueuedCount: 0,
-		QueuedBytes: 0,
-		ReceiptAtMs: 1_700_000_000_000,
+		Route:             "lan",
+		Phase:             "authenticated",
+		Generation:        3,
+		QueuedCount:       0,
+		QueuedBytes:       0,
+		PeerEvidence:      "direct",
+		PendingLocalCount: 0,
+		AwaitingPeerCount: 0,
+		HeldByRelayCount:  0,
+		DeliveryReason:    "none",
+		UserContentKind:   "notifications",
+		ReceiptAtMs:       1_700_000_000_000,
+	}
+}
+
+func TestAutomaticPromotionEvidenceRequiresRelayLanRelayLanWithIncreasingGenerations(t *testing.T) {
+	transitions := []RouteEvidence{
+		{Route: "relay", Phase: "authenticated", Generation: 4, PeerEvidence: "recent", DeliveryReason: "none", UserContentKind: "notifications"},
+		{Route: "lan", Phase: "authenticated", Generation: 5, PeerEvidence: "direct", DeliveryReason: "none", UserContentKind: "notifications"},
+		{Route: "relay", Phase: "authenticated", Generation: 6, PeerEvidence: "recent", DeliveryReason: "none", UserContentKind: "notifications"},
+		{Route: "lan", Phase: "authenticated", Generation: 7, PeerEvidence: "direct", DeliveryReason: "none", UserContentKind: "notifications"},
+	}
+	if err := VerifyAutomaticPromotion(transitions); err != nil {
+		t.Fatalf("valid automatic promotion evidence rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func([]RouteEvidence){
+		"wrong route order":     func(v []RouteEvidence) { v[2].Route = "lan" },
+		"reused generation":     func(v []RouteEvidence) { v[2].Generation = v[1].Generation },
+		"half-authenticated":    func(v []RouteEvidence) { v[1].Phase = "connecting" },
+		"wrong direct evidence": func(v []RouteEvidence) { v[3].PeerEvidence = "recent" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			copyOfTransitions := append([]RouteEvidence(nil), transitions...)
+			mutate(copyOfTransitions)
+			if err := VerifyAutomaticPromotion(copyOfTransitions); err == nil {
+				t.Fatal("invalid automatic route transition evidence passed")
+			}
+		})
+	}
+}
+
+func TestRelayPeerEvidenceMustBecomeStaleAfterPeerStops(t *testing.T) {
+	recent := validRoute()
+	recent.Route, recent.PeerEvidence = "relay", "recent"
+	stale := recent
+	stale.PeerEvidence = "stale"
+	if err := VerifyRelayEvidenceStaled(recent, stale); err != nil {
+		t.Fatalf("valid stale transition rejected: %v", err)
+	}
+	stale.PeerEvidence = "recent"
+	if err := VerifyRelayEvidenceStaled(recent, stale); err == nil {
+		t.Fatal("relay evidence that remained recent passed")
 	}
 }
 
@@ -52,6 +99,9 @@ func TestRouteEvidenceRejectsNegativeCounters(t *testing.T) {
 	for name, mutate := range map[string]func(*RouteEvidence){
 		"generation": func(r *RouteEvidence) { r.Generation = -1 },
 		"count":      func(r *RouteEvidence) { r.QueuedCount = -1 },
+		"pending":    func(r *RouteEvidence) { r.PendingLocalCount = -1 },
+		"awaiting":   func(r *RouteEvidence) { r.AwaitingPeerCount = -1 },
+		"held":       func(r *RouteEvidence) { r.HeldByRelayCount = -1 },
 		"bytes":      func(r *RouteEvidence) { r.QueuedBytes = -1 },
 		"receipt":    func(r *RouteEvidence) { r.ReceiptAtMs = -1 },
 	} {
@@ -100,6 +150,11 @@ func TestRejectSensitiveEvidenceCatchesSecretMaterial(t *testing.T) {
 	cases := map[string]any{
 		"key field":    map[string]string{"lan_secret": "abc"},
 		"token field":  map[string]string{"auth_token": "abc"},
+		"certificate":  map[string]string{"peer_certificate": "abc"},
+		"ciphertext":   map[string]string{"ciphertext": "abc"},
+		"title":        map[string]string{"title": "private message"},
+		"text":         map[string]string{"notification_text": "private message"},
+		"port":         map[string]any{"port": 8080},
 		"private key":  map[string]string{"note": "-----BEGIN PRIVATE KEY-----"},
 		"bearer":       map[string]string{"note": "Authorization: Bearer eyJhbGciOi"},
 		"long base64":  map[string]string{"blob": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9w"},
