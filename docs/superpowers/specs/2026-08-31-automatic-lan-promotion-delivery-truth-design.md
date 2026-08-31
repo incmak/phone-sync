@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-31
 
-**Status:** Approved for implementation planning
+**Status:** Approved, with the mixed-version capability-negotiation correction recorded below
 
 **Scope:** Android relay-paired devices, automatic LAN trust bootstrap, live route promotion/fallback, peer reachability, and delivery-state presentation
 
@@ -166,11 +166,19 @@ After envelope authentication and strict payload validation:
 
 ### 5.5 Send and recovery rules
 
-After relay capabilities establish protocol floor 2, every service transport generation enqueues at most one active `lan.bootstrap` announcement when either no LAN binding exists or the existing binding secret equals the locally derived bootstrap secret. Receiving an announcement also durably ensures one local announcement exists before committing new trust. The existing outbox and peer-receipt mechanism provides retry and restart durability. Protocol-floor-1 sessions never enqueue these v2 controls.
+After relay capabilities establish protocol floor 2 **and advertise both peer features `lan-bootstrap-v1` and `peer-probe-v1`**, every service transport generation enqueues at most one active `lan.bootstrap` announcement when either no LAN binding exists or the existing binding secret equals the locally derived bootstrap secret. Receiving an announcement also durably ensures one local announcement exists before committing new trust. The existing outbox and peer-receipt mechanism provides retry and restart durability. Protocol-floor-1 sessions and peers without both feature advertisements never receive these v2 controls.
 
 The secret comparison distinguishes relay-bootstrap bindings from established nearby-pairing bindings, whose LAN secrets were created by the nearby session and must not be replaced. Bootstrap-derived bindings continue announcing once per service generation, which repairs expiry or a prior asymmetric crash without adding another durable state machine. Identical announcements are idempotent and are excluded from user-facing queue counts.
 
-An older peer rejects the unknown event safely. The sender records a bounded internal incompatibility code, continues over relay, and tries a fresh bootstrap in a later service generation. It never downgrades TLS authentication.
+An older peer does not advertise the new features, so a current sender never places an unknown bootstrap or probe event in that peer's mailbox. The sender records a bounded internal incompatibility code, continues over relay, and re-evaluates the peer's capabilities on later relay updates. It never downgrades TLS authentication.
+
+### 5.6 Mixed-version capability negotiation
+
+The existing relay hello/capability exchange gains an optional, closed-world `features` string array. Current clients advertise exactly `lan-bootstrap-v1` and `peer-probe-v1`. The relay persists the list beside protocol versions and app version and returns `self_features` and `peer_features` only to a client that itself sent a non-empty feature list. This response shaping is required because deployed clients strictly reject unknown capability-frame fields; clients that send the legacy hello continue receiving the legacy capability shape byte-for-shape.
+
+The updated mobile codec accepts both the legacy capability shape and the feature-bearing shape, treating absent feature lists as empty. The relay validates bounded, unique feature strings and never interprets encrypted bootstrap payloads. Feature negotiation is an availability/compatibility gate, not a cryptographic authority: LAN trust still requires the E2E-authenticated announcement, locally derived secret, pinned TLS identity, and signed LAN handshake.
+
+This correction is required by the existing implementation: an old v2 client hard-rejects an unknown authenticated inner type and deliberately leaves the mailbox item unacknowledged. Blindly sending `lan.bootstrap` would therefore strand that item at the head of a mixed-version peer's mailbox. Gating the send is the smallest change that preserves the approved mixed-version safety requirement.
 
 ## 6. Authenticated Peer Liveness
 
@@ -192,7 +200,7 @@ The v2 inner-event enum also gains `peer.probe` with this closed-world payload:
 
 The event requires a peer receipt and has a two-minute expiry. It is never materialized and never appears in recent notification activity.
 
-While relay is the authenticated active route:
+While relay is the authenticated active route and the peer advertises `peer-probe-v1`:
 
 - enqueue a probe immediately if no active probe exists;
 - keep at most one active probe in the outbox;
@@ -365,15 +373,16 @@ Only approved public `delivery_reason` values cross the JS boundary. Raw excepti
 
 ### 10.1 Protocol compatibility
 
-The relay already treats the encrypted inner packet as opaque, so no relay runtime or pairing-store change is required. `proto/inner-event-v2.schema.json` remains the source of truth and gains the two event types plus closed-world payload definitions. Relay protocol-fixture tests are updated after `make sync-proto`, but generated relay schemas are not committed.
+The relay continues to treat the encrypted inner packet as opaque. `proto/inner-event-v2.schema.json` remains the source of truth and gains the two event types plus closed-world payload definitions. `proto/relay-control.schema.json`, relay capability persistence, and capability response shaping gain the compatibility feature list described in section 5.6. Relay protocol-fixture tests are updated after `make sync-proto`, but generated relay schemas are not committed.
 
-When a new phone talks to an old phone:
+When a new phone talks to an old phone through the updated relay:
 
 - relay v2 delivery continues normally;
-- the old phone rejects the unknown control event rather than applying it;
+- the old phone advertises no transport features and receives no new capability-frame fields;
+- the new phone does not enqueue either unknown control event;
 - no LAN binding is created;
 - notification delivery remains on relay;
-- after the second phone updates, a later transport generation sends a fresh announcement and converges automatically.
+- after the second phone updates, the relay propagates the new peer features and the current transport generation sends a fresh announcement and converges automatically.
 
 ### 10.2 Storage compatibility
 
@@ -381,13 +390,14 @@ The design reuses `LanPairStore` and existing outbound rows. It adds DAO queries
 
 ### 10.3 Rollout order
 
-1. Land schema and Android support together.
+1. Land relay-control schema, capability persistence/response shaping, inner-event schema, and Android support together.
 2. Run relay schema/fixture tests and Android unit/instrumented compilation gates.
-3. Build and install the same APK on both phones.
-4. Verify automatic bootstrap on the existing relay-only pair.
-5. Verify relay-to-LAN promotion, Wi-Fi loss fallback, and recovery.
+3. Deploy the backward-compatible relay before installing a mobile build that advertises the new features.
+4. Build and install the same APK on both phones.
+5. Verify automatic bootstrap on the existing relay-only pair.
+6. Verify relay-to-LAN promotion, Wi-Fi loss fallback, and recovery.
 
-No relay deployment is required solely for the new inner event types.
+The relay deployment is required for safe mixed-version feature negotiation, not because the relay needs to inspect or understand either encrypted inner event.
 
 ## 11. Testing Strategy
 
@@ -424,6 +434,9 @@ All implementation changes follow failing-test-first TDD.
 
 - valid and invalid `lan.bootstrap` fixtures;
 - valid and invalid `peer.probe` fixtures;
+- legacy and feature-bearing relay hello/capability fixtures;
+- old clients receive the legacy capability shape and never receive new control rows;
+- new clients gate bootstrap/probe sends until the peer advertises both features;
 - unknown extra fields rejected;
 - old event fixtures remain valid;
 - control events are excluded from user counts but included in engineering totals;
@@ -467,7 +480,7 @@ The work is complete only when all of the following are true:
 6. Relay-accepted rows are not labeled as still queued on the sender.
 7. Internal bootstrap, probe, receipt, and snapshot rows do not affect the user-visible count.
 8. Existing direct-nearby pairings continue to work and reject unauthorized binding replacement.
-9. A mixed-version pair remains safely functional over relay and auto-upgrades after both apps are current.
+9. With the capability-aware relay deployed first, a mixed-version pair remains safely functional over relay and auto-upgrades after both apps are current.
 10. Focused Kotlin/JS tests, protocol fixtures, TypeScript checks, lint where affected, and relevant relay tests pass.
 11. The final point-by-point interface review confirms hierarchy, spacing, copy truth, accessibility, light/dark rendering, and interaction states.
 12. The named two-phone ADB run is recorded honestly; any unavailable hardware scenario remains explicitly unverified rather than implied complete.
