@@ -41,11 +41,13 @@ type testRejectedFrame struct {
 }
 
 type testCapabilitiesFrame struct {
-	V     int    `json:"v"`
-	Type  string `json:"type"`
-	Self  []int  `json:"self"`
-	Peer  []int  `json:"peer"`
-	Floor int    `json:"floor"`
+	V            int      `json:"v"`
+	Type         string   `json:"type"`
+	Self         []int    `json:"self"`
+	Peer         []int    `json:"peer"`
+	Floor        int      `json:"floor"`
+	SelfFeatures []string `json:"self_features"`
+	PeerFeatures []string `json:"peer_features"`
 }
 
 type mailboxTestPair struct {
@@ -672,6 +674,8 @@ func TestParseRelayFrameStrictValidation(t *testing.T) {
 	}
 	tests := []string{
 		`{"v":2,"type":"relay.hello","protocols":[2,1],"app_version":"test","extra":true}`,
+		`{"v":2,"type":"relay.hello","protocols":[2,1],"app_version":"test","features":["unknown"]}`,
+		`{"v":2,"type":"relay.hello","protocols":[2,1],"app_version":"test","features":["lan-bootstrap-v1","lan-bootstrap-v1"]}`,
 		`{"v":2,"type":"relay.accepted","msg_id":"81111111-1111-4111-8111-111111111111","accepted_at":1}`,
 		`{"v":2,"type":"relay.unknown"}`,
 	}
@@ -681,6 +685,69 @@ func TestParseRelayFrameStrictValidation(t *testing.T) {
 		} else if protocolErr := asRelayProtocolError(err); protocolErr.Code != "invalid_frame" {
 			t.Fatalf("protocol error = %#v, want invalid_frame", protocolErr)
 		}
+	}
+}
+
+func TestWebSocketFeatureCapabilitiesAreShapedPerRecipient(t *testing.T) {
+	srv := newTestServer(t)
+	pair := registerMailboxTestPairWithoutCapabilities(t, srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	featurePeer := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+	defer featurePeer.Close()
+	writeMailboxFrame(t, featurePeer, map[string]any{
+		"v": 2, "type": "relay.hello", "protocols": []int{2, 1}, "app_version": "new-a",
+		"features": []string{"lan-bootstrap-v1", "peer-probe-v1"},
+	})
+	_, featureRaw, err := featurePeer.ReadMessage()
+	if err != nil {
+		t.Fatalf("read feature capabilities: %v", err)
+	}
+	var featureWire map[string]any
+	if err := json.Unmarshal(featureRaw, &featureWire); err != nil {
+		t.Fatalf("decode feature capabilities %q: %v", featureRaw, err)
+	}
+	if _, ok := featureWire["self_features"]; !ok {
+		t.Fatalf("feature client response omitted self_features: %s", featureRaw)
+	}
+	if _, ok := featureWire["peer_features"]; !ok {
+		t.Fatalf("feature client response omitted peer_features: %s", featureRaw)
+	}
+
+	legacyPeer := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+	defer legacyPeer.Close()
+	writeMailboxFrame(t, legacyPeer, map[string]any{
+		"v": 2, "type": "relay.hello", "protocols": []int{2, 1}, "app_version": "old-b",
+	})
+	_, legacyRaw, err := legacyPeer.ReadMessage()
+	if err != nil {
+		t.Fatalf("read legacy capabilities: %v", err)
+	}
+	var legacyWire map[string]any
+	if err := json.Unmarshal(legacyRaw, &legacyWire); err != nil {
+		t.Fatalf("decode legacy capabilities %q: %v", legacyRaw, err)
+	}
+	wantLegacyKeys := map[string]bool{"v": true, "type": true, "self": true, "peer": true, "floor": true}
+	if len(legacyWire) != len(wantLegacyKeys) {
+		t.Fatalf("legacy capabilities changed shape: %s", legacyRaw)
+	}
+	for key := range legacyWire {
+		if !wantLegacyKeys[key] {
+			t.Fatalf("legacy capabilities exposed new key %q: %s", key, legacyRaw)
+		}
+	}
+
+	_, propagatedRaw, err := featurePeer.ReadMessage()
+	if err != nil {
+		t.Fatalf("read propagated feature capabilities: %v", err)
+	}
+	var propagated testCapabilitiesFrame
+	if err := json.Unmarshal(propagatedRaw, &propagated); err != nil {
+		t.Fatalf("decode propagated feature capabilities %q: %v", propagatedRaw, err)
+	}
+	if !reflect.DeepEqual(propagated.SelfFeatures, []string{"lan-bootstrap-v1", "peer-probe-v1"}) || len(propagated.PeerFeatures) != 0 {
+		t.Fatalf("propagated features = self %v peer %v", propagated.SelfFeatures, propagated.PeerFeatures)
 	}
 }
 
@@ -1692,6 +1759,38 @@ func TestClientHubSendCapabilitiesIsTypedBoundedAndReplacementSafe(t *testing.T)
 		case <-current.done:
 			t.Fatal("stale capabilities stopped current replacement")
 		default:
+		}
+	})
+
+	t.Run("same protocols with a different feature shape are fenced", func(t *testing.T) {
+		hub := NewClientHub()
+		outbound := make(chan []byte, 1)
+		client := hub.Register("device", outbound)
+		if !hub.SetProtocolCapabilitiesAndFeatures(
+			client, protocolV2, []int{2, 1}, []string{"lan-bootstrap-v1", "peer-probe-v1"},
+		) {
+			t.Fatal("set feature-aware typed protocol")
+		}
+
+		legacyUpdate := []byte(`{"v":2,"type":"relay.capabilities","self":[2,1],"peer":[2,1],"floor":2}`)
+		hub.SendFeatureCapabilitiesForPair("device", "", []int{2, 1}, nil, legacyUpdate)
+		select {
+		case raw := <-outbound:
+			t.Fatalf("feature-aware connection received legacy-shaped update: %s", raw)
+		default:
+		}
+
+		featureUpdate := []byte(`{"v":2,"type":"relay.capabilities","self":[2,1],"peer":[2,1],"floor":2,"self_features":["lan-bootstrap-v1","peer-probe-v1"],"peer_features":[]}`)
+		hub.SendFeatureCapabilitiesForPair(
+			"device", "", []int{2, 1}, []string{"lan-bootstrap-v1", "peer-probe-v1"}, featureUpdate,
+		)
+		select {
+		case raw := <-outbound:
+			if string(raw) != string(featureUpdate) {
+				t.Fatalf("feature update = %q, want %q", raw, featureUpdate)
+			}
+		default:
+			t.Fatal("matching feature-aware connection received no update")
 		}
 	})
 

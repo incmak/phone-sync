@@ -93,9 +93,10 @@ type ConfirmedPair struct {
 }
 
 type DeviceCapabilities struct {
-	Protocols  []int  `json:"protocols"`
-	AppVersion string `json:"app_version"`
-	UpdatedAt  int64  `json:"updated_at"`
+	Protocols  []int    `json:"protocols"`
+	AppVersion string   `json:"app_version"`
+	Features   []string `json:"features,omitempty"`
+	UpdatedAt  int64    `json:"updated_at"`
 }
 
 type PairSession struct {
@@ -982,11 +983,18 @@ func (ps *PairStore) PeerForPair(deviceID, pairID string) (string, error) {
 // UpdateCapabilities records a confirmed device's advertised protocols and
 // advances its pair's protocol floor atomically. A negotiated floor never
 // decreases automatically.
-func (ps *PairStore) UpdateCapabilities(deviceID string, protocols []int, appVersion string) error {
-	return ps.UpdateCapabilitiesForPair(deviceID, "", protocols, appVersion)
+func (ps *PairStore) UpdateCapabilities(deviceID string, protocols []int, appVersion string, features ...[]string) error {
+	return ps.UpdateCapabilitiesForPair(deviceID, "", protocols, appVersion, features...)
 }
 
-func (ps *PairStore) UpdateCapabilitiesForPair(deviceID, expectedPairID string, protocols []int, appVersion string) error {
+func (ps *PairStore) UpdateCapabilitiesForPair(deviceID, expectedPairID string, protocols []int, appVersion string, features ...[]string) error {
+	if len(features) > 1 {
+		return errors.New("multiple feature lists")
+	}
+	var advertisedFeatures []string
+	if len(features) == 1 {
+		advertisedFeatures = append([]string(nil), features[0]...)
+	}
 	return ps.bolt.Update(func(tx *bbolt.Tx) error {
 		pairID, pair, err := confirmedPairForSessionTx(tx, deviceID, expectedPairID)
 		if err != nil {
@@ -1002,7 +1010,8 @@ func (ps *PairStore) UpdateCapabilitiesForPair(deviceID, expectedPairID string, 
 			return err
 		}
 		encoded, err := json.Marshal(DeviceCapabilities{
-			Protocols: append([]int(nil), protocols...), AppVersion: appVersion, UpdatedAt: time.Now().UnixMilli(),
+			Protocols: append([]int(nil), protocols...), AppVersion: appVersion,
+			Features: advertisedFeatures, UpdatedAt: time.Now().UnixMilli(),
 		})
 		if err != nil {
 			return err
@@ -1175,6 +1184,7 @@ func decodeCapabilities(raw []byte) (DeviceCapabilities, error) {
 		return DeviceCapabilities{}, err
 	}
 	capabilities.Protocols = append([]int(nil), capabilities.Protocols...)
+	capabilities.Features = append([]string(nil), capabilities.Features...)
 	return capabilities, nil
 }
 

@@ -284,7 +284,9 @@ func (s *Server) processWebSocketMessage(deviceID, pairID string, client *wsClie
 				return true
 			}
 			*protocol = protocolV2
-			if !s.clientHub.SetProtocolAndCapabilities(client, protocolV2Handshake, typed.Protocols) {
+			if !s.clientHub.SetProtocolCapabilitiesAndFeatures(
+				client, protocolV2Handshake, typed.Protocols, typed.Features,
+			) {
 				return false
 			}
 			var drainedIDs []string
@@ -417,7 +419,9 @@ func (s *Server) handleRelayHelloForPair(
 	if !admitted {
 		return ErrServerCapacity
 	}
-	err = s.pairStore.UpdateCapabilitiesForPair(deviceID, pairID, hello.Protocols, hello.AppVersion)
+	err = s.pairStore.UpdateCapabilitiesForPair(
+		deviceID, pairID, hello.Protocols, hello.AppVersion, hello.Features,
+	)
 	releaseMutation()
 	if err != nil {
 		return err
@@ -437,7 +441,9 @@ func (s *Server) handleRelayHelloForPair(
 		if err != nil {
 			return err
 		}
-		s.clientHub.SendCapabilitiesForPair(peerID, pairID, peerCapabilitiesFrame.Self, peerFrame)
+		s.clientHub.SendFeatureCapabilitiesForPair(
+			peerID, pairID, peerCapabilitiesFrame.Self, peerSelf.Features, peerFrame,
+		)
 	}
 	if err := writeFrame(capabilitiesFrame); err != nil {
 		return err
@@ -584,13 +590,28 @@ func relayCapabilitiesSnapshot(self, peer store.DeviceCapabilities, floor int) R
 	if len(peerProtocols) == 0 {
 		peerProtocols = []int{1}
 	}
-	return RelayCapabilities{
+	frame := RelayCapabilities{
 		V: 2, Type: "relay.capabilities", Self: append([]int(nil), self.Protocols...), Peer: peerProtocols, Floor: floor,
 	}
+	if len(self.Features) > 0 {
+		selfFeatures := append([]string(nil), self.Features...)
+		peerFeatures := append([]string(nil), peer.Features...)
+		frame.SelfFeatures = &selfFeatures
+		frame.PeerFeatures = &peerFeatures
+	}
+	return frame
 }
 
 func relayCapabilitiesEqual(a, b RelayCapabilities) bool {
-	return a.Floor == b.Floor && slices.Equal(a.Self, b.Self) && slices.Equal(a.Peer, b.Peer)
+	return a.Floor == b.Floor && slices.Equal(a.Self, b.Self) && slices.Equal(a.Peer, b.Peer) &&
+		equalOptionalStrings(a.SelfFeatures, b.SelfFeatures) && equalOptionalStrings(a.PeerFeatures, b.PeerFeatures)
+}
+
+func equalOptionalStrings(a, b *[]string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return slices.Equal(*a, *b)
 }
 
 func (s *Server) handleRelayPut(

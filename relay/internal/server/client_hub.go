@@ -37,6 +37,7 @@ type wsClient struct {
 	outbound            chan []byte
 	protocol            connectionProtocol
 	protocols           []int
+	features            []string
 	pendingCapabilities []byte
 	handshakeNotices    map[string]queuedV2Notification
 	handshakeBytes      uint64
@@ -411,7 +412,17 @@ func (h *ClientHub) SendCapabilities(deviceID string, selfProtocols []int, frame
 }
 
 func (h *ClientHub) SendCapabilitiesForPair(deviceID, pairID string, selfProtocols []int, frame []byte) {
+	h.SendFeatureCapabilitiesForPair(deviceID, pairID, selfProtocols, nil, frame)
+}
+
+func (h *ClientHub) SendFeatureCapabilitiesForPair(
+	deviceID, pairID string,
+	selfProtocols []int,
+	selfFeatures []string,
+	frame []byte,
+) {
 	expectedSelf := append([]int(nil), selfProtocols...)
+	expectedFeatures := append([]string(nil), selfFeatures...)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	c, ok := h.clients[deviceID]
@@ -423,7 +434,7 @@ func (h *ClientHub) SendCapabilitiesForPair(deviceID, pairID string, selfProtoco
 		return
 	default:
 	}
-	if !slices.Equal(c.protocols, expectedSelf) {
+	if !slices.Equal(c.protocols, expectedSelf) || !slices.Equal(c.features, expectedFeatures) {
 		return
 	}
 	switch c.protocol {
@@ -753,6 +764,15 @@ func (h *ClientHub) SetProtocol(c *wsClient, protocol connectionProtocol) bool {
 }
 
 func (h *ClientHub) SetProtocolAndCapabilities(c *wsClient, protocol connectionProtocol, protocols []int) bool {
+	return h.SetProtocolCapabilitiesAndFeatures(c, protocol, protocols, nil)
+}
+
+func (h *ClientHub) SetProtocolCapabilitiesAndFeatures(
+	c *wsClient,
+	protocol connectionProtocol,
+	protocols []int,
+	features []string,
+) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	current, ok := h.clients[c.deviceID]
@@ -762,6 +782,9 @@ func (h *ClientHub) SetProtocolAndCapabilities(c *wsClient, protocol connectionP
 	c.protocol = protocol
 	if protocols != nil {
 		c.protocols = append([]int(nil), protocols...)
+	}
+	if features != nil {
+		c.features = append([]string(nil), features...)
 	}
 	return true
 }

@@ -31,7 +31,7 @@ import okhttp3.WebSocketListener
 
 sealed interface TransportEvent {
     data object Connected : TransportEvent
-    data class Authenticated(val floor: Int) : TransportEvent
+    data class Authenticated(val floor: Int, val peerFeatures: Set<String> = emptySet()) : TransportEvent
     data object LegacyOnlineOnly : TransportEvent
     data class LegacyForwarded(val msgId: String) : TransportEvent
     data class RelayAccepted(val msgId: String, val acceptedAt: Long, val eventType: String? = null) : TransportEvent
@@ -195,7 +195,9 @@ class RelayTransport(
                         cancelOnce(socket)
                         return
                     }
-                    if (!socket.send(RelayFrameCodec.encode(RelayFrame.Hello(listOf(2, 1), appVersion)))) {
+                    if (!socket.send(RelayFrameCodec.encode(
+                            RelayFrame.Hello(listOf(2, 1), appVersion, RelayFeatures.CURRENT),
+                        ))) {
                         endSession("relay hello write failed")
                     }
                 }
@@ -255,7 +257,7 @@ class RelayTransport(
                             authenticated.set(true)
                         }
                         val floor = negotiatedFloor.updateAndGet { current -> maxOf(current, frame.floor) }
-                        emit(TransportEvent.Authenticated(floor))
+                        emit(TransportEvent.Authenticated(floor, frame.peerFeatures))
                         if (floor == 1) {
                             emit(TransportEvent.LegacyOnlineOnly)
                         }

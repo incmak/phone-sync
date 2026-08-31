@@ -426,11 +426,13 @@ func TestPairCapabilitiesPersistActualAdvertisementsAndMonotonicFloor(t *testing
 	ps := NewPairStore(s)
 	confirmTestPair(t, ps, "a", "b")
 	aProtocols := []int{2, 1}
-	if err := ps.UpdateCapabilities("a", aProtocols, "0.8.0-a"); err != nil {
+	aFeatures := []string{"lan-bootstrap-v1", "peer-probe-v1"}
+	if err := ps.UpdateCapabilities("a", aProtocols, "0.8.0-a", aFeatures); err != nil {
 		t.Fatal(err)
 	}
 	aProtocols[0] = 99
-	if err := ps.UpdateCapabilities("b", []int{1, 2}, "0.8.0-b"); err != nil {
+	aFeatures[0] = "mutated"
+	if err := ps.UpdateCapabilities("b", []int{1, 2}, "0.8.0-b", []string{"peer-probe-v1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -447,10 +449,14 @@ func TestPairCapabilitiesPersistActualAdvertisementsAndMonotonicFloor(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(self.Protocols, []int{2, 1}) || self.AppVersion != "0.8.0-a" || self.UpdatedAt == 0 {
+	if !reflect.DeepEqual(self.Protocols, []int{2, 1}) ||
+		!reflect.DeepEqual(self.Features, []string{"lan-bootstrap-v1", "peer-probe-v1"}) ||
+		self.AppVersion != "0.8.0-a" || self.UpdatedAt == 0 {
 		t.Fatalf("persisted self capabilities = %#v", self)
 	}
-	if !reflect.DeepEqual(peer.Protocols, []int{1, 2}) || peer.AppVersion != "0.8.0-b" || peer.UpdatedAt == 0 {
+	if !reflect.DeepEqual(peer.Protocols, []int{1, 2}) ||
+		!reflect.DeepEqual(peer.Features, []string{"peer-probe-v1"}) ||
+		peer.AppVersion != "0.8.0-b" || peer.UpdatedAt == 0 {
 		t.Fatalf("persisted peer capabilities = %#v", peer)
 	}
 	if floor != 2 {
@@ -458,6 +464,7 @@ func TestPairCapabilitiesPersistActualAdvertisementsAndMonotonicFloor(t *testing
 	}
 
 	self.Protocols[0] = 88
+	self.Features[0] = "aliased"
 	if err := ps.UpdateCapabilities("b", []int{1}, "0.7.0"); err != nil {
 		t.Fatal(err)
 	}
@@ -468,11 +475,24 @@ func TestPairCapabilitiesPersistActualAdvertisementsAndMonotonicFloor(t *testing
 	if !reflect.DeepEqual(storedSelf.Protocols, []int{2, 1}) {
 		t.Fatalf("returned protocol slice aliased store: %v", storedSelf.Protocols)
 	}
-	if !reflect.DeepEqual(storedPeer.Protocols, []int{1}) || storedPeer.AppVersion != "0.7.0" {
+	if !reflect.DeepEqual(storedSelf.Features, []string{"lan-bootstrap-v1", "peer-probe-v1"}) {
+		t.Fatalf("returned feature slice aliased store: %v", storedSelf.Features)
+	}
+	if !reflect.DeepEqual(storedPeer.Protocols, []int{1}) || len(storedPeer.Features) != 0 || storedPeer.AppVersion != "0.7.0" {
 		t.Fatalf("updated peer capabilities = %#v", storedPeer)
 	}
 	if floor != 2 {
 		t.Fatalf("floor downgraded to %d", floor)
+	}
+}
+
+func TestPairCapabilitiesDecodeLegacyRecordWithoutFeatures(t *testing.T) {
+	decoded, err := decodeCapabilities([]byte(`{"protocols":[2,1],"app_version":"0.8.0","updated_at":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.Protocols, []int{2, 1}) || len(decoded.Features) != 0 {
+		t.Fatalf("decoded legacy capabilities = %#v", decoded)
 	}
 }
 
@@ -627,10 +647,10 @@ func TestRevokeByDevicePurgesPairAuthorizationCapabilitiesTokenAndMailboxState(t
 	if _, err := ps.ConfirmPending(pending.PairToken, pair, []byte("confirmation")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ps.UpdateCapabilities(pair.DeviceA, []int{2, 1}, "old-a"); err != nil {
+	if err := ps.UpdateCapabilities(pair.DeviceA, []int{2, 1}, "old-a", []string{"lan-bootstrap-v1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ps.UpdateCapabilities(pair.DeviceB, []int{2, 1}, "old-b"); err != nil {
+	if err := ps.UpdateCapabilities(pair.DeviceB, []int{2, 1}, "old-b", []string{"peer-probe-v1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -686,7 +706,8 @@ func TestRevokeByDevicePurgesPairAuthorizationCapabilitiesTokenAndMailboxState(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(self.Protocols) != 0 || self.AppVersion != "" || len(peer.Protocols) != 0 || peer.AppVersion != "" || floor != 1 {
+	if len(self.Protocols) != 0 || len(self.Features) != 0 || self.AppVersion != "" ||
+		len(peer.Protocols) != 0 || len(peer.Features) != 0 || peer.AppVersion != "" || floor != 1 {
 		t.Fatalf("rebound pair inherited capabilities: self=%#v peer=%#v floor=%d", self, peer, floor)
 	}
 	for index, rec := range []MailboxRecord{

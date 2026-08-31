@@ -15,10 +15,11 @@ type RelayHeader struct {
 }
 
 type RelayHello struct {
-	V          int    `json:"v"`
-	Type       string `json:"type"`
-	Protocols  []int  `json:"protocols"`
-	AppVersion string `json:"app_version"`
+	V          int      `json:"v"`
+	Type       string   `json:"type"`
+	Protocols  []int    `json:"protocols"`
+	AppVersion string   `json:"app_version"`
+	Features   []string `json:"features,omitempty"`
 }
 
 type RelayPut struct {
@@ -69,11 +70,13 @@ type RelayExpired struct {
 }
 
 type RelayCapabilities struct {
-	V     int    `json:"v"`
-	Type  string `json:"type"`
-	Self  []int  `json:"self"`
-	Peer  []int  `json:"peer"`
-	Floor int    `json:"floor"`
+	V            int       `json:"v"`
+	Type         string    `json:"type"`
+	Self         []int     `json:"self"`
+	Peer         []int     `json:"peer"`
+	Floor        int       `json:"floor"`
+	SelfFeatures *[]string `json:"self_features,omitempty"`
+	PeerFeatures *[]string `json:"peer_features,omitempty"`
 }
 
 type encryptedEnvelopeHeader struct {

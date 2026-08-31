@@ -5,6 +5,19 @@ import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 
+object RelayFeatures {
+    const val LAN_BOOTSTRAP_V1 = "lan-bootstrap-v1"
+    const val PEER_PROBE_V1 = "peer-probe-v1"
+    val CURRENT: Set<String> = linkedSetOf(LAN_BOOTSTRAP_V1, PEER_PROBE_V1)
+
+    internal fun validated(values: Collection<String>): Set<String> {
+        require(values.isNotEmpty() && values.size <= CURRENT.size) { "feature list must be 1..${CURRENT.size} items" }
+        require(values.toSet().size == values.size) { "feature list must be unique" }
+        require(values.all(CURRENT::contains)) { "unsupported relay feature" }
+        return values.toCollection(linkedSetOf())
+    }
+}
+
 /**
  * The typed boundary for relay control frames.  The relay is intentionally opaque to the
  * encrypted envelope, but it is strict about the small control protocol around it.  Keeping
@@ -15,7 +28,11 @@ sealed interface RelayFrame {
     val version: Int
     val type: String
 
-    data class Hello(val protocols: List<Int>, val appVersion: String) : RelayFrame {
+    data class Hello(
+        val protocols: List<Int>,
+        val appVersion: String,
+        val features: Set<String> = emptySet(),
+    ) : RelayFrame {
         override val version: Int = 2
         override val type: String = "relay.hello"
     }
@@ -55,7 +72,13 @@ sealed interface RelayFrame {
         override val type: String = "relay.expired"
     }
 
-    data class Capabilities(val self: List<Int>, val peer: List<Int>, val floor: Int) : RelayFrame {
+    data class Capabilities(
+        val self: List<Int>,
+        val peer: List<Int>,
+        val floor: Int,
+        val selfFeatures: Set<String> = emptySet(),
+        val peerFeatures: Set<String> = emptySet(),
+    ) : RelayFrame {
         override val version: Int = 2
         override val type: String = "relay.capabilities"
     }
@@ -74,6 +97,11 @@ object RelayFrameCodec {
             .put("v", 2).put("type", frame.type)
             .put("protocols", JSONArray(frame.protocols))
             .put("app_version", frame.appVersion)
+            .apply {
+                if (frame.features.isNotEmpty()) {
+                    put("features", JSONArray(RelayFeatures.validated(frame.features).toList()))
+                }
+            }
             .toString()
         is RelayFrame.Put -> envelopeFrame(frame.type, frame.envelope)
         is RelayFrame.Ack -> JSONObject()
@@ -106,6 +134,17 @@ object RelayFrameCodec {
             .put("self", JSONArray(protocols(frame.self)))
             .put("peer", JSONArray(protocols(frame.peer)))
             .put("floor", frame.floor.also { require(it == 1 || it == 2) { "relay floor must be 1 or 2" } })
+            .apply {
+                require(frame.selfFeatures.isNotEmpty() || frame.peerFeatures.isEmpty()) {
+                    "peer features require a feature-aware self"
+                }
+                if (frame.selfFeatures.isNotEmpty()) {
+                    put("self_features", JSONArray(RelayFeatures.validated(frame.selfFeatures).toList()))
+                    put("peer_features", JSONArray(frame.peerFeatures.let {
+                        if (it.isEmpty()) emptyList() else RelayFeatures.validated(it).toList()
+                    }))
+                }
+            }
             .toString()
     }.also { require(it.encodeToByteArray().size <= MAX_FRAME_BYTES) { "relay frame exceeds limit" } }
 
@@ -118,9 +157,14 @@ object RelayFrameCodec {
         require(o.requiredInt("v") == 2) { "relay frame must use protocol version 2" }
         return when (type) {
             "relay.hello" -> {
-                requireKeys(o, setOf("v", "type", "protocols", "app_version"))
-                RelayFrame.Hello(protocols(o.requiredArray("protocols")), o.requiredString("app_version")
-                    .also { require(it.isNotEmpty() && it.length <= 32) { "invalid app_version" } })
+                requireKeys(o, setOf("v", "type", "protocols", "app_version", "features"))
+                RelayFrame.Hello(
+                    protocols(o.requiredArray("protocols")),
+                    o.requiredString("app_version").also {
+                        require(it.isNotEmpty() && it.length <= 32) { "invalid app_version" }
+                    },
+                    o.optionalFeatures("features"),
+                )
             }
             "relay.put" -> {
                 requireKeys(o, setOf("v", "type", "envelope"))
@@ -152,9 +196,17 @@ object RelayFrameCodec {
                 RelayFrame.Expired(canonicalUuid(o.requiredString("msg_id")), o.requiredNonNegativeLong("expired_at"))
             }
             "relay.capabilities" -> {
-                requireKeys(o, setOf("v", "type", "self", "peer", "floor"))
-                RelayFrame.Capabilities(protocols(o.requiredArray("self")), protocols(o.requiredArray("peer")),
-                    o.requiredInt("floor").also { require(it == 1 || it == 2) { "relay floor must be 1 or 2" } })
+                requireKeys(o, setOf("v", "type", "self", "peer", "floor", "self_features", "peer_features"))
+                require(o.has("self_features") == o.has("peer_features")) {
+                    "relay feature capability fields must be paired"
+                }
+                RelayFrame.Capabilities(
+                    protocols(o.requiredArray("self")),
+                    protocols(o.requiredArray("peer")),
+                    o.requiredInt("floor").also { require(it == 1 || it == 2) { "relay floor must be 1 or 2" } },
+                    o.optionalFeatures("self_features"),
+                    o.optionalFeatures("peer_features", allowEmpty = true),
+                )
             }
             else -> throw IllegalArgumentException("unsupported relay frame type $type")
         }
@@ -202,4 +254,17 @@ object RelayFrameCodec {
     private fun JSONObject.requiredNonNegativeLong(key: String): Long = get(key).let { require(it is Number) { "$key must be an integer" }; it.toLong().also { n -> require(n >= 0 && (it as Number).toDouble() == n.toDouble()) { "$key must be a non-negative integer" } } }
     private fun JSONObject.requiredArray(key: String): JSONArray = get(key).let { require(it is JSONArray) { "$key must be an array" }; it }
     private fun JSONObject.requiredObject(key: String): JSONObject = get(key).let { require(it is JSONObject) { "$key must be an object" }; it }
+
+    private fun JSONObject.optionalFeatures(key: String, allowEmpty: Boolean = false): Set<String> {
+        if (!has(key)) return emptySet()
+        val array = requiredArray(key)
+        val values = (0 until array.length()).map { index ->
+            array.get(index).let { value ->
+                require(value is String) { "$key entries must be strings" }
+                value
+            }
+        }
+        if (values.isEmpty() && allowEmpty) return emptySet()
+        return RelayFeatures.validated(values)
+    }
 }

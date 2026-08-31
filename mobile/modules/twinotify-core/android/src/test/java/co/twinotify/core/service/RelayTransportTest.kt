@@ -368,7 +368,10 @@ class RelayTransportTest {
         }
         runCurrent()
 
-        assertEquals(listOf<RelayFrame>(RelayFrame.Hello(listOf(2, 1), "0.8.0")), connector.socket.frames)
+        assertEquals(
+            listOf<RelayFrame>(RelayFrame.Hello(listOf(2, 1), "0.8.0", RelayFeatures.CURRENT)),
+            connector.socket.frames,
+        )
         advanceTimeBy(5_000L)
         runCurrent()
         assertTrue(connector.socket.frames.none { it is RelayFrame.Put })
@@ -408,6 +411,34 @@ class RelayTransportTest {
         advanceTimeBy(1_000L)
         runCurrent()
         assertEquals(2, connector.connectionCount, "30 continuous authenticated seconds reset reconnect delay to 1s")
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun authenticatedEventCarriesCurrentPeerFeatures() = runTest {
+        val connector = ManualConnector()
+        val events = mutableListOf<TransportEvent>()
+        val job = backgroundScope.launch {
+            RelayTransport(RecordingStore().repo, connector = connector, reconnect = false).run(endpoint).collect(events::add)
+        }
+        runCurrent()
+
+        connector.text(
+            RelayFrame.Capabilities(
+                self = listOf(2, 1),
+                peer = listOf(2, 1),
+                floor = 2,
+                selfFeatures = RelayFeatures.CURRENT,
+                peerFeatures = setOf(RelayFeatures.LAN_BOOTSTRAP_V1),
+            ),
+        )
+        runCurrent()
+
+        assertTrue(
+            events.contains(
+                TransportEvent.Authenticated(2, setOf(RelayFeatures.LAN_BOOTSTRAP_V1)),
+            ),
+        )
         job.cancelAndJoin()
     }
 
