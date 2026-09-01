@@ -9,6 +9,7 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.Person
 import androidx.core.app.RemoteInput
 import androidx.core.net.toUri
 import co.twinotify.core.R
@@ -58,7 +59,33 @@ object MirrorPoster {
             .apply {
                 tapPi?.let(::setContentIntent)
                 if (sourceArtwork != null) setLargeIcon(sourceArtwork)
-                if (!expandedText.isNullOrBlank()) setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+                val conversationStyle = post.conversation?.takeIf { it.messages.isNotEmpty() }?.let { conversation ->
+                    val style = NotificationCompat.MessagingStyle(
+                        Person.Builder().setName(post.app_name ?: post.title ?: "Source app").build(),
+                    )
+                    conversation.title?.let(style::setConversationTitle)
+                    style.setGroupConversation(conversation.is_group)
+                    conversation.messages.forEach { message ->
+                        val sender = message.sender_name?.let { senderName ->
+                            Person.Builder().setName(senderName).apply {
+                                message.sender_key?.let(::setKey)
+                            }.build()
+                        }
+                        style.addMessage(
+                            NotificationCompat.MessagingStyle.Message(
+                                message.text,
+                                message.timestamp,
+                                sender,
+                            ),
+                        )
+                    }
+                    style
+                }
+                if (conversationStyle != null) {
+                    setStyle(conversationStyle)
+                } else if (!expandedText.isNullOrBlank()) {
+                    setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+                }
                 presentation.replyText?.let { setRemoteInputHistory(arrayOf(it)) }
                 post.actions.take(3).filterNot { it.action_id in presentation.pendingActionIds }.forEach { action ->
                     val invokeIntent = Intent(ctx, ActionInvokeReceiver::class.java).apply {

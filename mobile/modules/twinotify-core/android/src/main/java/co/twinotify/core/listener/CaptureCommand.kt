@@ -4,6 +4,20 @@ import android.app.Notification
 import android.graphics.drawable.Icon
 import co.twinotify.core.actions.ActionCandidate
 
+data class SourceMessageSnapshot(
+    val text: String,
+    val timestamp: Long,
+    val senderName: String?,
+    val senderKey: String?,
+)
+
+data class SourceConversationSnapshot(
+    val key: String?,
+    val title: String?,
+    val isGroup: Boolean,
+    val messages: List<SourceMessageSnapshot>,
+)
+
 /**
  * Immutable input captured at the notification-listener boundary.  In particular, this type
  * never carries a StatusBarNotification: framework objects are mutable and are only valid for
@@ -33,6 +47,7 @@ data class SourceNotificationSnapshot(
     val largeIconPngB64: String? = null,
     val isAutoCancel: Boolean = true,
     val actions: List<ActionCandidate<Notification.Action>> = emptyList(),
+    val conversation: SourceConversationSnapshot? = null,
 ) {
     companion object {
         fun fromPost(post: NotifPostJson): SourceNotificationSnapshot = SourceNotificationSnapshot(
@@ -61,6 +76,21 @@ data class SourceNotificationSnapshot(
             smallIconPngB64 = post.small_icon_png_b64,
             largeIconPngB64 = post.large_icon_png_b64,
             isAutoCancel = post.is_auto_cancel,
+            conversation = post.conversation?.let { conversation ->
+                SourceConversationSnapshot(
+                    key = conversation.key,
+                    title = conversation.title,
+                    isGroup = conversation.is_group,
+                    messages = conversation.messages.map { message ->
+                        SourceMessageSnapshot(
+                            text = message.text,
+                            timestamp = message.timestamp,
+                            senderName = message.sender_name,
+                            senderKey = message.sender_key,
+                        )
+                    },
+                )
+            },
         )
     }
 }

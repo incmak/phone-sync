@@ -13,6 +13,58 @@ import org.json.JSONObject
 
 class NotifPostJsonTest {
     @Test
+    fun conversationPayload_preservesSenderOrderAndRoundTrips() {
+        val raw = JSONObject(ProtocolFixtures.readPath("v2-valid/notif-post-actions-valid.json"))
+            .put("conversation", JSONObject()
+                .put("key", "chat-42")
+                .put("title", "Weekend plans")
+                .put("is_group", true)
+                .put("messages", JSONArray()
+                    .put(message("First", 1_000, "Ada", "ada"))
+                    .put(message("Second", 1_001, "Ben", "ben"))
+                    .put(message("Third", 1_002, "Ada", "ada"))))
+
+        val post = NotifPostJson.fromPayloadJson(raw.toString())
+
+        assertEquals("chat-42", post.conversation?.key)
+        assertEquals(listOf("First", "Second", "Third"), post.conversation?.messages?.map { it.text })
+        assertEquals(listOf("Ada", "Ben", "Ada"), post.conversation?.messages?.map { it.sender_name })
+        val encoded = JSONObject(NotifPostBuilder.toPayloadJson(post)).getJSONObject("conversation")
+        assertEquals("Weekend plans", encoded.getString("title"))
+        assertEquals("Third", encoded.getJSONArray("messages").getJSONObject(2).getString("text"))
+    }
+
+    @Test
+    fun conversationPayload_rejectsOverflowUnknownFieldsAndOversizedValues() {
+        val valid = JSONObject(ProtocolFixtures.readPath("v2-valid/notif-post-actions-valid.json"))
+        val messages = JSONArray().apply {
+            repeat(26) { put(message("message-$it", it.toLong(), null, null)) }
+        }
+        val baseConversation = JSONObject()
+            .put("key", "chat")
+            .put("title", "Chat")
+            .put("is_group", false)
+            .put("messages", JSONArray().put(message("hello", 1_000, "Ada", "ada")))
+        val invalid = listOf(
+            JSONObject(valid.toString()).put("conversation", JSONObject(baseConversation.toString()).put("messages", messages)),
+            JSONObject(valid.toString()).put("conversation", JSONObject(baseConversation.toString()).put("private_uri", "content://forbidden")),
+            JSONObject(valid.toString()).put("conversation", JSONObject(baseConversation.toString()).put("key", "x".repeat(513))),
+            JSONObject(valid.toString()).put("conversation", JSONObject(baseConversation.toString()).put(
+                "messages",
+                JSONArray().put(message("x".repeat(4_097), 1_000, null, null)),
+            )),
+            JSONObject(valid.toString()).put("conversation", JSONObject(baseConversation.toString()).put(
+                "messages",
+                JSONArray().put(JSONObject(message("hello", 1_000, null, null).toString()).put("uri", "https://invalid")),
+            )),
+        )
+
+        invalid.forEach { payload ->
+            assertFailsWith<IllegalArgumentException> { NotifPostJson.fromPayloadJson(payload.toString()) }
+        }
+    }
+
+    @Test
     fun legacyPayload_defaultsToAutoCancelWithoutActions() {
         val post = NotifPostJson.fromPayloadJson(
             ProtocolFixtures.readPath("v2-valid/notif-post-legacy-valid.json"),
@@ -93,4 +145,15 @@ class NotifPostJsonTest {
         val parsedNull = NotifPostJson.fromPayloadJson(valid.toString())
         assertNull(parsedNull.actions.single().reply_label)
     }
+
+    private fun message(
+        text: String,
+        timestamp: Long,
+        senderName: String?,
+        senderKey: String?,
+    ) = JSONObject()
+        .put("text", text)
+        .put("timestamp", timestamp)
+        .put("sender_name", senderName ?: JSONObject.NULL)
+        .put("sender_key", senderKey ?: JSONObject.NULL)
 }

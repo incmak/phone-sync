@@ -14,12 +14,33 @@ import co.twinotify.core.actions.ActionCandidate
 import java.io.ByteArrayOutputStream
 import java.util.UUID
 
+private const val MAX_CONVERSATION_MESSAGES = 25
+private const val MAX_MESSAGE_TEXT_CODE_POINTS = 4_096
+private const val MAX_SENDER_NAME_CODE_POINTS = 256
+private const val MAX_SENDER_KEY_CODE_POINTS = 256
+private const val MAX_CONVERSATION_KEY_CODE_POINTS = 512
+private const val MAX_CONVERSATION_TITLE_CODE_POINTS = 256
+
 data class NotifActionJson(
     val action_id: String,
     val title: String,
     val semantic: Int,
     val reply: Boolean,
     val reply_label: String?,
+)
+
+data class NotifMessageJson(
+    val text: String,
+    val timestamp: Long,
+    val sender_name: String?,
+    val sender_key: String?,
+)
+
+data class NotifConversationJson(
+    val key: String?,
+    val title: String?,
+    val is_group: Boolean,
+    val messages: List<NotifMessageJson>,
 )
 
 data class NotifPostJson(
@@ -43,6 +64,7 @@ data class NotifPostJson(
     val ts: Long,
     val is_auto_cancel: Boolean = true,
     val actions: List<NotifActionJson> = emptyList(),
+    val conversation: NotifConversationJson? = null,
 ) {
     companion object {
         fun fromPayloadJson(raw: String): NotifPostJson {
@@ -62,6 +84,10 @@ data class NotifPostJson(
                     ?: throw IllegalArgumentException("notification payload actions must be an array")
                 require(array.length() <= 3) { "notification payload actions must contain at most 3 items" }
                 List(array.length()) { index -> parseAction(array.get(index), index) }
+            }
+            val conversation = when {
+                !o.has("conversation") || o.isNull("conversation") -> null
+                else -> parseConversation(o.get("conversation"))
             }
             return NotifPostJson(
                 v = version,
@@ -84,7 +110,72 @@ data class NotifPostJson(
                 ts = o.optLong("ts", 0L),
                 is_auto_cancel = o.optBoolean("is_auto_cancel", true),
                 actions = actions,
+                conversation = conversation,
             )
+        }
+
+        private fun parseConversation(value: Any): NotifConversationJson {
+            val conversation = value as? org.json.JSONObject
+                ?: throw IllegalArgumentException("notification payload conversation must be an object")
+            val allowed = setOf("key", "title", "is_group", "messages")
+            val unknown = conversation.keys().asSequence().filterNot(allowed::contains).toList()
+            require(unknown.isEmpty()) {
+                "notification payload conversation contains unknown fields: ${unknown.joinToString()}"
+            }
+            val messages = conversation.opt("messages") as? org.json.JSONArray
+                ?: throw IllegalArgumentException("notification payload conversation messages must be an array")
+            require(messages.length() in 1..MAX_CONVERSATION_MESSAGES) {
+                "notification payload conversation must contain 1..$MAX_CONVERSATION_MESSAGES messages"
+            }
+            val isGroup = conversation.opt("is_group") as? Boolean
+                ?: throw IllegalArgumentException("notification payload conversation is_group must be a boolean")
+            return NotifConversationJson(
+                key = optionalBoundedString(conversation, "key", MAX_CONVERSATION_KEY_CODE_POINTS),
+                title = optionalBoundedString(conversation, "title", MAX_CONVERSATION_TITLE_CODE_POINTS),
+                is_group = isGroup,
+                messages = List(messages.length()) { index -> parseMessage(messages.get(index), index) },
+            )
+        }
+
+        private fun parseMessage(value: Any, index: Int): NotifMessageJson {
+            val message = value as? org.json.JSONObject
+                ?: throw IllegalArgumentException("notification payload conversation message $index must be an object")
+            val allowed = setOf("text", "timestamp", "sender_name", "sender_key")
+            val unknown = message.keys().asSequence().filterNot(allowed::contains).toList()
+            require(unknown.isEmpty()) {
+                "notification payload conversation message $index contains unknown fields: ${unknown.joinToString()}"
+            }
+            val text = message.opt("text") as? String
+                ?: throw IllegalArgumentException("notification payload conversation message $index text must be a string")
+            require(text.isNotEmpty() && text.codePointCount(0, text.length) <= MAX_MESSAGE_TEXT_CODE_POINTS) {
+                "notification payload conversation message $index text exceeds bounds"
+            }
+            val timestampNumber = message.opt("timestamp") as? Number
+                ?: throw IllegalArgumentException("notification payload conversation message $index timestamp must be an integer")
+            val timestamp = timestampNumber.toLong()
+            require(timestamp >= 0 && timestampNumber.toDouble() == timestamp.toDouble()) {
+                "notification payload conversation message $index timestamp must be a non-negative integer"
+            }
+            return NotifMessageJson(
+                text = text,
+                timestamp = timestamp,
+                sender_name = optionalBoundedString(message, "sender_name", MAX_SENDER_NAME_CODE_POINTS),
+                sender_key = optionalBoundedString(message, "sender_key", MAX_SENDER_KEY_CODE_POINTS),
+            )
+        }
+
+        private fun optionalBoundedString(
+            objectValue: org.json.JSONObject,
+            key: String,
+            maxCodePoints: Int,
+        ): String? {
+            if (!objectValue.has(key) || objectValue.isNull(key)) return null
+            val value = objectValue.get(key) as? String
+                ?: throw IllegalArgumentException("notification payload $key must be a string or null")
+            require(value.codePointCount(0, value.length) <= maxCodePoints) {
+                "notification payload $key exceeds bounds"
+            }
+            return value.takeIf(String::isNotBlank)
         }
 
         private fun parseAction(value: Any, index: Int): NotifActionJson {
@@ -210,6 +301,7 @@ object NotifPostBuilder {
             largeIcon = notif.getLargeIcon(),
             isAutoCancel = (notif.flags and Notification.FLAG_AUTO_CANCEL) != 0,
             actions = actions,
+            conversation = captureConversation(notif),
         )
     }
 
@@ -246,6 +338,21 @@ object NotifPostBuilder {
             ts = snapshot.postTime,
             is_auto_cancel = snapshot.isAutoCancel,
             actions = actionDescriptors,
+            conversation = snapshot.conversation?.let { conversation ->
+                NotifConversationJson(
+                    key = conversation.key,
+                    title = conversation.title,
+                    is_group = conversation.isGroup,
+                    messages = conversation.messages.map { message ->
+                        NotifMessageJson(
+                            text = message.text,
+                            timestamp = message.timestamp,
+                            sender_name = message.senderName,
+                            sender_key = message.senderKey,
+                        )
+                    },
+                )
+            },
         )
     }
 
@@ -294,7 +401,63 @@ object NotifPostBuilder {
                 })
             }
         })
+        post.conversation?.let { conversation ->
+            put("conversation", org.json.JSONObject().apply {
+                put("key", conversation.key ?: org.json.JSONObject.NULL)
+                put("title", conversation.title ?: org.json.JSONObject.NULL)
+                put("is_group", conversation.is_group)
+                put("messages", org.json.JSONArray().apply {
+                    conversation.messages.forEach { message ->
+                        put(org.json.JSONObject().apply {
+                            put("text", message.text)
+                            put("timestamp", message.timestamp)
+                            put("sender_name", message.sender_name ?: org.json.JSONObject.NULL)
+                            put("sender_key", message.sender_key ?: org.json.JSONObject.NULL)
+                        })
+                    }
+                })
+            })
+        }
     }.toString()
+
+    private fun captureConversation(notification: Notification): SourceConversationSnapshot? {
+        val extras = notification.extras
+        val historic = parseFrameworkMessages(
+            extras.getParcelableArray(Notification.EXTRA_HISTORIC_MESSAGES),
+        )
+        val current = parseFrameworkMessages(extras.getParcelableArray(Notification.EXTRA_MESSAGES))
+        val messages = (historic + current)
+            .distinctBy { listOf(it.text, it.timestamp.toString(), it.senderName.orEmpty(), it.senderKey.orEmpty()) }
+            .takeLast(MAX_CONVERSATION_MESSAGES)
+        if (messages.isEmpty()) return null
+        return SourceConversationSnapshot(
+            key = notification.shortcutId?.truncateCodePoints(MAX_CONVERSATION_KEY_CODE_POINTS),
+            title = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
+                ?.toString()
+                ?.takeIf(String::isNotBlank)
+                ?.truncateCodePoints(MAX_CONVERSATION_TITLE_CODE_POINTS),
+            isGroup = extras.getBoolean(Notification.EXTRA_IS_GROUP_CONVERSATION, false),
+            messages = messages,
+        )
+    }
+
+    private fun parseFrameworkMessages(array: Array<android.os.Parcelable>?): List<SourceMessageSnapshot> =
+        Notification.MessagingStyle.Message.getMessagesFromBundleArray(array)
+            .orEmpty()
+            .mapNotNull { message ->
+                val text = message.text?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val sender = message.senderPerson
+                SourceMessageSnapshot(
+                    text = text.truncateCodePoints(MAX_MESSAGE_TEXT_CODE_POINTS),
+                    timestamp = message.timestamp.coerceAtLeast(0L),
+                    senderName = sender?.name?.toString()
+                        ?.takeIf(String::isNotBlank)
+                        ?.truncateCodePoints(MAX_SENDER_NAME_CODE_POINTS),
+                    senderKey = sender?.key
+                        ?.takeIf(String::isNotBlank)
+                        ?.truncateCodePoints(MAX_SENDER_KEY_CODE_POINTS),
+                )
+            }
 
     private fun visibilityString(v: Int): String = when (v) {
         Notification.VISIBILITY_PUBLIC -> "public"
@@ -331,4 +494,5 @@ object NotifPostBuilder {
         if (count <= maxCodePoints) return this
         return substring(0, offsetByCodePoints(0, maxCodePoints))
     }
+
 }

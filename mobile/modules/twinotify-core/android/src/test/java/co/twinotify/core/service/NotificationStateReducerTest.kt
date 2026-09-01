@@ -77,6 +77,56 @@ class NotificationStateReducerTest {
     }
 
     @Test
+    fun distinctSourceNotificationsReceiveDistinctMirrorIdentities() {
+        val first = assertIs<Reduction.Apply>(
+            NotificationStateReducer.reduce(
+                current = null,
+                event = event(type = "notif.post", sequence = 1).copy(canonId = "dev-peer:pkg:7:chat-a"),
+                localDeviceId = "dev-local",
+                allocator = allocator,
+            ),
+        ).state
+        val second = assertIs<Reduction.Apply>(
+            NotificationStateReducer.reduce(
+                current = null,
+                event = event(type = "notif.post", sequence = 1).copy(canonId = "dev-peer:pkg:8:chat-b"),
+                localDeviceId = "dev-local",
+                allocator = allocator,
+            ),
+        ).state
+
+        assertFalse(first.mirrorLocalId == second.mirrorLocalId)
+        assertFalse(first.mirrorLocalTag == second.mirrorLocalTag)
+    }
+
+    @Test
+    fun threeUpdatesConvergeWithoutChangingMirrorIdentity() {
+        var state = assertIs<Reduction.Apply>(
+            NotificationStateReducer.reduce(
+                current = null,
+                event = event(type = "notif.post", sequence = 1),
+                localDeviceId = "dev-local",
+                allocator = allocator,
+            ),
+        ).state
+        val initialIdentity = state.mirrorLocalTag to state.mirrorLocalId
+
+        for (sequence in 2L..4L) {
+            state = assertIs<Reduction.Apply>(
+                NotificationStateReducer.reduce(
+                    current = state,
+                    event = event(type = "notif.update", sequence = sequence),
+                    localDeviceId = "dev-local",
+                    allocator = allocator,
+                ),
+            ).state
+        }
+
+        assertEquals(initialIdentity, state.mirrorLocalTag to state.mirrorLocalId)
+        assertEquals(4, state.latestSequence)
+    }
+
+    @Test
     fun mirrorTagPredicateMatchesOnlyProductionMirrorTags() {
         assertTrue(NotificationStateReducer.isMirrorTag(NotificationStateReducer.stableMirrorTag("canon")))
         assertFalse(NotificationStateReducer.isMirrorTag("twinotify-mirror-stale"))
