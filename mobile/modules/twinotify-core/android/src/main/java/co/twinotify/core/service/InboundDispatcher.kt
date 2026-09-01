@@ -404,7 +404,7 @@ internal suspend fun dispatchAuthenticatedReceiptBackedControl(
         committedAt = committedAt,
         appliedAt = committedAt,
         receiptMsgId = receipt.msgId,
-        relayAckState = "READY",
+        relayAckState = "NONE",
     )
     return when (val result = journal.commit(inbound, receipt, process)) {
         DirectControlCommitResult.Committed -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)

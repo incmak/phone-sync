@@ -136,7 +136,7 @@ class InboundDispatcherControlTest {
         assertEquals(listOf("lan.bootstrap", "peer.probe"), committed.map { it.first.eventType })
         committed.forEach { (inbound, receipt) ->
             assertEquals(receipt.msgId, inbound.receiptMsgId)
-            assertEquals("READY", inbound.relayAckState)
+            assertEquals("NONE", inbound.relayAckState)
             assertEquals("peer.receipt", receipt.eventType)
         }
     }

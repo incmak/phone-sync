@@ -875,7 +875,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     ): DirectControlCommitResult {
         if (inbound.eventType !in RECEIPT_BACKED_CONTROL_TYPES) return DirectControlCommitResult.NotEligible
         require(inbound.canonId == null && inbound.sequence == null)
-        require(inbound.outcome == "APPLIED" && inbound.appliedAt != null && inbound.relayAckState == "READY")
+        require(inbound.outcome == "APPLIED" && inbound.appliedAt != null && inbound.relayAckState == "NONE")
         require(inbound.receiptMsgId == receipt.msgId)
         require(receipt.eventType == "peer.receipt" && !receipt.requiresPeerReceipt)
 

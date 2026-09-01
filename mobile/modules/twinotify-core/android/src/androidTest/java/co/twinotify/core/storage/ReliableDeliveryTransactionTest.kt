@@ -215,6 +215,28 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun receiptBackedControlWaitsForReceiptCustodyBeforeRelayAckBecomesReady() = runBlocking {
+        val receipt = controlOutbound("probe-receipt", "peer.receipt")
+        val inbound = receiptBackedInbound("probe", "probe-digest", receipt.msgId)
+            .copy(eventType = "peer.probe", relayAckState = "NONE")
+
+        assertEquals(
+            DirectControlCommitResult.Committed,
+            dao.commitReceiptBackedControl(inbound, receipt) {
+                ReceiptBackedControlResult.Applied
+            },
+        )
+        assertEquals("NONE", dao.inbound(inbound.msgId)?.relayAckState)
+
+        assertEquals(
+            CustodyAcceptanceResult.DeletedReceipt,
+            dao.acceptCustody(receipt.msgId, "RELAY", acceptedAt = 2_000, retryAt = 7_000),
+        )
+        assertNull(dao.outboundMessage(receipt.msgId))
+        assertEquals("READY", dao.inbound(inbound.msgId)?.relayAckState)
+    }
+
+    @Test
     fun rejectedOrReceiptConflictingControlLeavesNoInboundOrNewReceipt() = runBlocking {
         val rejectedReceipt = controlOutbound("rejected-receipt", "peer.receipt")
         val rejected = receiptBackedInbound("rejected-bootstrap", "digest-a", rejectedReceipt.msgId)
@@ -1714,7 +1736,7 @@ class ReliableDeliveryTransactionTest {
         committedAt = 1_000,
         appliedAt = 1_000,
         receiptMsgId = receiptMsgId,
-        relayAckState = "READY",
+        relayAckState = "NONE",
     )
 
     private fun controlOutbound(msgId: String, eventType: String) = outbound(
