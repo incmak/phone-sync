@@ -1,6 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools">
   <application>
+    <activity
+      android:name="co.twinotify.core.service.ForegroundNotificationTestActivity"
+      android:exported="false"
+      android:launchMode="singleTask" />
     <provider
       android:name="co.twinotify.core.e2e.E2eStateProvider"
       android:authorities="co.twinotify.core.test.e2e"

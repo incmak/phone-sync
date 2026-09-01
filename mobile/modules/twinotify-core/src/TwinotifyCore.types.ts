@@ -39,6 +39,15 @@ export type UserContentKind = 'notifications' | 'sync_updates';
  * endpoint, address, SSID, port, or peer identifier, so rendering it cannot
  * leak private network detail.
  */
+export interface NativeDeliveryPresentation {
+  state: 'direct' | 'relay' | 'reconnecting' | 'queued' | 'paused' | 'stopped' | 'unpaired';
+  label: string;
+  explanation: string;
+  action: 'retry' | 'pair' | null;
+  queued_count: number;
+  peer_line: 'Reachable now' | 'Checked in recently' | 'Not confirmed online' | null;
+}
+
 export interface RouteStatus {
   route: DeliveryRoute;
   phase: DeliveryRoutePhase;
@@ -50,6 +59,7 @@ export interface RouteStatus {
   delivery_reason: DeliveryReason;
   user_content_kind: UserContentKind;
   route_generation: number;
+  presentation?: NativeDeliveryPresentation;
 }
 
 export type RouteStatusEvent = (status: RouteStatus) => void;

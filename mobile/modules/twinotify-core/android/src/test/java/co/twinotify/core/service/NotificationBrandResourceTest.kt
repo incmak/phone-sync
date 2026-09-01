@@ -13,7 +13,7 @@ class NotificationBrandResourceTest {
     fun everyProductionNotificationUsesTheTwinotifySmallIcon() {
         val sources = listOf(
             File(sourceRoot, "service/MirrorPoster.kt").readText(),
-            File(sourceRoot, "service/SyncService.kt").readText(),
+            File(sourceRoot, "service/ForegroundNotificationFactory.kt").readText(),
             File(sourceRoot, "call/CallStateMaterializer.kt").readText(),
         )
 

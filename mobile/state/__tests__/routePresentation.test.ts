@@ -9,6 +9,30 @@ const status = (over: Partial<RouteStatus> = {}): RouteStatus => ({
 });
 
 describe('presentRoute delivery truth table', () => {
+  it('uses the native presentation for an enabled paired session', () => {
+    const presentation = presentRoute(status({
+      route: 'relay',
+      phase: 'authenticated',
+      presentation: {
+        state: 'relay',
+        label: 'Native relay truth',
+        explanation: 'Native custody explanation.',
+        action: null,
+        queued_count: 4,
+        peer_line: 'Checked in recently',
+      },
+    }), true, true);
+
+    expect(presentation).toEqual({
+      state: 'relay',
+      label: 'Native relay truth',
+      explanation: 'Native custody explanation.',
+      action: undefined,
+      queuedCount: 4,
+      peerLine: 'Checked in recently',
+    });
+  });
+
   it.each([
     {
       name: 'direct',

@@ -171,7 +171,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
     }
 
     private fun capturePosted(sbn: StatusBarNotification) {
-        if (sbn.packageName == packageName) return
+        if (!shouldCaptureOutbound(sbn.packageName, packageName)) return
         val canonId = CanonIdBuilder.build(originDevice, sbn.packageName, sbn.id, sbn.tag)
         val snapshot = NotifPostBuilder.captureSnapshot(
             sbn = sbn,

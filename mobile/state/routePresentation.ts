@@ -1,6 +1,6 @@
 import type { RouteStatus } from '../modules/twinotify-core/src/TwinotifyCoreModule';
 
-export type DeliveryState = 'direct' | 'relay' | 'reconnecting' | 'queued' | 'paused' | 'unpaired';
+export type DeliveryState = 'direct' | 'relay' | 'reconnecting' | 'queued' | 'paused' | 'stopped' | 'unpaired';
 
 export type DeliveryAction = 'retry' | 'pair';
 
@@ -62,6 +62,17 @@ export function presentRoute(status: RouteStatus, paired: boolean, enabled: bool
       explanation: 'Turn on mirroring when you want delivery to resume.',
       queuedCount,
       peerLine: null,
+    };
+  }
+
+  if (status.presentation) {
+    return {
+      state: status.presentation.state,
+      label: status.presentation.label,
+      explanation: status.presentation.explanation,
+      action: status.presentation.action ?? undefined,
+      queuedCount: count(status.presentation.queued_count),
+      peerLine: status.presentation.peer_line,
     };
   }
 

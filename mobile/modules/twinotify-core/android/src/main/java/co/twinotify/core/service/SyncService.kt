@@ -995,7 +995,7 @@ class SyncService : Service() {
     private var retainedCallShutdownTerminal = false
     private val callCaptureLifecycle = CallCaptureLifecycleFence()
     private val callCaptureStartupGate = CallCaptureStartupGate()
-    private val foregroundNotificationOwner = ForegroundNotificationOwner<SyncHealth>()
+    private val foregroundNotificationOwner = ForegroundNotificationOwner<DeliveryPresentation>()
     private var shuttingDown = false
     private val shutdownCompleted = CompletableDeferred<Unit>()
     private lateinit var legacyMigration: Deferred<LegacyMigrationSummary>
@@ -1046,10 +1046,15 @@ class SyncService : Service() {
             requestDirectAttempt = { directAttemptRequests.tryEmit(Unit) },
             requestRouteReload = routePreferenceRestarter::forceRestart,
         )
-        // Every health transition refreshes the foreground text from the same native snapshot.
+        // Every delivery transition refreshes foreground copy from the same native presenter as Home.
         healthJob = scope.launch {
-            SyncServiceStatus.health.collectLatest {
-                if (!shuttingDown) foregroundNotificationOwner.refresh(it, ::startForegroundCompat)
+            SyncServiceStatus.routeStatus.collectLatest { status ->
+                if (!shuttingDown) {
+                    foregroundNotificationOwner.refresh(
+                        DeliveryStatusPresenter.present(status, paired = true, enabled = true),
+                        ::startForegroundCompat,
+                    )
+                }
             }
         }
         retentionJob = scope.launch {
@@ -1091,11 +1096,18 @@ class SyncService : Service() {
             action = intent?.action,
             promote = {
                 updatePostPermissionStatus()
-                val health = SyncServiceStatus.health.value
-                foregroundNotificationOwner.promote(health, ::startForegroundCompat)
-                // Close the race where health changes between the snapshot read and promotion.
+                val route = SyncServiceStatus.routeStatus.value
+                foregroundNotificationOwner.promote(
+                    DeliveryStatusPresenter.present(route, paired = true, enabled = true),
+                    ::startForegroundCompat,
+                )
+                // Close the race where route/custody changes between snapshot read and promotion.
                 foregroundNotificationOwner.refresh(
-                    SyncServiceStatus.health.value,
+                    DeliveryStatusPresenter.present(
+                        SyncServiceStatus.routeStatus.value,
+                        paired = true,
+                        enabled = true,
+                    ),
                     ::startForegroundCompat,
                 )
             },
@@ -1212,13 +1224,8 @@ class SyncService : Service() {
         SyncServiceStatus.setPostPermission(effectivePostAvailability(this))
     }
 
-    private fun startForegroundCompat(health: SyncHealth) {
-        val notif: Notification = NotificationCompat.Builder(this, NotifChannelSetup.CHANNEL_FGS)
-            .setContentTitle("Twinotify active")
-            .setContentText(foregroundText(health))
-            .setSmallIcon(R.drawable.ic_stat_twinotify)
-            .setOngoing(true)
-            .build()
+    private fun startForegroundCompat(presentation: DeliveryPresentation) {
+        val notif: Notification = ForegroundNotificationFactory.build(this, presentation)
         startForeground(FGS_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
     }
 
@@ -1253,14 +1260,6 @@ class SyncService : Service() {
         )
         if (!fromRelayJob) stopForeground(STOP_FOREGROUND_REMOVE)
         shutdownCompleted.complete(Unit)
-    }
-
-    private fun foregroundText(health: SyncHealth): String = when (health.service) {
-        "connected" -> if (health.queuedCount == 0) "Connected - mirrors notifications to your paired phone."
-        else "Connected - ${health.queuedCount} item(s) queued."
-        "connecting" -> "Connecting to the paired phone…"
-        "degraded" -> "Offline - ${health.queuedCount} item(s) queued for retry."
-        else -> "Stopped - syncing is disabled."
     }
 
     private fun startTransport(relayInput: String?, preferLan: Boolean) {

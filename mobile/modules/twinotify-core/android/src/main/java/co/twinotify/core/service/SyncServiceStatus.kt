@@ -92,7 +92,7 @@ data class SyncRouteStatus(
     val userContentKind: UserContentKind = UserContentKind.NOTIFICATIONS,
     val routeGeneration: Int = 0,
 ) {
-    fun toPublicMap(): Map<String, Any> = mapOf(
+    fun toPublicMap(): Map<String, Any?> = mapOf(
         "route" to route.name.lowercase(),
         "phase" to phase.name.lowercase(),
         "queued_count" to queuedCount,
@@ -103,7 +103,138 @@ data class SyncRouteStatus(
         "delivery_reason" to deliveryReason.name.lowercase(),
         "user_content_kind" to userContentKind.name.lowercase(),
         "route_generation" to routeGeneration,
+        "presentation" to DeliveryStatusPresenter.present(
+            status = this,
+            paired = true,
+            enabled = true,
+        ).toPublicMap(),
     )
+}
+
+internal data class DeliveryPresentation(
+    val state: String,
+    val label: String,
+    val explanation: String,
+    val action: String?,
+    val queuedCount: Int,
+    val peerLine: String?,
+) {
+    fun toPublicMap(): Map<String, Any?> = mapOf(
+        "state" to state,
+        "label" to label,
+        "explanation" to explanation,
+        "action" to action,
+        "queued_count" to queuedCount,
+        "peer_line" to peerLine,
+    )
+}
+
+/** The single native source of user-facing delivery and custody wording. */
+internal object DeliveryStatusPresenter {
+    fun present(status: SyncRouteStatus, paired: Boolean, enabled: Boolean = true): DeliveryPresentation {
+        val queued = status.pendingLocalCount.coerceAtLeast(0)
+        val awaitingPeer = status.awaitingPeerCount.coerceAtLeast(0)
+        val heldByRelay = status.heldByRelayCount.coerceAtLeast(0)
+
+        if (!paired) return DeliveryPresentation(
+            state = "unpaired",
+            label = "Not paired",
+            explanation = "Link your other phone to start mirroring notifications.",
+            action = "pair",
+            queuedCount = 0,
+            peerLine = null,
+        )
+        if (!enabled) return DeliveryPresentation(
+            state = "paused",
+            label = "Paused",
+            explanation = "Turn on mirroring when you want delivery to resume.",
+            action = null,
+            queuedCount = queued,
+            peerLine = null,
+        )
+        if (status.phase == RoutePhase.IDLE) return DeliveryPresentation(
+            state = "stopped",
+            label = "Stopped",
+            explanation = if (queued > 0) {
+                "${itemName(queued, status.userContentKind)} ${if (queued == 1) "is" else "are"} waiting on this phone. Start mirroring to send."
+            } else {
+                "Mirroring is stopped."
+            },
+            action = "retry",
+            queuedCount = queued,
+            peerLine = null,
+        )
+        if (status.phase == RoutePhase.AUTHENTICATED && status.route == RouteKind.LAN) {
+            return DeliveryPresentation(
+                state = "direct",
+                label = "Direct on Wi-Fi",
+                explanation = "Your phones are talking directly over Wi-Fi.",
+                action = null,
+                queuedCount = queued,
+                peerLine = "Reachable now",
+            )
+        }
+        if (status.phase == RoutePhase.AUTHENTICATED && status.route == RouteKind.RELAY) {
+            val explanation = when {
+                status.deliveryReason == DeliveryReason.LAN_BINDING_CONFLICT ->
+                    "Direct Wi-Fi needs attention. Relay delivery remains encrypted end to end."
+                status.deliveryReason == DeliveryReason.PEER_VERSION_INCOMPATIBLE ->
+                    "Update Twinotify on your other phone to enable direct Wi-Fi."
+                heldByRelay > 0 ->
+                    "${itemName(heldByRelay, status.userContentKind)} ${if (heldByRelay == 1) "is" else "are"} stored securely and waiting for your other phone."
+                awaitingPeer > 0 ->
+                    "${itemName(awaitingPeer, status.userContentKind)} ${if (awaitingPeer == 1) "is" else "are"} waiting for confirmation from your other phone."
+                status.deliveryReason == DeliveryReason.LAN_BOOTSTRAP_WAITING ->
+                    "Setting up direct Wi-Fi in the background. Delivery is encrypted end to end."
+                status.peerEvidence == PeerEvidence.RECENT ->
+                    "Your other phone checked in recently. Delivery is encrypted end to end."
+                else -> "Connected to the relay. Waiting for your other phone to check in."
+            }
+            return DeliveryPresentation(
+                state = "relay",
+                label = "Via relay",
+                explanation = explanation,
+                action = null,
+                queuedCount = queued,
+                peerLine = evidenceLine(status),
+            )
+        }
+        if (queued > 0) return DeliveryPresentation(
+            state = "queued",
+            label = "Queued on this phone",
+            explanation = "${itemName(queued, status.userContentKind)} will send when a connection is available.",
+            action = "retry",
+            queuedCount = queued,
+            peerLine = "Not confirmed online",
+        )
+        if (heldByRelay > 0) return DeliveryPresentation(
+            state = "reconnecting",
+            label = "Reconnecting",
+            explanation = "${itemName(heldByRelay, status.userContentKind)} ${if (heldByRelay == 1) "is" else "are"} stored securely while this phone reconnects.",
+            action = "retry",
+            queuedCount = queued,
+            peerLine = "Not confirmed online",
+        )
+        return DeliveryPresentation(
+            state = "reconnecting",
+            label = "Reconnecting",
+            explanation = "Looking for your other phone. This retries on its own.",
+            action = null,
+            queuedCount = queued,
+            peerLine = "Not confirmed online",
+        )
+    }
+
+    private fun evidenceLine(status: SyncRouteStatus): String = when {
+        status.route == RouteKind.LAN && status.phase == RoutePhase.AUTHENTICATED -> "Reachable now"
+        status.peerEvidence == PeerEvidence.RECENT -> "Checked in recently"
+        else -> "Not confirmed online"
+    }
+
+    private fun itemName(total: Int, kind: UserContentKind): String {
+        val noun = if (kind == UserContentKind.NOTIFICATIONS) "notification" else "sync update"
+        return "$total $noun${if (total == 1) "" else "s"}"
+    }
 }
 
 internal object DeliveryStatusModel {

@@ -28,6 +28,162 @@ class ServiceLifecycleTest {
     private val relayUrl = "wss://relay.example.test/ws"
 
     @Test
+    fun deliveryPresenterCoversForegroundAndHomeTruthWithoutFalsePeerClaims() {
+        val cases = listOf(
+            Triple(
+                SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED, peerEvidence = PeerEvidence.DIRECT),
+                "Direct on Wi-Fi",
+                "Your phones are talking directly over Wi-Fi.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.RELAY,
+                    RoutePhase.AUTHENTICATED,
+                    awaitingPeerCount = 2,
+                    heldByRelayCount = 2,
+                    peerEvidence = PeerEvidence.STALE,
+                    deliveryReason = DeliveryReason.RELAY_HOLDING,
+                ),
+                "Via relay",
+                "2 notifications are stored securely and waiting for your other phone.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.RELAY,
+                    RoutePhase.AUTHENTICATED,
+                    peerEvidence = PeerEvidence.RECENT,
+                ),
+                "Via relay",
+                "Your other phone checked in recently. Delivery is encrypted end to end.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.RELAY,
+                    RoutePhase.AUTHENTICATED,
+                    peerEvidence = PeerEvidence.STALE,
+                ),
+                "Via relay",
+                "Connected to the relay. Waiting for your other phone to check in.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.RELAY,
+                    RoutePhase.AUTHENTICATED,
+                    awaitingPeerCount = 1,
+                    deliveryReason = DeliveryReason.WAITING_FOR_PEER,
+                ),
+                "Via relay",
+                "1 notification is waiting for confirmation from your other phone.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.RELAY,
+                    RoutePhase.AUTHENTICATED,
+                    deliveryReason = DeliveryReason.LAN_BOOTSTRAP_WAITING,
+                ),
+                "Via relay",
+                "Setting up direct Wi-Fi in the background. Delivery is encrypted end to end.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.RELAY,
+                    RoutePhase.AUTHENTICATED,
+                    deliveryReason = DeliveryReason.PEER_VERSION_INCOMPATIBLE,
+                ),
+                "Via relay",
+                "Update Twinotify on your other phone to enable direct Wi-Fi.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.RELAY,
+                    RoutePhase.AUTHENTICATED,
+                    deliveryReason = DeliveryReason.LAN_BINDING_CONFLICT,
+                ),
+                "Via relay",
+                "Direct Wi-Fi needs attention. Relay delivery remains encrypted end to end.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.NONE,
+                    RoutePhase.RECONNECTING,
+                    queuedCount = 1,
+                    pendingLocalCount = 1,
+                    deliveryReason = DeliveryReason.NO_ROUTE,
+                ),
+                "Queued on this phone",
+                "1 notification will send when a connection is available.",
+            ),
+            Triple(
+                SyncRouteStatus(RouteKind.NONE, RoutePhase.RECONNECTING),
+                "Reconnecting",
+                "Looking for your other phone. This retries on its own.",
+            ),
+            Triple(
+                SyncRouteStatus(
+                    RouteKind.NONE,
+                    RoutePhase.RECONNECTING,
+                    awaitingPeerCount = 3,
+                    heldByRelayCount = 3,
+                    deliveryReason = DeliveryReason.RELAY_HOLDING,
+                    userContentKind = UserContentKind.SYNC_UPDATES,
+                ),
+                "Reconnecting",
+                "3 sync updates are stored securely while this phone reconnects.",
+            ),
+            Triple(
+                SyncRouteStatus(RouteKind.NONE, RoutePhase.IDLE),
+                "Stopped",
+                "Mirroring is stopped.",
+            ),
+        )
+
+        cases.forEach { (status, label, explanation) ->
+            val presentation = DeliveryStatusPresenter.present(status, paired = true, enabled = true)
+            assertEquals(label, presentation.label)
+            assertEquals(explanation, presentation.explanation)
+            assertFalse(presentation.label.contains("connected", ignoreCase = true))
+            assertFalse(presentation.label.contains("active", ignoreCase = true))
+        }
+
+        assertEquals(
+            "Paused",
+            DeliveryStatusPresenter.present(
+                SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED),
+                paired = true,
+                enabled = false,
+            ).label,
+        )
+        assertEquals(
+            "Not paired",
+            DeliveryStatusPresenter.present(
+                SyncRouteStatus(RouteKind.LAN, RoutePhase.AUTHENTICATED),
+                paired = false,
+                enabled = true,
+            ).label,
+        )
+    }
+
+    @Test
+    fun publicRouteStatusIncludesTheNativePresentationWithoutSensitiveTransportDetails() {
+        val public = SyncRouteStatus(
+            route = RouteKind.RELAY,
+            phase = RoutePhase.AUTHENTICATED,
+            awaitingPeerCount = 1,
+            heldByRelayCount = 1,
+            deliveryReason = DeliveryReason.RELAY_HOLDING,
+        ).toPublicMap()
+
+        val presentation = assertIs<Map<*, *>>(public["presentation"])
+        assertEquals("Via relay", presentation["label"])
+        assertEquals(
+            "1 notification is stored securely and waiting for your other phone.",
+            presentation["explanation"],
+        )
+        assertFalse(presentation.values.joinToString().contains("wss://"))
+        assertFalse(presentation.keys.any { it in setOf("relay_url", "peer_id", "token", "content") })
+    }
+
+    @Test
     fun foregroundWithoutEffectivePostAvailabilityUpdatesHealthButDoesNotRequestMaterialization() {
         var permission: Boolean? = null
         var requests = 0
@@ -597,7 +753,7 @@ class ServiceLifecycleTest {
             setOf(
                 "route", "phase", "queued_count", "pending_local_count", "awaiting_peer_count",
                 "held_by_relay_count", "peer_evidence", "delivery_reason", "user_content_kind",
-                "route_generation",
+                "route_generation", "presentation",
             ),
             rendered.keys,
         )
@@ -797,7 +953,7 @@ class ServiceLifecycleTest {
             setOf(
                 "route", "phase", "queued_count", "pending_local_count", "awaiting_peer_count",
                 "held_by_relay_count", "peer_evidence", "delivery_reason", "user_content_kind",
-                "route_generation",
+                "route_generation", "presentation",
             ),
             rendered.keys,
         )

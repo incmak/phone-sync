@@ -18,6 +18,7 @@ const states: readonly HandoffTraceState[] = [
   'reconnecting',
   'queued',
   'paused',
+  'stopped',
   'unpaired',
 ];
 
@@ -90,7 +91,7 @@ function writeGeometryEvidence() {
 }
 
 describe('HandoffTrace', () => {
-  test('six state geometries are bounded, unique, and always retain two brackets with one ticket', () => {
+  test('seven state geometries are bounded, unique, and always retain two brackets with one ticket', () => {
     const seen = new Set<string>();
 
     states.forEach((state) => {
@@ -191,6 +192,15 @@ describe('HandoffTrace', () => {
     expect(leftRouteEnd).toEqual({ x: leftGate.x, y: height * 0.6 });
     expect(rightRouteStart).toEqual({ x: rightGate.x, y: height * 0.6 });
     expect(geometry.ticket.x + geometry.ticket.width).toBe(leftGate.x);
+  });
+
+  test('stopped geometry leaves the ticket at the source with no implied connection', () => {
+    const geometry = buildTraceGeometry('stopped', width, height);
+
+    expect(geometry.routePaths).toHaveLength(1);
+    expect(geometry.waypointPaths).toHaveLength(0);
+    expect(geometry.ticket.x + geometry.ticket.width).toBeLessThan(width * 0.35);
+    expect(pathPoints(geometry.routePaths[0]).at(-1)?.x).toBeLessThan(width * 0.35);
   });
 
   test('unpaired geometry keeps only endpoints and a ticket beside the left bracket', () => {

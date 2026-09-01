@@ -5,6 +5,9 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import java.util.Collections
 
+internal fun shouldCaptureOutbound(sourcePackage: String, selfPackage: String): Boolean =
+    sourcePackage != selfPackage
+
 /** Lifecycle-safe bridge for platform operations that require a bound notification listener. */
 object NotificationListenerBridge {
     private val lock = Any()
@@ -56,7 +59,7 @@ object NotificationListenerBridge {
         denylist: Set<String> = emptySet(),
         selfPackage: String = context.packageName,
     ): List<SourceNotificationSnapshot> = activeNotifications().asSequence()
-        .filter { it.packageName != selfPackage }
+        .filter { shouldCaptureOutbound(it.packageName, selfPackage) }
         .mapNotNull { NotifPostBuilder.captureSnapshot(it, context, denylist) }
         .toList()
 
@@ -69,7 +72,7 @@ object NotificationListenerBridge {
         val notifications = activeNotifications()
         return ListenerCaptureSnapshot(
             sourceSnapshots = notifications.asSequence()
-                .filter { it.packageName != selfPackage }
+                .filter { shouldCaptureOutbound(it.packageName, selfPackage) }
                 .mapNotNull { NotifPostBuilder.captureSnapshot(it, context, denylist) }
                 .toList(),
             liveMirrorIdentities = notifications.asSequence()

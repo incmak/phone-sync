@@ -11,6 +11,7 @@ export type HandoffTraceState =
   | 'reconnecting'
   | 'queued'
   | 'paused'
+  | 'stopped'
   | 'unpaired';
 
 export interface HandoffTraceProps {
@@ -182,6 +183,15 @@ export function buildTraceGeometry(
         ],
       };
     }
+    case 'stopped':
+      return {
+        state,
+        leftBracket,
+        rightBracket,
+        routePaths: [`M ${innerLeft} ${baseline} H ${innerLeft + ticketWidth + 8}`],
+        ticket: finalTicket(innerLeft + 4),
+        waypointPaths: [],
+      };
     case 'unpaired':
       return {
         state,
