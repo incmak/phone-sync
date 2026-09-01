@@ -106,7 +106,7 @@ export default function OemScreen() {
             {...cardProps}
             number="1"
             title="Disable battery optimization"
-            body={"Go to Settings \u2192 Battery \u2192 Battery Optimization, find Twinotify, and choose \u201cDon\u2019t optimize\u201d."}
+            body="In the app info screen, tap App battery usage and allow background use. The wording varies by device."
           />
           <StepCard
             {...cardProps}
@@ -123,7 +123,7 @@ export default function OemScreen() {
             fullWidth
             onPress={openBatterySettings}
           >
-            Open battery settings
+            Open app settings
           </TwButton>
           <TwButton
             variant="ghost"

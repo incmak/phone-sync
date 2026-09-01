@@ -247,7 +247,6 @@ class OfflinePairingLoopbackTest {
         val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
         val permissions = buildList {
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.NEARBY_WIFI_DEVICES)
-            if (Build.VERSION.SDK_INT >= 36) add("android.permission.ACCESS_LOCAL_NETWORK")
         }
         permissions.forEach { permission ->
             automation.grantRuntimePermission(context.packageName, permission)

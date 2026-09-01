@@ -127,12 +127,12 @@ const SLIDES: Slide[] = [
     body: 'Scan a code to link your two devices. No accounts, no email — just a one-time local handshake.',
   },
   {
-    title: 'Mirror every notification',
-    body: 'Every alert from phone A appears silently on phone B in real time, even when your screen is off.',
+    title: 'Mirror selected notifications',
+    body: 'Alerts you choose appear on your other phone in real time, even when its screen is off.',
   },
   {
     title: 'Private by default',
-    body: 'All data is encrypted on-device before it leaves. Twinotify never sees your notifications.',
+    body: 'Your phones encrypt notification data before sending it. Only your paired phones can read the content.',
   },
 ];
 

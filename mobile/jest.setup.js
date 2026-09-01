@@ -96,6 +96,15 @@ const mockTwinotifyCore = {
   requestCallStatePermissionAsync: jest.fn(async () => ({
     status: 'granted', granted: true, canAskAgain: true, expires: 'never',
   })),
+  getNearbyWifiPermissionAsync: jest.fn(async () => ({
+    status: 'undetermined', granted: false, canAskAgain: true, expires: 'never',
+  })),
+  requestNearbyWifiPermissionAsync: jest.fn(async () => ({
+    status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+  })),
+  isNotificationListenerGranted: jest.fn(async () => false),
+  openListenerSettings: jest.fn(async () => {}),
+  isPostNotificationsGranted: jest.fn(async () => false),
   openAppSettings: jest.fn(async () => {}),
   getMetrics: jest.fn(async () => ({ mirroredToday: 0, blockedToday: 0, latencyMs: null })),
   getRecentActivity: jest.fn(async () => []),
@@ -167,4 +176,12 @@ global.__RESET_OFFLINE_TEST_STATE__ = () => {
   mockTwinotifyCore.requestCallStatePermissionAsync.mockResolvedValue({
     status: 'granted', granted: true, canAskAgain: true, expires: 'never',
   });
+  mockTwinotifyCore.getNearbyWifiPermissionAsync.mockResolvedValue({
+    status: 'undetermined', granted: false, canAskAgain: true, expires: 'never',
+  });
+  mockTwinotifyCore.requestNearbyWifiPermissionAsync.mockResolvedValue({
+    status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+  });
+  mockTwinotifyCore.isNotificationListenerGranted.mockResolvedValue(false);
+  mockTwinotifyCore.isPostNotificationsGranted.mockResolvedValue(false);
 };

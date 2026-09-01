@@ -588,6 +588,22 @@ class TwinotifyCoreModule internal constructor(
             )
         }
 
+        AsyncFunction("getNearbyWifiPermissionAsync") { promise: Promise ->
+            Permissions.getPermissionsWithPermissionsManager(
+                appContext.permissions,
+                promise,
+                Manifest.permission.NEARBY_WIFI_DEVICES,
+            )
+        }
+
+        AsyncFunction("requestNearbyWifiPermissionAsync") { promise: Promise ->
+            Permissions.askForPermissionsWithPermissionsManager(
+                appContext.permissions,
+                promise,
+                Manifest.permission.NEARBY_WIFI_DEVICES,
+            )
+        }
+
         AsyncFunction("isNotificationListenerGranted") { promise: Promise ->
             try {
                 val ctx = requireContext()

@@ -1,11 +1,13 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
+import { View, Text, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import Svg, { Path, Circle, Rect } from 'react-native-svg';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { useTheme, TwButton } from '../../components';
 import type { SemanticDisplayPair } from '../../components/tokens';
 import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
+import { OnboardingState, type PairingMode } from '../../state/onboardingState';
 import * as Notifications from 'expo-notifications';
 
 // --- Icons ---
@@ -56,6 +58,7 @@ interface PermCardProps {
   description: string;
   granted: boolean;
   onGrant: () => void;
+  actionLabel: string;
   accent: string;
   accentInk: string;
   border: string;
@@ -69,7 +72,7 @@ interface PermCardProps {
 }
 
 function PermCard({
-  icon, title, description, granted, onGrant,
+  icon, title, description, granted, onGrant, actionLabel,
   accent, accentInk, border, fill, ink, ink3, sem, uiSemi, ui, radius,
 }: PermCardProps) {
   return (
@@ -101,6 +104,8 @@ function PermCard({
         </View>
       ) : (
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={actionLabel}
           onPress={onGrant}
           style={[permStyles.grantBtn, { backgroundColor: accent, borderRadius: radius / 2 }]}
         >
@@ -116,7 +121,7 @@ const permStyles = StyleSheet.create({
   iconWrap: { width: 44, height: 44, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   text: { flex: 1 },
   statusBadge: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
-  grantBtn: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
+  grantBtn: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
 });
 
 // --- Screen ---
@@ -125,17 +130,28 @@ export default function PermsScreen() {
   const theme = useTheme();
   const [postNotifGranted, setPostNotifGranted] = useState(false);
   const [nlsGranted, setNlsGranted] = useState(false);
+  const [pairingMode, setPairingMode] = useState<PairingMode | null>(null);
+  const [nearbyWifiGranted, setNearbyWifiGranted] = useState(false);
+  const [modeLoaded, setModeLoaded] = useState(false);
 
   const checkPerms = useCallback(async () => {
     try {
-      const [pn, nls] = await Promise.all([
+      const mode = await OnboardingState.getPairingMode();
+      const [pn, nls, nearby] = await Promise.all([
         TwinotifyCoreModule.isPostNotificationsGranted(),
         TwinotifyCoreModule.isNotificationListenerGranted(),
+        mode === 'nearby'
+          ? TwinotifyCoreModule.getNearbyWifiPermissionAsync()
+          : Promise.resolve({ granted: true }),
       ]);
+      setPairingMode(mode);
       setPostNotifGranted(pn);
       setNlsGranted(nls);
+      setNearbyWifiGranted(nearby.granted);
     } catch {
       // non-fatal; buttons still actionable
+    } finally {
+      setModeLoaded(true);
     }
   }, []);
 
@@ -175,7 +191,23 @@ export default function PermsScreen() {
     }
   }
 
-  const allGranted = postNotifGranted && nlsGranted;
+  async function grantNearbyWifi() {
+    try {
+      const result = await TwinotifyCoreModule.requestNearbyWifiPermissionAsync();
+      setNearbyWifiGranted(result.granted);
+      if (!result.granted && !result.canAskAgain) {
+        await TwinotifyCoreModule.openAppSettings();
+      }
+    } catch {
+      try { await TwinotifyCoreModule.openAppSettings(); } catch { /* ignore */ }
+    }
+  }
+
+  const needsNearbyWifi = pairingMode === 'nearby';
+  const allGranted = modeLoaded
+    && postNotifGranted
+    && nlsGranted
+    && (!needsNearbyWifi || nearbyWifiGranted);
 
   const cardProps = {
     accent: theme.accent,
@@ -195,7 +227,7 @@ export default function PermsScreen() {
       edges={['top', 'bottom']}
       style={[styles.safe, { backgroundColor: theme.bg }]}
     >
-      <View style={styles.container}>
+      <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.header}>
           <Text
             style={[
@@ -212,7 +244,9 @@ export default function PermsScreen() {
               { color: theme.ink3, fontFamily: theme.fonts.ui },
             ]}
           >
-            Twinotify needs two permissions to mirror notifications.
+            {needsNearbyWifi
+              ? 'Twinotify needs three permissions for nearby pairing.'
+              : 'Twinotify needs two permissions to mirror notifications.'}
           </Text>
         </View>
 
@@ -221,6 +255,7 @@ export default function PermsScreen() {
             {...cardProps}
             granted={postNotifGranted}
             onGrant={grantPostNotif}
+            actionLabel="Allow Post notifications"
             icon={<BellIcon color={theme.ink3} />}
             title="Post notifications"
             description="Shows mirrored alerts on this device's lock screen and notification shade."
@@ -229,10 +264,22 @@ export default function PermsScreen() {
             {...cardProps}
             granted={nlsGranted}
             onGrant={grantNls}
+            actionLabel="Open Notification access settings"
             icon={<NotifListIcon color={theme.ink3} />}
             title="Notification access"
-            description="Reads notifications so they can be sent to your paired device. Tap to open settings and enable Twinotify."
+            description="Reads notification content and actions so selected alerts can be shown on your paired phone. Tap to open Android settings."
           />
+          {needsNearbyWifi && (
+            <PermCard
+              {...cardProps}
+              granted={nearbyWifiGranted}
+              onGrant={grantNearbyWifi}
+              actionLabel="Allow Nearby devices"
+              icon={<MaterialIcons name="devices" color={theme.ink3} size={24} />}
+              title="Nearby devices"
+              description="Finds and connects to your other phone on nearby Wi-Fi. Twinotify does not use this permission for location."
+            />
+          )}
         </View>
 
         <View style={styles.footer}>
@@ -246,14 +293,14 @@ export default function PermsScreen() {
             Continue
           </TwButton>
         </View>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { flex: 1, paddingHorizontal: 24, paddingTop: 20, paddingBottom: 8 },
+  container: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 20, paddingBottom: 8 },
   header: { marginBottom: 32 },
   subtitle: { marginTop: 10 },
   cards: { gap: 12, flex: 1 },

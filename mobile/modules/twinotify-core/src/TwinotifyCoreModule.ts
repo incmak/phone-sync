@@ -133,6 +133,8 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   setCallCaptureEnabled(enabled: boolean): Promise<boolean>;
   getCallStatePermissionAsync(): Promise<PermissionResponse>;
   requestCallStatePermissionAsync(): Promise<PermissionResponse>;
+  getNearbyWifiPermissionAsync(): Promise<PermissionResponse>;
+  requestNearbyWifiPermissionAsync(): Promise<PermissionResponse>;
   getSyncStatus(): Promise<SyncStatus>;
   getRouteStatus(): Promise<RouteStatus>;
   /** Try a direct LAN route before the relay. */
