@@ -19,6 +19,13 @@ sha256_file() {
 
 lowercase() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+extract_signer_sha256_digests() {
+  sed -nE \
+    -e 's/^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$/\1/p' \
+    -e 's/^V[0-9]+(\.[0-9]+)? Signer: certificate SHA-256 digest: ([0-9a-fA-F]{64})$/\2/p' \
+    -e 's/^V[0-9]+(\.[0-9]+)? Signer: \([^)]*\) certificate SHA-256 digest: ([0-9a-fA-F]{64})$/\2/p'
+}
+
 find_android_tool() {
   local tool=$1 sdk candidate
   if command -v "$tool" >/dev/null 2>&1; then
@@ -52,9 +59,9 @@ verify_apk() {
 
   local cert_output cert_count actual_cert
   cert_output=$("$apksigner" verify --verbose --print-certs "$apk" 2>&1) || die "APK signature verification failed"
-  cert_count=$(printf '%s\n' "$cert_output" | grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest: [0-9a-fA-F]{64}$' || true)
+  actual_cert=$(printf '%s\n' "$cert_output" | extract_signer_sha256_digests | sort -u)
+  cert_count=$(printf '%s\n' "$actual_cert" | grep -Ec '^[0-9a-fA-F]{64}$' || true)
   [[ "$cert_count" -eq 1 ]] || die "APK must have exactly one verified signer SHA-256 digest"
-  actual_cert=$(printf '%s\n' "$cert_output" | sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: \([0-9a-fA-F][0-9a-fA-F]*\)$/\1/p')
   [[ "$(lowercase "$actual_cert")" == "$(lowercase "$expected_cert")" ]] || die "APK signer certificate SHA-256 does not match the protected expected fingerprint"
 
   local badging package_name
@@ -98,7 +105,7 @@ find_android_platform() {
 }
 
 self_test() {
-  local tmp aapt2 apksigner zipalign platform release_keystore debug_keystore release_apk debug_apk commit cert cert_output sha
+  local tmp aapt2 apksigner zipalign platform release_keystore debug_keystore release_apk debug_apk commit cert cert_output parser_fixture parser_expected parser_actual sha
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/twinotify-standalone-android.XXXXXX")
   trap 'rm -rf -- "$tmp"' RETURN
   aapt2=$(find_android_tool aapt2) || die "self-test requires aapt2"
@@ -106,6 +113,15 @@ self_test() {
   zipalign=$(find_android_tool zipalign) || die "self-test requires zipalign"
   platform=$(find_android_platform) || die "self-test requires an Android platform android.jar"
   command -v keytool >/dev/null 2>&1 || die "self-test requires keytool"
+
+  parser_expected=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  parser_fixture=$(printf '%s\n' \
+    "Signer #1 certificate SHA-256 digest: $parser_expected" \
+    "V3.0 Signer: certificate SHA-256 digest: $parser_expected" \
+    "V3.1 Signer: (minSdkVersion=33, maxSdkVersion=2147483647) certificate SHA-256 digest: $parser_expected" \
+    'Source Stamp Signer: certificate SHA-256 digest: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')
+  parser_actual=$(printf '%s\n' "$parser_fixture" | extract_signer_sha256_digests | sort -u)
+  [[ "$parser_actual" == "$parser_expected" ]] || die "self-test signer certificate parser rejected supported apksigner output"
 
   release_keystore="$tmp/release.p12"
   debug_keystore="$tmp/debug.p12"
@@ -147,7 +163,7 @@ self_test() {
   build_fixture "$debug_apk" "$debug_keystore" true false
   commit=0123456789abcdef0123456789abcdef01234567
   cert_output=$("$apksigner" verify --print-certs "$release_apk")
-  cert=$(printf '%s\n' "$cert_output" | sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p')
+  cert=$(printf '%s\n' "$cert_output" | extract_signer_sha256_digests | sort -u)
   if [[ ! "$cert" =~ ^[0-9a-fA-F]{64}$ ]]; then
     printf 'standalone-android: unable to parse fixture certificate from apksigner output:\n%s\n' "$cert_output" >&2
     return 1
