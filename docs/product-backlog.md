@@ -1,6 +1,6 @@
 # Twinotify Product Backlog
 
-**Last reviewed:** 2026-08-31
+**Last reviewed:** 2026-09-01
 
 **Purpose:** Local source of truth for user-visible follow-up work that is not
 owned by the reliability, direct-LAN, relay-hardening, or protected-release
@@ -22,6 +22,8 @@ from host tests alone.
 | PB-005 | P1 | Make relay setup consumer-friendly with a safe default service | BLOCKED | approved production relay URL and service policy |
 | PB-006 | P2 | Add a secondary “Open in Twinotify” mirrored-notification action | BACKLOG | PB-001/PB-003 detail model |
 | PB-007 | P1 | Complete a non-technical-user UX audit across onboarding, pairing, home, settings, recovery, and unpair | BACKLOG | PB-002 and PB-005 |
+| PB-008 | P0 | Restore transport automatically after process/package restart | READY FOR DESIGN | automatic-LAN physical evidence |
+| PB-009 | P1 | Make home delivery metrics reflect verified mirrored traffic | READY FOR DESIGN | delivery-event accounting audit |
 
 ## Implemented invariant requiring physical regression coverage
 
@@ -182,6 +184,46 @@ progressive disclosure.
 - Home communicates route, peer evidence, and custody without requiring knowledge of LAN, WebSockets, or queues.
 - Recovery actions are specific, reversible, and do not send users into settings without an explanation.
 - Large font, TalkBack, light/dark, one-handed reach, and OEM background-restriction paths are recorded on both target phones.
+
+## PB-008 — Automatic transport recovery after process restart
+
+**Problem:** Physical testing found that Twinotify can retain an enabled-looking
+preference after a force-stop or package replacement while no transport is
+running. Opening the app alone may leave it disconnected until the user changes
+a setting. An enabled product must restore its service and route without this
+manual wake-up.
+
+**Scope:** Audit persisted mirroring intent, package-replaced/boot handling,
+activity resume, foreground-service eligibility, and OEM background restrictions.
+Define one idempotent recovery authority that starts only when the user has
+enabled mirroring and all required permissions remain valid.
+
+**Acceptance:**
+
+- An in-place signed upgrade preserves pairing/data and resumes delivery after the next Android-permitted wake without toggling a preference.
+- Opening Twinotify after force-stop reconciles enabled intent with actual service state and starts or explains the required recovery action.
+- Reboot, process death, package replacement, and ordinary activity recreation do not create duplicate services or transport coordinators.
+- A user-paused state remains paused across every lifecycle event.
+- Tests cover persisted-intent truth, idempotent startup, permission loss, and OEM-denied background start; both physical phones cover upgrade, force-stop, and reboot.
+
+## PB-009 — Truthful mirrored and latency metrics
+
+**Problem:** The home screen remained at zero mirrored items and no latency data
+after bidirectional notifications were physically delivered and acknowledged on
+direct Wi-Fi. The metric therefore does not represent verified user delivery.
+
+**Scope:** Trace notification delivery, peer custody receipts, duplicates,
+internal controls, and day-boundary accounting into the existing metrics
+surface. Choose and document the exact event that increments “Mirrored” and the
+timestamps used for latency.
+
+**Acceptance:**
+
+- One logical notification increments the daily mirrored count exactly once after the documented delivery proof.
+- Retry, duplicate receipt, snapshot reconciliation, control traffic, call state, and dismissal do not inflate notification counts.
+- Bidirectional deliveries are attributed locally and survive process restart and UTC/local day transitions according to documented semantics.
+- Latency uses monotonic-compatible or authenticated timestamps and never reports a fabricated value when required evidence is absent.
+- JVM/Room tests cover deduplication and rollover; a two-phone run reconciles the visible count with sanitized sent markers.
 
 ## Backlog maintenance
 
