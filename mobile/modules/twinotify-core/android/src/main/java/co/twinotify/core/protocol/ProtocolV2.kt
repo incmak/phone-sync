@@ -33,6 +33,11 @@ data class AuthenticatedEnvelope(
     val envelopeSha256: String,
 )
 
+/** A fully authenticated envelope whose inner event is beyond the allowed clock-skew window. */
+class AuthenticatedEnvelopeExpiredException(
+    val authenticated: AuthenticatedEnvelope,
+) : ProtocolException("authenticated v2 envelope expired")
+
 fun interface PayloadDecryptor {
     fun decrypt(envelope: EncryptedEnvelope): ByteArray
 }

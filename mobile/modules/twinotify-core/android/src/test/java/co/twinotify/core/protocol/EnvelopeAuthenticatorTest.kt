@@ -74,7 +74,7 @@ class EnvelopeAuthenticatorTest {
     fun authenticatedExpiry_rejectsOneMillisecondBeyondSkewAfterDecryption() {
         val expiry = OUTER_CREATED_AT + 10_000L
         var decryptions = 0
-        val error = assertFailsWith<ProtocolException> {
+        val error = assertFailsWith<AuthenticatedEnvelopeExpiredException> {
             EnvelopeAuthenticator(
                 decryptor = PayloadDecryptor {
                     decryptions += 1
@@ -87,6 +87,11 @@ class EnvelopeAuthenticatorTest {
 
         assertEquals(1, decryptions)
         assertEquals("authenticated v2 envelope expired", error.message)
+        assertEquals(INNER_ID, error.authenticated.inner.msgId)
+        val expectedDigest = MessageDigest.getInstance("SHA-256")
+            .digest(validOuterJson.encodeToByteArray())
+            .joinToString("") { "%02x".format(it) }
+        assertEquals(expectedDigest, error.authenticated.envelopeSha256)
     }
 
     @Test

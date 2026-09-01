@@ -26,6 +26,7 @@ import co.twinotify.core.call.CallStateReducer
 import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.listener.NotificationListenerBridge
 import co.twinotify.core.protocol.AuthenticatedEnvelope
+import co.twinotify.core.protocol.AuthenticatedEnvelopeExpiredException
 import co.twinotify.core.protocol.EnvelopeAuthenticator
 import co.twinotify.core.protocol.PayloadDecryptor
 import co.twinotify.core.protocol.optNullableString
@@ -312,6 +313,44 @@ internal suspend fun dispatchAuthenticatedCallRejection(
     }
 }
 
+/**
+ * Terminalizes an event only after it decrypted and its authenticated inner metadata matched the
+ * relay-visible envelope. The encrypted expiry receipt must reach durable custody before the
+ * original relay record becomes ACK-ready.
+ */
+internal suspend fun dispatchAuthenticatedExpiry(
+    opened: AuthenticatedEnvelope,
+    committedAt: Long,
+    createReceipt: suspend (String, String) -> co.twinotify.core.storage.OutboundMessage?,
+    journal: CallRejectionJournal,
+): InboundDispatchResult {
+    val inner = opened.inner
+    val receipt = createReceipt(inner.msgId, opened.envelopeSha256)
+        ?: return InboundDispatchResult.Rejected("expiry_receipt_unavailable")
+    val inbound = InboundMessage(
+        msgId = inner.msgId,
+        originDevice = inner.originDevice,
+        envelopeSha256 = opened.envelopeSha256,
+        eventType = inner.type,
+        canonId = inner.canonId,
+        sequence = inner.sequence,
+        outcome = "REJECTED",
+        committedAt = committedAt,
+        appliedAt = committedAt,
+        receiptMsgId = receipt.msgId,
+        relayAckState = "NONE",
+    )
+    return when (journal.commit(inbound, receipt)) {
+        CallRejectionCommitResult.Committed ->
+            InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256)
+        CallRejectionCommitResult.Duplicate ->
+            InboundDispatchResult.Duplicate(inner.msgId, opened.envelopeSha256)
+        CallRejectionCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        CallRejectionCommitResult.ReceiptConflict ->
+            InboundDispatchResult.Rejected("expiry_receipt_conflict")
+    }
+}
+
 internal suspend fun dispatchAuthenticatedDirectControl(
     msgId: String,
     originDevice: String,
@@ -592,6 +631,19 @@ class InboundDispatcher internal constructor(
                     peerDeviceId = pairedPeer.deviceId,
                 ).open(raw)
             }
+        } catch (expired: AuthenticatedEnvelopeExpiredException) {
+            val authenticated = expired.authenticated
+            val receiptFactory = DurableReceiptFactory(ctx.applicationContext)
+            val result = dispatchAuthenticatedExpiry(
+                opened = authenticated,
+                committedAt = System.currentTimeMillis().coerceAtLeast(0L),
+                createReceipt = receiptFactory::createExpired,
+                journal = CallRejectionJournal(reliableDao::commitInboundRejection),
+            )
+            if (result !is InboundDispatchResult.Rejected) {
+                onAuthenticatedEvent(authenticated.inner.type)
+            }
+            return result
         } catch (error: Throwable) {
             android.util.Log.w("Twinotify", "v2 authentication failed: ${error.message}")
             return InboundDispatchResult.Rejected("auth_failed")

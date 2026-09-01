@@ -477,6 +477,9 @@ class DurableReceiptFactory(private val context: Context) : ReceiptFactory {
     suspend fun createApplied(ackedMsgId: String, envelopeSha256: String): OutboundMessage? =
         createReceipt(ackedMsgId, envelopeSha256, "applied", null)
 
+    suspend fun createExpired(ackedMsgId: String, envelopeSha256: String): OutboundMessage? =
+        createReceipt(ackedMsgId, envelopeSha256, "expired", null)
+
     override suspend fun createRejected(
         ackedMsgId: String,
         envelopeSha256: String,

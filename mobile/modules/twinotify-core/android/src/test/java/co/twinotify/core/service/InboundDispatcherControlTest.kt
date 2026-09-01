@@ -6,6 +6,7 @@ import java.util.concurrent.CancellationException
 import java.util.Base64
 import java.io.File
 import co.twinotify.core.protocol.EncryptedEnvelope
+import co.twinotify.core.protocol.AuthenticatedEnvelope
 import co.twinotify.core.protocol.EnvelopeAuthenticator
 import co.twinotify.core.protocol.InnerEventV2
 import co.twinotify.core.protocol.PayloadDecryptor
@@ -35,6 +36,52 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class InboundDispatcherControlTest {
+    @Test
+    fun authenticatedExpiredEventCommitsTerminalReceiptWithoutMaterialization() = runTest {
+        val inner = malformedSnapshotEvent(
+            msgId = 49.canonicalUuid(),
+            type = "notif.post",
+            canonId = "peer-device:com.example:49:",
+            sequence = 49,
+        )
+        val opened = AuthenticatedEnvelope(
+            outer = EncryptedEnvelope(
+                version = 2,
+                msgId = inner.msgId,
+                originDevice = inner.originDevice,
+                createdAt = inner.createdAt,
+                nonceB64 = "nonce",
+                ciphertextB64 = "ciphertext",
+            ),
+            inner = inner,
+            envelopeSha256 = "a".repeat(64),
+        )
+        var committed: Pair<InboundMessage, co.twinotify.core.storage.OutboundMessage>? = null
+        var receiptArgs: Pair<String, String>? = null
+
+        val result = dispatchAuthenticatedExpiry(
+            opened = opened,
+            committedAt = 20_000,
+            createReceipt = { msgId, digest ->
+                receiptArgs = msgId to digest
+                outboundPeerReceipt(79.canonicalUuid())
+            },
+            journal = CallRejectionJournal { inbound, receipt ->
+                committed = inbound to receipt
+                CallRejectionCommitResult.Committed
+            },
+        )
+
+        assertEquals(InboundDispatchResult.Accepted(inner.msgId, opened.envelopeSha256), result)
+        assertEquals(inner.msgId to opened.envelopeSha256, receiptArgs)
+        val (inbound, receipt) = requireNotNull(committed)
+        assertEquals("REJECTED", inbound.outcome)
+        assertEquals("NONE", inbound.relayAckState)
+        assertEquals(inner.canonId, inbound.canonId)
+        assertEquals(inner.sequence, inbound.sequence)
+        assertEquals(receipt.msgId, inbound.receiptMsgId)
+    }
+
     @Test
     fun authenticatedBootstrapAndProbeCommitAppliedReceiptsBeforePostCommitSignals() = runTest {
         val bootstrap = lanBootstrapEvent()

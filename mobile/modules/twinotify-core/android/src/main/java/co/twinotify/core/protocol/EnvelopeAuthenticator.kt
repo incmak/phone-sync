@@ -37,19 +37,20 @@ class EnvelopeAuthenticator(
         }
         val inner = ProtocolJson.decodeInner(decodeUtf8(plaintext))
         validateOuterAndInner(outer, inner)
+        val authenticated = AuthenticatedEnvelope(
+            outer = outer,
+            inner = inner,
+            envelopeSha256 = sha256Hex(rawEnvelope.encodeToByteArray()),
+        )
         val acceptedThrough = if (inner.expiresAt > Long.MAX_VALUE - EXPIRY_SKEW_MS) {
             Long.MAX_VALUE
         } else {
             inner.expiresAt + EXPIRY_SKEW_MS
         }
         if (clock() > acceptedThrough) {
-            throw ProtocolException("authenticated v2 envelope expired")
+            throw AuthenticatedEnvelopeExpiredException(authenticated)
         }
-        return AuthenticatedEnvelope(
-            outer = outer,
-            inner = inner,
-            envelopeSha256 = sha256Hex(rawEnvelope.encodeToByteArray()),
-        )
+        return authenticated
     }
 
     private fun validateOuterAndInner(outer: EncryptedEnvelope, inner: InnerEventV2) {
