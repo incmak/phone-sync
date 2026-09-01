@@ -28,6 +28,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.flow.flow
@@ -343,6 +344,27 @@ class LanTransportTest {
         val second = transport.run().toList()
 
         assertEquals(listOf(LanTransportEvent.Closed("session_already_started")), second)
+    }
+
+    @Test
+    fun authenticatedRouteSessionOutlivesTheTemporaryOpeningScope() = runTest {
+        val connection = FakeConnection()
+        val route = LanRoute(
+            connect = { connection },
+            outbox = outbox(FakeStore()),
+            dispatch = { InboundDispatchResult.Accepted(MSG_A, DIGEST_A) },
+        )
+
+        val opened = backgroundScope.async {
+            coroutineScope { route.open() }
+        }
+        runCurrent()
+
+        assertTrue(
+            opened.isCompleted,
+            "authenticated LAN worker kept the relay-promotion scope from returning",
+        )
+        opened.await().close("test_complete")
     }
 
     @Test

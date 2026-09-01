@@ -237,7 +237,10 @@ class LanRoute(
         val connection = connect()
         val transport = LanTransport(connection, outbox, dispatch = dispatch)
         val closed = CompletableDeferred<String>()
-        val session = CoroutineScope(currentCoroutineContext()).launch {
+        // The returned route session owns this worker. In particular, do not attach it to
+        // TransportCoordinator's temporary relay-promotion scope: that scope must return after
+        // authentication so it can close relay and grant LAN the single drainer lease.
+        val session = CoroutineScope(currentCoroutineContext().minusKey(Job)).launch {
             try {
                 transport.run().collect { event ->
                     onEvent(event)
@@ -271,8 +274,10 @@ private class LanRouteSession(
         } catch (_: Throwable) {
             null
         }
-        session.cancelAndJoin()
-        closed.complete(code)
+        withContext(NonCancellable) {
+            session.cancelAndJoin()
+            closed.complete(code)
+        }
         cancellation?.let { throw it }
     }
 }
