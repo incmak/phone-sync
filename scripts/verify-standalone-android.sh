@@ -98,7 +98,7 @@ find_android_platform() {
 }
 
 self_test() {
-  local tmp aapt2 apksigner zipalign platform release_keystore debug_keystore release_apk debug_apk commit cert sha
+  local tmp aapt2 apksigner zipalign platform release_keystore debug_keystore release_apk debug_apk commit cert cert_output sha
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/twinotify-standalone-android.XXXXXX")
   trap 'rm -rf -- "$tmp"' RETURN
   aapt2=$(find_android_tool aapt2) || die "self-test requires aapt2"
@@ -146,7 +146,12 @@ self_test() {
   build_fixture "$release_apk" "$release_keystore" true false
   build_fixture "$debug_apk" "$debug_keystore" true false
   commit=0123456789abcdef0123456789abcdef01234567
-  cert=$("$apksigner" verify --print-certs "$release_apk" | sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p')
+  cert_output=$("$apksigner" verify --print-certs "$release_apk")
+  cert=$(printf '%s\n' "$cert_output" | sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p')
+  if [[ ! "$cert" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    printf 'standalone-android: unable to parse fixture certificate from apksigner output:\n%s\n' "$cert_output" >&2
+    return 1
+  fi
   sha=$(sha256_file "$release_apk")
   printf '{"git_commit":"%s","app_sha256":"%s"}\n' "$commit" "$sha" > "$tmp/provenance.json"
 
