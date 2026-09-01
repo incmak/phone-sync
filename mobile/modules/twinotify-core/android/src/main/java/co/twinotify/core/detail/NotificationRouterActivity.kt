@@ -41,11 +41,16 @@ class NotificationTapRouter(
     private val source: NotificationSourceLauncher,
     private val fallback: NotificationFallbackLauncher,
 ) {
-    suspend fun route(detailId: String): NotificationTapResult {
-        if (!isOpaqueDetailId(detailId)) return NotificationTapResult.InvalidDetail
-        val detail = load.load(detailId)
-        if (detail != null && source.launch(detail.packageName) == SourceLaunchResult.Launched) {
-            return NotificationTapResult.SourceOpened
+    suspend fun route(
+        detailId: String,
+        openInTwinotify: Boolean = false,
+    ): NotificationTapResult {
+        if (!isOpaqueNotificationDetailId(detailId)) return NotificationTapResult.InvalidDetail
+        if (!openInTwinotify) {
+            val detail = load.load(detailId)
+            if (detail != null && source.launch(detail.packageName) == SourceLaunchResult.Launched) {
+                return NotificationTapResult.SourceOpened
+            }
         }
         return if (fallback.launch(detailId)) {
             NotificationTapResult.FallbackOpened
@@ -53,10 +58,32 @@ class NotificationTapRouter(
             NotificationTapResult.Unavailable
         }
     }
+}
 
-    private fun isOpaqueDetailId(value: String): Boolean = runCatching {
-        UUID.fromString(value).toString() == value.lowercase()
-    }.getOrDefault(false)
+internal fun isOpaqueNotificationDetailId(value: String): Boolean = runCatching {
+    UUID.fromString(value).toString() == value.lowercase()
+}.getOrDefault(false)
+
+internal fun notificationRouteUri(
+    detailId: String,
+    openInTwinotify: Boolean = false,
+    sourceLaunchFailed: Boolean = false,
+) = requireNotNull(detailId.takeIf(::isOpaqueNotificationDetailId)) {
+    "notification detail ID must be an opaque UUID"
+}.let { validDetailId ->
+    "${NotificationRouterActivity.SCHEME}://${NotificationRouterActivity.NOTIFICATION_HOST}/$validDetailId"
+        .toUri()
+        .buildUpon()
+        .apply {
+            if (openInTwinotify) {
+                appendQueryParameter(
+                    NotificationRouterActivity.OPEN_IN_TWINOTIFY_PARAM,
+                    NotificationRouterActivity.OPEN_IN_TWINOTIFY_VALUE,
+                )
+            }
+            if (sourceLaunchFailed) appendQueryParameter(SOURCE_LAUNCH_FAILED_PARAM, "1")
+        }
+        .build()
 }
 
 class NotificationRouterActivity : Activity() {
@@ -65,13 +92,14 @@ class NotificationRouterActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val detailId = intent.data
+        val route = intent.data
             ?.takeIf { it.scheme == SCHEME && it.host == NOTIFICATION_HOST && it.pathSegments.size == 1 }
-            ?.lastPathSegment
+        val detailId = route?.lastPathSegment
         if (detailId == null) {
             finish()
             return
         }
+        val openInTwinotify = route.getQueryParameter(OPEN_IN_TWINOTIFY_PARAM) == OPEN_IN_TWINOTIFY_VALUE
         val dao = NotificationDb.get(applicationContext).reliableDeliveryDao()
         val router = NotificationTapRouter(
             load = NotificationRouteLoader { id ->
@@ -92,7 +120,7 @@ class NotificationRouterActivity : Activity() {
                         startActivity(
                             Intent(
                                 Intent.ACTION_VIEW,
-                                "$SCHEME://$NOTIFICATION_HOST/$id?sourceLaunchFailed=1".toUri(),
+                                notificationRouteUri(id, sourceLaunchFailed = true),
                             ).apply {
                                 setPackage(packageName)
                                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -105,7 +133,7 @@ class NotificationRouterActivity : Activity() {
         )
         routingJob = scope.launch {
             try {
-                router.route(detailId)
+                router.route(detailId, openInTwinotify)
             } finally {
                 withContext(Dispatchers.Main.immediate) { finish() }
             }
@@ -121,5 +149,9 @@ class NotificationRouterActivity : Activity() {
     companion object {
         const val SCHEME = "twinotify"
         const val NOTIFICATION_HOST = "notification"
+        const val OPEN_IN_TWINOTIFY_PARAM = "openInTwinotify"
+        const val OPEN_IN_TWINOTIFY_VALUE = "1"
     }
 }
+
+private const val SOURCE_LAUNCH_FAILED_PARAM = "sourceLaunchFailed"

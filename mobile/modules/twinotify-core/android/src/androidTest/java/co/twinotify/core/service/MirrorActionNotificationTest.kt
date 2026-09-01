@@ -6,6 +6,7 @@ import android.os.SystemClock
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import co.twinotify.core.actions.MirrorActionIntent
+import co.twinotify.core.detail.NotificationRouterActivity
 import co.twinotify.core.listener.NotifActionJson
 import co.twinotify.core.listener.NotifConversationJson
 import co.twinotify.core.listener.NotifMessageJson
@@ -13,6 +14,9 @@ import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.storage.ActionInvocation
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.Test
 
@@ -126,6 +130,13 @@ class MirrorActionNotificationTest {
         assertFalse(button.allowGeneratedReplies)
         assertTrue(button.actionIntent.isImmutable)
         assertTrue(button.remoteInputs.isNullOrEmpty())
+
+        val open = notification.actions[2]
+        assertEquals("Open in Twinotify", open.title)
+        assertTrue(open.isAuthenticationRequired)
+        assertTrue(open.actionIntent.isActivity)
+        assertTrue(open.actionIntent.isImmutable)
+        assertNotEquals(notification.contentIntent, open.actionIntent)
     }
 
     @Test
@@ -147,8 +158,64 @@ class MirrorActionNotificationTest {
 
         assertEquals("Sending\u2026", notification.extras.getString(Notification.EXTRA_SUB_TEXT))
         assertEquals("private reply", notification.extras.getCharSequenceArray(Notification.EXTRA_REMOTE_INPUT_HISTORY)?.single())
-        assertEquals(1, notification.actions.size)
-        assertEquals("Archive", notification.actions.single().title)
+        assertEquals(listOf("Archive", "Open in Twinotify"), notification.actions.map { it.title.toString() })
+    }
+
+    @Test
+    fun sourceActionsKeepPriorityAndTotalActionsStayWithinAndroidCap() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val notification = MirrorPoster.buildNotification(
+            context,
+            post(
+                actions = listOf(
+                    NotifActionJson(REPLY_ID, "Reply", Notification.Action.SEMANTIC_ACTION_REPLY, true, "Message"),
+                    NotifActionJson(BUTTON_ID, "Archive", Notification.Action.SEMANTIC_ACTION_ARCHIVE, false, null),
+                    NotifActionJson(THIRD_ID, "Mark read", Notification.Action.SEMANTIC_ACTION_MARK_AS_READ, false, null),
+                ),
+            ),
+            localId = 41,
+            localTag = "mirror-tag",
+            detailId = DETAIL_ID,
+        )
+
+        assertEquals(listOf("Reply", "Archive", "Mark read"), notification.actions.map { it.title.toString() })
+    }
+
+    @Test
+    fun invalidDetailIdCreatesNoNavigationPendingIntents() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val notification = MirrorPoster.buildNotification(
+            context,
+            post(actions = emptyList()),
+            localId = 41,
+            localTag = "mirror-tag",
+            detailId = "peer:package:id:tag",
+        )
+
+        assertNull(notification.contentIntent)
+        assertTrue(notification.actions.isNullOrEmpty())
+    }
+
+    @Test
+    fun openInTwinotifyActionLaunchesTheExplicitRouterActivity() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val monitor = instrumentation.addMonitor(NotificationRouterActivity::class.java.name, null, false)
+        try {
+            val notification = MirrorPoster.buildNotification(
+                context,
+                post(actions = emptyList()),
+                localId = 41,
+                localTag = "mirror-tag",
+                detailId = DETAIL_ID,
+            )
+
+            notification.actions.single().actionIntent.send()
+
+            assertNotNull(instrumentation.waitForMonitorWithTimeout(monitor, 2_000))
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
     }
 
     @Test
@@ -255,6 +322,7 @@ class MirrorActionNotificationTest {
     private companion object {
         const val REPLY_ID = "33333333-3333-4333-8333-333333333333"
         const val BUTTON_ID = "44444444-4444-4444-8444-444444444444"
+        const val THIRD_ID = "55555555-5555-4555-8555-555555555555"
         const val DETAIL_ID = "11111111-1111-4111-8111-111111111111"
     }
 }

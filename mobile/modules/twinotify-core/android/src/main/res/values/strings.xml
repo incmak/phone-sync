@@ -7,4 +7,5 @@
     <string name="mirror_action_gone">Action unavailable</string>
     <string name="mirror_action_notification_gone">Notification unavailable</string>
     <string name="mirror_action_expired">Timed out</string>
+    <string name="open_in_twinotify">Open in Twinotify</string>
 </resources>

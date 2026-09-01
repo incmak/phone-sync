@@ -16,6 +16,8 @@ import co.twinotify.core.R
 import co.twinotify.core.actions.ActionInvokeReceiver
 import co.twinotify.core.actions.MirrorActionIntent
 import co.twinotify.core.detail.NotificationRouterActivity
+import co.twinotify.core.detail.isOpaqueNotificationDetailId
+import co.twinotify.core.detail.notificationRouteUri
 import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.ActionInvocation
@@ -36,9 +38,10 @@ object MirrorPoster {
         val largeIcon = post.large_icon_png_b64?.let(::decodeBitmap)
         val sourceArtwork = largeIcon ?: smallIcon
 
-        val tapPi = detailId?.let {
+        val validDetailId = detailId?.takeIf(::isOpaqueNotificationDetailId)
+        val tapPi = validDetailId?.let {
             val tapIntent = Intent(ctx, NotificationRouterActivity::class.java).apply {
-                data = "${NotificationRouterActivity.SCHEME}://${NotificationRouterActivity.NOTIFICATION_HOST}/$it".toUri()
+                data = notificationRouteUri(it)
             }
             PendingIntent.getActivity(
                 ctx, 0, tapIntent,
@@ -49,6 +52,9 @@ object MirrorPoster {
             ?: post.text?.takeIf { it.isNotBlank() }
             ?: post.title
         val presentation = MirrorActionPresentation.from(ctx, invocations)
+        val sourceActions = post.actions
+            .take(MAX_VISIBLE_ACTIONS)
+            .filterNot { it.action_id in presentation.pendingActionIds }
         return NotificationCompat.Builder(ctx, NotifChannelSetup.CHANNEL_MIRRORS)
             .setContentTitle(post.title ?: "")
             .setContentText(post.text ?: "")
@@ -87,7 +93,7 @@ object MirrorPoster {
                     setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
                 }
                 presentation.replyText?.let { setRemoteInputHistory(arrayOf(it)) }
-                post.actions.take(3).filterNot { it.action_id in presentation.pendingActionIds }.forEach { action ->
+                sourceActions.forEach { action ->
                     val invokeIntent = Intent(ctx, ActionInvokeReceiver::class.java).apply {
                         data = MirrorActionIntent.dataUri(localTag, localId, action.action_id).toUri()
                     }
@@ -110,6 +116,27 @@ object MirrorPoster {
                         )
                     }
                     addAction(builder.build())
+                }
+                if (validDetailId != null && sourceActions.size < MAX_VISIBLE_ACTIONS) {
+                    val openIntent = Intent(ctx, NotificationRouterActivity::class.java).apply {
+                        data = notificationRouteUri(validDetailId, openInTwinotify = true)
+                    }
+                    val openPending = PendingIntent.getActivity(
+                        ctx,
+                        0,
+                        openIntent,
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                    )
+                    addAction(
+                        NotificationCompat.Action.Builder(
+                            R.drawable.ic_stat_twinotify,
+                            ctx.getString(R.string.open_in_twinotify),
+                            openPending,
+                        )
+                            .setAllowGeneratedReplies(false)
+                            .setAuthenticationRequired(true)
+                            .build(),
+                    )
                 }
             }
             .build()
@@ -146,6 +173,8 @@ object MirrorPoster {
             (digest[3].toInt() and 0xff)
         return (raw and Int.MAX_VALUE).coerceAtLeast(1)
     }
+
+    private const val MAX_VISIBLE_ACTIONS = 3
 }
 
 private data class MirrorActionPresentation(

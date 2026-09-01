@@ -62,6 +62,27 @@ class NotificationRouterActivityTest {
         assertEquals(NotificationTapResult.Unavailable, router.route(DETAIL_ID))
     }
 
+    @Test
+    fun explicitTwinotifyActionBypassesSourceLaunchAndUsesOpaqueFallback() = runTest {
+        var sourceLaunches = 0
+        val fallbacks = mutableListOf<String>()
+        val router = NotificationTapRouter(
+            load = NotificationRouteLoader { NotificationRouteDetail("com.example") },
+            source = NotificationSourceLauncher {
+                sourceLaunches++
+                SourceLaunchResult.Launched
+            },
+            fallback = NotificationFallbackLauncher { fallbacks += it; true },
+        )
+
+        assertEquals(
+            NotificationTapResult.FallbackOpened,
+            router.route(DETAIL_ID, openInTwinotify = true),
+        )
+        assertEquals(0, sourceLaunches)
+        assertEquals(listOf(DETAIL_ID), fallbacks)
+    }
+
     private companion object {
         const val DETAIL_ID = "11111111-1111-4111-8111-111111111111"
     }
