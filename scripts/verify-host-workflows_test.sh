@@ -446,6 +446,10 @@ sed -i.bak 's/ compileDebugAndroidTestKotlin//' "$tmp/.github/workflows/mobile.y
 expect_rejection 'native Android CI must compile instrumentation sources'
 
 copy_workflows
+sed -i.bak 's/ -Dorg.gradle.jvmargs="-Xmx2048m -XX:MaxMetaspaceSize=1024m"//' "$tmp/.github/workflows/mobile.yml"
+expect_rejection 'native Android CI must reserve enough Gradle metaspace'
+
+copy_workflows
 awk '
   /compileDebugAndroidTestKotlin assembleDebug$/ {
     sub(/ compileDebugAndroidTestKotlin/, "")
@@ -470,7 +474,7 @@ EOF
 expect_rejection 'instrumentation compilation in another job cannot satisfy native Android CI'
 
 copy_workflows
-awk '/^[[:space:]]*- run: .*gradlew --no-daemon lintDebug testDebugUnitTest/ { print; print; next } { print }' \
+awk '/^[[:space:]]*- run: .*gradlew --no-daemon .*lintDebug testDebugUnitTest/ { print; print; next } { print }' \
   "$tmp/.github/workflows/mobile.yml" > "$tmp/mobile.yml"
 mv "$tmp/mobile.yml" "$tmp/.github/workflows/mobile.yml"
 expect_rejection 'native Android CI must not duplicate the canonical Gradle command'

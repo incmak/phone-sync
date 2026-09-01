@@ -137,7 +137,7 @@ require_mobile_native_android_runs() {
       expected[1] = "npm ci"
       expected[2] = "make sync-proto"
       expected[3] = "npx expo prebuild --platform android --clean --no-install"
-      expected[4] = "./gradlew --no-daemon lintDebug testDebugUnitTest compileDebugAndroidTestKotlin assembleDebug"
+      expected[4] = "./gradlew --no-daemon -Dorg.gradle.jvmargs=\"-Xmx2048m -XX:MaxMetaspaceSize=1024m\" lintDebug testDebugUnitTest compileDebugAndroidTestKotlin assembleDebug"
     }
     {
       code = $0
