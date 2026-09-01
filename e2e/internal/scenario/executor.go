@@ -1323,9 +1323,9 @@ func predicateSatisfied(name, predicate string, a, b Observation) bool {
 	case predicate == "terminal.converged":
 		return a.Terminal && b.Terminal && a.Outbox == 0 && b.Outbox == 0 && a.LoopEvents == 0 && b.LoopEvents == 0
 	case predicate == "A.outbox.zero":
-		return a.Outbox == 0
+		return userDeliveryCount(a) == 0
 	case predicate == "A.outbox.nonzero":
-		return a.Outbox > 0
+		return userDeliveryCount(a) > 0
 	case predicate == "B.mirror.active:n1":
 		return b.Mirror
 	case predicate == "B.mirror.absent:n1":
@@ -1347,6 +1347,10 @@ func predicateSatisfied(name, predicate string, a, b Observation) bool {
 	default:
 		return false
 	}
+}
+
+func userDeliveryCount(state Observation) int {
+	return state.PendingLocalCount + state.AwaitingPeerCount + state.HeldByRelayCount
 }
 
 // routeSatisfied reads only the observed route, so a scenario can never claim

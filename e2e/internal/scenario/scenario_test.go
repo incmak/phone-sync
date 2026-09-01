@@ -472,12 +472,36 @@ func (f *fakeBridge) Snapshot(_ context.Context, device string) (scenario.Observ
 	if device == "A" {
 		if f.pendingOutbox {
 			state.Outbox = 1
+			state.PendingLocalCount = 1
 			f.pendingOutbox = false
 		} else {
 			state.Outbox = 0
+			state.PendingLocalCount = 0
 		}
 	}
 	return state, nil
+}
+
+type internalControlOutboxBridge struct{ *fakeBridge }
+
+func (b *internalControlOutboxBridge) Snapshot(ctx context.Context, device string) (scenario.Observation, error) {
+	state, err := b.fakeBridge.Snapshot(ctx, device)
+	if err != nil {
+		return scenario.Observation{}, err
+	}
+	state.PendingLocalCount = state.Outbox
+	state.Outbox += 4
+	return state, nil
+}
+
+func TestPostIgnoresInternalControlRowsWhenWaitingForDeliveryTerminal(t *testing.T) {
+	bridge := &internalControlOutboxBridge{fakeBridge: &fakeBridge{
+		states: map[string]scenario.Observation{"A": {}, "B": {}},
+	}}
+	result, err := scenario.NewExecutor(bridge, 50*time.Millisecond).RunResult(context.Background(), "post")
+	if err != nil || result.Status != "passed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
 }
 
 func TestExecutorUsesRealBridgeActionsAndBoundedPredicates(t *testing.T) {
