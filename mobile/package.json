@@ -11,6 +11,7 @@
     "lint": "expo lint",
     "prebuild": "expo prebuild --clean",
     "build:dev": "npx --yes eas-cli@22.0.0 build --profile development --platform android --local",
+    "check:launcher-assets": "node ./scripts/check-launcher-assets.mjs",
     "typecheck": "tsc --noEmit",
     "test": "jest"
   },
