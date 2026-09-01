@@ -348,7 +348,7 @@ check_doc_status() {
     else
       [[ -e "$repo_root/$ref" ]] || die "documented repository path does not exist: $ref"
     fi
-  done < <(grep -Eho '\`(scripts|e2e|docs|mobile)/[^`[:space:]]+\`' "$@" | sort -u || true)
+  done < <(grep -Eho '`(scripts|e2e|docs|mobile)/[^`[:space:]]+`' "$@" | sort -u || true)
 
   for doc in "$@"; do
     while IFS= read -r link; do
@@ -380,7 +380,7 @@ check_doc_status() {
       *" $scenario "*) ;;
       *) die "unknown direct-LAN scenario is documented: $scenario" ;;
     esac
-  done < <(grep -Eho '\`lan-[a-z0-9-]+\`' "$@" | sort -u || true)
+  done < <(grep -Eho '`lan-[a-z0-9-]+`' "$@" | sort -u || true)
   echo "direct LAN documentation status passed"
 }
 
