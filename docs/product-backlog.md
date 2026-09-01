@@ -7,23 +7,27 @@ owned by the reliability, direct-LAN, relay-hardening, or protected-release
 plans.
 
 **Status values:** `BACKLOG`, `READY FOR DESIGN`, `BLOCKED`, `IN PROGRESS`,
-`DONE`. An item moves to `IN PROGRESS` only after its design/spec and numbered
-implementation plan are approved. Physical observations never become `DONE`
-from host tests alone.
+`SOURCE COMPLETE`, `DONE`. `SOURCE COMPLETE` means implementation and all
+available host/emulator evidence are complete, while named physical or
+owner-controlled acceptance remains. An item moves to `IN PROGRESS` only after
+its design/spec and numbered implementation plan are approved. Physical
+observations never become `DONE` from host or emulator tests alone.
 
 ## Priority order
 
 | ID | Priority | Product outcome | Status | Dependency |
 | --- | --- | --- | --- | --- |
-| PB-001 | P0 | Preserve multiple messages and conversation fidelity | READY FOR DESIGN | none |
-| PB-002 | P0 | Make the persistent service notification truthful and open Twinotify | READY FOR DESIGN | PB-001 independent |
-| PB-003 | P1 | Show useful, private, groupable notification history with explicit clearing | READY FOR DESIGN | PB-001 content model |
-| PB-004 | P1 | Make the themed launcher icon render correctly on supported Android launchers | READY FOR DESIGN | physical launcher captures |
+| PB-001 | P0 | Preserve multiple messages and conversation fidelity | SOURCE COMPLETE | physical two-phone fixture |
+| PB-002 | P0 | Make the persistent service notification truthful and open Twinotify | SOURCE COMPLETE | physical notification/tap regression |
+| PB-008 | P0 | Restore transport automatically after process/package restart | SOURCE COMPLETE | physical lifecycle/OEM regression |
+| PB-003 | P1 | Show useful, private, groupable notification history with explicit clearing | DONE | none |
+| PB-004 | P1 | Make the themed launcher icon render correctly on supported Android launchers | SOURCE COMPLETE | physical launcher captures |
 | PB-005 | P1 | Make relay setup consumer-friendly with a safe default service | BLOCKED | approved production relay URL and service policy |
-| PB-006 | P2 | Add a secondary “Open in Twinotify” mirrored-notification action | BACKLOG | PB-001/PB-003 detail model |
-| PB-007 | P1 | Complete a non-technical-user UX audit across onboarding, pairing, home, settings, recovery, and unpair | BACKLOG | PB-002 and PB-005 |
-| PB-008 | P0 | Restore transport automatically after process/package restart | READY FOR DESIGN | automatic-LAN physical evidence |
-| PB-009 | P1 | Make home delivery metrics reflect verified mirrored traffic | READY FOR DESIGN | delivery-event accounting audit |
+| PB-007 | P1 | Complete a non-technical-user UX audit across onboarding, pairing, home, settings, recovery, and unpair | SOURCE COMPLETE | PB-005 plus physical two-phone/TalkBack evidence |
+| PB-009 | P1 | Make home delivery metrics reflect verified mirrored traffic | SOURCE COMPLETE | physical two-phone reconciliation |
+| PB-011 | P1 | Choose the Android 17 local-network privacy model before target SDK 37 | BLOCKED | owner privacy/UX decision |
+| PB-006 | P2 | Add a secondary “Open in Twinotify” mirrored-notification action | SOURCE COMPLETE | physical OEM notification-shade regression |
+| PB-010 | P2 | Provide an accessible non-camera pairing fallback | BLOCKED | owner security/UX decision |
 
 ## Implemented invariant requiring physical regression coverage
 
@@ -36,6 +40,13 @@ while removal of a locally mirrored Twinotify notification must continue to
 drive the existing peer-dismiss logic exactly once.
 
 ## PB-001 — Preserve multiple messages and conversation fidelity
+
+**Implementation:** Source complete in `41eada3`. See the
+[design](superpowers/specs/2026-09-01-pb-001-conversation-fidelity-design.md)
+and [implementation plan with evidence](superpowers/plans/2026-09-01-pb-001-conversation-fidelity.md).
+Emulator instrumentation covers bounded 30-message history, two simultaneous
+mirrors, repeated in-place updates, and independent cancellation. The required
+paired-phone WhatsApp-like run remains pending.
 
 **Problem:** A later notification from the same app/conversation can replace
 the previous mirrored presentation. The desired-state protocol intentionally
@@ -62,6 +73,14 @@ mapping, supersession terminalization, or notification privacy filtering.
 
 ## PB-002 — Persistent notification truth, navigation, and self-filtering
 
+**Implementation:** Source complete in `26cf7ad`. See the
+[design](superpowers/specs/2026-09-01-pb-002-foreground-notification-design.md)
+and [implementation plan with evidence](superpowers/plans/2026-09-01-pb-002-foreground-notification.md).
+The emulator verifies truthful state presentation, private/ongoing notification
+flags, a sanitized explicit immutable content intent, repeated taps into one
+task, and the fail-closed own-package filter. Physical shade, lock-screen,
+restart, tap, and paired-phone self-notification evidence remains pending.
+
 **Problem:** The foreground notification always titles itself “Twinotify
 active,” places route state only in secondary text, and has no content intent.
 It can therefore look connected while delivery is not authenticated, and
@@ -82,6 +101,14 @@ foreground-service contract and private lock-screen presentation.
 - Unit tests cover every route/delivery state; physical tests cover tap behavior, lock screen, restart, and both OEM phones.
 
 ## PB-003 — Private notification history, grouping, retention, and clearing
+
+**Implementation:** Done in `120931b`. See the
+[design](superpowers/specs/2026-09-01-pb-003-private-history-design.md) and
+[implementation plan with evidence](superpowers/plans/2026-09-01-pb-003-private-history.md).
+Host tests and 12 emulator instrumented tests cover the Room v10 migration,
+Keystore-protected content, age/row/byte bounds, grouping, pagination,
+transactional clearing, and immediate content-retention disable behavior. The
+release History screen and its destructive confirmation were also exercised.
 
 **Problem:** The current recent-activity journal keeps metadata for up to 500
 rows/30 days but exposes at most 20 rows, does not retain display content, does
@@ -108,6 +135,13 @@ query, analytics, or indefinite retention.
 - Migration is explicit, non-destructive, and includes a committed Room schema if a new entity is required.
 
 ## PB-004 — Themed launcher icon regression
+
+**Implementation:** Source complete in `86549ba`. See the
+[design](superpowers/specs/2026-09-01-pb-004-themed-launcher-icon-design.md) and
+[implementation plan with evidence](superpowers/plans/2026-09-01-pb-004-themed-launcher-icon.md).
+Asset checks, clean prebuild, generated density resources, and light/dark themed
+rendering pass on `emulator-5558`. POCO F1 and MI 11X launcher captures remain
+pending and are the only reason this item is not `DONE`.
 
 **Problem:** Expo configuration includes an adaptive monochrome layer, but the
 icon is not visible on at least one launcher with themed icons enabled.
@@ -150,6 +184,14 @@ overwriting user choices.
 
 ## PB-006 — Secondary “Open in Twinotify” action
 
+**Implementation:** Source complete in `2af48fc`. See the
+[design](superpowers/specs/2026-09-01-pb-006-open-in-twinotify-action-design.md)
+and [implementation plan with evidence](superpowers/plans/2026-09-01-pb-006-open-in-twinotify-action.md).
+Eight emulator instrumentation scenarios cover the explicit router activity,
+opaque detail IDs, primary-tap preservation, bounded action count, unavailable
+fallback, update, and cancel behavior. Layout on both target OEM notification
+shades remains pending.
+
 **Problem:** The primary mirrored-notification tap correctly follows the source
 app's action semantics. Users may also want a separate way to inspect the local
 Twinotify detail/history entry.
@@ -167,6 +209,18 @@ canonical IDs, peer IDs, or package-controlled deep links in the intent URI.
 - Action count and layout remain usable on both target OEM notification shades.
 
 ## PB-007 — Non-technical-user UX audit
+
+**Implementation:** Source/emulator scope complete in `7b5fd8d`. See the
+[design](superpowers/specs/2026-09-01-pb-007-nontechnical-journey-audit-design.md),
+[implementation plan](superpowers/plans/2026-09-01-pb-007-nontechnical-journey-audit.md),
+and [numbered screenshot audit](audits/pb-007/README.md).
+
+The audit fixed a critical nearby-pairing permission gap, corrected selection,
+privacy, and battery-setting copy, enlarged/named the permission controls, and
+verified a clean install through the Android **Nearby devices** prompt to a real
+QR/waiting state. The pairing QR was not captured because it contains ephemeral
+pairing material. Full two-phone success/recovery/unpair, TalkBack, one-handed
+use, OEM background behavior, and the PB-005 relay path remain external evidence.
 
 **Problem:** Individual screens have been designed and tested, but the complete
 journey has not been re-audited for a user unfamiliar with relays, notification
@@ -186,6 +240,14 @@ progressive disclosure.
 - Large font, TalkBack, light/dark, one-handed reach, and OEM background-restriction paths are recorded on both target phones.
 
 ## PB-008 — Automatic transport recovery after process restart
+
+**Implementation:** Source complete in `1b06246`. See the
+[design](superpowers/specs/2026-09-01-pb-008-automatic-transport-recovery-design.md)
+and [implementation plan with evidence](superpowers/plans/2026-09-01-pb-008-automatic-transport-recovery.md).
+API 37 emulator runs cover signed in-place replacement, force-stop/foreground
+recovery, exact persisted-state preservation, paused-state preservation, and
+single-service idempotence. Signed upgrades, reboot, force-stop/open, OEM
+auto-start/battery policy, and resumed delivery still need both physical phones.
 
 **Problem:** Physical testing found that Twinotify can retain an enabled-looking
 preference after a force-stop or package replacement while no transport is
@@ -208,6 +270,14 @@ enabled mirroring and all required permissions remain valid.
 
 ## PB-009 — Truthful mirrored and latency metrics
 
+**Implementation:** Source complete in `6bc1543`. See the
+[design](superpowers/specs/2026-09-01-pb-009-truthful-delivery-metrics-design.md)
+and [implementation plan with evidence](superpowers/plans/2026-09-01-pb-009-truthful-delivery-metrics.md).
+Room/JVM coverage locks first-receipt deduplication, exclusion rules, local-day
+bounds, last-ten latency, migration 10-to-11, and the distinction between no
+latency evidence and a measured zero. Two physical phones must still reconcile
+visible counts and latency against authenticated receipts.
+
 **Problem:** The home screen remained at zero mirrored items and no latency data
 after bidirectional notifications were physically delivered and acknowledged on
 direct Wi-Fi. The metric therefore does not represent verified user delivery.
@@ -225,10 +295,70 @@ timestamps used for latency.
 - Latency uses monotonic-compatible or authenticated timestamps and never reports a fabricated value when required evidence is absent.
 - JVM/Room tests cover deduplication and rollover; a two-phone run reconciles the visible count with sanitized sent markers.
 
+## PB-010 — Accessible non-camera pairing fallback
+
+**Problem:** “I already have a code” currently leads to the camera scanner. A
+user who cannot grant camera access, aim the camera, or visually scan a QR has
+no equivalent secure way to join a pair. Exposing the current opaque QR payload
+as a manually typed value would be unusable and would encourage unsafe sharing.
+
+**Owner decision required:** Approve the fallback product/security model:
+whether it is a short-lived relay-brokered code, a system-mediated nearby/share
+flow, or another reviewed transfer. Decide whether the relay may observe pairing
+attempt metadata, the allowed validity/rate limits, and the exact user warning.
+
+**Scope after unblock:** Add one progressively disclosed alternative beside QR
+scanning, reuse the existing cryptographic confirmation/fingerprint step, and
+ensure the QR and fallback routes have the same expiry, cancellation, replay,
+and replacement guarantees.
+
+**Non-goals:** No permanent recovery code, raw key/payload transcription,
+account-based pairing, silent trust, or downgrade of the existing fingerprint
+confirmation.
+
+**Acceptance:**
+
+- A user can join a pair without camera access or visual QR scanning.
+- The fallback carries no less cryptographic assurance than the QR path and expires/cancels cleanly.
+- Guessing, replay, enumeration, screenshots, clipboard exposure, and relay metadata are threat-modeled and bounded.
+- Copy and assistive-technology behavior are tested with non-technical users on both physical phones.
+
+## PB-011 — Android 17 local-network privacy migration
+
+**Problem:** Twinotify targets SDK 36 today. Android 17 makes local-network
+protection mandatory for apps targeting SDK 37+, and the product must choose
+between a privacy-preserving system-mediated discovery path and requesting broad
+`ACCESS_LOCAL_NETWORK` access before the target SDK is raised. Declaring that
+permission early caused contradictory permission state during PB-007 and is now
+guarded by a regression test.
+
+**Owner decision required:** Approve whether nearby pairing/direct delivery
+should use Android's system NSD picker where possible or request broad local
+network access with an explicit rationale. Approve the privacy disclosure and
+whether reduced automation/discovery is acceptable in exchange for narrower
+access.
+
+**Scope after unblock:** Prototype both viable paths against the current NSD,
+pinned TLS, LAN-binding, recovery, and direct-delivery flows; write the security
+and UX decision before adding `ACCESS_LOCAL_NETWORK` or raising target SDK to
+37.
+
+**Non-goals:** Do not add or request `ACCESS_LOCAL_NETWORK` while target SDK
+remains 36. Do not weaken TLS pinning, pairing confirmation, route coordination,
+or offline operation.
+
+**Acceptance:**
+
+- The approved Android 17 path is documented before the target SDK 37 change lands.
+- Permission timing and copy state exactly what local access enables and offer a recoverable denial path.
+- Nearby pairing and direct delivery retain their security and single-drainer invariants on Android 17.
+- Upgrade and fresh-install tests cover grant, denial, revocation, and previously paired users without resetting identity or pairing state.
+
 ## Backlog maintenance
 
 When work is approved, create one design/spec and one numbered implementation
 plan per backlog item under `docs/superpowers/`. Link both here and update the
 status. Do not combine PB-001/PB-003 storage and notification semantics with
 PB-005 relay operations in one implementation change; their security and
-rollback boundaries are independent.
+rollback boundaries are independent. `SOURCE COMPLETE` items return to active
+work only for the named physical evidence or a newly reproduced regression.
