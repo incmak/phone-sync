@@ -308,7 +308,14 @@ class TwinotifyCoreModule internal constructor(
         }
 
         OnActivityEntersForeground {
-            co.twinotify.core.service.SyncService.onAppForeground(requireContext())
+            val ctx = requireContext()
+            moduleScope.launch {
+                co.twinotify.core.service.TransportRecoveryAuthority.recover(
+                    ctx,
+                    co.twinotify.core.service.RecoveryTrigger.APP_FOREGROUND,
+                )
+                co.twinotify.core.service.SyncService.onAppForeground(ctx)
+            }
         }
 
         OnDestroy {
@@ -322,6 +329,7 @@ class TwinotifyCoreModule internal constructor(
                     val ctx = requireContext()
                     co.twinotify.core.service.ServiceConfigStore.setRelayUrl(ctx, relayUrl)
                     co.twinotify.core.service.ServiceConfigStore.setEnabled(ctx, true)
+                    co.twinotify.core.service.SyncServiceStatus.setEnabled(true)
                     val intent = android.content.Intent(ctx, co.twinotify.core.service.SyncService::class.java).apply {
                         action = co.twinotify.core.service.SyncService.ACTION_START
                         putExtra(co.twinotify.core.service.SyncService.EXTRA_RELAY_URL, relayUrl)
@@ -340,6 +348,7 @@ class TwinotifyCoreModule internal constructor(
                     persistLanOnlyConfigThenStart(
                         persist = {
                             co.twinotify.core.service.ServiceConfigStore.setLanOnlyEnabled(ctx)
+                            co.twinotify.core.service.SyncServiceStatus.setEnabled(true)
                         },
                         start = {
                             val intent = android.content.Intent(
@@ -389,10 +398,17 @@ class TwinotifyCoreModule internal constructor(
 
         /** Ask the coordinator to reconnect now instead of waiting out its backoff. */
         AsyncFunction("retryRoute") { promise: Promise ->
-            try {
-                co.twinotify.core.service.SyncServiceStatus.requestRouteRetry()
-                promise.resolve(null)
-            } catch (e: Throwable) { promise.reject("RETRY_ROUTE", e.message ?: "err", e) }
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    co.twinotify.core.service.TransportRecoveryAuthority.recover(
+                        ctx,
+                        co.twinotify.core.service.RecoveryTrigger.USER_RETRY,
+                    )
+                    co.twinotify.core.service.SyncServiceStatus.requestRouteRetry()
+                    promise.resolve(null)
+                } catch (e: Throwable) { promise.reject("RETRY_ROUTE", e.message ?: "err", e) }
+            }
         }
 
         AsyncFunction("getRouteStatus") { promise: Promise ->
@@ -408,6 +424,8 @@ class TwinotifyCoreModule internal constructor(
                     boundedMessage = "Unable to stop sync service",
                     operation = {
                         co.twinotify.core.service.SyncService.shutdownActive(requireContext())
+                        co.twinotify.core.service.SyncServiceStatus.setEnabled(false)
+                        co.twinotify.core.service.SyncServiceStatus.setRecoveryIssue(null)
                         null
                     },
                     resolve = promise::resolve,
@@ -556,8 +574,7 @@ class TwinotifyCoreModule internal constructor(
         AsyncFunction("isNotificationListenerGranted") { promise: Promise ->
             try {
                 val ctx = requireContext()
-                val enabled = androidx.core.app.NotificationManagerCompat
-                    .getEnabledListenerPackages(ctx).contains(ctx.packageName)
+                val enabled = co.twinotify.core.service.notificationListenerAccessAvailable(ctx)
                 promise.resolve(enabled)
             } catch (e: Throwable) { promise.reject("NLS_GRANT", e.message ?: "err", e) }
         }

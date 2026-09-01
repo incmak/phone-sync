@@ -8,6 +8,7 @@ export type SyncState =
 export interface SyncStatus {
   state: SyncState;
   queuedCount: number;
+  enabled?: boolean;
   service?: 'stopped' | 'connecting' | 'connected' | 'degraded';
   transport?: 'offline' | 'connecting' | 'online';
   protocolFloor?: number;

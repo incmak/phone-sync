@@ -781,6 +781,7 @@ class SyncService : Service() {
     companion object {
         const val FGS_ID = 9_001
         const val EXTRA_RELAY_URL = "relay_url"
+        const val EXTRA_RECOVERY_TRIGGER = "recovery_trigger"
         const val EXTRA_CALL_CAPTURE_ADMISSION_GENERATION = "call_capture_admission_generation"
         const val ACTION_START = "co.twinotify.service.START"
         const val ACTION_STOP = "co.twinotify.service.STOP"
@@ -794,6 +795,8 @@ class SyncService : Service() {
 
         internal fun beginCallCaptureAdmission(): CallCaptureAdmissionTicket =
             callCaptureAdmissionGate.begin()
+
+        internal fun isActive(): Boolean = activeInstance != null
 
         internal suspend fun awaitCallCaptureAdmission(ticket: CallCaptureAdmissionTicket): Boolean =
             callCaptureAdmissionGate.await(ticket, CALL_CAPTURE_ADMISSION_TIMEOUT_MILLIS)
@@ -1071,6 +1074,7 @@ class SyncService : Service() {
         }
         // Publish only after every field needed by a concurrently reserved shutdown is ready.
         activeInstance = this
+        TransportRecoveryAuthority.serviceBecameActive()
         // Resume Room commits that were left before an Android platform call completed.
         val postAvailable = effectivePostAvailability(applicationContext)
         SyncServiceStatus.setPostPermission(postAvailable)
@@ -1125,11 +1129,16 @@ class SyncService : Service() {
                     ServiceConfigStore.read(applicationContext)
                 }
                 val peer = runBlocking(Dispatchers.IO) { PeerStore.load(applicationContext) }
-                ServiceStartPolicy.decide(
-                    intent?.action,
-                    config,
-                    paired = peer != null,
-                    lanBound = peer?.lanBindingId != null,
+                SyncServiceStatus.setEnabled(config.enabled)
+                RecoveryPolicy.decideServiceStart(
+                    RecoveryInputs(
+                        persisted = config,
+                        paired = peer != null,
+                        lanBound = peer?.lanBindingId != null,
+                        listenerPermission = notificationListenerAccessAvailable(applicationContext),
+                        postPermission = effectivePostAvailability(applicationContext),
+                        serviceActive = false,
+                    ),
                 )
             },
             onActionStop = {
@@ -1148,6 +1157,7 @@ class SyncService : Service() {
                     admitted = false,
                 )
                 clearForegroundOwnership()
+                SyncServiceStatus.setRecoveryIssue(RecoveryIssue.fromCode(decision.reason))
                 SyncServiceStatus.setLastError(decision.reason)
                 SyncServiceStatus.setState(SyncState.DISCONNECTED)
                 SyncServiceStatus.clearRouteStatus()

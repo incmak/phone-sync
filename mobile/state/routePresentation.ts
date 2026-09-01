@@ -2,7 +2,7 @@ import type { RouteStatus } from '../modules/twinotify-core/src/TwinotifyCoreMod
 
 export type DeliveryState = 'direct' | 'relay' | 'reconnecting' | 'queued' | 'paused' | 'stopped' | 'unpaired';
 
-export type DeliveryAction = 'retry' | 'pair';
+export type DeliveryAction = 'retry' | 'pair' | 'permissions';
 
 export interface DeliveryPresentation {
   state: DeliveryState;

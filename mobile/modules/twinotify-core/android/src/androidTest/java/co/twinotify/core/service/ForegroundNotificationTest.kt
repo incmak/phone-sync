@@ -17,6 +17,11 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class ForegroundNotificationTest {
     @Test
@@ -112,14 +117,32 @@ class ForegroundNotificationTest {
 }
 
 class ForegroundNotificationTestActivity : Activity() {
+    private val fixtureScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         created += 1
         lastInstance = this
         lastIntent = intent
+        // Test-only analogue of TwinotifyCoreModule.OnActivityEntersForeground. It lets the
+        // host exercise force-stop -> explicit launch without placing test seams in production.
+        if (intent.getBooleanExtra(EXTRA_RECOVER_ON_OPEN, false)) {
+            fixtureScope.launch {
+                TransportRecoveryAuthority.recover(
+                    applicationContext,
+                    RecoveryTrigger.APP_FOREGROUND,
+                )
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        fixtureScope.cancel()
+        super.onDestroy()
     }
 
     companion object {
+        const val EXTRA_RECOVER_ON_OPEN = "recover_on_open"
         @Volatile var created: Int = 0
         @Volatile var lastInstance: ForegroundNotificationTestActivity? = null
         @Volatile var lastIntent: Intent? = null

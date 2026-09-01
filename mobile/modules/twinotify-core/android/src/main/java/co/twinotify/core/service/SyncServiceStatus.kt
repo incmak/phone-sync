@@ -15,6 +15,7 @@ enum class SyncState { DISCONNECTED, CONNECTING, CONNECTED, LEGACY_ONLINE_ONLY, 
 data class SyncHealth(
     val service: String,
     val transport: String,
+    val enabled: Boolean,
     val protocolFloor: Int,
     val queuedCount: Int,
     val queuedBytes: Long,
@@ -35,6 +36,7 @@ data class SyncHealth(
 fun SyncHealth.toEventMap(): Map<String, Any?> = mapOf(
     "service" to service,
     "transport" to transport,
+    "enabled" to enabled,
     "protocolFloor" to protocolFloor,
     "queuedCount" to queuedCount,
     "queuedBytes" to queuedBytes,
@@ -91,6 +93,7 @@ data class SyncRouteStatus(
     val deliveryReason: DeliveryReason = DeliveryReason.NONE,
     val userContentKind: UserContentKind = UserContentKind.NOTIFICATIONS,
     val routeGeneration: Int = 0,
+    val recoveryIssue: RecoveryIssue? = null,
 ) {
     fun toPublicMap(): Map<String, Any?> = mapOf(
         "route" to route.name.lowercase(),
@@ -103,6 +106,7 @@ data class SyncRouteStatus(
         "delivery_reason" to deliveryReason.name.lowercase(),
         "user_content_kind" to userContentKind.name.lowercase(),
         "route_generation" to routeGeneration,
+        "recovery_issue" to recoveryIssue?.code,
         "presentation" to DeliveryStatusPresenter.present(
             status = this,
             paired = true,
@@ -152,6 +156,33 @@ internal object DeliveryStatusPresenter {
             queuedCount = queued,
             peerLine = null,
         )
+        when (status.recoveryIssue) {
+            RecoveryIssue.NOTIFICATION_ACCESS_REQUIRED -> return DeliveryPresentation(
+                state = "stopped",
+                label = "Notification access needed",
+                explanation = "Allow notification access to resume mirroring.",
+                action = "permissions",
+                queuedCount = queued,
+                peerLine = null,
+            )
+            RecoveryIssue.POST_NOTIFICATIONS_REQUIRED -> return DeliveryPresentation(
+                state = "stopped",
+                label = "Notifications need attention",
+                explanation = "Allow Twinotify notifications to resume mirroring.",
+                action = "permissions",
+                queuedCount = queued,
+                peerLine = null,
+            )
+            RecoveryIssue.BACKGROUND_START_DENIED -> return DeliveryPresentation(
+                state = "stopped",
+                label = "Open Twinotify to resume",
+                explanation = "Android prevented the automatic restart. Try again while Twinotify is open.",
+                action = "retry",
+                queuedCount = queued,
+                peerLine = null,
+            )
+            null -> Unit
+        }
         if (status.phase == RoutePhase.IDLE) return DeliveryPresentation(
             state = "stopped",
             label = "Stopped",
@@ -299,6 +330,7 @@ object SyncServiceStatus {
         SyncHealth(
             service = "stopped",
             transport = "offline",
+            enabled = false,
             protocolFloor = 1,
             queuedCount = 0,
             queuedBytes = 0,
@@ -368,7 +400,12 @@ object SyncServiceStatus {
         queueSnapshot = emptyQueueSnapshot()
         deliveryConditions = DeliveryConditions()
         relayEvidence = PeerEvidence.UNKNOWN
-        _routeStatus.update { SyncRouteStatus(routeGeneration = routeGeneration.get()) }
+        _routeStatus.update {
+            SyncRouteStatus(
+                routeGeneration = routeGeneration.get(),
+                recoveryIssue = it.recoveryIssue,
+            )
+        }
     }
 
     fun setState(s: SyncState) {
@@ -501,6 +538,15 @@ object SyncServiceStatus {
 
     fun setPostPermission(granted: Boolean) {
         _health.value = _health.value.copy(postPermission = granted)
+    }
+
+    fun setEnabled(enabled: Boolean) {
+        _health.value = _health.value.copy(enabled = enabled)
+    }
+
+    @Synchronized
+    fun setRecoveryIssue(issue: RecoveryIssue?) {
+        _routeStatus.update { it.copy(recoveryIssue = issue) }
     }
 
     fun setLastReceiptAt(at: Long?) {

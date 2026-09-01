@@ -16,9 +16,10 @@ interface ConnectionSurfaceProps {
   traceWidth: number;
   onRetry?: () => void;
   onPair?: () => void;
+  onPermissions?: () => void;
 }
 
-export function ConnectionSurface({ route, enabled, onToggle, peerName, onOpenPeer, traceWidth, onRetry, onPair }: ConnectionSurfaceProps) {
+export function ConnectionSurface({ route, enabled, onToggle, peerName, onOpenPeer, traceWidth, onRetry, onPair, onPermissions }: ConnectionSurfaceProps) {
   const theme = useTheme();
   const { width, fontScale } = useWindowDimensions();
   const narrow = width <= 360 || fontScale >= 1.6;
@@ -62,6 +63,9 @@ export function ConnectionSurface({ route, enabled, onToggle, peerName, onOpenPe
         <TwButton variant="secondary" onPress={onRetry} fullWidth accessibilityHint="Tries your other phone again straight away">Try again now</TwButton>
       )}
       {route.action === 'pair' && onPair && <TwButton variant="primary" onPress={onPair} fullWidth>Link your other phone</TwButton>}
+      {route.action === 'permissions' && onPermissions && (
+        <TwButton variant="primary" onPress={onPermissions} fullWidth accessibilityHint="Explains the access Twinotify needs before opening Android settings">Review permissions</TwButton>
+      )}
     </View>
   );
 }

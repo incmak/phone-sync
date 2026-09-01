@@ -34,6 +34,11 @@ export type DeliveryReason =
 
 export type UserContentKind = 'notifications' | 'sync_updates';
 
+export type RecoveryIssue =
+  | 'notification_access_required'
+  | 'post_notifications_required'
+  | 'background_start_denied';
+
 /**
  * The complete public description of delivery. It deliberately carries no
  * endpoint, address, SSID, port, or peer identifier, so rendering it cannot
@@ -43,7 +48,7 @@ export interface NativeDeliveryPresentation {
   state: 'direct' | 'relay' | 'reconnecting' | 'queued' | 'paused' | 'stopped' | 'unpaired';
   label: string;
   explanation: string;
-  action: 'retry' | 'pair' | null;
+  action: 'retry' | 'pair' | 'permissions' | null;
   queued_count: number;
   peer_line: 'Reachable now' | 'Checked in recently' | 'Not confirmed online' | null;
 }
@@ -59,6 +64,7 @@ export interface RouteStatus {
   delivery_reason: DeliveryReason;
   user_content_kind: UserContentKind;
   route_generation: number;
+  recovery_issue?: RecoveryIssue | null;
   presentation?: NativeDeliveryPresentation;
 }
 

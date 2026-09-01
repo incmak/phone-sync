@@ -218,13 +218,18 @@ class ServiceLifecycleTest {
     }
 
     @Test
-    fun lifecycleCallsTheTestedForegroundAndStartupTriggerContractsWithoutAutoStarting() {
+    fun lifecycleCallsRecoveryBeforeTheTestedForegroundMaterializationContract() {
         val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
         val moduleSource = File(sourceRoot, "TwinotifyCoreModule.kt").readText()
         val foregroundBlock = moduleSource
             .substringAfter("OnActivityEntersForeground")
             .substringBefore("OnDestroy")
-        assertTrue(foregroundBlock.contains("SyncService.onAppForeground(requireContext())"))
+        assertSourceOrder(
+            foregroundBlock,
+            "TransportRecoveryAuthority.recover(",
+            "RecoveryTrigger.APP_FOREGROUND",
+            "SyncService.onAppForeground(ctx)",
+        )
         assertFalse(foregroundBlock.contains("startForegroundService"))
 
         val serviceSource = File(sourceRoot, "service/SyncService.kt").readText()
@@ -753,7 +758,7 @@ class ServiceLifecycleTest {
             setOf(
                 "route", "phase", "queued_count", "pending_local_count", "awaiting_peer_count",
                 "held_by_relay_count", "peer_evidence", "delivery_reason", "user_content_kind",
-                "route_generation", "presentation",
+                "route_generation", "recovery_issue", "presentation",
             ),
             rendered.keys,
         )
@@ -918,6 +923,144 @@ class ServiceLifecycleTest {
         )
     }
 
+    // ---- PB-008: automatic transport recovery ---------------------------
+
+    @Test
+    fun recoveryPolicyRequiresDurableIntentPairRouteAndPermissions() {
+        val ready = RecoveryInputs(
+            persisted = ServiceConfig(enabled = true, relayUrl = relayUrl),
+            paired = true,
+            lanBound = false,
+            listenerPermission = true,
+            postPermission = true,
+            serviceActive = false,
+        )
+
+        assertIs<RecoveryDecision.Start>(RecoveryPolicy.decide(ready))
+        assertEquals(
+            "disabled",
+            assertIs<RecoveryDecision.NoAction>(
+                RecoveryPolicy.decide(ready.copy(persisted = ready.persisted.copy(enabled = false))),
+            ).reason,
+        )
+        assertEquals(
+            "not_paired",
+            assertIs<RecoveryDecision.NoAction>(RecoveryPolicy.decide(ready.copy(paired = false))).reason,
+        )
+        assertEquals(
+            "no_route_available",
+            assertIs<RecoveryDecision.NoAction>(
+                RecoveryPolicy.decide(ready.copy(persisted = ServiceConfig(enabled = true, relayUrl = null))),
+            ).reason,
+        )
+        assertEquals(
+            RecoveryIssue.NOTIFICATION_ACCESS_REQUIRED,
+            assertIs<RecoveryDecision.Blocked>(
+                RecoveryPolicy.decide(ready.copy(listenerPermission = false)),
+            ).issue,
+        )
+        assertEquals(
+            RecoveryIssue.POST_NOTIFICATIONS_REQUIRED,
+            assertIs<RecoveryDecision.Blocked>(
+                RecoveryPolicy.decide(ready.copy(postPermission = false)),
+            ).issue,
+        )
+        assertIs<RecoveryDecision.AlreadyRunning>(
+            RecoveryPolicy.decide(ready.copy(serviceActive = true)),
+        )
+        assertEquals(
+            "notification_access_required",
+            assertIs<ServiceStartDecision.Stop>(
+                RecoveryPolicy.decideServiceStart(ready.copy(listenerPermission = false)),
+            ).reason,
+        )
+        assertIs<ServiceStartDecision.Start>(RecoveryPolicy.decideServiceStart(ready))
+    }
+
+    @Test
+    fun recoveryStartGateCoalescesLifecycleRacesButAllowsLaterRetry() {
+        val gate = RecoveryStartGate(coalesceMillis = 10_000L)
+
+        assertTrue(gate.reserve(serviceActive = false, nowMillis = 1_000L))
+        assertFalse(gate.reserve(serviceActive = false, nowMillis = 1_001L))
+        assertTrue(gate.reserve(serviceActive = false, nowMillis = 11_000L))
+
+        gate.release()
+        assertTrue(gate.reserve(serviceActive = false, nowMillis = 11_001L))
+        gate.serviceBecameActive()
+        assertFalse(gate.reserve(serviceActive = true, nowMillis = 11_002L))
+    }
+
+    @Test
+    fun deniedRecoveryStartReleasesGateAndKeepsEnabledIntent() {
+        val gate = RecoveryStartGate(coalesceMillis = 10_000L)
+        val persisted = ServiceConfig(enabled = true, relayUrl = relayUrl)
+
+        val result = executeRecoveryStart(
+            decision = RecoveryDecision.Start(ServiceStartDecision.Start(relayUrl, lanBound = false)),
+            gate = gate,
+            serviceActive = false,
+            nowMillis = 5_000L,
+            start = { throw IllegalStateException("platform denied") },
+            classifyFailure = { RecoveryIssue.BACKGROUND_START_DENIED },
+        )
+
+        assertEquals(
+            RecoveryExecution.Blocked(RecoveryIssue.BACKGROUND_START_DENIED),
+            result,
+        )
+        assertTrue(persisted.enabled)
+        assertTrue(gate.reserve(serviceActive = false, nowMillis = 5_001L))
+    }
+
+    @Test
+    fun recoveryPresentationExplainsPermissionAndPlatformBlocks() {
+        val idle = SyncRouteStatus(route = RouteKind.NONE, phase = RoutePhase.IDLE)
+        val notificationAccess = DeliveryStatusPresenter.present(
+            idle.copy(recoveryIssue = RecoveryIssue.NOTIFICATION_ACCESS_REQUIRED),
+            paired = true,
+            enabled = true,
+        )
+        assertEquals("Notification access needed", notificationAccess.label)
+        assertEquals("permissions", notificationAccess.action)
+
+        val postPermission = DeliveryStatusPresenter.present(
+            idle.copy(recoveryIssue = RecoveryIssue.POST_NOTIFICATIONS_REQUIRED),
+            paired = true,
+            enabled = true,
+        )
+        assertEquals("Notifications need attention", postPermission.label)
+        assertEquals("permissions", postPermission.action)
+
+        val denied = DeliveryStatusPresenter.present(
+            idle.copy(recoveryIssue = RecoveryIssue.BACKGROUND_START_DENIED),
+            paired = true,
+            enabled = true,
+        )
+        assertEquals("Open Twinotify to resume", denied.label)
+        assertEquals("retry", denied.action)
+    }
+
+    @Test
+    fun recoveryLifecycleUsesOneAuthorityForForegroundBootReplacementAndRetry() {
+        val projectDir = File(requireNotNull(System.getProperty("user.dir")))
+        val sourceRoot = File(projectDir, "src/main/java/co/twinotify/core")
+        val manifest = File(projectDir, "src/main/AndroidManifest.xml").readText()
+        val receiver = File(sourceRoot, "service/BootReceiver.kt").readText()
+        val module = File(sourceRoot, "TwinotifyCoreModule.kt").readText()
+        val authority = File(sourceRoot, "service/TransportRecoveryAuthority.kt").readText()
+
+        assertTrue(manifest.contains("android.intent.action.BOOT_COMPLETED"))
+        assertTrue(manifest.contains("android.intent.action.MY_PACKAGE_REPLACED"))
+        assertTrue(receiver.contains("goAsync()"))
+        assertTrue(receiver.contains("TransportRecoveryAuthority.recover"))
+        assertTrue(receiver.contains("RecoveryTrigger.BOOT_COMPLETED"))
+        assertTrue(receiver.contains("RecoveryTrigger.PACKAGE_REPLACED"))
+        assertTrue(module.contains("RecoveryTrigger.APP_FOREGROUND"))
+        assertTrue(module.contains("RecoveryTrigger.USER_RETRY"))
+        assertFalse(authority.contains("putExtra(SyncService.EXTRA_RELAY_URL"))
+    }
+
     @Test
     fun staleGenerationCannotOverwriteRouteOrQueueTruth() {
         val current = SyncServiceStatus.beginRouteGeneration()
@@ -953,7 +1096,7 @@ class ServiceLifecycleTest {
             setOf(
                 "route", "phase", "queued_count", "pending_local_count", "awaiting_peer_count",
                 "held_by_relay_count", "peer_evidence", "delivery_reason", "user_content_kind",
-                "route_generation", "presentation",
+                "route_generation", "recovery_issue", "presentation",
             ),
             rendered.keys,
         )

@@ -74,3 +74,29 @@ test('keeps switch and peer button targets at least 48dp', () => {
   expect(StyleSheet.flatten(peer.props.style).minHeight).toBeGreaterThanOrEqual(48);
   expect(mirror.props.accessibilityState.disabled).toBe(false);
 });
+
+test('renders one explicit permission-recovery action with a physical touch target', () => {
+  const onPermissions = jest.fn();
+  const screen = render(
+    <ConnectionSurface
+      route={route({
+        state: 'stopped',
+        label: 'Notification access needed',
+        explanation: 'Allow notification access to resume mirroring.',
+        peerLine: null,
+        action: 'permissions',
+      })}
+      enabled
+      onToggle={jest.fn()}
+      peerName="Pixel"
+      onOpenPeer={jest.fn()}
+      traceWidth={260}
+      onPermissions={onPermissions}
+    />,
+  );
+
+  const action = screen.getByRole('button', { name: 'Review permissions' });
+  fireEvent.press(action);
+  expect(onPermissions).toHaveBeenCalledTimes(1);
+  expect(StyleSheet.flatten(action.props.style).minHeight).toBeGreaterThanOrEqual(44);
+});

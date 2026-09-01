@@ -26,13 +26,13 @@ function serviceIsRunning(state: SyncState): boolean {
 export default function HomeScreen() {
   const theme = useTheme();
   const { width } = useWindowDimensions();
-  const { state } = useSyncStatus();
+  const { state, enabled } = useSyncStatus();
   const routeStatus = useRouteStatus();
   const metrics = useMetrics();
   const recentActivity = useRecentActivity(5);
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
   const [relayUrl, setRelayUrl] = useState<string | null>(null);
-  const nativeMirrorOn = serviceIsRunning(state);
+  const nativeMirrorOn = enabled ?? serviceIsRunning(state);
   const [previousNativeMirrorOn, setPreviousNativeMirrorOn] = useState(nativeMirrorOn);
   const [mirrorOn, setMirrorOn] = useState(nativeMirrorOn);
 
@@ -88,6 +88,7 @@ export default function HomeScreen() {
           traceWidth={traceWidth}
           onRetry={handleRetry}
           onPair={() => router.push('/pair/nearby')}
+          onPermissions={() => router.push('/onboarding/perms')}
         />
         <HomeMetrics mirroredToday={metrics.mirroredToday} blockedToday={metrics.blockedToday} latencyMs={metrics.latencyMs} />
         <RecentActivitySection state={recentActivity} peerName={peerName} />

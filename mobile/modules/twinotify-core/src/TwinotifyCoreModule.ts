@@ -48,6 +48,8 @@ export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'LEGACY_ON
 export interface SyncStatus {
   state: SyncState;
   queuedCount: number;
+  /** Durable user intent; absent only when paired with an older native bundle. */
+  enabled?: boolean;
   totalActiveCount?: number;
   totalActiveBytes?: number;
   callCaptureEnabled?: boolean;

@@ -12,6 +12,12 @@ describe('route product truth', () => {
     global.__RESET_OFFLINE_TEST_STATE__();
     global.__TWINOTIFY_CORE__.getPairStatus.mockResolvedValue({ paired: true, peerDisplayName: 'Pixel' });
     global.__TWINOTIFY_CORE__.getPreferLan.mockResolvedValue(false);
+    global.__TWINOTIFY_CORE__.getSyncStatus.mockResolvedValue({ state: 'DISCONNECTED', queuedCount: 0 });
+    global.__TWINOTIFY_CORE__.getRouteStatus.mockResolvedValue({
+      route: 'none', phase: 'idle', queued_count: 0, pending_local_count: 0,
+      awaiting_peer_count: 0, held_by_relay_count: 0, peer_evidence: 'unknown',
+      delivery_reason: 'none', user_content_kind: 'notifications', route_generation: 0,
+    });
   });
 
   it('loads the durable route preference and explains relay-first fallback truthfully', async () => {
@@ -46,6 +52,33 @@ describe('route product truth', () => {
 
     expect(screen.getByText('Turn on mirroring when you want delivery to resume.')).toBeTruthy();
     expect(screen.queryByText(/retries on its own/i)).toBeNull();
+  });
+
+  it('keeps durable mirroring intent on and routes a permission-blocked recovery through explanation', async () => {
+    global.__TWINOTIFY_CORE__.getSyncStatus.mockResolvedValue({
+      state: 'DISCONNECTED', queuedCount: 0, enabled: true,
+    });
+    global.__TWINOTIFY_CORE__.getRouteStatus.mockResolvedValue({
+      route: 'none', phase: 'idle', queued_count: 0, pending_local_count: 0,
+      awaiting_peer_count: 0, held_by_relay_count: 0, peer_evidence: 'unknown',
+      delivery_reason: 'none', user_content_kind: 'notifications', route_generation: 0,
+      recovery_issue: 'notification_access_required',
+      presentation: {
+        state: 'stopped',
+        label: 'Notification access needed',
+        explanation: 'Allow notification access to resume mirroring.',
+        action: 'permissions',
+        queued_count: 0,
+        peer_line: null,
+      },
+    });
+
+    const screen = render(<HomeScreen />);
+
+    expect(await screen.findByText('Notification access needed')).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Mirror notifications' }).props.accessibilityState.checked).toBe(true);
+    fireEvent.press(screen.getByRole('button', { name: 'Review permissions' }));
+    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/onboarding/perms');
   });
 
   it('starts a LAN-only peer without inventing a relay URL', async () => {
