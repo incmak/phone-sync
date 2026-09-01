@@ -6,6 +6,7 @@ import co.twinotify.core.storage.MaterializationResult
 import co.twinotify.core.storage.MaterializationRetryDisposition
 import co.twinotify.core.storage.MaterializationRetryWriteResult
 import co.twinotify.core.storage.OutboundMessage
+import co.twinotify.core.history.HistoryContentRecorder
 import co.twinotify.core.protocol.InnerEventV2
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +22,41 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class NotificationMaterializerTest {
+    @Test
+    fun completedInboundPostRecordsBestEffortHistoryContent() = runBlocking {
+        val store = FakeStore(canonical(sequence = 2, materialized = 1))
+        val recorded = mutableListOf<Triple<String, String, Long>>()
+
+        val result = NotificationMaterializer(
+            store = store,
+            port = noOpPort(),
+            historyRecorder = HistoryContentRecorder { eventId, payload, now ->
+                recorded += Triple(eventId, payload, now)
+                true
+            },
+        ).materializePending(nowMs = 2_000)
+
+        assertEquals(1, result.applied)
+        assertEquals(
+            listOf(Triple("inbound:inbound-1", requireNotNull(store.state.desiredPayloadJson), 2_000L)),
+            recorded,
+        )
+    }
+
+    @Test
+    fun historyFailureNeverRollsBackMaterialization() = runBlocking {
+        val store = FakeStore(canonical(sequence = 2, materialized = 1))
+
+        val result = NotificationMaterializer(
+            store = store,
+            port = noOpPort(),
+            historyRecorder = HistoryContentRecorder { _, _, _ -> error("keystore unavailable") },
+        ).materializePending(nowMs = 2_000)
+
+        assertEquals(MaterializationSummary(applied = 1, pending = 0, skipped = 0), result)
+        assertTrue(store.completed)
+    }
+
     @Test
     fun permissionBlockedPostStaysPendingWithoutSchedulingRetryWake() = runBlocking {
         val store = FakeStore(canonical(sequence = 2, materialized = 1))

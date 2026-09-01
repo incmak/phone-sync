@@ -1222,6 +1222,7 @@ class SyncService : Service() {
                         receiptFactory = DurableReceiptFactory(applicationContext),
                         localDeviceId = localDevice,
                         retryScheduler = materializationStartupScheduler(applicationContext),
+                        historyRecorder = co.twinotify.core.history.HistoryRepository(applicationContext),
                     ).materializePending(trigger = passTrigger)
                 }
             } finally {

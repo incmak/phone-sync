@@ -5,6 +5,7 @@ import {
   StyleSheet,
   Text,
   View,
+  Pressable,
 } from 'react-native';
 
 import type { RecentActivityState } from '../../hooks/useRecentActivity';
@@ -17,15 +18,29 @@ interface RecentActivitySectionProps {
   state: RecentActivityState;
   peerName: string;
   now?: number;
+  onSeeAll?: () => void;
 }
 
-export function RecentActivitySection({ state, peerName, now }: RecentActivitySectionProps) {
+export function RecentActivitySection({ state, peerName, now, onSeeAll }: RecentActivitySectionProps) {
   const theme = useTheme();
   const relativeNow = now ?? (state.kind === 'populated' ? state.refreshedAt : 0);
 
   return (
     <View accessibilityLabel="Recent activity" style={styles.section}>
-      <Text style={[styles.heading, { color: theme.colors.onSurface, fontFamily: theme.fonts.uiSemi }]}>Recent</Text>
+      <View style={styles.headingRow}>
+        <Text style={[styles.heading, { color: theme.colors.onSurface, fontFamily: theme.fonts.uiSemi }]}>Recent</Text>
+        {onSeeAll && state.kind === 'populated' && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open notification history"
+            hitSlop={8}
+            onPress={onSeeAll}
+            style={styles.seeAllTarget}
+          >
+            <Text style={[styles.seeAll, { color: theme.colors.primary, fontFamily: theme.fonts.uiSemi }]}>See all</Text>
+          </Pressable>
+        )}
+      </View>
 
       {state.kind === 'loading' && (
         <View style={styles.messageRow} accessibilityLiveRegion="polite">
@@ -77,7 +92,10 @@ export function RecentActivitySection({ state, peerName, now }: RecentActivitySe
 
 const styles = StyleSheet.create({
   section: { gap: 16 },
+  headingRow: { minHeight: 32, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   heading: { fontSize: 22, lineHeight: 28, letterSpacing: -0.3 },
+  seeAllTarget: { minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
+  seeAll: { fontSize: 14, lineHeight: 20 },
   messageRow: { minHeight: 64, flexDirection: 'row', alignItems: 'center', gap: 12 },
   empty: { minHeight: 92, justifyContent: 'center', alignItems: 'flex-start', gap: 6 },
   emptyTitle: { fontSize: 17, lineHeight: 24 },

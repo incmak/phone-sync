@@ -1,13 +1,15 @@
 package co.twinotify.core.service
 
-import android.content.Context
 import android.app.AlarmManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.util.Base64
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.Encrypter
 import co.twinotify.core.crypto.NonceSource
+import co.twinotify.core.history.HistoryContentRecorder
+import co.twinotify.core.history.HistoryRepository
 import co.twinotify.core.protocol.EncryptedEnvelope
 import co.twinotify.core.protocol.InnerEventV2
 import co.twinotify.core.protocol.ProtocolJson
@@ -280,6 +282,7 @@ class NotificationMaterializer(
     private val receiptFactory: ReceiptFactory? = null,
     private val localDeviceId: String? = null,
     private val retryScheduler: MaterializationRetryScheduler = NotificationMaterializationRetry.scheduler,
+    private val historyRecorder: HistoryContentRecorder? = null,
 ) {
     constructor(
         dao: ReliableDeliveryDao,
@@ -287,7 +290,8 @@ class NotificationMaterializer(
         receiptFactory: ReceiptFactory? = null,
         localDeviceId: String? = null,
         retryScheduler: MaterializationRetryScheduler = NotificationMaterializationRetry.scheduler,
-    ) : this(DaoMaterializationStore(dao), port, receiptFactory, localDeviceId, retryScheduler)
+        historyRecorder: HistoryContentRecorder? = null,
+    ) : this(DaoMaterializationStore(dao), port, receiptFactory, localDeviceId, retryScheduler, historyRecorder)
 
     suspend fun materializePending(
         trigger: MaterializationTrigger = MaterializationTrigger.ROUTINE,
@@ -369,9 +373,20 @@ class NotificationMaterializer(
                 }
             }
             when (store.completeMaterialization(state.canonId, state.latestSequence, nowMs, preparedReceipt)) {
-                MaterializationResult.Completed,
-                MaterializationResult.AlreadyCompleted,
-                -> {
+                MaterializationResult.Completed -> {
+                    if (state.state == "ACTIVE") {
+                        val latest = inbound.maxByOrNull { it.committedAt }
+                        val payload = state.desiredPayloadJson
+                        if (latest != null && payload != null) {
+                            runCatching {
+                                historyRecorder?.record("inbound:${latest.msgId}", payload, nowMs)
+                            }
+                        }
+                    }
+                    store.clearRetry(state.canonId, state.latestSequence)
+                    applied += 1
+                }
+                MaterializationResult.AlreadyCompleted -> {
                     store.clearRetry(state.canonId, state.latestSequence)
                     applied += 1
                 }
@@ -573,5 +588,6 @@ fun NotificationMaterializer(context: Context): NotificationMaterializer {
         receiptFactory = DurableReceiptFactory(app),
         localDeviceId = local,
         retryScheduler = AlarmManagerMaterializationScheduler(app),
+        historyRecorder = HistoryRepository(app),
     )
 }

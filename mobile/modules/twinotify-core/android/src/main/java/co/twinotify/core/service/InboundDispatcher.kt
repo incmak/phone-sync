@@ -776,6 +776,7 @@ class InboundDispatcher internal constructor(
                     receiptFactory = DurableReceiptFactory(ctx),
                     localDeviceId = localDeviceId,
                     retryScheduler = materializationStartupScheduler(ctx),
+                    historyRecorder = co.twinotify.core.history.HistoryRepository(ctx),
                 ).materializePending()
             }
             onAuthenticatedEvent(inner.type)

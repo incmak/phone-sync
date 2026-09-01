@@ -133,6 +133,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
                 receiptFactory = co.twinotify.core.service.DurableReceiptFactory(ctx),
                 localDeviceId = originDevice,
                 retryScheduler = co.twinotify.core.service.materializationStartupScheduler(ctx),
+                historyRecorder = co.twinotify.core.history.HistoryRepository(ctx),
             ).materializePending(
                 trigger = co.twinotify.core.service.materializationTriggerForPostAvailability(postAvailable),
             )

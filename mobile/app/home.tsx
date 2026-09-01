@@ -91,7 +91,7 @@ export default function HomeScreen() {
           onPermissions={() => router.push('/onboarding/perms')}
         />
         <HomeMetrics mirroredToday={metrics.mirroredToday} blockedToday={metrics.blockedToday} latencyMs={metrics.latencyMs} />
-        <RecentActivitySection state={recentActivity} peerName={peerName} />
+        <RecentActivitySection state={recentActivity} peerName={peerName} onSeeAll={() => router.push('/history' as never)} />
         <HomeFilterAction onPress={() => router.push('/filter')} />
       </ScrollView>
     </SafeAreaView>

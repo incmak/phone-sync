@@ -243,6 +243,30 @@ val MIGRATION_8_9 = object : Migration(8, 9) {
     }
 }
 
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS ui_activity_content (
+                eventId TEXT NOT NULL PRIMARY KEY,
+                ciphertext BLOB NOT NULL,
+                iv BLOB NOT NULL,
+                byteSize INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                FOREIGN KEY(eventId) REFERENCES ui_activity_event(eventId) ON UPDATE NO ACTION ON DELETE CASCADE)""",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_ui_activity_content_createdAt " +
+                "ON ui_activity_content(createdAt)",
+        )
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS ui_history_policy (
+                id INTEGER NOT NULL PRIMARY KEY,
+                contentEnabled INTEGER NOT NULL,
+                retentionDays INTEGER NOT NULL)""",
+        )
+    }
+}
+
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
 
@@ -265,6 +289,7 @@ object NotificationDb {
             MIGRATION_6_7,
             MIGRATION_7_8,
             MIGRATION_8_9,
+            MIGRATION_9_10,
         ).build().also { instance = it }
     }
 }
@@ -281,13 +306,15 @@ object NotificationDb {
         OriginSequence::class,
         ActivityEvent::class,
         UiActivityEvent::class,
+        UiActivityContent::class,
+        UiHistoryPolicy::class,
         SnapshotStage::class,
         MaterializationRetry::class,
         ActionInvocation::class,
         ActionExecution::class,
         NotificationDetailCache::class,
     ],
-    version = 9,
+    version = 10,
 )
 abstract class NotificationDbImpl : RoomDatabase() {
     abstract fun notificationMapDao(): NotificationMapDao

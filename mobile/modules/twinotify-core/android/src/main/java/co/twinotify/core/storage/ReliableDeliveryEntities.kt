@@ -1,6 +1,7 @@
 package co.twinotify.core.storage
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import androidx.room.TypeConverter
@@ -127,6 +128,54 @@ data class UiActivityEvent(
     val status: String,
     val route: String?,
     val occurredAt: Long,
+)
+
+@Entity(
+    tableName = "ui_activity_content",
+    foreignKeys = [ForeignKey(
+        entity = UiActivityEvent::class,
+        parentColumns = ["eventId"],
+        childColumns = ["eventId"],
+        onDelete = ForeignKey.CASCADE,
+    )],
+    indices = [Index("createdAt")],
+)
+data class UiActivityContent(
+    @PrimaryKey val eventId: String,
+    val ciphertext: ByteArray,
+    val iv: ByteArray,
+    val byteSize: Long,
+    val createdAt: Long,
+)
+
+@Entity(tableName = "ui_history_policy")
+data class UiHistoryPolicy(
+    @PrimaryKey val id: Int = 0,
+    val contentEnabled: Boolean,
+    val retentionDays: Int,
+) {
+    init {
+        require(id == 0)
+        require(retentionDays in setOf(7, 30))
+    }
+}
+
+data class UiHistoryStoredRow(
+    val eventId: String,
+    val packageName: String?,
+    val appName: String?,
+    val direction: String,
+    val kind: String,
+    val status: String,
+    val route: String?,
+    val occurredAt: Long,
+    val contentCiphertext: ByteArray?,
+    val contentIv: ByteArray?,
+)
+
+data class UiHistoryContentSize(
+    val eventId: String,
+    val byteSize: Long,
 )
 
 @Entity(tableName = "snapshot_stage", primaryKeys = ["snapshotId", "canonId"])

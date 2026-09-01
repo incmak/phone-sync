@@ -578,6 +578,94 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("DELETE FROM ui_activity_event WHERE msgId=:msgId")
     protected abstract suspend fun deleteUiActivityForMessage(msgId: String): Int
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun putUiActivityContent(row: UiActivityContent)
+
+    @Query("SELECT * FROM ui_history_policy WHERE id=0")
+    abstract suspend fun uiHistoryPolicy(): UiHistoryPolicy?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun putUiHistoryPolicy(row: UiHistoryPolicy)
+
+    @Query("DELETE FROM ui_activity_content")
+    protected abstract suspend fun clearUiActivityContent(): Int
+
+    @Query("DELETE FROM ui_activity_content WHERE eventId=:eventId")
+    protected abstract suspend fun deleteUiActivityContent(eventId: String): Int
+
+    @Query("DELETE FROM ui_activity_content WHERE eventId IN (SELECT eventId FROM ui_activity_event WHERE packageName=:packageName)")
+    protected abstract suspend fun deleteUiActivityContentForPackage(packageName: String): Int
+
+    @Query("DELETE FROM ui_activity_event WHERE packageName=:packageName")
+    protected abstract suspend fun deleteUiActivityForPackage(packageName: String): Int
+
+    @Query("SELECT DISTINCT packageName FROM ui_activity_event WHERE packageName IS NOT NULL")
+    abstract suspend fun uiHistoryPackages(): List<String>
+
+    @Query("SELECT eventId, byteSize FROM ui_activity_content ORDER BY createdAt ASC, eventId ASC")
+    protected abstract suspend fun uiHistoryContentOldestFirst(): List<UiHistoryContentSize>
+
+    @Query(
+        "SELECT e.eventId, e.packageName, e.appName, e.direction, e.kind, e.status, e.route, e.occurredAt, " +
+            "c.ciphertext AS contentCiphertext, c.iv AS contentIv " +
+            "FROM ui_activity_event e LEFT JOIN ui_activity_content c ON c.eventId=e.eventId " +
+            "ORDER BY e.occurredAt DESC, e.eventId DESC LIMIT :limit",
+    )
+    abstract suspend fun uiHistoryRows(limit: Int): List<UiHistoryStoredRow>
+
+    @Transaction
+    open suspend fun retainUiHistoryContent(row: UiActivityContent): Boolean {
+        if (uiHistoryPolicy()?.contentEnabled == false) return false
+        putUiActivityContent(row)
+        maintainUiHistory(row.createdAt)
+        return true
+    }
+
+    @Transaction
+    open suspend fun setUiHistoryContentEnabled(enabled: Boolean) {
+        val current = uiHistoryPolicy()
+        putUiHistoryPolicy(
+            UiHistoryPolicy(contentEnabled = enabled, retentionDays = current?.retentionDays ?: 30),
+        )
+        if (!enabled) clearUiActivityContent()
+    }
+
+    @Transaction
+    open suspend fun setUiHistoryRetentionDays(days: Int, now: Long) {
+        require(days in setOf(7, 30))
+        val current = uiHistoryPolicy()
+        putUiHistoryPolicy(
+            UiHistoryPolicy(contentEnabled = current?.contentEnabled ?: true, retentionDays = days),
+        )
+        maintainUiHistory(now)
+    }
+
+    @Transaction
+    open suspend fun maintainUiHistory(now: Long) {
+        require(now >= 0)
+        val days = uiHistoryPolicy()?.retentionDays ?: 30
+        deleteUiActivityBefore(now - days * 24L * 60L * 60L * 1_000L)
+        trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+        var totalBytes = uiHistoryContentOldestFirst().sumOf(UiHistoryContentSize::byteSize)
+        if (totalBytes <= UI_HISTORY_CONTENT_MAX_BYTES) return
+        for (row in uiHistoryContentOldestFirst()) {
+            if (totalBytes <= UI_HISTORY_CONTENT_MAX_BYTES) break
+            if (deleteUiActivityContent(row.eventId) == 1) totalBytes -= row.byteSize
+        }
+    }
+
+    @Transaction
+    open suspend fun clearUiHistory() {
+        clearUiActivityContent()
+        clearUiActivityEvents()
+    }
+
+    @Transaction
+    open suspend fun clearUiHistoryForPackage(packageName: String) {
+        deleteUiActivityContentForPackage(packageName)
+        deleteUiActivityForPackage(packageName)
+    }
+
     @Query(
         "DELETE FROM ui_activity_event WHERE eventId NOT IN " +
             "(SELECT eventId FROM ui_activity_event ORDER BY occurredAt DESC, eventId DESC LIMIT :limit)",
@@ -1308,8 +1396,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                     occurredAt = appliedAt,
                 ),
             )
-            deleteUiActivityBefore(appliedAt - 30L * 24L * 60L * 60L * 1_000L)
-            trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+            maintainUiHistory(appliedAt)
         }
         return MaterializationResult.Completed
     }
@@ -1591,8 +1678,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             }
             if (uiActivity != null) {
                 upsertUiActivity(uiActivity)
-                deleteUiActivityBefore(uiActivity.occurredAt - 30L * 24L * 60L * 60L * 1_000L)
-                trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+                maintainUiHistory(uiActivity.occurredAt)
             }
         }
         return result
@@ -1625,8 +1711,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             is OutboundStateCommitResult.Committed -> {
                 if (uiActivity != null) {
                     upsertUiActivity(uiActivity)
-                    deleteUiActivityBefore(uiActivity.occurredAt - 30L * 24L * 60L * 60L * 1_000L)
-                    trimUiActivityToLimit(UiActivityJournal.MAX_ROWS)
+                    maintainUiHistory(uiActivity.occurredAt)
                 }
                 CallRecoveryCommitResult.Committed(result.compacted)
             }
@@ -1923,6 +2008,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         const val SNAPSHOT_BASELINE_MARKER_PREFIX = "${SNAPSHOT_RESERVED_CANON_PREFIX}baseline:"
         const val MAX_SNAPSHOT_ITEMS = 4_096
         const val MAX_SNAPSHOT_ITEM_BYTES = 512 * 1024
+        const val UI_HISTORY_CONTENT_MAX_BYTES = 2L * 1024L * 1024L
         const val SNAPSHOT_TTL_MS = 10 * 60 * 1_000L
         const val ACTION_EXECUTION_RETENTION_MS = 24 * 60 * 60 * 1_000L
         const val NOTIFICATION_DETAIL_CANCELLED_RETENTION_MS = 10 * 60 * 1_000L

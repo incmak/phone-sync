@@ -9,6 +9,7 @@ import co.twinotify.core.actions.ProcessNotificationActionRegistry
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.crypto.Encrypter
 import co.twinotify.core.crypto.NonceSource
+import co.twinotify.core.history.HistoryRepository
 import co.twinotify.core.call.CallStateEvent
 import co.twinotify.core.call.CallStatePersistResult
 import co.twinotify.core.protocol.EncryptedEnvelope
@@ -68,6 +69,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
     private val actionCommitter = ActionGenerationCommitter<Notification.Action>(
         ProcessNotificationActionRegistry.registry,
     )
+    private val history = HistoryRepository(appContext)
 
     override suspend fun persist(command: CaptureCommand): CapturePersistResult {
         val peer = PeerStore.load(appContext)
@@ -183,6 +185,9 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         val uiActivity = outboundUiActivity(command, current?.desiredPayloadJson, msgId, now)
         when (val result = dao.commitCapturedState(desired, row, uiActivity)) {
             is OutboundStateCommitResult.Committed -> {
+                if (command is PostCommand) {
+                    runCatching { history.record("outbound:$msgId", payloadJson, now) }
+                }
                 when (command) {
                     is PostCommand -> actionCommitter.afterPostCommit(
                         command.canonId,

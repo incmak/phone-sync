@@ -24,6 +24,8 @@ import co.twinotify.core.pairing.lan.AndroidOfflinePairingRuntimeFactory
 import co.twinotify.core.service.toEventMap
 import co.twinotify.core.detail.NotificationDetailRepository
 import co.twinotify.core.detail.toBridgeMap
+import co.twinotify.core.history.HistoryItem
+import co.twinotify.core.history.HistoryRepository
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.PeerRecord
 import co.twinotify.core.storage.PeerStore
@@ -64,6 +66,21 @@ internal fun co.twinotify.core.storage.UiActivityEvent.toRecentActivityMap(
     "status" to status,
     "route" to route,
     "occurredAt" to occurredAt,
+)
+
+internal fun HistoryItem.toHistoryMap(
+    artworkDataUri: String? = null,
+): Map<String, Any?> = mapOf(
+    "appName" to appName,
+    "artworkDataUri" to artworkDataUri,
+    "appGroupId" to appGroupId,
+    "direction" to direction,
+    "kind" to kind,
+    "status" to status,
+    "route" to route,
+    "occurredAt" to occurredAt,
+    "title" to title,
+    "preview" to preview,
 )
 
 internal suspend fun persistRoutePreferenceThenNotifyService(
@@ -981,6 +998,79 @@ class TwinotifyCoreModule internal constructor(
                     })
                 } catch (e: Throwable) {
                     promise.reject("RECENT_ACTIVITY", "recent_activity_unavailable", e)
+                }
+            }
+        }
+
+        AsyncFunction("getHistory") { limit: Int, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val context = requireContext()
+                    val rows = HistoryRepository(context).recent(limit)
+                    promise.resolve(rows.map { row ->
+                        row.toHistoryMap(sourceAppArtworkDataUri(context, row.packageName))
+                    })
+                } catch (e: Throwable) {
+                    promise.reject("HISTORY", "history_unavailable", e)
+                }
+            }
+        }
+
+        AsyncFunction("getHistorySettings") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val settings = HistoryRepository(requireContext()).settings()
+                    promise.resolve(mapOf(
+                        "contentEnabled" to settings.contentEnabled,
+                        "retentionDays" to settings.retentionDays,
+                        "maxRows" to settings.maxRows,
+                        "maxContentBytes" to settings.maxContentBytes,
+                    ))
+                } catch (e: Throwable) {
+                    promise.reject("HISTORY_SETTINGS", "history_settings_unavailable", e)
+                }
+            }
+        }
+
+        AsyncFunction("setHistoryContentEnabled") { enabled: Boolean, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    HistoryRepository(requireContext()).setContentEnabled(enabled)
+                    promise.resolve(null)
+                } catch (e: Throwable) {
+                    promise.reject("HISTORY_SETTINGS", "history_settings_update_failed", e)
+                }
+            }
+        }
+
+        AsyncFunction("setHistoryRetentionDays") { days: Int, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    HistoryRepository(requireContext()).setRetentionDays(days)
+                    promise.resolve(null)
+                } catch (e: Throwable) {
+                    promise.reject("HISTORY_SETTINGS", "history_settings_update_failed", e)
+                }
+            }
+        }
+
+        AsyncFunction("clearHistory") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    HistoryRepository(requireContext()).clearAll()
+                    promise.resolve(null)
+                } catch (e: Throwable) {
+                    promise.reject("HISTORY_CLEAR", "history_clear_failed", e)
+                }
+            }
+        }
+
+        AsyncFunction("clearHistoryApp") { appGroupId: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    promise.resolve(HistoryRepository(requireContext()).clearApp(appGroupId))
+                } catch (e: Throwable) {
+                    promise.reject("HISTORY_CLEAR", "history_clear_failed", e)
                 }
             }
         }

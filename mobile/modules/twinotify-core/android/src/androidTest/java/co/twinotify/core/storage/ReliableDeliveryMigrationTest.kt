@@ -306,6 +306,31 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate9To10_preservesMetadataAndAddsProtectedHistorySidecar() {
+        helper.createDatabase(TEST_DB_V10, 9).apply {
+            execSQL(
+                "INSERT INTO ui_activity_event(" +
+                    "eventId,msgId,packageName,appName,direction,kind,status,route,occurredAt) " +
+                    "VALUES('history-event','message-10','example.messages','Messages','RECEIVED'," +
+                    "'NOTIFICATION','APPLIED','LAN',2000)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB_V10, 10, true, MIGRATION_9_10)
+        db.query("SELECT COUNT(*) FROM ui_activity_event WHERE eventId='history-event'").use { row ->
+            assertTrue(row.moveToFirst())
+            assertEquals(1, row.getInt(0))
+        }
+        for (table in listOf("ui_activity_content", "ui_history_policy")) {
+            db.query("SELECT name FROM sqlite_master WHERE type='table' AND name=?", arrayOf(table)).use { row ->
+                assertTrue(row.moveToFirst(), table)
+            }
+        }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
         const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"
@@ -314,5 +339,6 @@ class ReliableDeliveryMigrationTest {
         const val TEST_DB_V7 = "reliable-delivery-migration-v7-test"
         const val TEST_DB_V8 = "reliable-delivery-migration-v8-test"
         const val TEST_DB_V9 = "reliable-delivery-migration-v9-test"
+        const val TEST_DB_V10 = "reliable-delivery-migration-v10-test"
     }
 }

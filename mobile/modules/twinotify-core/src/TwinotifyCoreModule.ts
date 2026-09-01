@@ -42,6 +42,17 @@ export type RecentActivityItem = {
   route: 'LAN' | 'RELAY' | null;
   occurredAt: number;
 };
+export type HistoryItem = RecentActivityItem & {
+  appGroupId: string | null;
+  title: string | null;
+  preview: string | null;
+};
+export type HistorySettings = {
+  contentEnabled: boolean;
+  retentionDays: 7 | 30;
+  maxRows: number;
+  maxContentBytes: number;
+};
 
 export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'LEGACY_ONLINE_ONLY' | 'OFFLINE_QUEUED';
 
@@ -142,6 +153,12 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   // Home screen metrics
   getMetrics(): Promise<MetricsSnapshot>;
   getRecentActivity(limit: number): Promise<RecentActivityItem[]>;
+  getHistory(limit: number): Promise<HistoryItem[]>;
+  getHistorySettings(): Promise<HistorySettings>;
+  setHistoryContentEnabled(enabled: boolean): Promise<void>;
+  setHistoryRetentionDays(days: 7 | 30): Promise<void>;
+  clearHistory(): Promise<void>;
+  clearHistoryApp(appGroupId: string): Promise<boolean>;
   getNotificationDetail(detailId: string): Promise<NotificationDetail | null>;
   invokeMirrorAction(
     detailId: string,
