@@ -10,6 +10,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runInterruptible
@@ -66,43 +67,47 @@ class DirectLanConnector(
 
     private val preferredInitiatorDeviceId = minOf(localDeviceId, peerDeviceId)
 
-    suspend fun connect(): AuthenticatedLanConnection = withTimeout(connectTimeoutMillis) {
-        coroutineScope {
-            // Each side reports its own outcome, so one failing does not cancel the
-            // other. A refused dial must still let an inbound connection land.
-            val inbound = async { attempt { listener.accept() } }
-            val outbound = async {
-                // Normally only the stable, identity-selected initiator dials. The other
-                // phone retains a delayed reverse dial so asymmetric OEM/firewall behavior
-                // can still recover without creating routine crossed connections.
-                if (localDeviceId != preferredInitiatorDeviceId) {
-                    delay(fallbackDialDelayMillis)
-                }
-                attempt { dialer.dial(discovery.candidates().first()) }
-            }
-            try {
-                race(inbound, outbound)
-            } finally {
-                withContext(NonCancellable) {
-                    inbound.cancel()
-                    outbound.cancel()
-
-                    // SSLServerSocket.accept() is not reliably interruptible on Android.
-                    // Close the owned listener before joining the losing branch, otherwise
-                    // coroutineScope can hold an authenticated winner until the outer
-                    // timeout tears that winner down as well.
-                    runCatching { closeListener() }
-                    try {
-                        closeDiscovery()
-                    } catch (_: Exception) {
-                        // Closing discovery is best-effort cleanup. The branch joins below
-                        // are what prevent connector work from escaping this attempt.
+    suspend fun connect(): AuthenticatedLanConnection = try {
+        withTimeout(connectTimeoutMillis) {
+            coroutineScope {
+                // Each side reports its own outcome, so one failing does not cancel the
+                // other. A refused dial must still let an inbound connection land.
+                val inbound = async { attempt { listener.accept() } }
+                val outbound = async {
+                    // Normally only the stable, identity-selected initiator dials. The other
+                    // phone retains a delayed reverse dial so asymmetric OEM/firewall behavior
+                    // can still recover without creating routine crossed connections.
+                    if (localDeviceId != preferredInitiatorDeviceId) {
+                        delay(fallbackDialDelayMillis)
                     }
-                    inbound.join()
-                    outbound.join()
+                    attempt { dialer.dial(discovery.candidates().first()) }
+                }
+                try {
+                    race(inbound, outbound)
+                } finally {
+                    withContext(NonCancellable) {
+                        inbound.cancel()
+                        outbound.cancel()
+
+                        // SSLServerSocket.accept() is not reliably interruptible on Android.
+                        // Close the owned listener before joining the losing branch, otherwise
+                        // coroutineScope can hold an authenticated winner until the outer
+                        // timeout tears that winner down as well.
+                        runCatching { closeListener() }
+                        try {
+                            closeDiscovery()
+                        } catch (_: Exception) {
+                            // Closing discovery is best-effort cleanup. The branch joins below
+                            // are what prevent connector work from escaping this attempt.
+                        }
+                        inbound.join()
+                        outbound.join()
+                    }
                 }
             }
         }
+    } catch (_: TimeoutCancellationException) {
+        throw LanConnectionException(LanConnectionFailure.TIMEOUT)
     }
 
     private suspend fun race(

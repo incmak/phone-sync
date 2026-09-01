@@ -271,7 +271,8 @@ class DirectLanConnectorTest {
             connectTimeoutMillis = 500,
         )
 
-        assertFailsWith<kotlinx.coroutines.TimeoutCancellationException> { connector.connect() }
+        val error = assertFailsWith<LanConnectionException> { connector.connect() }
+        assertEquals(LanConnectionFailure.TIMEOUT, error.failure)
     }
 
     // ---- helpers ---------------------------------------------------------

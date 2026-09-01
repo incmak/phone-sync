@@ -183,12 +183,16 @@ class PeerControlOutbox(
             require(generation >= 0) { "transport generation must be non-negative" }
             val now = validNow()
             val tracked = synchronized(stateLock) { activeProbe }
-            if (tracked != null && tracked.expiresAt > now) return@withLock null
-            val recentEvidence = synchronized(stateLock) { evidence }
-            if (recentEvidence?.generation == generation && now < recentEvidence.nextProbeAt) {
+            if (tracked != null && tracked.expiresAt > now && (!requestDirect || tracked.requestDirect)) {
                 return@withLock null
             }
-            if (store.active("peer.probe", now) != null) return@withLock null
+            if (!requestDirect) {
+                val recentEvidence = synchronized(stateLock) { evidence }
+                if (recentEvidence?.generation == generation && now < recentEvidence.nextProbeAt) {
+                    return@withLock null
+                }
+                if (store.active("peer.probe", now) != null) return@withLock null
+            }
 
             val msgId = newId()
             val event = InnerEventV2(
@@ -215,6 +219,7 @@ class PeerControlOutbox(
                     msgId = row.msgId,
                     envelopeSha256 = row.envelopeSha256,
                     expiresAt = row.expiresAt,
+                    requestDirect = requestDirect,
                 )
             }
             row
@@ -270,6 +275,7 @@ class PeerControlOutbox(
         val msgId: String,
         val envelopeSha256: String,
         val expiresAt: Long,
+        val requestDirect: Boolean,
     )
 
     private data class EvidenceRegistration(

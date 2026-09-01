@@ -72,6 +72,31 @@ class PeerControlOutboxTest {
     }
 
     @Test
+    fun activeDirectRequestSupersedesUnexpiredPassiveProbe() = runTest {
+        assertNotNull(outbox.ensureProbe(generation = 3, requestDirect = false))
+
+        val direct = assertNotNull(outbox.ensureProbe(generation = 3, requestDirect = true))
+
+        assertEquals(2, store.inserted.size)
+        assertEquals(true, JSONObject(events.last().first.payloadJson).getBoolean("request_direct"))
+        assertEquals(direct.msgId, events.last().first.msgId)
+        assertNull(outbox.ensureProbe(generation = 3, requestDirect = true))
+    }
+
+    @Test
+    fun activeDirectRequestBypassesPassiveProbeReceiptCooldown() = runTest {
+        val passive = assertNotNull(outbox.ensureProbe(generation = 3, requestDirect = false))
+        assertTrue(outbox.acceptProbeReceipt(passive.msgId, passive.envelopeSha256, generation = 3, now = 2_000))
+        store.inserted.clear() // The ordinary receipt transition deletes this durable row.
+        now = 2_001
+
+        val direct = assertNotNull(outbox.ensureProbe(generation = 3, requestDirect = true))
+
+        assertEquals(true, JSONObject(events.last().first.payloadJson).getBoolean("request_direct"))
+        assertEquals(direct.msgId, events.last().first.msgId)
+    }
+
+    @Test
     fun recoveredUnexpiredProbeBlocksOnlyUntilItsInnerExpiry() = runTest {
         store.recovered = row(
             InnerEventV2(
