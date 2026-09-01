@@ -133,6 +133,7 @@ for serial in "$EMU_A" "$EMU_B"; do
   # capability is determined from the returned command list, not that status.
   help=$("$ADB_BIN" -s "$serial" shell cmd notification help 2>&1) || true
   notification_help_has_post "$help" || fail 24 "$serial cmd notification lacks post support"
+  "$ADB_BIN" -s "$serial" reverse "tcp:$RELAY_PORT" "tcp:$RELAY_PORT" >/dev/null
 done
 
 LISTEN_ADDR="127.0.0.1:$RELAY_PORT" BOLT_PATH="$RUN_DIR/relay.db" "$RELAY_BIN" >"$RUN_DIR/relay.log" 2>&1 &
@@ -143,7 +144,7 @@ for _ in $(seq 1 30); do
 done
 "$CURL_BIN" -fsS "http://127.0.0.1:$RELAY_PORT/health" >/dev/null 2>&1 || fail 13 "relay did not become healthy; see $RUN_DIR/relay.log"
 
-RELAY_URL="http://10.0.2.2:$RELAY_PORT"
+RELAY_URL="http://127.0.0.1:$RELAY_PORT"
 (cd "$ROOT_DIR/e2e" && go run ./cmd/twinotify-e2e -scenario pair -serial-a "$EMU_A" -serial-b "$EMU_B" -package "$PACKAGE_NAME" -relay-url "$RELAY_URL" -timeout "${E2E_TIMEOUT:-60s}")
 mkdir -p "$RUN_DIR/sanitized"
 if [[ "$SCENARIO" != "pair" ]]; then

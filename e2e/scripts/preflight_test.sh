@@ -16,6 +16,19 @@ status=$?
 set -e
 [[ "$status" -eq 0 ]] || { echo "notification shell capability self-test failed with $status" >&2; cat "$tmp/notification-error" >&2; exit 1; }
 
+grep -Fq '"$ADB_BIN" -s "$serial" reverse "tcp:$RELAY_PORT" "tcp:$RELAY_PORT"' "$SCRIPT_DIR/run-two-emulators.sh" || {
+  echo "emulator harness must reverse the loopback relay port on every target" >&2
+  exit 1
+}
+grep -Fq 'RELAY_URL="http://127.0.0.1:$RELAY_PORT"' "$SCRIPT_DIR/run-two-emulators.sh" || {
+  echo "emulator harness must give the app a policy-compliant loopback relay URL" >&2
+  exit 1
+}
+if grep -Fq 'RELAY_URL="http://10.0.2.2:' "$SCRIPT_DIR/run-two-emulators.sh"; then
+  echo "emulator harness must not bypass the debug loopback-only relay policy" >&2
+  exit 1
+fi
+
 fakebin="$tmp/bin"
 mkdir -p "$fakebin"
 for tool in adb emulator sdkmanager avdmanager nc curl; do

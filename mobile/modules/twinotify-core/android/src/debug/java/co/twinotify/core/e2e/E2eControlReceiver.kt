@@ -303,7 +303,15 @@ class E2eControlReceiver internal constructor(
             val (box, sign) = CryptoStore.loadOrGenerate(context)
             val deviceId = DeviceIdentity.getOrCreate(context)
             val token = PairPayload.newToken()
-            PairProtocol.initiate(relayUrl, token, deviceId, box.publicKey, sign.publicKey, displayName)
+            PairProtocol.initiate(
+                relayUrl,
+                token,
+                deviceId,
+                box.publicKey,
+                sign.publicKey,
+                displayName,
+                debug = true,
+            )
             E2eCommandResult(
                 requestId,
                 "ok",
@@ -320,6 +328,7 @@ class E2eControlReceiver internal constructor(
                 box.publicKey,
                 sign.publicKey,
                 command.param("display_name").orEmpty(),
+                debug = true,
             )
             PeerStore.save(
                 context,
@@ -340,6 +349,7 @@ class E2eControlReceiver internal constructor(
                 relayUrl, pairToken, role = "A", expectedType = "peer.hello",
                 deviceId = deviceId, signSecretKey = signSecret,
                 timeoutMs = command.timeoutMs(),
+                debug = true,
             )
             val hello = JSONObject(frame)
             PeerStore.save(
@@ -378,6 +388,7 @@ class E2eControlReceiver internal constructor(
                 relayUrl,
                 pairToken,
                 java.util.Base64.getDecoder().decode(signature),
+                debug = true,
             )
             E2eCommandResult(requestId, "ok")
         }
@@ -390,6 +401,7 @@ class E2eControlReceiver internal constructor(
                 relayUrl, pairToken, role = "B", expectedType = "pair.sig",
                 deviceId = deviceId, signSecretKey = signSecret,
                 timeoutMs = command.timeoutMs(),
+                debug = true,
             )
             val signature = java.util.Base64.getDecoder().decode(JSONObject(frame).getString("confirmation_sig"))
             E2eCommandResult(requestId, "ok", payload = JSONObject().put(
@@ -401,6 +413,7 @@ class E2eControlReceiver internal constructor(
                 command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid", "relay_url required"),
                 command.param("pair_token") ?: return E2eCommandResult(requestId, "invalid", "pair_token required"),
                 java.util.Base64.getDecoder().decode(command.param("confirmation_sig") ?: ""),
+                debug = true,
             )
             E2eCommandResult(requestId, "ok")
         }
@@ -419,6 +432,7 @@ class E2eControlReceiver internal constructor(
                 sign.publicKey,
                 sign.secretKey,
                 java.util.Base64.getDecoder().decode(command.param("confirmation_sig") ?: ""),
+                debug = true,
             )
             E2eCommandResult(requestId, "ok")
         }

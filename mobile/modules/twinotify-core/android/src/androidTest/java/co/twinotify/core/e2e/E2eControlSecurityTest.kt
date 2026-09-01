@@ -19,6 +19,10 @@ import org.junit.runner.RunWith
 import org.json.JSONObject
 import java.nio.file.Files
 import java.io.File
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import co.twinotify.core.listener.PendingPeerCancel
 import co.twinotify.core.service.SnapshotConvergence
 import co.twinotify.core.service.StateDigest
@@ -29,6 +33,54 @@ import kotlinx.coroutines.runBlocking
 @RunWith(AndroidJUnit4::class)
 class E2eControlSecurityTest {
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
+
+    @Test
+    fun debugPairInitAcceptsTheLoopbackRelayUsedByTheEmulatorHarness() {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val executor = Executors.newSingleThreadExecutor()
+        val request = executor.submit<String> {
+            server.accept().use { socket ->
+                val reader = socket.getInputStream().bufferedReader()
+                val requestLine = reader.readLine()
+                var contentLength = 0
+                while (true) {
+                    val line = reader.readLine()
+                    if (line.isNullOrEmpty()) break
+                    if (line.startsWith("Content-Length:", ignoreCase = true)) {
+                        contentLength = line.substringAfter(':').trim().toInt()
+                    }
+                }
+                repeat(contentLength) { reader.read() }
+                socket.getOutputStream().write(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".encodeToByteArray(),
+                )
+                requestLine
+            }
+        }
+
+        try {
+            val token = E2eSessionToken.forTest(context, "debug-loopback-pair-init")
+            val result = E2eControlReceiver().executeForTest(
+                context,
+                E2eCommand(
+                    requestId = "debug-loopback-pair-init",
+                    name = "PAIR_INIT",
+                    token = token,
+                    params = mapOf(
+                        "relay_url" to "http://127.0.0.1:${server.localPort}",
+                        "display_name" to "Emulator A",
+                    ),
+                ),
+            )
+
+            assertEquals("ok", result.code, result.toJson().toString())
+            assertNotNull(result.payload)
+            assertEquals("POST /pair/init HTTP/1.1", request.get(2, TimeUnit.SECONDS))
+        } finally {
+            server.close()
+            executor.shutdownNow()
+        }
+    }
 
     @Test
     fun emulatorNetworkFaultControlIsAuthenticatedClosedAndDelegated() {
