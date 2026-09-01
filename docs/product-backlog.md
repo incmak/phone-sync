@@ -39,6 +39,23 @@ and Twinotify-authored mirrored notifications must never be sent to the peer,
 while removal of a locally mirrored Twinotify notification must continue to
 drive the existing peer-dismiss logic exactly once.
 
+## 2026-09-01 two-emulator verification
+
+The [two-emulator verification record](superpowers/plans/2026-09-01-two-emulator-backlog-verification.md)
+now covers all emulator-reachable rows on two Android 17/API 37 emulators. It
+includes a fresh authenticated v2 relay pair, 79 focused Android integration
+tests, the complete 13-scenario/155-step notification-action aggregate,
+foreground-notification tap/state inspection, paired Home/History/Settings
+review, dark mode and 130% font scale, force-stop, in-place package replacement,
+and reboot recovery.
+
+That run fixed three emulator-valid regressions: debug pairing now uses the
+documented loopback-only URL policy through ADB reverse; receipt-backed internal
+controls no longer leak peer-receipt rows after relay custody; and E2E user
+delivery predicates no longer count internal control traffic. Both emulators
+finished authenticated with zero active user-delivery queue rows. These results
+do not replace any named physical/OEM acceptance row.
+
 ## PB-001 — Preserve multiple messages and conversation fidelity
 
 **Implementation:** Source complete in `41eada3`. See the
@@ -46,7 +63,11 @@ drive the existing peer-dismiss logic exactly once.
 and [implementation plan with evidence](superpowers/plans/2026-09-01-pb-001-conversation-fidelity.md).
 Emulator instrumentation covers bounded 30-message history, two simultaneous
 mirrors, repeated in-place updates, and independent cancellation. The required
-paired-phone WhatsApp-like run remains pending.
+paired-phone WhatsApp-like run remains pending. The 2026-09-01 paired-emulator
+run additionally kept three independent canonical notifications materialized
+across service restart, package replacement, and reboot; API 37's shell lacked
+a stable cancel command, so deterministic instrumentation remains the dismissal
+oracle for this pass.
 
 **Problem:** A later notification from the same app/conversation can replace
 the previous mirrored presentation. The desired-state protocol intentionally
@@ -80,6 +101,8 @@ The emulator verifies truthful state presentation, private/ongoing notification
 flags, a sanitized explicit immutable content intent, repeated taps into one
 task, and the fail-closed own-package filter. Physical shade, lock-screen,
 restart, tap, and paired-phone self-notification evidence remains pending.
+The 2026-09-01 paired-emulator inspection also verified the visible **Via
+relay** title/custody copy and one resumed `MainActivity` after repeated taps.
 
 **Problem:** The foreground notification always titles itself “Twinotify
 active,” places route state only in secondary text, and has no content intent.
@@ -109,6 +132,9 @@ Host tests and 12 emulator instrumented tests cover the Room v10 migration,
 Keystore-protected content, age/row/byte bounds, grouping, pagination,
 transactional clearing, and immediate content-retention disable behavior. The
 release History screen and its destructive confirmation were also exercised.
+The paired-emulator pass repeated the History review with real mirrored entries,
+By app grouping, privacy controls, and the clear-all confirmation; Cancel was
+exercised so the evidence run did not delete its retained state.
 
 **Problem:** The current recent-activity journal keeps metadata for up to 500
 rows/30 days but exposes at most 20 rows, does not retain display content, does
@@ -190,7 +216,9 @@ and [implementation plan with evidence](superpowers/plans/2026-09-01-pb-006-open
 Eight emulator instrumentation scenarios cover the explicit router activity,
 opaque detail IDs, primary-tap preservation, bounded action count, unavailable
 fallback, update, and cancel behavior. Layout on both target OEM notification
-shades remains pending.
+shades remains pending. The clean two-emulator action aggregate also passed all
+13 primary-action/durability children and 155 recorded steps without weakening
+the secondary-action contract.
 
 **Problem:** The primary mirrored-notification tap correctly follows the source
 app's action semantics. Users may also want a separate way to inspect the local
@@ -222,6 +250,13 @@ QR/waiting state. The pairing QR was not captured because it contains ephemeral
 pairing material. Full two-phone success/recovery/unpair, TalkBack, one-handed
 use, OEM background behavior, and the PB-005 relay path remain external evidence.
 
+The 2026-09-01 paired-emulator continuation exercised onboarding through role
+and transport choice, paired Home/History/Settings, light/dark rendering, named
+accessibility nodes, and 130% font scale without visible clipping or control
+collisions. Debug-control pairing bypasses the TypeScript onboarding store, so
+the direct-only Settings branch seen in that fixture is not release relay-state
+evidence; release tests separately cover both settings branches.
+
 **Problem:** Individual screens have been designed and tested, but the complete
 journey has not been re-audited for a user unfamiliar with relays, notification
 access, background restrictions, or pairing terminology.
@@ -244,10 +279,13 @@ progressive disclosure.
 **Implementation:** Source complete in `1b06246`. See the
 [design](superpowers/specs/2026-09-01-pb-008-automatic-transport-recovery-design.md)
 and [implementation plan with evidence](superpowers/plans/2026-09-01-pb-008-automatic-transport-recovery.md).
-API 37 emulator runs cover signed in-place replacement, force-stop/foreground
-recovery, exact persisted-state preservation, paused-state preservation, and
-single-service idempotence. Signed upgrades, reboot, force-stop/open, OEM
-auto-start/battery policy, and resumed delivery still need both physical phones.
+API 37 emulator runs cover in-place replacement, force-stop/foreground recovery,
+emulator reboot, exact persisted-state preservation, paused-state preservation,
+and single-service idempotence. The 2026-09-01 continuation observed honest
+transient reconnecting state followed by automatic authenticated relay recovery
+at protocol floor 2 and zero queued user deliveries, including reboot recovery
+without opening the app. Signed production upgrades, OEM auto-start/battery
+policy, and resumed delivery still need both physical phones.
 
 **Problem:** Physical testing found that Twinotify can retain an enabled-looking
 preference after a force-stop or package replacement while no transport is
@@ -277,6 +315,13 @@ Room/JVM coverage locks first-receipt deduplication, exclusion rules, local-day
 bounds, last-ten latency, migration 10-to-11, and the distinction between no
 latency evidence and a measured zero. Two physical phones must still reconcile
 visible counts and latency against authenticated receipts.
+
+The paired-emulator pass reconciled six known source deliveries with
+**Mirrored 6** at one UI checkpoint. It also found and fixed internal
+receipt-backed controls that could remain queued forever after relay custody;
+after the fix, retries and periodic controls left both emulators with zero
+active user-delivery rows. Physical latency and two-phone count reconciliation
+remain pending.
 
 **Problem:** The home screen remained at zero mirrored items and no latency data
 after bidirectional notifications were physically delivered and acknowledged on
