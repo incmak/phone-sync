@@ -3,7 +3,7 @@ import { StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import { useTheme } from '../Theme';
 
-interface HomeMetricsProps { mirroredToday: number; blockedToday: number; latencyMs: number }
+interface HomeMetricsProps { mirroredToday: number; blockedToday: number; latencyMs: number | null }
 
 export function HomeMetrics({ mirroredToday, blockedToday, latencyMs }: HomeMetricsProps) {
   const theme = useTheme();
@@ -11,7 +11,7 @@ export function HomeMetrics({ mirroredToday, blockedToday, latencyMs }: HomeMetr
   const wrapValues = width <= 360 || fontScale >= 1.6;
   const metrics = [
     { label: 'Mirrored', value: String(mirroredToday), accessibilityLabel: `${mirroredToday} mirrored today` },
-    { label: 'Latency', value: latencyMs > 0 ? `${latencyMs} ms` : 'No data', accessibilityLabel: latencyMs > 0 ? `${latencyMs} milliseconds` : 'Latency not measured' },
+    { label: 'Latency', value: latencyMs !== null ? `${latencyMs} ms` : 'No data', accessibilityLabel: latencyMs !== null ? `${latencyMs} milliseconds` : 'Latency not measured' },
     { label: 'Blocked', value: String(blockedToday), accessibilityLabel: `${blockedToday} blocked today` },
   ];
   return (

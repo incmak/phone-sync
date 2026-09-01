@@ -580,6 +580,7 @@ class LanTransportTest {
             status: String,
             reason: String?,
             occurredAt: Long,
+            peerReceiptCreatedAt: Long?,
         ): RelayReceiptResult = RelayReceiptResult.Missing
         override suspend fun rejectRelay(
             msgId: String,

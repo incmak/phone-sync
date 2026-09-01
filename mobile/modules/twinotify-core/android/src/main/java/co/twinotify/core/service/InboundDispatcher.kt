@@ -735,6 +735,8 @@ class InboundDispatcher internal constructor(
                             envelopeSha256 = payload.getString("envelope_sha256"),
                             status = payload.getString("status"),
                             reason = payload.optString("reason").takeIf { it.isNotEmpty() },
+                            occurredAt = controlNow,
+                            peerReceiptCreatedAt = inner.createdAt,
                         )
                         if (transition is OutboxTransition.Deleted) {
                             acceptedProbeReceipt = payload.getString("acked_msg_id") to
@@ -1116,10 +1118,6 @@ class InboundDispatcher internal constructor(
             large_icon_png_b64 = o.optString("large_icon_png_b64").takeIf { it.isNotEmpty() },
             ts = o.optLong("ts"),
         )
-        // Record latency from envelope timestamp (stamped by sender) to receive time.
-        val latencyMs = System.currentTimeMillis() - post.ts
-        co.twinotify.core.metrics.MetricsStore.recordLatency(ctx, latencyMs)
-
         if (post.is_group_summary) return   // spec §4.7.2 — drop summary, mirror children only
         MirrorPoster.post(ctx, post)
     }

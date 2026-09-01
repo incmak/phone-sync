@@ -10,6 +10,8 @@ import co.twinotify.core.actions.ActionExpiryCommitResult
 import co.twinotify.core.actions.ActionResultCommitResult
 import co.twinotify.core.actions.ActionResultRepost
 import co.twinotify.core.actions.ActionResultRequest
+import co.twinotify.core.metrics.DeliveryLatencyEvidence
+import co.twinotify.core.metrics.deliveryLatencyEvidence
 import co.twinotify.core.service.DirectControlCommitResult
 import co.twinotify.core.service.DirectControlProcessingResult
 import co.twinotify.core.service.ReceiptBackedControlResult
@@ -572,6 +574,46 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("SELECT * FROM ui_activity_event ORDER BY occurredAt DESC, eventId DESC LIMIT :limit")
     abstract override suspend fun recentUiActivity(limit: Int): List<UiActivityEvent>
 
+    @Query("SELECT * FROM verified_delivery_metric WHERE msgId=:msgId LIMIT 1")
+    abstract suspend fun verifiedDeliveryMetric(msgId: String): VerifiedDeliveryMetric?
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    protected abstract suspend fun insertVerifiedDeliveryMetric(row: VerifiedDeliveryMetric)
+
+    @Query(
+        "SELECT COUNT(*) FROM verified_delivery_metric " +
+            "WHERE verifiedAt >= :startInclusive AND verifiedAt < :endExclusive",
+    )
+    protected abstract suspend fun verifiedDeliveryCount(startInclusive: Long, endExclusive: Long): Int
+
+    @Query(
+        "SELECT latencyMs FROM verified_delivery_metric WHERE latencyMs IS NOT NULL " +
+            "ORDER BY verifiedAt DESC, msgId DESC LIMIT 10",
+    )
+    protected abstract suspend fun recentVerifiedDeliveryLatencies(): List<Long>
+
+    @Query("DELETE FROM verified_delivery_metric WHERE verifiedAt < :cutoff")
+    protected abstract suspend fun deleteVerifiedDeliveryMetricsBefore(cutoff: Long): Int
+
+    @Query(
+        "DELETE FROM verified_delivery_metric WHERE msgId NOT IN " +
+            "(SELECT msgId FROM verified_delivery_metric ORDER BY verifiedAt DESC, msgId DESC LIMIT :limit)",
+    )
+    protected abstract suspend fun trimVerifiedDeliveryMetrics(limit: Int): Int
+
+    @Transaction
+    open suspend fun verifiedDeliverySnapshot(
+        startInclusive: Long,
+        endExclusive: Long,
+    ): VerifiedDeliverySnapshot {
+        require(startInclusive <= endExclusive)
+        val latencies = recentVerifiedDeliveryLatencies()
+        return VerifiedDeliverySnapshot(
+            mirroredToday = verifiedDeliveryCount(startInclusive, endExclusive),
+            latencyMs = if (latencies.isEmpty()) null else (latencies.sum() / latencies.size).toInt(),
+        )
+    }
+
     @Query("DELETE FROM ui_activity_event WHERE occurredAt < :cutoff")
     abstract override suspend fun deleteUiActivityBefore(cutoff: Long): Int
 
@@ -713,6 +755,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         clearOriginSequences()
         clearActivityEvents()
         clearUiActivityEvents()
+        clearVerifiedDeliveryMetrics()
         clearSnapshotStages()
         clearMaterializationRetries()
         clearActionInvocations()
@@ -732,6 +775,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     protected abstract suspend fun clearActivityEvents()
     @Query("DELETE FROM ui_activity_event")
     protected abstract suspend fun clearUiActivityEvents()
+    @Query("DELETE FROM verified_delivery_metric")
+    protected abstract suspend fun clearVerifiedDeliveryMetrics()
     @Query("DELETE FROM snapshot_stage")
     protected abstract suspend fun clearSnapshotStages()
     @Query("DELETE FROM materialization_retry")
@@ -1513,12 +1558,31 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         status: String,
         reason: String?,
         occurredAt: Long,
+        peerReceiptCreatedAt: Long? = null,
     ): RelayReceiptResult {
         require(status in setOf("applied", "expired", "rejected", "decrypt_failed"))
         val row = outboundMessage(ackedMsgId)
             ?: return if (activityForMessage(ackedMsgId) != null) RelayReceiptResult.AlreadyTerminal
             else RelayReceiptResult.Missing
         if (row.envelopeSha256 != envelopeSha256) return RelayReceiptResult.Conflict(row.envelopeSha256)
+        val verifiedDelivery = if (
+            status == "applied" && row.eventType in VERIFIED_NOTIFICATION_EVENT_TYPES
+        ) {
+            val evidence = deliveryLatencyEvidence(row.createdAt, peerReceiptCreatedAt)
+            VerifiedDeliveryMetric(
+                msgId = row.msgId,
+                verifiedAt = occurredAt,
+                latencyMs = (evidence as? DeliveryLatencyEvidence.Measured)?.milliseconds,
+                latencyStatus = when (evidence) {
+                    is DeliveryLatencyEvidence.Measured -> "MEASURED"
+                    DeliveryLatencyEvidence.ClockSkew -> "CLOCK_SKEW"
+                    DeliveryLatencyEvidence.Implausible -> "IMPLAUSIBLE"
+                    DeliveryLatencyEvidence.Unavailable -> "UNAVAILABLE"
+                },
+            )
+        } else {
+            null
+        }
         val movement = moveToTerminalActivity(
             msgId = ackedMsgId,
             activity = ActivityEvent(
@@ -1531,6 +1595,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 occurredAt = occurredAt,
                 detailCode = reason?.take(128),
             ),
+            verifiedDelivery = verifiedDelivery,
         )
         return when (movement) {
             TerminalMovementResult.Moved -> RelayReceiptResult.Deleted
@@ -1936,6 +2001,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     open suspend fun moveToTerminalActivity(
         msgId: String,
         activity: ActivityEvent,
+        verifiedDelivery: VerifiedDeliveryMetric? = null,
     ): TerminalMovementResult {
         require(activity.msgId == msgId)
         val outbound = outbound(msgId)
@@ -1947,6 +2013,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             }
         }
         insertActivity(activity)
+        verifiedDelivery?.let {
+            require(it.msgId == msgId)
+            insertVerifiedDeliveryMetric(it)
+            deleteVerifiedDeliveryMetricsBefore((it.verifiedAt - VERIFIED_METRIC_RETENTION_MS).coerceAtLeast(0L))
+            trimVerifiedDeliveryMetrics(VERIFIED_METRIC_MAX_ROWS)
+        }
         uiActivityForMessage(msgId)?.let { ui ->
             val terminalStatus = when (activity.status) {
                 "applied" -> UiActivityStatus.DELIVERED
@@ -1985,6 +2057,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     }
 
     private companion object {
+        val VERIFIED_NOTIFICATION_EVENT_TYPES = setOf("notif.post", "notif.update")
+        const val VERIFIED_METRIC_RETENTION_MS = 32L * 24L * 60L * 60L * 1_000L
+        const val VERIFIED_METRIC_MAX_ROWS = 10_000
         val DIRECT_ACK_CONTROL_TYPES = setOf(
             "peer.receipt",
             "state.digest",

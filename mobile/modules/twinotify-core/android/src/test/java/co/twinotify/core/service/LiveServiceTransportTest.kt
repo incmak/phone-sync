@@ -410,7 +410,14 @@ class LiveServiceTransportTest {
             CustodyAcceptanceResult.Missing
         override suspend fun markSent(msgId: String, retryAt: Long): Int = 0
         override suspend fun legacyForwarded(msgId: String, forwardedAt: Long) = LegacyForwardResult.Missing
-        override suspend fun applyPeerReceipt(ackedMsgId: String, envelopeSha256: String, status: String, reason: String?, occurredAt: Long) =
+        override suspend fun applyPeerReceipt(
+            ackedMsgId: String,
+            envelopeSha256: String,
+            status: String,
+            reason: String?,
+            occurredAt: Long,
+            peerReceiptCreatedAt: Long?,
+        ) =
             RelayReceiptResult.Missing
         override suspend fun rejectRelay(msgId: String, reason: String, occurredAt: Long, retryAt: Long) =
             RelayRejectionResult.Missing

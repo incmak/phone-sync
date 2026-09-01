@@ -886,6 +886,7 @@ class RelayTransportTest {
             status: String,
             reason: String?,
             occurredAt: Long,
+            peerReceiptCreatedAt: Long?,
         ) = RelayReceiptResult.Deleted
 
         override suspend fun rejectRelay(msgId: String, reason: String, occurredAt: Long, retryAt: Long) =

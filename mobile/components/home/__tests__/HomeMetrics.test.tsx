@@ -14,3 +14,13 @@ test('uses a wrapping comparison grid with aligned metric roles', () => {
   expect(screen.getByText('Blocked')).toBeTruthy();
   expect(screen.getByLabelText('84 milliseconds')).toBeTruthy();
 });
+
+test('distinguishes absent latency from a measured zero', () => {
+  const screen = render(<HomeMetrics mirroredToday={1} blockedToday={0} latencyMs={null} />);
+  expect(screen.getByText('No data')).toBeTruthy();
+  expect(screen.getByLabelText('Latency not measured')).toBeTruthy();
+
+  screen.rerender(<HomeMetrics mirroredToday={1} blockedToday={0} latencyMs={0} />);
+  expect(screen.getByText('0 ms')).toBeTruthy();
+  expect(screen.getByLabelText('0 milliseconds')).toBeTruthy();
+});

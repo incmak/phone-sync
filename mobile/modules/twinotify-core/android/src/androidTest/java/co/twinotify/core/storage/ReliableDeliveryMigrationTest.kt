@@ -331,6 +331,29 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate10To11_preservesHistoryAndAddsVerifiedDeliveryLedger() {
+        helper.createDatabase(TEST_DB_V11, 10).apply {
+            execSQL(
+                "INSERT INTO ui_activity_event(" +
+                    "eventId,msgId,packageName,appName,direction,kind,status,route,occurredAt) " +
+                    "VALUES('history-event','message-11','example.messages','Messages','SENT'," +
+                    "'NOTIFICATION','DELIVERED','LAN',2000)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(TEST_DB_V11, 11, true, MIGRATION_10_11)
+        db.query("SELECT COUNT(*) FROM ui_activity_event WHERE eventId='history-event'").use { row ->
+            assertTrue(row.moveToFirst())
+            assertEquals(1, row.getInt(0))
+        }
+        db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='verified_delivery_metric'").use { row ->
+            assertTrue(row.moveToFirst())
+        }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
         const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"
@@ -340,5 +363,6 @@ class ReliableDeliveryMigrationTest {
         const val TEST_DB_V8 = "reliable-delivery-migration-v8-test"
         const val TEST_DB_V9 = "reliable-delivery-migration-v9-test"
         const val TEST_DB_V10 = "reliable-delivery-migration-v10-test"
+        const val TEST_DB_V11 = "reliable-delivery-migration-v11-test"
     }
 }

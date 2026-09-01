@@ -249,6 +249,7 @@ class ReliablePipelineTest {
             status: String,
             reason: String?,
             occurredAt: Long,
+            peerReceiptCreatedAt: Long?,
         ): RelayReceiptResult {
             val row = outbound[ackedMsgId] ?: return if (ackedMsgId in terminal) {
                 RelayReceiptResult.AlreadyTerminal

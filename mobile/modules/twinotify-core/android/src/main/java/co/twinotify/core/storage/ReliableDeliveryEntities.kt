@@ -131,6 +131,29 @@ data class UiActivityEvent(
 )
 
 @Entity(
+    tableName = "verified_delivery_metric",
+    indices = [Index("verifiedAt"), Index("latencyStatus")],
+)
+data class VerifiedDeliveryMetric(
+    @PrimaryKey val msgId: String,
+    val verifiedAt: Long,
+    val latencyMs: Long?,
+    val latencyStatus: String,
+) {
+    init {
+        require(verifiedAt >= 0)
+        require(latencyMs == null || latencyMs >= 0)
+        require(latencyStatus in setOf("MEASURED", "CLOCK_SKEW", "IMPLAUSIBLE", "UNAVAILABLE"))
+        require((latencyStatus == "MEASURED") == (latencyMs != null))
+    }
+}
+
+data class VerifiedDeliverySnapshot(
+    val mirroredToday: Int,
+    val latencyMs: Int?,
+)
+
+@Entity(
     tableName = "ui_activity_content",
     foreignKeys = [ForeignKey(
         entity = UiActivityEvent::class,

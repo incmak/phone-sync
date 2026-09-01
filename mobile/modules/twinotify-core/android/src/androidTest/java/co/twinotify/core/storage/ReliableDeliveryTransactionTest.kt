@@ -108,6 +108,79 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun authenticatedAppliedNotificationReceiptRecordsOneMetricAndDuplicateDoesNotInflateIt() = runBlocking {
+        val row = outbound("metric-notification", 1_000, "notif.post")
+        dao.insertOutbound(row)
+
+        assertEquals(
+            RelayReceiptResult.Deleted,
+            dao.applyPeerReceipt(
+                row.msgId,
+                row.envelopeSha256,
+                status = "applied",
+                reason = null,
+                occurredAt = 2_000,
+                peerReceiptCreatedAt = 1_125,
+            ),
+        )
+        assertEquals(
+            VerifiedDeliverySnapshot(mirroredToday = 1, latencyMs = 125),
+            dao.verifiedDeliverySnapshot(1_000, 3_000),
+        )
+
+        assertEquals(
+            RelayReceiptResult.AlreadyTerminal,
+            dao.applyPeerReceipt(
+                row.msgId,
+                row.envelopeSha256,
+                status = "applied",
+                reason = null,
+                occurredAt = 2_100,
+                peerReceiptCreatedAt = 1_200,
+            ),
+        )
+        assertEquals(1, dao.verifiedDeliverySnapshot(1_000, 3_000).mirroredToday)
+    }
+
+    @Test
+    fun metricLedgerExcludesFailuresAndNonNotificationsButKeepsClockSkewSeparate() = runBlocking {
+        val rejected = outbound("metric-rejected", 1_000, "notif.update")
+        val call = outbound("metric-call", 1_000, "call.state")
+        val skewed = outbound("metric-skewed", 1_000, "notif.update")
+        listOf(rejected, call, skewed).forEach { dao.insertOutbound(it) }
+
+        dao.applyPeerReceipt(rejected.msgId, rejected.envelopeSha256, "rejected", "stale", 2_000, 1_100)
+        dao.applyPeerReceipt(call.msgId, call.envelopeSha256, "applied", null, 2_100, 1_200)
+        dao.applyPeerReceipt(skewed.msgId, skewed.envelopeSha256, "applied", null, 2_200, 900)
+
+        assertEquals(
+            VerifiedDeliverySnapshot(mirroredToday = 1, latencyMs = null),
+            dao.verifiedDeliverySnapshot(1_000, 3_000),
+        )
+        assertEquals("CLOCK_SKEW", dao.verifiedDeliveryMetric(skewed.msgId)?.latencyStatus)
+    }
+
+    @Test
+    fun verifiedDeliverySnapshotUsesHalfOpenDayBoundsAndLastTenMeasuredSamples() = runBlocking {
+        repeat(11) { index ->
+            val row = outbound("metric-$index", 1_000, if (index % 2 == 0) "notif.post" else "notif.update")
+            dao.insertOutbound(row)
+            dao.applyPeerReceipt(
+                row.msgId,
+                row.envelopeSha256,
+                "applied",
+                null,
+                occurredAt = 1_999L + index,
+                peerReceiptCreatedAt = 1_001L + index,
+            )
+        }
+
+        assertEquals(1, dao.verifiedDeliverySnapshot(1_000, 2_000).mirroredToday)
+        assertEquals(10, dao.verifiedDeliverySnapshot(2_000, 3_000).mirroredToday)
+        assertEquals(6, dao.verifiedDeliverySnapshot(1_000, 3_000).latencyMs)
+    }
+
+    @Test
     fun receiptBackedControlCommitsJournalAndReceiptAtomicallyAndDuplicatesSafely() = runBlocking {
         val receipt = controlOutbound("bootstrap-receipt", "peer.receipt").copy(
             envelopeSha256 = "receipt-digest",

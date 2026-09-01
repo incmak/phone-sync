@@ -25,6 +25,7 @@ interface OutboxStore {
         status: String,
         reason: String?,
         occurredAt: Long,
+        peerReceiptCreatedAt: Long?,
     ): RelayReceiptResult
     suspend fun rejectRelay(msgId: String, reason: String, occurredAt: Long, retryAt: Long): RelayRejectionResult
     suspend fun expireRelay(msgId: String, expiredAt: Long): RelayReceiptResult
@@ -126,8 +127,16 @@ class OutboxRepository(
         status: String,
         reason: String? = null,
         occurredAt: Long = clock(),
+        peerReceiptCreatedAt: Long? = null,
     ): OutboxTransition = when (
-        val result = store.applyPeerReceipt(ackedMsgId, envelopeSha256, status, reason, occurredAt)
+        val result = store.applyPeerReceipt(
+            ackedMsgId,
+            envelopeSha256,
+            status,
+            reason,
+            occurredAt,
+            peerReceiptCreatedAt,
+        )
     ) {
         RelayReceiptResult.Missing -> OutboxTransition.Missing
         RelayReceiptResult.Deleted -> OutboxTransition.Deleted
@@ -195,7 +204,15 @@ class DaoOutboxStore(private val dao: ReliableDeliveryDao) : OutboxStore {
         status: String,
         reason: String?,
         occurredAt: Long,
-    ): RelayReceiptResult = dao.applyPeerReceipt(ackedMsgId, envelopeSha256, status, reason, occurredAt)
+        peerReceiptCreatedAt: Long?,
+    ): RelayReceiptResult = dao.applyPeerReceipt(
+        ackedMsgId,
+        envelopeSha256,
+        status,
+        reason,
+        occurredAt,
+        peerReceiptCreatedAt,
+    )
     override suspend fun rejectRelay(msgId: String, reason: String, occurredAt: Long, retryAt: Long): RelayRejectionResult =
         dao.rejectRelay(msgId, reason, occurredAt, retryAt)
     override suspend fun expireRelay(msgId: String, expiredAt: Long): RelayReceiptResult = dao.expireRelay(msgId, expiredAt)

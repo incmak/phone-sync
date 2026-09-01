@@ -32,7 +32,7 @@ export type {
 
 export type KeyPair = { encPubkey: string; signPubkey: string };
 export type EncryptResult = { ciphertext: string; nonce: string };
-export type MetricsSnapshot = { mirroredToday: number; blockedToday: number; latencyMs: number };
+export type MetricsSnapshot = { mirroredToday: number; blockedToday: number; latencyMs: number | null };
 export type RecentActivityItem = {
   appName: string | null;
   artworkDataUri: string | null;

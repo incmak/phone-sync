@@ -97,7 +97,7 @@ const mockTwinotifyCore = {
     status: 'granted', granted: true, canAskAgain: true, expires: 'never',
   })),
   openAppSettings: jest.fn(async () => {}),
-  getMetrics: jest.fn(async () => ({ mirroredToday: 0, blockedToday: 0, latencyMs: 0 })),
+  getMetrics: jest.fn(async () => ({ mirroredToday: 0, blockedToday: 0, latencyMs: null })),
   getRecentActivity: jest.fn(async () => []),
   getHistory: jest.fn(async () => []),
   getHistorySettings: jest.fn(async () => ({ contentEnabled: true, retentionDays: 30, maxRows: 500, maxContentBytes: 2097152 })),

@@ -20,7 +20,17 @@ class OutboxRepositoryTest {
         val repo = OutboxRepository(store, clock)
         assertEquals(CustodyResult.Accepted, repo.onCustodyAccepted("m1", CustodyRoute.LAN, 1_000))
         assertNotNull(store.rows["m1"])
-        assertEquals(OutboxTransition.Deleted, repo.onPeerReceipt("m1", digest, "applied", occurredAt = 2_000))
+        assertEquals(
+            OutboxTransition.Deleted,
+            repo.onPeerReceipt(
+                "m1",
+                digest,
+                "applied",
+                occurredAt = 2_000,
+                peerReceiptCreatedAt = 1_750,
+            ),
+        )
+        assertEquals(1_750, store.lastPeerReceiptCreatedAt)
         assertNull(store.rows["m1"])
     }
 
@@ -124,6 +134,7 @@ class OutboxRepositoryTest {
     private class FakeOutboxStore : OutboxStore {
         val rows = linkedMapOf<String, OutboundMessage>()
         val localExpirations = mutableListOf<String>()
+        var lastPeerReceiptCreatedAt: Long? = null
         override suspend fun expireLocal(now: Long): Int {
             val expired = rows.values.filter {
                 it.expiresAt <= now && it.relayCustodyState == "NONE" &&
@@ -166,7 +177,15 @@ class OutboxRepositoryTest {
             )
             return CustodyAcceptanceResult.Accepted
         }
-        override suspend fun applyPeerReceipt(ackedMsgId: String, envelopeSha256: String, status: String, reason: String?, occurredAt: Long): RelayReceiptResult {
+        override suspend fun applyPeerReceipt(
+            ackedMsgId: String,
+            envelopeSha256: String,
+            status: String,
+            reason: String?,
+            occurredAt: Long,
+            peerReceiptCreatedAt: Long?,
+        ): RelayReceiptResult {
+            lastPeerReceiptCreatedAt = peerReceiptCreatedAt
             val row = rows[ackedMsgId] ?: return RelayReceiptResult.Missing
             if (row.envelopeSha256 != envelopeSha256) return RelayReceiptResult.Conflict(row.envelopeSha256)
             rows.remove(ackedMsgId)

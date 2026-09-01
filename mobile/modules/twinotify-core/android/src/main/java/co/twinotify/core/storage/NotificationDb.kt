@@ -267,6 +267,26 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
     }
 }
 
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS verified_delivery_metric (
+                msgId TEXT NOT NULL PRIMARY KEY,
+                verifiedAt INTEGER NOT NULL,
+                latencyMs INTEGER,
+                latencyStatus TEXT NOT NULL)""",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_verified_delivery_metric_verifiedAt " +
+                "ON verified_delivery_metric(verifiedAt)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_verified_delivery_metric_latencyStatus " +
+                "ON verified_delivery_metric(latencyStatus)",
+        )
+    }
+}
+
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
 
@@ -290,6 +310,7 @@ object NotificationDb {
             MIGRATION_7_8,
             MIGRATION_8_9,
             MIGRATION_9_10,
+            MIGRATION_10_11,
         ).build().also { instance = it }
     }
 }
@@ -306,6 +327,7 @@ object NotificationDb {
         OriginSequence::class,
         ActivityEvent::class,
         UiActivityEvent::class,
+        VerifiedDeliveryMetric::class,
         UiActivityContent::class,
         UiHistoryPolicy::class,
         SnapshotStage::class,
@@ -314,7 +336,7 @@ object NotificationDb {
         ActionExecution::class,
         NotificationDetailCache::class,
     ],
-    version = 10,
+    version = 11,
 )
 abstract class NotificationDbImpl : RoomDatabase() {
     abstract fun notificationMapDao(): NotificationMapDao

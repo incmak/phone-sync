@@ -62,7 +62,7 @@ export interface PeerHelloPayload {
 export interface MetricsSnapshot {
   mirroredToday: number;
   blockedToday: number;
-  latencyMs: number;
+  latencyMs: number | null;
 }
 
 export interface TwinotifyCoreAPI {

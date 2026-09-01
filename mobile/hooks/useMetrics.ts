@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import TwinotifyCoreModule from '../modules/twinotify-core/src/TwinotifyCoreModule';
 import type { MetricsSnapshot } from '../modules/twinotify-core/src/TwinotifyCoreModule';
 
-const INITIAL: MetricsSnapshot = { mirroredToday: 0, blockedToday: 0, latencyMs: 0 };
+const INITIAL: MetricsSnapshot = { mirroredToday: 0, blockedToday: 0, latencyMs: null };
 
 /**
  * Polls MetricsStore every [intervalMs] (default 5 s).
