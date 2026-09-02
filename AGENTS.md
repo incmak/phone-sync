@@ -137,8 +137,3 @@ Kotlin flow: `TwinotifyNotificationListener` captures → filters → `OutboundQ
 - **Report honestly when something cannot be verified** here (Kotlin compilation, instrumented tests, physical-device behaviour) rather than implying a pass.
 - Pause and ask on UI/visual decisions — those are the user's to drive.
 
----
-
-Foreign agent configs were detected at `~/.codex` and `~/.gemini`. Reply `/import` to scan and list what's importable (MCP servers, slash commands, subagents, skills, instructions), then `/import --yes=<digest>` to apply the user-level items.
-
----
