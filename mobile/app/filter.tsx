@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  FlatList,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -11,77 +11,84 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
-import TwinotifyCoreModule from '../modules/twinotify-core/src/TwinotifyCoreModule';
-import { useTheme, TwAppChip, TW_APPS, TwSwitch, TwBanner } from '../components';
-
-// ── types ─────────────────────────────────────────────────────────────────────
+import TwinotifyCoreModule, {
+  type FilterableApp,
+} from '../modules/twinotify-core/src/TwinotifyCoreModule';
+import { useTheme, TwAppChip, TwSwitch, TwBanner } from '../components';
 
 type TabKey = 'all' | 'mirrored' | 'blocked';
-// packageName → allowed (true = mirrored, false = blocked)
 type AppFilter = Record<string, boolean>;
 
-// ── component ─────────────────────────────────────────────────────────────────
+export function filterTabAccessibilityLabel(label: string, count: number): string {
+  return `${label}, ${count} ${count === 1 ? 'app' : 'apps'}`;
+}
 
 export default function FilterScreen() {
   const theme = useTheme();
   const [tab, setTab] = useState<TabKey>('all');
   const [query, setQuery] = useState('');
+  const [apps, setApps] = useState<FilterableApp[]>([]);
   const [filter, setFilter] = useState<AppFilter>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [pendingKeys, setPendingKeys] = useState<Set<string>>(() => new Set());
   const [saveError, setSaveError] = useState(false);
   const pendingKeysRef = useRef(new Set<string>());
 
-  // Load user denylist from native bridge on mount
   useEffect(() => {
-    TwinotifyCoreModule.getUserDenylist()
-      .then((denied: string[]) => {
+    let active = true;
+
+    async function loadCatalog() {
+      try {
+        const catalog = await TwinotifyCoreModule.getFilterableApps();
+        // Discovery happens first so native refreshes against the current app categories.
+        const denied = await TwinotifyCoreModule.getUserDenylist();
+        if (!active) return;
         const deniedSet = new Set(denied);
-        const allKeys = Object.keys(TW_APPS);
         const initial: AppFilter = {};
-        for (const k of allKeys) {
-          // toggle ON (allowed) = NOT in denylist
-          initial[k] = !deniedSet.has(k);
+        for (const app of catalog) {
+          initial[app.packageName] = (
+            !app.alwaysFiltered && !deniedSet.has(app.packageName)
+          );
         }
+        setApps(catalog);
         setFilter(initial);
-      })
-      .catch(() => {
-        // fallback: allow everything (fail open for display; enforcement is in native)
-        const allKeys = Object.keys(TW_APPS);
-        const fallback: AppFilter = {};
-        for (const k of allKeys) {
-          fallback[k] = true;
-        }
-        setFilter(fallback);
-      })
-      .finally(() => setLoading(false));
+        setLoadError(false);
+      } catch {
+        if (active) setLoadError(true);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void loadCatalog();
+    return () => { active = false; };
   }, []);
 
-  const allKeys = Object.keys(TW_APPS);
-  const mirroredCount = allKeys.filter((k) => filter[k] !== false).length;
-  const blockedCount = allKeys.filter((k) => filter[k] === false).length;
-
+  const mirroredCount = apps.filter((app) => filter[app.packageName] !== false).length;
+  const blockedCount = apps.filter((app) => filter[app.packageName] === false).length;
   const tabs: { k: TabKey; label: string; count: number }[] = [
-    { k: 'all',      label: 'All',      count: allKeys.length },
-    { k: 'mirrored', label: 'Mirrored', count: mirroredCount  },
-    { k: 'blocked',  label: 'Blocked',  count: blockedCount   },
+    { k: 'all', label: 'All', count: apps.length },
+    { k: 'mirrored', label: 'Mirrored', count: mirroredCount },
+    { k: 'blocked', label: 'Blocked', count: blockedCount },
   ];
 
-  const visibleKeys = useMemo(() => {
-    const lq = query.toLowerCase();
-    return allKeys.filter((k) => {
-      const app = TW_APPS[k];
-      if (!app) return false;
-      if (lq && !app.name.toLowerCase().includes(lq)) return false;
-      if (tab === 'mirrored') return filter[k] !== false;
-      if (tab === 'blocked')  return filter[k] === false;
+  const visibleApps = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    return apps.filter((app) => {
+      if (
+        normalizedQuery
+        && !app.displayName.toLocaleLowerCase().includes(normalizedQuery)
+        && !app.packageName.toLocaleLowerCase().includes(normalizedQuery)
+      ) return false;
+      if (tab === 'mirrored') return filter[app.packageName] !== false;
+      if (tab === 'blocked') return filter[app.packageName] === false;
       return true;
     });
-  }, [allKeys, tab, query, filter]);
+  }, [apps, filter, query, tab]);
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>
-      {/* Header */}
       <View style={[styles.header, { borderBottomColor: theme.border }]}>
         <Pressable
           onPress={() => router.back()}
@@ -97,20 +104,17 @@ export default function FilterScreen() {
         <View style={styles.backBtn} />
       </View>
 
-      {/* Default denylist info banner */}
       <TwBanner
         tone="info"
-        title="Default denylist is compiled-in"
-        body="The default denylist (OTP, banking, password managers) is compiled into the app and cannot be unblocked here. Use the toggles below to additionally block any app you don't want mirrored."
+        title="Privacy defaults"
+        body="Banking, authenticator, and password-manager apps stay blocked. Music and audio apps start blocked, but you can turn them on below."
         compact
         style={styles.infoBanner}
       />
 
-      {/* Search + tabs — sticky above list */}
       <View style={styles.controls}>
-        {/* Search bar */}
         <View style={[styles.searchBar, { backgroundColor: theme.fill, borderColor: theme.border }]}>
-          <Text style={[styles.searchIcon, { color: theme.ink3 }]}>🔍</Text>
+          <MaterialIcons name="search" size={20} color={theme.ink3} />
           <TextInput
             placeholder="Search apps"
             placeholderTextColor={theme.ink3}
@@ -118,18 +122,21 @@ export default function FilterScreen() {
             onChangeText={setQuery}
             style={[styles.searchInput, { color: theme.ink, fontFamily: theme.fonts.ui }]}
             returnKeyType="search"
+            autoCapitalize="none"
             autoCorrect={false}
           />
         </View>
 
-        {/* Tabs */}
         <View style={styles.tabRow}>
-          {tabs.map((t) => {
-            const active = t.k === tab;
+          {tabs.map((item) => {
+            const active = item.k === tab;
             return (
               <Pressable
-                key={t.k}
-                onPress={() => setTab(t.k)}
+                key={item.k}
+                onPress={() => setTab(item.k)}
+                accessibilityRole="tab"
+                accessibilityLabel={filterTabAccessibilityLabel(item.label, item.count)}
+                accessibilityState={{ selected: active }}
                 style={[
                   styles.tabBtn,
                   {
@@ -147,27 +154,13 @@ export default function FilterScreen() {
                     },
                   ]}
                 >
-                  {t.label}{' '}
-                  <Text style={{ opacity: 0.6 }}>{t.count}</Text>
+                  {item.label}{' '}
+                  <Text style={{ opacity: 0.6 }}>{item.count}</Text>
                 </Text>
               </Pressable>
             );
           })}
         </View>
-
-        {/* OTP pre-blocked banner — only on All tab */}
-        {tab === 'all' && (
-          <View
-            style={[
-              styles.otpBanner,
-              { backgroundColor: theme.fill, borderColor: theme.border },
-            ]}
-          >
-            <Text style={[styles.otpText, { color: theme.ink2, fontFamily: theme.fonts.ui }]}>
-              🛡 3 banking apps pre-blocked · <Text style={{ color: theme.ink, fontFamily: theme.fonts.uiSemi }}>hash verified</Text>
-            </Text>
-          </View>
-        )}
 
         {saveError && (
           <Text
@@ -183,87 +176,110 @@ export default function FilterScreen() {
         )}
       </View>
 
-      {/* App list */}
-      <ScrollView
-        contentContainerStyle={styles.list}
+      <FlatList
+        data={loading ? [] : visibleApps}
+        keyExtractor={(app) => app.packageName}
+        initialNumToRender={24}
+        style={[styles.listCard, { backgroundColor: theme.card, borderColor: theme.border }]}
+        contentContainerStyle={(loading || visibleApps.length === 0) ? styles.emptyList : undefined}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
-      >
-        <View style={[styles.listCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
-          {loading ? (
-            <View style={styles.emptyRow}>
+        ListEmptyComponent={(
+          <View style={styles.emptyRow}>
+            {loading ? (
               <Text style={[styles.emptyText, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
                 Loading…
               </Text>
-            </View>
-          ) : visibleKeys.length === 0 ? (
-            <View style={styles.emptyRow}>
+            ) : loadError ? (
+              <Text
+                accessibilityRole="alert"
+                style={[
+                  styles.emptyText,
+                  { color: theme.sem.danger.foreground, fontFamily: theme.fonts.ui },
+                ]}
+              >
+                Couldn&apos;t load installed apps. Reopen this screen to try again.
+              </Text>
+            ) : (
               <Text style={[styles.emptyText, { color: theme.ink3, fontFamily: theme.fonts.ui }]}>
                 No apps match
               </Text>
+            )}
+          </View>
+        )}
+        renderItem={({ item: app, index }) => {
+          const packageName = app.packageName;
+          const allowed = filter[packageName] !== false;
+          return (
+            <View
+              style={[
+                styles.appRow,
+                index > 0 && {
+                  borderTopColor: theme.border,
+                  borderTopWidth: StyleSheet.hairlineWidth,
+                },
+              ]}
+            >
+              <TwAppChip
+                app={{ name: app.displayName, artworkDataUri: app.artworkDataUri }}
+                size="sm"
+              />
+              <View style={styles.appCopy}>
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.appName,
+                    { color: theme.ink, fontFamily: theme.fonts.uiMedium },
+                  ]}
+                >
+                  {app.displayName}
+                </Text>
+                {app.alwaysFiltered ? (
+                  <Text style={[styles.appMeta, { color: theme.ink2, fontFamily: theme.fonts.ui }]}>
+                    Always blocked for privacy
+                  </Text>
+                ) : app.defaultFiltered ? (
+                  <Text style={[styles.appMeta, { color: theme.ink2, fontFamily: theme.fonts.ui }]}>
+                    Music or audio · blocked by default
+                  </Text>
+                ) : null}
+              </View>
+              <TwSwitch
+                checked={allowed}
+                onChange={async (next) => {
+                  if (pendingKeysRef.current.has(packageName)) return;
+                  pendingKeysRef.current.add(packageName);
+                  setPendingKeys(new Set(pendingKeysRef.current));
+                  setSaveError(false);
+                  setFilter((previous) => ({ ...previous, [packageName]: next }));
+                  try {
+                    if (next) {
+                      await TwinotifyCoreModule.removeFromDenylist(packageName);
+                    } else {
+                      await TwinotifyCoreModule.addToDenylist(packageName);
+                    }
+                  } catch {
+                    setFilter((previous) => ({ ...previous, [packageName]: !next }));
+                    setSaveError(true);
+                  } finally {
+                    pendingKeysRef.current.delete(packageName);
+                    setPendingKeys(new Set(pendingKeysRef.current));
+                  }
+                }}
+                size="md"
+                disabled={app.alwaysFiltered || pendingKeys.has(packageName)}
+                accessibilityLabel={`${app.displayName} mirroring`}
+              />
             </View>
-          ) : (
-            visibleKeys.map((k, i) => {
-              const app = TW_APPS[k];
-              if (!app) return null;
-              const allowed = filter[k] !== false;
-              return (
-                <View key={k}>
-                  {i > 0 && (
-                    <View style={[styles.rowDivider, { backgroundColor: theme.border }]} />
-                  )}
-                  <View style={styles.appRow}>
-                    <TwAppChip app={app} size="sm" />
-                    <Text
-                      style={[
-                        styles.appName,
-                        { color: theme.ink, fontFamily: theme.fonts.uiMedium },
-                      ]}
-                    >
-                      {app.name}
-                    </Text>
-                    <TwSwitch
-                      checked={allowed}
-                      onChange={async (next) => {
-                        if (pendingKeysRef.current.has(k)) return;
-                        pendingKeysRef.current.add(k);
-                        setPendingKeys(new Set(pendingKeysRef.current));
-                        setSaveError(false);
-                        setFilter((prev) => ({ ...prev, [k]: next }));
-                        try {
-                          if (next) {
-                            // Turning ON = allow = remove from denylist
-                            await TwinotifyCoreModule.removeFromDenylist(k);
-                          } else {
-                            // Turning OFF = block = add to denylist
-                            await TwinotifyCoreModule.addToDenylist(k);
-                          }
-                        } catch {
-                          setFilter((prev) => ({ ...prev, [k]: !next }));
-                          setSaveError(true);
-                        } finally {
-                          pendingKeysRef.current.delete(k);
-                          setPendingKeys(new Set(pendingKeysRef.current));
-                        }
-                      }}
-                      size="md"
-                      disabled={pendingKeys.has(k)}
-                      accessibilityLabel={`${app.name} mirroring`}
-                    />
-                  </View>
-                </View>
-              );
-            })
-          )}
-        </View>
-      </ScrollView>
+          );
+        }}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -274,9 +290,7 @@ const styles = StyleSheet.create({
   },
   backBtn: { width: 80, minHeight: 48, justifyContent: 'center' },
   headerTitle: { fontSize: 17 },
-  // Info banner
   infoBanner: { marginHorizontal: 16, marginTop: 12 },
-  // Controls
   controls: { paddingHorizontal: 20, paddingTop: 12, gap: 12 },
   searchBar: {
     flexDirection: 'row',
@@ -284,47 +298,45 @@ const styles = StyleSheet.create({
     gap: 8,
     borderRadius: 12,
     borderWidth: 1,
+    minHeight: 48,
     paddingVertical: 10,
     paddingHorizontal: 12,
   },
-  searchIcon: { fontSize: 14 },
   searchInput: { flex: 1, fontSize: 14, padding: 0 },
-  // Tabs
   tabRow: { flexDirection: 'row', gap: 8 },
   tabBtn: {
     flex: 1,
+    minHeight: 44,
     paddingVertical: 8,
     paddingHorizontal: 10,
     borderRadius: 999,
     borderWidth: 1,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   tabLabel: { fontSize: 13 },
-  // OTP banner
-  otpBanner: {
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    borderWidth: 1,
-  },
-  otpText: { fontSize: 12 },
   saveError: { fontSize: 13, lineHeight: 18 },
-  // List
-  list: { padding: 20, paddingBottom: 40 },
   listCard: {
+    flex: 1,
+    marginHorizontal: 20,
+    marginTop: 16,
+    marginBottom: 20,
     borderRadius: 14,
     borderWidth: 1,
     overflow: 'hidden',
   },
-  rowDivider: { height: StyleSheet.hairlineWidth, marginHorizontal: 14 },
+  emptyList: { flexGrow: 1 },
   appRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingVertical: 12,
+    paddingVertical: 10,
     paddingHorizontal: 14,
+    minHeight: 64,
   },
-  appName: { flex: 1, fontSize: 14 },
-  emptyRow: { padding: 32, alignItems: 'center' },
-  emptyText: { fontSize: 14 },
+  appCopy: { flex: 1, minWidth: 0 },
+  appName: { fontSize: 14 },
+  appMeta: { fontSize: 12, lineHeight: 17, marginTop: 1 },
+  emptyRow: { flex: 1, padding: 32, alignItems: 'center', justifyContent: 'center' },
+  emptyText: { fontSize: 14, lineHeight: 20, textAlign: 'center' },
 });

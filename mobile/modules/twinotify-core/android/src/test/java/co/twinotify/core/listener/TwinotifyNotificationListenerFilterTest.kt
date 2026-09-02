@@ -24,6 +24,10 @@ class TwinotifyNotificationListenerFilterTest {
         ).readText()
         val capture = listener.substringAfter("private fun capturePosted").substringBefore("override fun onNotificationRemoved")
         assertContains(capture, "if (!shouldCaptureOutbound(sbn.packageName, packageName)) return")
+        assertTrue(
+            capture.indexOf("shouldCaptureOutbound") < capture.indexOf("AppFilterStore.cachedOrEmpty"),
+            "self-authored notifications must be rejected before any filter snapshot is consulted",
+        )
     }
 
     @Test

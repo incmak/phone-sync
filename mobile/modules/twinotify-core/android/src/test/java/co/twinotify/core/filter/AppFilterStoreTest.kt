@@ -18,18 +18,49 @@ class AppFilterStoreTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun defaultFilteredPackagesAreDeniedUntilExplicitlyAllowed() {
+        val defaults = setOf("com.example.music")
+
+        assertEquals(defaults, AppFilterPreferences().effective(defaults))
+        assertEquals(
+            emptySet(),
+            AppFilterPreferences(explicitlyAllowed = defaults).effective(defaults),
+        )
+    }
+
+    @Test
+    fun explicitBlockWinsAndBlockingAgainClearsAnAllowOverride() {
+        val allowed = AppFilterPreferences(
+            explicitlyAllowed = setOf("com.example.music"),
+        )
+        val blockedAgain = allowed.block("com.example.music")
+
+        assertEquals(setOf("com.example.music"), blockedAgain.effective(setOf("com.example.music")))
+        assertEquals(emptySet(), blockedAgain.explicitlyAllowed)
+    }
+
+    @Test
+    fun allowingAnExplicitlyBlockedAppRemovesItFromTheEffectiveSet() {
+        val blocked = AppFilterPreferences(
+            explicitlyDenied = setOf("com.example.chat"),
+        )
+
+        assertEquals(emptySet(), blocked.allow("com.example.chat").effective(emptySet()))
+    }
+
+    @Test
     fun removePublishesRemainingCommittedPackagesWithoutEmptyWindow() = runTest {
         val context = object : ContextWrapper(null) {
             override fun getApplicationContext(): Context = this
             override fun getFilesDir() = temporaryFolder.root
         }
 
-        AppFilterStore.clear(context)
-        AppFilterStore.add(context, "pkg.a")
-        AppFilterStore.add(context, "pkg.b")
-        assertEquals(setOf("pkg.a", "pkg.b"), AppFilterStore.load(context))
+        AppFilterStore.clear(context, emptySet())
+        AppFilterStore.add(context, "pkg.a", emptySet())
+        AppFilterStore.add(context, "pkg.b", emptySet())
+        assertEquals(setOf("pkg.a", "pkg.b"), AppFilterStore.load(context, emptySet()))
 
-        AppFilterStore.remove(context, "pkg.a")
+        AppFilterStore.remove(context, "pkg.a", emptySet())
 
         assertEquals(setOf("pkg.b"), AppFilterStore.cachedOrEmpty())
     }

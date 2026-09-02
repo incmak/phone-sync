@@ -33,6 +33,13 @@ export type {
 export type KeyPair = { encPubkey: string; signPubkey: string };
 export type EncryptResult = { ciphertext: string; nonce: string };
 export type MetricsSnapshot = { mirroredToday: number; blockedToday: number; latencyMs: number | null };
+export type FilterableApp = {
+  packageName: string;
+  displayName: string;
+  artworkDataUri: string | null;
+  defaultFiltered: boolean;
+  alwaysFiltered: boolean;
+};
 export type RecentActivityItem = {
   appName: string | null;
   artworkDataUri: string | null;
@@ -149,6 +156,7 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   isPostNotificationsGranted(): Promise<boolean>;
   openAppSettings(): Promise<void>;
   // User-controlled app denylist
+  getFilterableApps(): Promise<FilterableApp[]>;
   getUserDenylist(): Promise<string[]>;
   addToDenylist(pkg: string): Promise<void>;
   removeFromDenylist(pkg: string): Promise<void>;

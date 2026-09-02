@@ -24,6 +24,8 @@ import co.twinotify.core.pairing.lan.AndroidOfflinePairingRuntimeFactory
 import co.twinotify.core.service.toEventMap
 import co.twinotify.core.detail.NotificationDetailRepository
 import co.twinotify.core.detail.toBridgeMap
+import co.twinotify.core.filter.DenylistLoader
+import co.twinotify.core.filter.InstalledAppCatalog
 import co.twinotify.core.history.HistoryItem
 import co.twinotify.core.history.HistoryRepository
 import co.twinotify.core.storage.DeviceIdentity
@@ -957,6 +959,27 @@ class TwinotifyCoreModule internal constructor(
                     throw cancellation
                 } catch (e: Throwable) {
                     promise.reject("UNPAIR", e.message ?: "err", e)
+                }
+            }
+        }
+
+        AsyncFunction("getFilterableApps") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val context = requireContext()
+                    val alwaysFiltered = DenylistLoader.load(context)
+                    val apps = InstalledAppCatalog.load(context).map { app ->
+                        mapOf(
+                            "packageName" to app.packageName,
+                            "displayName" to app.displayName,
+                            "artworkDataUri" to sourceAppArtworkDataUri(context, app.packageName),
+                            "defaultFiltered" to app.defaultFiltered,
+                            "alwaysFiltered" to alwaysFiltered.contains(app.packageName),
+                        )
+                    }
+                    promise.resolve(apps)
+                } catch (e: Throwable) {
+                    promise.reject("FILTER_APPS", e.message ?: "err", e)
                 }
             }
         }

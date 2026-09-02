@@ -1,4 +1,9 @@
-import TwinotifyCoreModule, { KeyPair, EncryptResult, MetricsSnapshot } from './TwinotifyCoreModule';
+import TwinotifyCoreModule, {
+  KeyPair,
+  EncryptResult,
+  FilterableApp,
+  MetricsSnapshot,
+} from './TwinotifyCoreModule';
 
 export type { KeyPair, EncryptResult, MetricsSnapshot };
 
@@ -93,6 +98,10 @@ export async function unpair(): Promise<void> {
 
 export async function pingRelay(relayUrl: string, authed: boolean = false): Promise<string> {
   return await TwinotifyCoreModule.ping(relayUrl, authed);
+}
+
+export async function getFilterableApps(): Promise<FilterableApp[]> {
+  return await TwinotifyCoreModule.getFilterableApps();
 }
 
 export async function getUserDenylist(): Promise<string[]> {
