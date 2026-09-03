@@ -232,6 +232,13 @@ class RelayTransportTest {
         val failure = connector.failAsync(0, IllegalStateException("boom"))
         assertTrue(failure.started.await(1, TimeUnit.SECONDS))
         runCurrent()
+        // `started` fires before the failure thread reaches onFailure; give that real thread a
+        // bounded chance to close the socket so the ordering assertion below is not a CPU race.
+        val closeDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (connector.sockets[0].closeCalls == 0 && System.nanoTime() < closeDeadline) {
+            Thread.sleep(5)
+            runCurrent()
+        }
         val closeCallsBeforeCollectorRelease = connector.sockets[0].closeCalls
 
         collectorRelease.complete(Unit)
@@ -747,7 +754,7 @@ class RelayTransportTest {
         private val onClose: () -> Unit,
     ) : RelaySocket {
         val frames = mutableListOf<RelayFrame>()
-        var closeCalls = 0
+        @Volatile var closeCalls = 0
             private set
 
         override fun send(text: String): Boolean {
