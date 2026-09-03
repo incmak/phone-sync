@@ -54,8 +54,10 @@ export default function SettingsScreen() {
   const [relayUrl, setRelayUrl] = useState<string | null | undefined>(undefined);
   const [preferLan, setPreferLan] = useState<boolean | null>(null);
   const [callCaptureEnabled, setCallCaptureEnabled] = useState<boolean | null>(null);
+  const [callControlsEnabled, setCallControlsEnabled] = useState(false);
   const [callPermissionCanAskAgain, setCallPermissionCanAskAgain] = useState(true);
   const [callCaptureBusy, setCallCaptureBusy] = useState(false);
+  const [callControlsBusy, setCallControlsBusy] = useState(false);
   const [callEnablePending, setCallEnablePending] = useState(false);
 
   useEffect(() => {
@@ -67,11 +69,16 @@ export default function SettingsScreen() {
       .catch(() => {});
     Promise.all([
       TwinotifyCoreModule.getCallCaptureEnabled(),
+      TwinotifyCoreModule.getCallControlsEnabled(),
       TwinotifyCoreModule.getCallStatePermissionAsync(),
-    ]).then(([enabled, permission]) => {
+    ]).then(([enabled, controlsEnabled, permission]) => {
       setCallCaptureEnabled(enabled && permission.granted);
+      setCallControlsEnabled(enabled && permission.granted && controlsEnabled);
       setCallPermissionCanAskAgain(permission.canAskAgain);
-    }).catch(() => setCallCaptureEnabled(false));
+    }).catch(() => {
+      setCallCaptureEnabled(false);
+      setCallControlsEnabled(false);
+    });
     OnboardingState.getRelayUrl()
       .then(setRelayUrl)
       .catch(() => {});
@@ -100,6 +107,7 @@ export default function SettingsScreen() {
 
   const persistCallCapture = useCallback(async (next: boolean) => {
     const previous = callCaptureEnabled ?? false;
+    const previousControls = callControlsEnabled;
     setCallCaptureBusy(true);
     try {
       if (next) {
@@ -112,15 +120,20 @@ export default function SettingsScreen() {
         setCallEnablePending(true);
       }
       await TwinotifyCoreModule.setCallCaptureEnabled(next);
-      const durable = await TwinotifyCoreModule.getCallCaptureEnabled();
+      const [durable, durableControls] = await Promise.all([
+        TwinotifyCoreModule.getCallCaptureEnabled(),
+        TwinotifyCoreModule.getCallControlsEnabled(),
+      ]);
       setCallCaptureEnabled(durable);
+      setCallControlsEnabled(durable && durableControls);
     } catch {
       setCallCaptureEnabled(previous);
+      setCallControlsEnabled(previousControls);
     } finally {
       setCallEnablePending(false);
       setCallCaptureBusy(false);
     }
-  }, [callCaptureEnabled]);
+  }, [callCaptureEnabled, callControlsEnabled]);
 
   const handleCallCaptureChange = useCallback((next: boolean) => {
     if (!next) {
@@ -147,18 +160,56 @@ export default function SettingsScreen() {
     ? callCaptureHealthMessage(syncStatus.callCaptureHealthCode)
     : null;
   const callUnavailable = callPreferenceEnabled && syncStatus.callCaptureEnabled !== true;
+  const renderedCallControlsEnabled = callPreferenceEnabled && callControlsEnabled;
+  const callNoSharing = renderedCallControlsEnabled ? 'No phone numbers.' : 'No phone numbers or controls.';
   const callSubtitle = callUnsupported
     ? 'Call state mirroring is unavailable on this device.'
     : callPermissionDenied
       ? 'Call state permission is required. Turn this on to grant it.'
     : callStarting
-      ? 'Enabled. Waiting for call capture to start. No phone numbers or controls.'
+      ? `Enabled. Waiting for call capture to start. ${callNoSharing}`
       : callHealthMessage
         ? callHealthMessage
       : callUnavailable
-        ? 'Enabled. Call capture is not active. No phone numbers or controls.'
-        : 'Shares only ringing, active, and ended states. No phone numbers or controls.';
+        ? `Enabled. Call capture is not active. ${callNoSharing}`
+        : `Shares only ringing, active, and ended states. ${callNoSharing}`;
   const callStateLabel = callPreferenceEnabled ? 'On' : 'Off';
+  const peerName = pairStatus.peerDisplayName?.trim() || 'your paired phone';
+
+  const persistCallControls = useCallback(async (next: boolean) => {
+    const previous = callControlsEnabled;
+    setCallControlsBusy(true);
+    try {
+      const durable = await TwinotifyCoreModule.setCallControlsEnabled(next);
+      setCallControlsEnabled(callPreferenceEnabled && durable);
+      if (durable !== next) {
+        Alert.alert(
+          'Call controls unavailable',
+          'This phone could not save the call-control setting.',
+        );
+      }
+    } catch {
+      setCallControlsEnabled(previous);
+      Alert.alert('Call controls unavailable', 'Nothing changed. Try again.');
+    } finally {
+      setCallControlsBusy(false);
+    }
+  }, [callControlsEnabled, callPreferenceEnabled]);
+
+  const handleCallControlsChange = useCallback((next: boolean) => {
+    if (!next) {
+      void persistCallControls(false);
+      return;
+    }
+    Alert.alert(
+      `Let ${peerName} control calls?`,
+      `Anyone holding ${peerName} can answer, decline, or end an incoming cellular call on this phone, including while ${peerName} is locked. Call audio stays on this phone. Twinotify never sends the caller's name or number.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Allow', onPress: () => { void persistCallControls(true); } },
+      ],
+    );
+  }, [peerName, persistCallControls]);
 
   const sectionHeader = (label: string) => (
     <Text style={[styles.sectionHeader, { color: theme.ink2, fontFamily: theme.fonts.uiMedium }]}>
@@ -246,6 +297,27 @@ export default function SettingsScreen() {
                       ? 'Loading call state preference'
                       : `${callSubtitle} ${callStateLabel}`
                   }`}
+                />
+              </View>
+            }
+            style={styles.ledgerRow}
+          />
+          <TwRow
+            title="Let paired phone control calls"
+            subtitle={renderedCallControlsEnabled
+              ? 'The paired phone can answer, decline, or end compatible incoming calls on this phone. Audio stays here.'
+              : callPreferenceEnabled
+                ? 'Off. This phone still mirrors call state without sharing controls.'
+                : 'Turn on Mirror call state first.'}
+            trailing={
+              <View style={styles.controlSlot}>
+                <TwSwitch
+                  checked={renderedCallControlsEnabled}
+                  onChange={handleCallControlsChange}
+                  size="md"
+                  touchTargetSize={48}
+                  disabled={!callPreferenceEnabled || callControlsBusy || callCaptureBusy}
+                  accessibilityLabel={`Let paired phone control calls, ${renderedCallControlsEnabled ? 'On' : 'Off'}`}
                 />
               </View>
             }

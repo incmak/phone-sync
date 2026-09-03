@@ -23,7 +23,7 @@ export interface SyncStatus {
   callCaptureEnabled?: boolean;
   callCaptureDisabledReason?: string | null;
   callCaptureHealthCode?: string | null;
-  callNotificationMode?: 'call_style_deferred_no_controls' | null;
+  callNotificationMode?: 'call_style_deferred_no_controls' | 'call_style_conditional_controls' | null;
   lastCallEventAt?: number | null;
 }
 
@@ -84,6 +84,8 @@ export interface TwinotifyCoreAPI {
   stopSyncService(): Promise<void>;
   getCallCaptureEnabled(): Promise<boolean>;
   setCallCaptureEnabled(enabled: boolean): Promise<boolean>;
+  getCallControlsEnabled(): Promise<boolean>;
+  setCallControlsEnabled(enabled: boolean): Promise<boolean>;
   getCallStatePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
   requestCallStatePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
   getSyncStatus(): Promise<SyncStatus>;

@@ -73,7 +73,7 @@ export interface SyncStatus {
   callCaptureEnabled?: boolean;
   callCaptureDisabledReason?: string | null;
   callCaptureHealthCode?: string | null;
-  callNotificationMode?: 'call_style_deferred_no_controls' | null;
+  callNotificationMode?: 'call_style_deferred_no_controls' | 'call_style_conditional_controls' | null;
   lastCallEventAt?: number | null;
 }
 
@@ -138,6 +138,8 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   stopSyncService(): Promise<void>;
   getCallCaptureEnabled(): Promise<boolean>;
   setCallCaptureEnabled(enabled: boolean): Promise<boolean>;
+  getCallControlsEnabled(): Promise<boolean>;
+  setCallControlsEnabled(enabled: boolean): Promise<boolean>;
   getCallStatePermissionAsync(): Promise<PermissionResponse>;
   requestCallStatePermissionAsync(): Promise<PermissionResponse>;
   getNearbyWifiPermissionAsync(): Promise<PermissionResponse>;

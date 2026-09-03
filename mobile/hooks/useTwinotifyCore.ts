@@ -56,6 +56,10 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.getCallCaptureEnabled(),
     setCallCaptureEnabled: (enabled: boolean): Promise<boolean> =>
       TwinotifyCoreModule.setCallCaptureEnabled(enabled),
+    getCallControlsEnabled: (): Promise<boolean> =>
+      TwinotifyCoreModule.getCallControlsEnabled(),
+    setCallControlsEnabled: (enabled: boolean): Promise<boolean> =>
+      TwinotifyCoreModule.setCallControlsEnabled(enabled),
     getCallStatePermissionAsync: () =>
       TwinotifyCoreModule.getCallStatePermissionAsync(),
     requestCallStatePermissionAsync: () =>

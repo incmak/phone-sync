@@ -90,6 +90,8 @@ const mockTwinotifyCore = {
   getSyncStatus: jest.fn(async () => ({ state: 'DISCONNECTED', queuedCount: 0 })),
   getCallCaptureEnabled: jest.fn(async () => false),
   setCallCaptureEnabled: jest.fn(async (enabled) => enabled),
+  getCallControlsEnabled: jest.fn(async () => false),
+  setCallControlsEnabled: jest.fn(async (enabled) => enabled),
   getCallStatePermissionAsync: jest.fn(async () => ({
     status: 'undetermined', granted: false, canAskAgain: true, expires: 'never',
   })),
@@ -174,6 +176,7 @@ global.__RESET_OFFLINE_TEST_STATE__ = () => {
   mockTwinotifyCore.getPairStatus.mockResolvedValue({ paired: false });
   mockTwinotifyCore.getRecentActivity.mockResolvedValue([]);
   mockTwinotifyCore.getCallCaptureEnabled.mockResolvedValue(false);
+  mockTwinotifyCore.getCallControlsEnabled.mockResolvedValue(false);
   mockTwinotifyCore.getCallStatePermissionAsync.mockResolvedValue({
     status: 'undetermined', granted: false, canAskAgain: true, expires: 'never',
   });
