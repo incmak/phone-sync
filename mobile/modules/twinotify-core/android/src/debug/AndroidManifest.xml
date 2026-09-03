@@ -15,6 +15,10 @@
       </intent-filter>
     </receiver>
 
+    <receiver
+      android:name="co.twinotify.core.e2e.CallControlFixtureReceiver"
+      android:exported="false" />
+
     <provider
       android:name="co.twinotify.core.e2e.E2eStateProvider"
       android:authorities="${applicationId}.e2e"

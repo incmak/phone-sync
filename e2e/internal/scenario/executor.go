@@ -137,6 +137,9 @@ func parseAction(raw string) (action, error) {
 	case "A.control.local-unpair":
 		return action{kind: actionControl, device: "A", command: "LOCAL_UNPAIR", delivery: true, original: raw}, nil
 	}
+	if parsed, matched, err := parseCallControlAction(raw); matched {
+		return parsed, err
+	}
 	if strings.HasPrefix(raw, "A.control.call-state:") {
 		state := strings.TrimPrefix(raw, "A.control.call-state:")
 		if state != "ringing" && state != "active" && state != "idle" {
@@ -205,7 +208,7 @@ func splitAction(raw string) []string {
 }
 
 func knownPredicate(predicate string) bool {
-	if knownNotificationActionPredicate(predicate) {
+	if knownNotificationActionPredicate(predicate) || knownCallControlPredicate(predicate) {
 		return true
 	}
 	if _, _, ok := parseTrackedSequencePredicate(predicate); ok {
@@ -385,6 +388,11 @@ type Executor struct {
 	burstDone             <-chan error
 	fixtureUninstalled    bool
 	originClaimPauseArmed bool
+	// Call-control runs correlate through the mirror's canonical observation and
+	// enforce exact, stable dispatch counts rather than sequence pins.
+	callControl              bool
+	callControlSequence      int
+	callControlStableSamples int
 }
 
 func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
@@ -440,6 +448,9 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.fixtureUninstalled = false
 		e.originClaimPauseArmed = false
 		e.direct = strings.HasPrefix(plan.Name, "lan-direct-") || plan.Name == "lan-restart-persistence"
+		e.callControl = isCallControlPlan(plan.Name)
+		e.callControlSequence = 0
+		e.callControlStableSamples = 0
 	}
 	if err := ValidateExecutablePlan(plan); err != nil {
 		result.ErrorCode = errorCode(err)
@@ -623,6 +634,8 @@ func cloneObservation(value Observation) Observation {
 	value.CanonicalMirrorIdentityHashes = cloneCanonical(value.CanonicalMirrorIdentityHashes)
 	value.CanonicalActionSetHashes = cloneCanonical(value.CanonicalActionSetHashes)
 	value.ActionInvocationCounts = cloneInt64Map(value.ActionInvocationCounts)
+	value.CanonicalCallControls = cloneStringSliceMap(value.CanonicalCallControls)
+	value.CallControlDispatches = cloneInt64Map(value.CallControlDispatches)
 	sourceCustodyCounts := value.CustodyCounts
 	value.CustodyCounts = map[string]map[string]int64{}
 	for route, counts := range sourceCustodyCounts {
@@ -755,6 +768,29 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 			}
 			if e.trackedHash != hash || sequence != map[string]int{"ringing": 1, "active": 2, "idle": 3}[a.params["state"]] {
 				return "", oracleFailure("invalid_call_control")
+			}
+		}
+		switch a.command {
+		case "CALL_CONTROLS_ENABLE":
+			if err := parseCallControlsEnableResult(response); err != nil {
+				return "", err
+			}
+		case "CALL_CONTROL_SOURCE":
+			if e.callControlSequence == 0 && a.params["state"] != "ringing" {
+				return "", oracleFailure("invalid_call_control_source")
+			}
+			sequence, err := parseCallControlSourceResult(response, a.params["state"], e.callControlSequence)
+			if err != nil {
+				return "", err
+			}
+			e.callControlSequence = sequence
+		case "CALL_CONTROL_TAP":
+			if err := parseCallControlTapResult(response, a.params["kind"]); err != nil {
+				return "", err
+			}
+		case "CALL_CONTROL_AWAIT":
+			if _, err := parseCallControlAwaitResult(response, a.params["kind"]); err != nil {
+				return "", err
 			}
 		}
 		return routeEvent, nil
@@ -938,7 +974,17 @@ func (e *Executor) observeDeliveryRoute(ctx context.Context, a action) (string, 
 
 func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) error {
 	var matchedA Observation
-	err := Eventually(ctx, 200*time.Millisecond, e.stepTimeout, func() (bool, error) {
+	e.callControlStableSamples = 0
+	// Devices are sampled every 200 ms. Stability predicates need several
+	// samples inside one step, so never poll slower than a tenth of the budget.
+	interval := 200 * time.Millisecond
+	if e.stepTimeout/10 < interval {
+		interval = e.stepTimeout / 10
+	}
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	err := Eventually(ctx, interval, e.stepTimeout, func() (bool, error) {
 		stateA, err := e.bridge.Snapshot(ctx, "A")
 		if err != nil {
 			return false, err
@@ -1125,6 +1171,18 @@ func (e *Executor) predicateSatisfied(name, predicate string, a, b Observation) 
 		}
 		return unique == want
 	}
+	if predicate == "A.call-controls.enabled" {
+		return a.CallControlsEnabled
+	}
+	if kinds, semantic, ok := parseCallControlsPredicate(predicate); ok {
+		return e.callControlsSatisfied(kinds, semantic, b)
+	}
+	if kind, want, ok := parseCallControlDispatchPredicate(predicate); ok {
+		return e.callControlDispatchSatisfied(kind, want, a)
+	}
+	if strings.HasPrefix(predicate, "B.call.semantic:") && e.callControl {
+		return e.callControlSemanticSatisfied(strings.TrimPrefix(predicate, "B.call.semantic:"), b)
+	}
 	if strings.HasPrefix(predicate, "B.call.semantic:") {
 		want := strings.TrimPrefix(predicate, "B.call.semantic:")
 		sequence := map[string]int{"RINGING": 1, "ACTIVE": 2, "IDLE": 3}[want]
@@ -1263,6 +1321,9 @@ func scenarioExecutionErrorCode(err error) string {
 }
 
 func oracleCode(predicate string) string {
+	if code, ok := callControlOracleCode(predicate); ok {
+		return code
+	}
 	switch {
 	case strings.Contains(predicate, ".route."):
 		return "missing_authenticated_lan"

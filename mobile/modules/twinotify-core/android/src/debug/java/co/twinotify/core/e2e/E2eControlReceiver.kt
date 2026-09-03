@@ -187,12 +187,14 @@ class E2eControlReceiver internal constructor(
             "PAIR_INIT", "PAIR_JOIN", "AWAIT_PEER_HELLO", "SIGN_CONFIRMATION",
             "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
+            "CALL_CONTROLS_ENABLE", "CALL_CONTROL_SOURCE", "CALL_CONTROL_TAP", "CALL_CONTROL_AWAIT",
             "SET_LAN_AVAILABLE",
             "NOTIFICATION_FIXTURE",
             "NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN",
             "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR",
             "OFFLINE_PAIR_START", "OFFLINE_PAIR_JOIN", "OFFLINE_PAIR_CONFIRM", "OFFLINE_PAIR_CANCEL", "OFFLINE_PAIR_QUERY",
         )
+        private val RELEASES_BROADCAST_EARLY = setOf("CALL_CONTROL_AWAIT")
         private val SHELL_COMMANDS = setOf(
             "STATUS", "NOTIFICATION_FIXTURE", "NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN",
         )
@@ -212,6 +214,7 @@ class E2eControlReceiver internal constructor(
         scope.launch {
             var requestId = "missing-request"
             var shellResponse = intent.getStringExtra("auth_input_id") == null
+            var broadcastReleased = false
             try {
                 val parsed = E2eCommand.fromIntent(intent)
                 requestId = safeRequestId(parsed.requestId)
@@ -231,6 +234,14 @@ class E2eControlReceiver internal constructor(
                     params = parsed.params - "auth_input_id",
                 )
                 auth?.fill(0)
+                if (authenticated.name in RELEASES_BROADCAST_EARLY) {
+                    // Android delivers this process's broadcasts one at a time. A command that
+                    // waits for another broadcast (the fixture's control receiver) must give the
+                    // queue back first; the host reads the result from the private file, not
+                    // from broadcast completion.
+                    pending.finish()
+                    broadcastReleased = true
+                }
                 var result = executeForTest(appContext, authenticated)
                 result.secretPayload?.let { secret ->
                     result = try {
@@ -251,7 +262,7 @@ class E2eControlReceiver internal constructor(
                     runCatching { writeResult(appContext, error) }
                 }
             } finally {
-                pending.finish()
+                if (!broadcastReleased) pending.finish()
             }
         }
     }
@@ -512,6 +523,18 @@ class E2eControlReceiver internal constructor(
                     .put("sequence", event.sequence),
             )
         }
+        "CALL_CONTROLS_ENABLE" -> {
+            if (!SyncService.startDebugCallCapture(controls = true)) {
+                return E2eCommandResult(requestId, "unsupported", "debug call control capture requires an active sync service")
+            }
+            E2eCommandResult(requestId, "ok", payload = JSONObject().put("enabled", true))
+        }
+        "CALL_CONTROL_SOURCE" -> CallControlFixture.source(context, command.param("state").orEmpty()).toResult(requestId)
+        "CALL_CONTROL_TAP" -> CallControlControl.tap(context, command.param("kind").orEmpty()).toResult(requestId)
+        "CALL_CONTROL_AWAIT" -> CallControlFixture.await(
+            command.param("kind").orEmpty(),
+            command.param("timeout_ms")?.toLongOrNull() ?: 0L,
+        ).toResult(requestId)
         "DISMISS_NEWEST_MIRROR" -> controls.dismissNewestMirror(context).toResult(requestId)
         "EMIT_SNAPSHOT" -> controls.emitSnapshot(context).toResult(requestId)
         "FORCE_REPAIR_SNAPSHOT" -> controls.forceRepairSnapshot(context).toResult(requestId)
@@ -606,10 +629,24 @@ class E2eControlReceiver internal constructor(
             "NOTIFICATION_MIRROR", "NOTIFICATION_ORIGIN" -> setOf("operation")
             "STATUS" -> emptySet()
             "DISMISS_NEWEST_MIRROR", "EMIT_SNAPSHOT", "FORCE_REPAIR_SNAPSHOT", "LOCAL_UNPAIR" -> emptySet()
+            "CALL_CONTROLS_ENABLE" -> emptySet()
+            "CALL_CONTROL_SOURCE" -> setOf("state")
+            "CALL_CONTROL_TAP" -> setOf("kind")
+            "CALL_CONTROL_AWAIT" -> setOf("kind", "timeout_ms")
             else -> return null
         }
         if (command.params.keys.any { it !in allowed }) return "unexpected parameter"
         if (command.params.values.any { it.encodeToByteArray().size > MAX_SECRET_BYTES }) return "parameter too large"
+        if (command.name == "CALL_CONTROL_SOURCE" && !CallControlFixture.stateIsValid(command.param("state").orEmpty())) {
+            return "state must be ringing, active, or idle"
+        }
+        if (command.name == "CALL_CONTROL_TAP" && !CallControlControl.kindIsValid(command.param("kind").orEmpty())) {
+            return "kind must be answer, decline, hang_up, or replay"
+        }
+        if (command.name == "CALL_CONTROL_AWAIT") {
+            if (CallControlFixture.kindOrNull(command.param("kind").orEmpty()) == null) return "kind must be answer, decline, or hang_up"
+            if (command.param("timeout_ms")?.toLongOrNull()?.let { it in 1..10_000 } != true) return "timeout_ms must be 1..10000"
+        }
         if (command.name == "SET_NETWORK_EXPECTED" && command.param("expected") !in setOf("online", "offline")) {
             return "expected must be online or offline"
         }

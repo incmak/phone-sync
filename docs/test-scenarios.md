@@ -377,6 +377,64 @@ SSIDs, keys, or tokens. If two suitable phones or the protected candidate is
 unavailable, leave this scenario pending. Synthetic injection and emulator runs
 must not be recorded as `PHY-CALL-01`.
 
+### PHY-CALL-CONTROL-01 - stock dialer incoming-call controls
+
+- [ ] Status - pending physical two-phone run.
+
+Use two Android 14+ phones with cellular calling available and a
+project-owned target build installed on both. The phone receiving the cellular
+call is the source; the paired phone is the peer. Run every required case with
+the source's current default stock dialer. Third-party dialers, VoIP apps, and
+the debug call-control fixture are out of scope for this record.
+
+1. On the source, enable `Mirror call state` from Settings, then enable call
+   controls and confirm the enablement dialog discloses that a control can run
+   from the peer's lock screen after a direct tap. Confirm no new runtime
+   permission was requested.
+2. For each required case, place a real incoming cellular call to the source,
+   wait for the peer's native `CallStyle` mirror, and tap exactly one control
+   on the peer. Record the wall-clock latency from the peer tap to the organic
+   source `call.state` transition. Only that organic transition confirms
+   application; a `dispatched` outcome on its own is not a pass.
+3. Repeat each control over an authenticated direct LAN route and over the
+   relay with the direct route disabled through the app-internal control, and
+   repeat with both screens on, both screens off, and both phones locked.
+4. Place an outgoing call from the source and, separately, a second incoming
+   call while one is active. Prove the peer mirror exposes no control in either
+   case and that no `call.control.invoke` leaves the peer.
+5. Tap the same peer control twice in quick succession and prove the source
+   dispatches once and the second tap reports a terminal one-use outcome.
+
+Required matrix; every cell needs `pass` before a build is supported:
+
+| Control | Route | Screens on | Screens off | Both locked | Required organic transition | p95 latency |
+| --- | --- | --- | --- | --- | --- | --- |
+| `answer` | LAN | required | required | required | `ringing -> active` | under 750 ms |
+| `answer` | relay | required | required | required | `ringing -> active` | under 2000 ms |
+| `decline` | LAN | required | required | required | `ringing -> idle` | under 750 ms |
+| `decline` | relay | required | required | required | `ringing -> idle` | under 2000 ms |
+| `hang_up` (answered incoming) | LAN | required | required | required | `active -> idle` | under 750 ms |
+| `hang_up` (answered incoming) | relay | required | required | required | `active -> idle` | under 2000 ms |
+| outgoing call | LAN and relay | required | required | required | no control advertised, no invoke sent | n/a |
+| concurrent incoming call | LAN and relay | required | required | required | no control advertised, no invoke sent | n/a |
+| duplicate tap | LAN and relay | required | n/a | n/a | one dispatch, second tap terminal | n/a |
+
+Compute p95 per control and route across all screen states. A build is
+supported only when every required cell passes, direct p95 is under 750 ms,
+and relay p95 is under 2000 ms. Write one JSON record per case using the
+contract in [`docs/evidence/call-control/README.md`](evidence/call-control/README.md),
+under a directory named from the sanitized `Build.MODEL`, SDK level, and date.
+
+Retain only sanitized model names, SHA-256 build and dialer identifiers,
+numeric dialer versions, lock states, route, control kind, dispatch status,
+observed transition, and latency. Never retain phone numbers, contact names,
+SIM identity, caller verification data, notification text, call audio,
+`PendingIntent` details, control or invocation UUIDs, raw build fingerprints,
+device IDs, IPs, SSIDs, keys, or tokens. If two suitable phones or a
+project-owned target build is unavailable, leave this scenario pending. The
+`make e2e-call-control` synthetic gate must not be recorded as
+`PHY-CALL-CONTROL-01`.
+
 ### Release evidence layout and audit
 
 Place the APK, sanitized E2E result, sanitized timeline, operator notes, and

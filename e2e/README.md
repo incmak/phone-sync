@@ -82,6 +82,55 @@ The predecessor automation is implemented and host-tested through commit
 actual aggregate hardware execution is still pending physical two-phone run;
 host fixtures are not physical acceptance.
 
+## Stock call control gate
+
+`call-control-correctness` runs three children in this exact order:
+`call-control-answer`, `call-control-decline`, and `call-control-duplicate`.
+Device A runs a debug-only fixture that posts a real local
+`Notification.CallStyle` with test answer, decline, and hang-up
+`PendingIntent`s and injects the matching telephony state; device B renders
+the mirrored native controls. The host names only closed enums (`ringing`,
+`active`, `idle`; `answer`, `decline`, `hang_up`, `replay`) and reads back
+`kind`, `count`, `status`, and timing. Control UUIDs, invocation IDs, session
+IDs, caller data, intents, and package names never cross ADB or reach evidence,
+and the artifact writer rejects them if they do.
+
+Status: passes on two API 37 emulators over the relay route (2026-09-03). Emulators
+cannot reach each other on a LAN, so keep Wi-Fi off during the run; a stale LAN
+binding otherwise adds a 10 s direct-connection timeout to every send. Re-pair from
+a clean install and a fresh relay database after any identity change, because a
+peer that receives envelopes for a previous identity backs off into a reconnect
+loop. The gate is an emulator regression aid; the physical matrix below is still
+the release evidence.
+
+The answer child proves `ringing -> answer -> active -> hang_up -> idle` with
+exactly one fixture dispatch per control. The decline child proves
+`ringing -> decline -> idle` with no answer dispatch. The duplicate child
+re-sends the last tapped mirror `PendingIntent` and proves the origin still
+reports one dispatch, because `invocation_id` equals the one-use `control_id`.
+Dispatch counts are exact and must hold across three consecutive samples; the
+STATUS observation carries `call_controls_enabled`, `canonical_call_controls`,
+and `call_control_dispatches` as closed-world fields. The scenarios run over
+whatever route is authenticated and do not assert a direct LAN route.
+
+From the repository root, provide two distinct already-paired targets and a
+private evidence directory:
+
+```sh
+E2E_DEVICE_A='<serial-a>' \
+E2E_DEVICE_B='<serial-b>' \
+E2E_CALL_CONTROL_EVIDENCE_DIR='/private/path/call-control' \
+make e2e-call-control
+```
+
+This gate is a synthetic emulator and debug-build regression aid. It requires
+the default `run-as` transport and is rejected in shell-broadcast mode. It does
+not exercise a real dialer, a cellular call, a lock screen, or an OEM
+notification shade, so it cannot satisfy `PHY-CALL-CONTROL-01`. The physical
+stock-dialer matrix in `docs/test-scenarios.md` and the record contract in
+`docs/evidence/call-control/README.md` remain pending until a two-phone run
+produces them.
+
 ## Real call release evidence
 
 Call-sync acceptance uses the protected physical evidence pipeline, not the

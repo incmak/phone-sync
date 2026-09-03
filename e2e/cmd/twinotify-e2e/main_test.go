@@ -125,7 +125,7 @@ func TestShellBroadcastDeviceRejectsCredentialsBeforeADB(t *testing.T) {
 }
 
 func TestShellBroadcastTransportRejectsSecretScenarios(t *testing.T) {
-	for _, name := range []string{"pair", "offline-pairing", "lan-product-correctness"} {
+	for _, name := range []string{"pair", "offline-pairing", "lan-product-correctness", "call-control-correctness", "call-control-answer", "call-control-decline", "call-control-duplicate"} {
 		if err := validateControlTransport("shell-broadcast", name); err == nil {
 			t.Fatalf("accepted shell transport for %s", name)
 		}
@@ -180,6 +180,7 @@ func TestLanDirectSemanticScenariosPassPreflightBeforeADB(t *testing.T) {
 		"lan-direct-call-state", "lan-direct-snapshot-receipt",
 		"lan-direct-burst-backpressure", "lan-direct-unpair-during-traffic",
 		"lan-product-correctness",
+		"call-control-answer", "call-control-decline", "call-control-duplicate", "call-control-correctness",
 	} {
 		if err := validateScenarioBeforeADB(name); err != nil {
 			t.Fatalf("%s: %v", name, err)

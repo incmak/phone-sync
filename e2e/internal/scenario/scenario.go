@@ -220,6 +220,9 @@ func PlanWithBurstCount(name string, burstCount int) (ScenarioPlan, error) {
 	if plan, ok := notificationActionPlan(name); ok {
 		return plan, nil
 	}
+	if plan, ok := callControlPlan(name); ok {
+		return plan, nil
+	}
 	if name == "core-correctness" {
 		children := make([]ScenarioPlan, 0, 5)
 		for _, child := range []string{"post", "update", "dismiss-origin", "rapid-post-update-cancel", "offline"} {
@@ -345,6 +348,9 @@ type Observation struct {
 	DetailCancelled                int64                       `json:"detail_cancelled,omitempty"`
 	LatestActionTerminal           string                      `json:"latest_action_terminal,omitempty"`
 	ForegroundPackage              string                      `json:"foreground_package,omitempty"`
+	CallControlsEnabled            bool                        `json:"call_controls_enabled"`
+	CanonicalCallControls          map[string][]string         `json:"-"`
+	CallControlDispatches          map[string]int64            `json:"call_control_dispatches,omitempty"`
 }
 
 func ParseObservation(payload []byte) (Observation, error) {
@@ -359,6 +365,7 @@ func ParseObservation(payload []byte) (Observation, error) {
 		"pending_materialization": true, "canonical": true, "activity": true,
 		"product_observations": true, "notification_action_fixture": true,
 		"notification_action_observations": true,
+		"call_controls_enabled":            true, "canonical_call_controls": true, "call_control_dispatches": true,
 	}
 	for key := range root {
 		if !allowedRoot[key] {
@@ -370,6 +377,7 @@ func ParseObservation(payload []byte) (Observation, error) {
 		"outbox_bytes", "active_outbox", "active_inbound", "pending_materialization",
 		"canonical", "activity", "product_observations", "notification_action_fixture",
 		"notification_action_observations",
+		"call_controls_enabled", "canonical_call_controls", "call_control_dispatches",
 	} {
 		if raw, ok := root[key]; !ok || string(raw) == "null" {
 			return Observation{}, fmt.Errorf("E2E state missing %s", key)
@@ -473,6 +481,10 @@ func ParseObservation(payload []byte) (Observation, error) {
 	if err != nil {
 		return Observation{}, err
 	}
+	callControls, err := parseCallControlObservations(root["call_controls_enabled"], root["canonical_call_controls"], root["call_control_dispatches"])
+	if err != nil {
+		return Observation{}, err
+	}
 	state := Observation{
 		Health:                         raw.Health.Service,
 		Transport:                      raw.Health.Transport,
@@ -520,6 +532,8 @@ func ParseObservation(payload []byte) (Observation, error) {
 		ActionExecutionClaimed: actions.ExecutionClaimed, ActionExecutionCompleted: actions.ExecutionCompleted,
 		DetailActive: actions.DetailActive, DetailCancelled: actions.DetailCancelled,
 		LatestActionTerminal: actions.LatestTerminal,
+		CallControlsEnabled:  callControls.Enabled, CanonicalCallControls: callControls.Controls,
+		CallControlDispatches: callControls.Dispatches,
 	}
 	for _, encoded := range raw.Canonical {
 		item, err := parseCanonicalObservation(encoded)

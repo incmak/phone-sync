@@ -283,10 +283,20 @@ class E2eControlSecurityTest {
         assertEquals("ACTIVE", E2eStateProvider.callSemanticState("call:$session", "ACTIVE", active))
         assertEquals("IDLE", E2eStateProvider.callSemanticState("call:$session", "CANCELLED", null))
         assertEquals(null, E2eStateProvider.callSemanticState("notification:fixture", "ACTIVE", "not-json"))
+        val controls = org.json.JSONArray()
+            .put(JSONObject().put("control_id", "22222222-2222-4222-8222-222222222222").put("kind", "answer"))
+            .put(JSONObject().put("control_id", "33333333-3333-4333-8333-333333333333").put("kind", "decline"))
+        assertEquals(
+            "RINGING",
+            E2eStateProvider.callSemanticState("call:$session", "ACTIVE", JSONObject(ringing).put("controls", controls).toString()),
+        )
 
         for (malformed in listOf(
             JSONObject(ringing).put("state", "unknown").toString(),
             JSONObject(ringing).put("title", "forbidden").toString(),
+            JSONObject(ringing).put("controls", org.json.JSONArray().put(JSONObject().put("control_id", "not-a-uuid").put("kind", "answer"))).toString(),
+            JSONObject(ringing).put("controls", org.json.JSONArray().put(JSONObject().put("control_id", "22222222-2222-4222-8222-222222222222").put("kind", "mute"))).toString(),
+            JSONObject(ringing).put("controls", org.json.JSONArray().put(JSONObject().put("control_id", "22222222-2222-4222-8222-222222222222").put("kind", "answer").put("label", "Answer"))).toString(),
             JSONObject(ringing).put("call_session_id", "22222222-2222-4222-8222-222222222222").toString(),
             "not-json",
             "{" + " ".repeat(4_097) + "}",
@@ -478,6 +488,35 @@ class E2eControlSecurityTest {
             ),
         )
         assertEquals("invalid", forbidden.code)
+    }
+
+    @Test
+    fun callControlCommandsAreAllowlistedWithClosedParams() {
+        val receiver = E2eControlReceiver()
+        val token = E2eSessionToken.forTest(context, "call-control-allowlist")
+        assertEquals("unauthorized", receiver.executeForTest(
+            context, E2eCommand("cc-wrong-token", "CALL_CONTROL_SOURCE", token = "wrong", params = mapOf("state" to "ringing")),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context, E2eCommand("cc-bad-state", "CALL_CONTROL_SOURCE", token = token, params = mapOf("state" to "hold")),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context,
+            E2eCommand("cc-phone", "CALL_CONTROL_SOURCE", token = token, params = mapOf("state" to "ringing", "phone_number" to "+15551234567")),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context, E2eCommand("cc-bad-kind", "CALL_CONTROL_TAP", token = token, params = mapOf("kind" to "mute")),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context, E2eCommand("cc-await-timeout", "CALL_CONTROL_AWAIT", token = token, params = mapOf("kind" to "answer", "timeout_ms" to "99999")),
+        ).code)
+        assertEquals("invalid", receiver.executeForTest(
+            context, E2eCommand("cc-enable-param", "CALL_CONTROLS_ENABLE", token = token, params = mapOf("controls" to "true")),
+        ).code)
+        // Without a live sync service the source path fails closed instead of touching prefs.
+        assertEquals("unsupported", receiver.executeForTest(
+            context, E2eCommand("cc-no-service", "CALL_CONTROLS_ENABLE", token = token),
+        ).code)
     }
 
     @Test

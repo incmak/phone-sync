@@ -1,0 +1,18 @@
+{
+  "scenario": "call-control",
+  "mode": "synthetic-debug-only",
+  "children": ["call-control-answer", "call-control-decline", "call-control-duplicate"],
+  "states": ["ringing", "active", "idle"],
+  "controls": {
+    "ringing": ["answer", "decline"],
+    "active": ["hang_up"],
+    "idle": []
+  },
+  "taps": ["answer", "decline", "hang_up", "replay"],
+  "dispatch_limit_per_kind": 1,
+  "forbidden_fields": [
+    "control_id", "invocation_id", "call_session_id", "pending_intent", "package",
+    "phone_number", "contact", "caller", "audio"
+  ],
+  "physical_evidence": false
+}

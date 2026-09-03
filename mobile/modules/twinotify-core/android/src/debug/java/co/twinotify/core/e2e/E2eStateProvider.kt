@@ -8,6 +8,7 @@ import android.database.MatrixCursor
 import android.net.Uri
 import android.os.CancellationSignal
 import androidx.core.net.toUri
+import co.twinotify.core.service.SyncService
 import co.twinotify.core.service.SyncServiceStatus
 import co.twinotify.core.service.toEventMap
 import co.twinotify.core.service.ProductObservationTracker
@@ -90,6 +91,9 @@ class E2eStateProvider : ContentProvider() {
                 .put("pending_materialization", scalar(database, "SELECT COUNT(*) FROM canonical_notification_state WHERE latestSequence > materializedSequence"))
                 .put("product_observations", productObservations(context, database, activeOutbox, outboxBytes))
             root.put("canonical", canonical(database))
+            root.put("call_controls_enabled", SyncService.callControlCaptureAttached())
+            root.put("canonical_call_controls", canonicalCallControls(database))
+            root.put("call_control_dispatches", CallControlFixture.dispatches())
             root.put("activity", activity(database))
             root.put("notification_action_fixture", NotificationActionFixture.snapshot(context))
             root.put("notification_action_observations", notificationActionObservations(database))
@@ -136,6 +140,33 @@ class E2eStateProvider : ContentProvider() {
             return result
         }
 
+        /** Advertised control kinds per live call, keyed by canon hash; control ids never leave the device. */
+        private fun canonicalCallControls(database: androidx.sqlite.db.SupportSQLiteDatabase): JSONObject {
+            val result = JSONObject()
+            database.query(
+                "SELECT canonId, desiredPayloadJson FROM canonical_notification_state " +
+                    "WHERE state = 'ACTIVE' AND canonId LIKE 'call:%' ORDER BY updatedAt LIMIT 50",
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val kinds = callControlKinds(cursor.getString(1))?.takeIf { it.isNotEmpty() } ?: continue
+                    result.put(sha256Hex(cursor.getString(0)), JSONArray(kinds))
+                }
+            }
+            return result
+        }
+
+        internal fun callControlKinds(payloadJson: String?): List<String>? {
+            val controls = runCatching { JSONObject(payloadJson ?: return null).optJSONArray("controls") }.getOrNull()
+                ?: return null
+            val kinds = (0 until controls.length()).mapNotNull { index ->
+                controls.optJSONObject(index)?.optString("kind")?.takeIf { it in CALL_CONTROL_KINDS }
+            }
+            if (kinds.size != controls.length()) return null
+            return kinds.sorted()
+        }
+
+        private val CALL_CONTROL_KINDS = setOf("answer", "decline", "hang_up")
+
         private fun notificationActionObservations(
             database: androidx.sqlite.db.SupportSQLiteDatabase,
         ): JSONObject {
@@ -177,7 +208,20 @@ class E2eStateProvider : ContentProvider() {
             }
             val payload = runCatching { JSONObject(payloadJson) }
                 .getOrElse { throw IllegalArgumentException("malformed call payload") }
-            require(payload.keys().asSequence().toSet() == CALL_PAYLOAD_KEYS) { "unknown call payload field" }
+            val keys = payload.keys().asSequence().toSet()
+            require(keys == CALL_PAYLOAD_KEYS || keys == CALL_PAYLOAD_KEYS + "controls") { "unknown call payload field" }
+            if ("controls" in keys) {
+                val kinds = callControlKinds(payloadJson)
+                require(kinds != null && kinds.size <= 2 && kinds.toSet().size == kinds.size) { "invalid call controls" }
+                val controls = payload.getJSONArray("controls")
+                for (index in 0 until controls.length()) {
+                    val id = controls.getJSONObject(index).optString("control_id")
+                    require(runCatching { UUID.fromString(id).toString() }.getOrNull() == id) { "invalid call control id" }
+                    require(controls.getJSONObject(index).keys().asSequence().toSet() == setOf("control_id", "kind")) {
+                        "unknown call control field"
+                    }
+                }
+            }
             require(payload.optString("call_session_id") == sessionId) { "call session mismatch" }
             require(payload.optString("direction") in CALL_DIRECTIONS) { "invalid call direction" }
             return when (payload.optString("state")) {

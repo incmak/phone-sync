@@ -75,7 +75,7 @@ verify_apk() {
 
   local manifest
   manifest=$("$aapt2" dump xmltree --file AndroidManifest.xml "$apk" 2>/dev/null) || die "unable to inspect release manifest"
-  if grep -Eq 'co\.twinotify\.core\.e2e\.(E2eControlReceiver|E2eStateProvider)|co\.twinotify\.e2e\.CONTROL|com\.twinotify\.app\.e2e' <<<"$manifest"; then
+  if grep -Eq 'co\.twinotify\.core\.e2e\.(E2eControlReceiver|E2eStateProvider|CallControlFixtureReceiver)|co\.twinotify\.e2e\.CONTROL|com\.twinotify\.app\.e2e' <<<"$manifest"; then
     die "release manifest contains a debug E2E receiver or provider"
   fi
 

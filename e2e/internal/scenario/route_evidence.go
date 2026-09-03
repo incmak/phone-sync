@@ -231,7 +231,8 @@ func inspectClosedWorldScenario(root map[string]any) error {
 		"fixture_generation": true, "fixture_status": true, "action_invocation_counts": true,
 		"action_execution_claimed": true, "action_execution_completed": true,
 		"detail_active": true, "detail_cancelled": true, "latest_action_terminal": true,
-		"foreground_package": true,
+		"foreground_package":    true,
+		"call_controls_enabled": true, "call_control_dispatches": true,
 	}
 	for _, groupName := range []string{"before", "after"} {
 		group, ok := root[groupName].(map[string]any)
@@ -416,6 +417,23 @@ func validateObservationShape(value map[string]any) error {
 	if raw, present := value["fixture_available"]; present {
 		if _, ok := raw.(bool); !ok {
 			return errors.New("fixture_available must be boolean")
+		}
+	}
+	if raw, present := value["call_controls_enabled"]; present {
+		if _, ok := raw.(bool); !ok {
+			return errors.New("call_controls_enabled must be boolean")
+		}
+	}
+	if raw, present := value["call_control_dispatches"]; present {
+		dispatches, ok := raw.(map[string]any)
+		if !ok {
+			return errors.New("call_control_dispatches must be an object")
+		}
+		for kind, count := range dispatches {
+			number, ok := count.(float64)
+			if !callControlKinds[kind] || !ok || number < 0 || number > 1_000_000_000 || number != float64(int64(number)) {
+				return errors.New("call_control_dispatches must map control kinds to bounded nonnegative integers")
+			}
 		}
 	}
 	if raw, present := value["fixture_status"]; present {

@@ -119,6 +119,7 @@ func validObservationPayloadForTest() map[string]any {
 		},
 		"outbox_bytes": 0.0, "active_outbox": 0.0, "active_inbound": 0.0, "pending_materialization": 0.0,
 		"canonical": []any{}, "activity": []any{},
+		"call_controls_enabled": false, "canonical_call_controls": map[string]any{}, "call_control_dispatches": map[string]any{},
 		"notification_action_fixture": map[string]any{
 			"available": true, "reply_dispatch_count": 0.0, "mark_read_dispatch_count": 0.0,
 			"last_fixture_generation": 0.0, "last_terminal_status": "none",
@@ -1200,6 +1201,8 @@ type directSemanticBridge struct {
 	dismissed              bool
 	bSnapshotsAfterDismiss int
 	notificationSequences  map[string]int
+	lastControlTap         string
+	callSessions           int
 }
 
 func newDirectSemanticBridge(omit string) *directSemanticBridge {
@@ -1219,6 +1222,7 @@ func newDirectSemanticBridge(omit string) *directSemanticBridge {
 			Terminal: true, Paired: true, CustodyCounts: counts(), Canonical: map[string]string{},
 			CanonicalSequences: map[string]int{}, CanonicalSemanticStates: map[string]string{},
 			CanonicalMaterializedSequences: map[string]int{},
+			CanonicalCallControls:          map[string][]string{}, CallControlDispatches: map[string]int64{},
 		}
 	}
 	bridge := &directSemanticBridge{
@@ -1266,6 +1270,102 @@ func (b *directSemanticBridge) Control(_ context.Context, device, name string, p
 		b.recordReceipt("A")
 		b.afterDelivery()
 		payload, _ := json.Marshal(map[string]any{"call_session_id": b.session, "state": params["state"], "sequence": b.sequence})
+		return control.Result{Code: "ok", Payload: payload}, nil
+	case "CALL_CONTROLS_ENABLE":
+		if b.omit != "controls-enable" {
+			state := b.states["A"]
+			state.CallControlsEnabled = true
+			b.states["A"] = state
+		}
+		return control.Result{Code: "ok", Payload: json.RawMessage(`{"enabled":true}`)}, nil
+	case "CALL_CONTROL_SOURCE":
+		// The synthetic source republishes call.state with controls, so the canon
+		// sequence on B is deliberately not equal to the transition count.
+		b.sequence += 2
+		state := params["state"]
+		semantic := strings.ToUpper(state)
+		if state == "ringing" {
+			// Every ringing transition is a fresh call session, so a second child
+			// scenario must correlate a new canon rather than the previous one.
+			b.session = fmt.Sprintf("%08x-1111-4111-8111-111111111111", 0x11111111+b.callSessions)
+			b.callSessions++
+		}
+		hash := callHashForTest(b.session)
+		remote := b.states["B"]
+		if b.omit != "call-"+state {
+			remote.Canonical[hash] = map[bool]string{true: "CANCELLED", false: "ACTIVE"}[semantic == "IDLE"]
+			remote.CanonicalSequences[hash] = b.sequence
+			remote.CanonicalSemanticStates[hash] = semantic
+			if b.omit != "stale-call-"+state {
+				remote.CanonicalMaterializedSequences[hash] = b.sequence
+			}
+		}
+		delete(remote.CanonicalCallControls, hash)
+		switch state {
+		case "ringing":
+			origin := b.states["A"]
+			origin.CallControlDispatches = map[string]int64{}
+			b.states["A"] = origin
+			b.lastControlTap = ""
+			if b.omit != "controls-ringing" {
+				remote.CanonicalCallControls[hash] = []string{"answer", "decline"}
+			}
+		case "active":
+			if b.omit != "controls-active" {
+				remote.CanonicalCallControls[hash] = []string{"hang_up"}
+			}
+		case "idle":
+			if b.omit == "controls-linger" {
+				remote.CanonicalCallControls[hash] = []string{"hang_up"}
+			}
+		}
+		b.states["B"] = remote
+		b.recordCustody("A", "call_state")
+		b.recordReceipt("A")
+		b.afterDelivery()
+		fields := map[string]any{"state": state, "sequence": b.sequence}
+		if b.omit == "source-leak" {
+			fields["call_session_id"] = b.session
+		}
+		payload, _ := json.Marshal(fields)
+		return control.Result{Code: "ok", Payload: payload}, nil
+	case "CALL_CONTROL_TAP":
+		kind := params["kind"]
+		origin := b.states["A"]
+		if kind == "replay" {
+			if b.lastControlTap == "" {
+				return control.Result{Code: "unsupported", Detail: "no controllable mirror"}, nil
+			}
+			if b.omit == "duplicate-dispatch" {
+				origin.CallControlDispatches[b.lastControlTap]++
+			}
+			payload, _ := json.Marshal(map[string]any{"kind": kind, "status": "sent"})
+			return control.Result{Code: "ok", Payload: payload}, nil
+		}
+		if !contains(b.states["B"].CanonicalCallControls[callHashForTest(b.session)], kind) {
+			return control.Result{Code: "unsupported", Detail: "no controllable mirror"}, nil
+		}
+		b.lastControlTap = kind
+		if b.omit != "dispatch-"+kind {
+			origin.CallControlDispatches[kind]++
+		}
+		fields := map[string]any{"kind": kind, "status": "sent"}
+		if b.omit == "tap-leak" {
+			fields["invocation_id"] = "22222222-2222-4222-8222-222222222222"
+		}
+		payload, _ := json.Marshal(fields)
+		return control.Result{Code: "ok", Payload: payload}, nil
+	case "CALL_CONTROL_AWAIT":
+		kind := params["kind"]
+		count := b.states["A"].CallControlDispatches[kind]
+		fields := map[string]any{"kind": kind, "count": count, "status": map[bool]string{true: "dispatched", false: "timeout"}[count > 0], "elapsed_ms": 1}
+		if b.omit == "await-wrong-kind" {
+			fields["kind"] = "replay"
+		}
+		if b.omit == "await-leak" {
+			fields["control_id"] = "33333333-3333-4333-8333-333333333333"
+		}
+		payload, _ := json.Marshal(fields)
 		return control.Result{Code: "ok", Payload: payload}, nil
 	case "DISMISS_NEWEST_MIRROR":
 		b.dismissed = true

@@ -166,6 +166,61 @@ func TestNotificationMirrorCommandCarriesNoContentOrIdentity(t *testing.T) {
 	}
 }
 
+func TestCallControlCommandsAreClosedAndCarryNoCallIdentity(t *testing.T) {
+	enable, err := control.NewCallControlsEnableCommand("request-call")
+	if err != nil || enable.Name != "CALL_CONTROLS_ENABLE" || len(enable.Params) != 0 {
+		t.Fatalf("enable=%+v err=%v", enable, err)
+	}
+	for _, state := range []string{"ringing", "active", "idle"} {
+		command, err := control.NewCallControlSourceCommand("request-call", state)
+		if err != nil || command.Name != "CALL_CONTROL_SOURCE" || !reflect.DeepEqual(command.Params, map[string]string{"state": state}) {
+			t.Fatalf("%s: command=%+v err=%v", state, command, err)
+		}
+	}
+	for _, kind := range []string{"answer", "decline", "hang_up", "replay"} {
+		command, err := control.NewCallControlTapCommand("request-call", kind)
+		if err != nil || command.Name != "CALL_CONTROL_TAP" || !reflect.DeepEqual(command.Params, map[string]string{"kind": kind}) {
+			t.Fatalf("%s: command=%+v err=%v", kind, command, err)
+		}
+	}
+	for _, kind := range []string{"answer", "decline", "hang_up"} {
+		command, err := control.NewCallControlAwaitCommand("request-call", kind, 5*time.Second)
+		if err != nil || command.Name != "CALL_CONTROL_AWAIT" || !reflect.DeepEqual(command.Params, map[string]string{"kind": kind, "timeout_ms": "5000"}) {
+			t.Fatalf("%s: command=%+v err=%v", kind, command, err)
+		}
+		encoded, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"control_id", "invocation_id", "call_session_id", "phone", "caller", "package", "intent"} {
+			if strings.Contains(strings.ToLower(string(encoded)), forbidden) {
+				t.Fatalf("%s carries %s: %s", kind, forbidden, encoded)
+			}
+		}
+	}
+	if _, err := control.NewCallControlsEnableCommand(""); err == nil {
+		t.Fatal("accepted an empty enable request ID")
+	}
+	for _, state := range []string{"hold", "", "RINGING", "outgoing"} {
+		if _, err := control.NewCallControlSourceCommand("request-call", state); err == nil {
+			t.Fatalf("accepted source state %q", state)
+		}
+	}
+	for _, kind := range []string{"mute", "", "hangup", "ANSWER"} {
+		if _, err := control.NewCallControlTapCommand("request-call", kind); err == nil {
+			t.Fatalf("accepted tap kind %q", kind)
+		}
+	}
+	if _, err := control.NewCallControlAwaitCommand("request-call", "replay", 5*time.Second); err == nil {
+		t.Fatal("accepted replay as an await kind")
+	}
+	for _, timeout := range []time.Duration{0, 500 * time.Microsecond, 10*time.Second + time.Millisecond, time.Minute} {
+		if _, err := control.NewCallControlAwaitCommand("request-call", "answer", timeout); err == nil {
+			t.Fatalf("accepted await timeout %s", timeout)
+		}
+	}
+}
+
 func TestExecuteSecretCleansAllPrivateBucketsOnEveryExit(t *testing.T) {
 	cases := []struct {
 		name    string

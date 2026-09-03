@@ -74,6 +74,69 @@ func NewNotificationMirrorCommand(requestID, operation string) (Command, error) 
 	}, nil
 }
 
+var callControlSourceStates = map[string]bool{"ringing": true, "active": true, "idle": true}
+
+var callControlTapKinds = map[string]bool{"answer": true, "decline": true, "hang_up": true, "replay": true}
+
+var callControlAwaitKinds = map[string]bool{"answer": true, "decline": true, "hang_up": true}
+
+// MaxCallControlAwait bounds how long the origin fixture may block waiting for
+// one receiver dispatch. The device rejects anything outside 1..10000 ms.
+const MaxCallControlAwait = 10 * time.Second
+
+// NewCallControlsEnableCommand turns on synthetic debug call capture with
+// control advertising on the origin. It carries no parameters.
+func NewCallControlsEnableCommand(requestID string) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("call control request ID is required")
+	}
+	return Command{RequestID: requestID, Name: "CALL_CONTROLS_ENABLE"}, nil
+}
+
+// NewCallControlSourceCommand drives the origin fixture's local CallStyle
+// notification and injected telephony state. Only the closed state enum
+// crosses ADB; caller, number, and intent material never do.
+func NewCallControlSourceCommand(requestID, state string) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("call control request ID is required")
+	}
+	if !callControlSourceStates[state] {
+		return Command{}, errors.New("call control source state is outside the closed contract")
+	}
+	return Command{RequestID: requestID, Name: "CALL_CONTROL_SOURCE", Params: map[string]string{"state": state}}, nil
+}
+
+// NewCallControlTapCommand taps one native control on the mirror. The device
+// resolves which mirror and which capability; the host names only the kind.
+func NewCallControlTapCommand(requestID, kind string) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("call control request ID is required")
+	}
+	if !callControlTapKinds[kind] {
+		return Command{}, errors.New("call control tap kind is outside the closed contract")
+	}
+	return Command{RequestID: requestID, Name: "CALL_CONTROL_TAP", Params: map[string]string{"kind": kind}}, nil
+}
+
+// NewCallControlAwaitCommand waits on the origin for the fixture receiver of
+// one control kind and returns only kind, count, status, and timing.
+func NewCallControlAwaitCommand(requestID, kind string, timeout time.Duration) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("call control request ID is required")
+	}
+	if !callControlAwaitKinds[kind] {
+		return Command{}, errors.New("call control await kind is outside the closed contract")
+	}
+	if timeout < time.Millisecond || timeout > MaxCallControlAwait {
+		return Command{}, errors.New("call control await timeout is outside 1ms..10s")
+	}
+	return Command{
+		RequestID: requestID,
+		Name:      "CALL_CONTROL_AWAIT",
+		Params:    map[string]string{"kind": kind, "timeout_ms": strconv.FormatInt(timeout.Milliseconds(), 10)},
+	}, nil
+}
+
 type Result struct {
 	RequestID string          `json:"request_id"`
 	Code      string          `json:"code"`
