@@ -19,6 +19,7 @@ data class ServiceConfig(
     val preferLan: Boolean = true,
     val alwaysConnected: Boolean = true,
     val callCaptureEnabled: Boolean = false,
+    val callControlsEnabled: Boolean = false,
     val lastUserChangeAt: Long? = null,
     val revocationRequestedAt: Long? = null,
 )
@@ -30,8 +31,12 @@ internal fun mergeCallShutdownIntent(
 ): ServiceConfig = current.copy(
     enabled = if (intent.disableService) false else current.enabled,
     callCaptureEnabled = if (intent.disableCallCapture) false else current.callCaptureEnabled,
+    callControlsEnabled = if (intent.disableCallCapture) false else current.callControlsEnabled,
     lastUserChangeAt = if (intent.disableService) now else current.lastUserChangeAt,
 )
+
+internal fun durableCallControlsValue(callCaptureEnabled: Boolean, requestedEnabled: Boolean): Boolean =
+    callCaptureEnabled && requestedEnabled
 
 /** Single durable source of truth for service intent, relay endpoint, and revocation progress. */
 object ServiceConfigStore {
@@ -40,6 +45,7 @@ object ServiceConfigStore {
     private val PREFER_LAN = booleanPreferencesKey("prefer_lan")
     private val ALWAYS_CONNECTED = booleanPreferencesKey("always_connected")
     private val CALL_CAPTURE_ENABLED = booleanPreferencesKey("call_capture_enabled")
+    private val CALL_CONTROLS_ENABLED = booleanPreferencesKey("call_controls_enabled")
     private val LAST_USER_CHANGE_AT = longPreferencesKey("last_user_change_at")
     private val REVOCATION_REQUESTED_AT = longPreferencesKey("revocation_requested_at")
 
@@ -51,6 +57,7 @@ object ServiceConfigStore {
             preferLan = prefs[PREFER_LAN] ?: true,
             alwaysConnected = prefs[ALWAYS_CONNECTED] ?: true,
             callCaptureEnabled = prefs[CALL_CAPTURE_ENABLED] ?: false,
+            callControlsEnabled = prefs[CALL_CONTROLS_ENABLED] ?: false,
             lastUserChangeAt = prefs[LAST_USER_CHANGE_AT],
             revocationRequestedAt = prefs[REVOCATION_REQUESTED_AT],
         )
@@ -102,6 +109,17 @@ object ServiceConfigStore {
     suspend fun setCallCaptureEnabled(ctx: Context, enabled: Boolean): ServiceConfig {
         ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
             prefs[CALL_CAPTURE_ENABLED] = enabled
+            if (!enabled) prefs[CALL_CONTROLS_ENABLED] = false
+        }
+        return read(ctx)
+    }
+
+    suspend fun setCallControlsEnabled(ctx: Context, enabled: Boolean): ServiceConfig {
+        ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
+            prefs[CALL_CONTROLS_ENABLED] = durableCallControlsValue(
+                callCaptureEnabled = prefs[CALL_CAPTURE_ENABLED] ?: false,
+                requestedEnabled = enabled,
+            )
         }
         return read(ctx)
     }
@@ -112,7 +130,10 @@ object ServiceConfigStore {
         now: Long = System.currentTimeMillis(),
     ): ServiceConfig {
         ctx.applicationContext.syncServiceConfigDataStore.edit { prefs ->
-            if (intent.disableCallCapture) prefs[CALL_CAPTURE_ENABLED] = false
+            if (intent.disableCallCapture) {
+                prefs[CALL_CAPTURE_ENABLED] = false
+                prefs[CALL_CONTROLS_ENABLED] = false
+            }
             if (intent.disableService) {
                 prefs[ENABLED] = false
                 prefs[LAST_USER_CHANGE_AT] = now

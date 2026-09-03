@@ -26,6 +26,13 @@ data class CallStateEvent(
     val state: String,
     val direction: CallDirection,
     val sequence: Long,
+    val controls: List<CallControlDescriptor> = emptyList(),
+    internal val pendingGeneration: CallCapabilityGeneration<*>? = null,
+)
+
+internal data class CallControlSessionSnapshot(
+    val state: CallFrameworkState,
+    val direction: CallDirection,
 )
 
 data class CallSourceCapabilities(

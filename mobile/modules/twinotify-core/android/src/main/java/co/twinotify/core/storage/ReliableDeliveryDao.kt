@@ -10,6 +10,7 @@ import co.twinotify.core.actions.ActionExpiryCommitResult
 import co.twinotify.core.actions.ActionResultCommitResult
 import co.twinotify.core.actions.ActionResultRepost
 import co.twinotify.core.actions.ActionResultRequest
+import co.twinotify.core.call.CallControlResultRequest
 import co.twinotify.core.metrics.DeliveryLatencyEvidence
 import co.twinotify.core.metrics.deliveryLatencyEvidence
 import co.twinotify.core.service.DirectControlCommitResult
@@ -262,12 +263,45 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     )
 
     @Transaction
-    open suspend fun commitActionResult(request: ActionResultRequest): ActionResultCommitResult {
-        val row = request.inbound
-        require(row.eventType == "notif.action.result")
+    open suspend fun commitActionResult(request: ActionResultRequest): ActionResultCommitResult =
+        commitControlResultBody(
+            row = request.inbound,
+            invocationId = request.invocationId,
+            canonId = request.canonId,
+            status = request.status,
+            expectedEventType = "notif.action.result",
+            allowedStatuses = ACTION_RESULT_STATUSES,
+            expectedActionId = null,
+            terminalState = ::notificationActionTerminalState,
+        )
+
+    @Transaction
+    open suspend fun commitCallControlResult(request: CallControlResultRequest): ActionResultCommitResult =
+        commitControlResultBody(
+            row = request.inbound,
+            invocationId = request.invocationId,
+            canonId = request.canonId,
+            status = request.status,
+            expectedEventType = "call.control.result",
+            allowedStatuses = CALL_CONTROL_RESULT_STATUSES,
+            expectedActionId = request.kind.wire,
+            terminalState = ::callControlTerminalState,
+        )
+
+    private suspend fun commitControlResultBody(
+        row: InboundMessage,
+        invocationId: String,
+        canonId: String,
+        status: String,
+        expectedEventType: String,
+        allowedStatuses: Set<String>,
+        expectedActionId: String?,
+        terminalState: (String) -> String,
+    ): ActionResultCommitResult {
+        require(row.eventType == expectedEventType)
         require(row.canonId == null && row.sequence == null)
         require(row.outcome == "APPLIED" && row.appliedAt != null && row.relayAckState == "READY")
-        require(request.status in ACTION_RESULT_STATUSES)
+        require(status in allowedStatuses)
 
         inbound(row.msgId)?.let { existing ->
             return if (existing.envelopeSha256 == row.envelopeSha256) {
@@ -278,21 +312,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         }
         insertInbound(row)
 
-        val invocation = actionInvocation(request.invocationId)
+        val invocation = actionInvocation(invocationId)
             ?: return ActionResultCommitResult.Committed(repost = null)
-        if (invocation.canonId != request.canonId || invocation.state != "PENDING") {
+        if (
+            invocation.canonId != canonId || invocation.state != "PENDING" ||
+            (expectedActionId != null && invocation.actionId != expectedActionId)
+        ) {
             return ActionResultCommitResult.Committed(repost = null)
         }
-        val terminalState = when (request.status) {
-            "dispatched" -> "DISPATCHED"
-            "outcome_unknown" -> "OUTCOME_UNKNOWN"
-            "action_gone" -> "ACTION_GONE"
-            "notification_gone" -> "NOTIFICATION_GONE"
-            "expired" -> "EXPIRED"
-            "failed" -> "FAILED"
-            else -> error("validated action result status drift")
-        }
-        if (terminalizeActionInvocation(invocation.invocationId, terminalState, row.committedAt) != 1) {
+        if (terminalizeActionInvocation(invocation.invocationId, terminalState(status), row.committedAt) != 1) {
             return ActionResultCommitResult.Committed(repost = null)
         }
         val canonical = canonical(invocation.canonId)
@@ -311,6 +339,26 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             null
         }
         return ActionResultCommitResult.Committed(repost)
+    }
+
+    private fun notificationActionTerminalState(status: String): String = when (status) {
+        "dispatched" -> "DISPATCHED"
+        "outcome_unknown" -> "OUTCOME_UNKNOWN"
+        "action_gone" -> "ACTION_GONE"
+        "notification_gone" -> "NOTIFICATION_GONE"
+        "expired" -> "EXPIRED"
+        "failed" -> "FAILED"
+        else -> error("validated action result status drift")
+    }
+
+    private fun callControlTerminalState(status: String): String = when (status) {
+        "dispatched" -> "DISPATCHED"
+        "outcome_unknown" -> "OUTCOME_UNKNOWN"
+        "capability_gone" -> "ACTION_GONE"
+        "call_gone" -> "NOTIFICATION_GONE"
+        "stale_state", "failed" -> "FAILED"
+        "expired" -> "EXPIRED"
+        else -> error("validated call-control result status drift")
     }
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
@@ -343,8 +391,22 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         row: InboundMessage,
         execution: ActionExecution,
         now: Long,
+    ): ActionClaimDecision = claimControlInvocationBody(row, execution, now, "notif.action.invoke")
+
+    @Transaction
+    open suspend fun claimCallControlInvocation(
+        row: InboundMessage,
+        execution: ActionExecution,
+        now: Long,
+    ): ActionClaimDecision = claimControlInvocationBody(row, execution, now, "call.control.invoke")
+
+    private suspend fun claimControlInvocationBody(
+        row: InboundMessage,
+        execution: ActionExecution,
+        now: Long,
+        expectedEventType: String,
     ): ActionClaimDecision {
-        require(row.eventType == "notif.action.invoke")
+        require(row.eventType == expectedEventType)
         require(row.canonId == null && row.sequence == null)
         require(row.outcome == "APPLIED" && row.appliedAt != null)
         require(row.relayAckState == "READY")
@@ -390,9 +452,23 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     open suspend fun commitActionInvocationAndOutbound(
         invocation: ActionInvocation,
         invoke: OutboundMessage,
+    ): ActionInvocationOutboxCommitResult =
+        commitControlInvocationAndOutboundBody(invocation, invoke, "notif.action.invoke")
+
+    @Transaction
+    open suspend fun commitCallControlInvocationAndOutbound(
+        invocation: ActionInvocation,
+        invoke: OutboundMessage,
+    ): ActionInvocationOutboxCommitResult =
+        commitControlInvocationAndOutboundBody(invocation, invoke, "call.control.invoke")
+
+    private suspend fun commitControlInvocationAndOutboundBody(
+        invocation: ActionInvocation,
+        invoke: OutboundMessage,
+        eventType: String,
     ): ActionInvocationOutboxCommitResult {
         require(invocation.state == "PENDING")
-        require(invoke.eventType == "notif.action.invoke")
+        require(invoke.eventType == eventType)
         require(invoke.canonId == null && invoke.sequence == null)
         require(!invoke.requiresPeerReceipt)
 
@@ -403,6 +479,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             } else {
                 ActionInvocationOutboxCommitResult.InvocationConflict
             }
+        }
+        if (
+            eventType == "call.control.invoke" &&
+            actionInvocationsForNotification(invocation.canonId, invocation.notificationSequence).isNotEmpty()
+        ) {
+            return ActionInvocationOutboxCommitResult.InvocationConflict
         }
         if (outboundMessage(invoke.msgId) != null) {
             return ActionInvocationOutboxCommitResult.OutboundConflict
@@ -418,9 +500,30 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         status: String,
         now: Long,
         result: OutboundMessage,
+    ): ActionCompletionOutboxCommitResult = completeControlExecutionAndEnqueueBody(
+        invocationId, status, now, result, "notif.action.result", ACTION_RESULT_STATUSES,
+    )
+
+    @Transaction
+    open suspend fun completeCallControlExecutionAndEnqueue(
+        invocationId: String,
+        status: String,
+        now: Long,
+        result: OutboundMessage,
+    ): ActionCompletionOutboxCommitResult = completeControlExecutionAndEnqueueBody(
+        invocationId, status, now, result, "call.control.result", CALL_CONTROL_RESULT_STATUSES,
+    )
+
+    private suspend fun completeControlExecutionAndEnqueueBody(
+        invocationId: String,
+        status: String,
+        now: Long,
+        result: OutboundMessage,
+        expectedEventType: String,
+        allowedStatuses: Set<String>,
     ): ActionCompletionOutboxCommitResult {
-        require(status in ACTION_RESULT_STATUSES)
-        require(result.eventType == "notif.action.result")
+        require(status in allowedStatuses)
+        require(result.eventType == expectedEventType)
         require(result.canonId == null && result.sequence == null)
         require(!result.requiresPeerReceipt)
 
@@ -442,9 +545,28 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         invocationId: String,
         status: String,
         result: OutboundMessage,
+    ): Boolean = enqueueCompletedControlResultBody(
+        invocationId, status, result, "notif.action.result", ACTION_RESULT_STATUSES,
+    )
+
+    @Transaction
+    open suspend fun enqueueCompletedCallControlResult(
+        invocationId: String,
+        status: String,
+        result: OutboundMessage,
+    ): Boolean = enqueueCompletedControlResultBody(
+        invocationId, status, result, "call.control.result", CALL_CONTROL_RESULT_STATUSES,
+    )
+
+    private suspend fun enqueueCompletedControlResultBody(
+        invocationId: String,
+        status: String,
+        result: OutboundMessage,
+        expectedEventType: String,
+        allowedStatuses: Set<String>,
     ): Boolean {
-        require(status in ACTION_RESULT_STATUSES)
-        require(result.eventType == "notif.action.result")
+        require(status in allowedStatuses)
+        require(result.eventType == expectedEventType)
         require(result.canonId == null && result.sequence == null)
         require(!result.requiresPeerReceipt)
         val execution = actionExecution(invocationId) ?: return false
@@ -531,15 +653,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
 
     @Query(
         "SELECT " +
-            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state') " +
+            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
             "AND state='NEW' AND custodyAcceptedAt IS NULL THEN 1 END) AS pendingLocal, " +
-            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state') " +
+            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
             "AND state='ACCEPTED' AND custodyAcceptedAt IS NOT NULL THEN 1 END) AS awaitingPeer, " +
-            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state') " +
+            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
             "AND state='ACCEPTED' AND custodyAcceptedAt IS NOT NULL AND relayCustodyState='ACCEPTED' THEN 1 END) AS heldByRelay, " +
-            "COUNT(CASE WHEN eventType NOT IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state') THEN 1 END) AS internalActive, " +
+            "COUNT(CASE WHEN eventType NOT IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') THEN 1 END) AS internalActive, " +
             "COUNT(*) AS totalActive, COALESCE(SUM(byteSize), 0) AS totalActiveBytes, " +
-            "COUNT(CASE WHEN eventType IN ('notif.action.invoke','notif.action.result','call.state') THEN 1 END) AS nonNotificationUser " +
+            "COUNT(CASE WHEN eventType IN ('notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') THEN 1 END) AS nonNotificationUser " +
             "FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED')",
     )
     protected abstract suspend fun deliveryQueueProjection(): DeliveryQueueProjection
@@ -904,7 +1026,24 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
 
     @Transaction
     open suspend fun commitActionInvokeRejection(row: InboundMessage): ActionInvokeRejectionCommitResult {
-        require(row.eventType == "notif.action.invoke")
+        return commitControlInvokeRejectionBody(row, "notif.action.invoke")
+    }
+
+    @Transaction
+    open suspend fun commitCallControlInvokeRejection(row: InboundMessage): ActionInvokeRejectionCommitResult {
+        return commitControlInvokeRejectionBody(row, "call.control.invoke")
+    }
+
+    @Transaction
+    open suspend fun commitCallControlResultRejection(row: InboundMessage): ActionInvokeRejectionCommitResult {
+        return commitControlInvokeRejectionBody(row, "call.control.result")
+    }
+
+    private suspend fun commitControlInvokeRejectionBody(
+        row: InboundMessage,
+        expectedEventType: String,
+    ): ActionInvokeRejectionCommitResult {
+        require(row.eventType == expectedEventType)
         require(row.canonId == null && row.sequence == null)
         require(row.outcome == "REJECTED" && row.appliedAt != null && row.relayAckState == "READY")
         val existing = inbound(row.msgId)
@@ -2073,6 +2212,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             "outcome_unknown",
             "action_gone",
             "notification_gone",
+            "expired",
+            "failed",
+        )
+        val CALL_CONTROL_RESULT_STATUSES = setOf(
+            "dispatched",
+            "outcome_unknown",
+            "capability_gone",
+            "call_gone",
+            "stale_state",
             "expired",
             "failed",
         )

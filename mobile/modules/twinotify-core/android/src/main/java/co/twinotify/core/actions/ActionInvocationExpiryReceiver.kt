@@ -76,11 +76,16 @@ internal object ActionInvocationExpiryRuntime {
                 val state = dao.canonical(row.canonId)
                     ?.takeIf { it.state == "ACTIVE" && it.latestSequence == row.notificationSequence }
                     ?: return@ActionExpiredReposter
-                DefaultAndroidNotificationPort(
+                val port = DefaultAndroidNotificationPort(
                     app,
                     DeviceIdentity.getOrCreate(app),
                     dao,
-                ).postMirror(state)
+                )
+                if (row.canonId.startsWith("call:")) {
+                    port.postCallMirror(state)
+                } else {
+                    port.postMirror(state)
+                }
             },
             scheduler = PersistentActionInvocationExpiryScheduler(app),
         ).expireDue()

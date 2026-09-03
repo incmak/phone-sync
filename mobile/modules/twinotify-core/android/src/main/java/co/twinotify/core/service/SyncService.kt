@@ -1,10 +1,12 @@
 package co.twinotify.core.service
 
 import android.app.Notification
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
+import android.telecom.TelecomManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -23,7 +25,15 @@ import co.twinotify.core.call.CallCaptureDecision
 import co.twinotify.core.call.CallCapturePolicy
 import co.twinotify.core.call.CallCaptureStatus
 import co.twinotify.core.call.CallStatePersister
+import co.twinotify.core.call.CallStatePersistenceException
 import co.twinotify.core.call.CallStateMaterializer
+import co.twinotify.core.call.CallControlCaptureBridge
+import co.twinotify.core.call.CallControlCaptureSession
+import co.twinotify.core.call.CallControlCaptureSink
+import co.twinotify.core.call.ProcessCallCapabilityRegistry
+import co.twinotify.core.call.callControlCaptureEnabled
+import co.twinotify.core.call.launchOrderedCallControlMutation
+import co.twinotify.core.listener.NotificationListenerBridge
 import co.twinotify.core.R
 import co.twinotify.core.call.CallShutdownConfigIntent
 import co.twinotify.core.call.GracefulCallShutdownGate
@@ -62,6 +72,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -551,10 +563,24 @@ internal suspend fun resumeNormalCallCaptureAfterShutdown(
     awaitRelease: suspend () -> Unit,
     readConfig: suspend () -> ServiceConfig,
     configure: (Boolean) -> Unit,
+    configureControls: (Boolean) -> Unit = {},
 ) {
     awaitRelease()
     val config = readConfig()
-    if (config.enabled) configure(config.callCaptureEnabled)
+    if (config.enabled) {
+        configure(config.callCaptureEnabled)
+        configureControls(config.callControlsEnabled)
+    }
+}
+
+/** Re-reads the committed preference before touching the live capture session. */
+internal suspend fun reconfigureCommittedCallControls(
+    readConfig: suspend () -> ServiceConfig,
+    reconfigure: (serviceEnabled: Boolean, callCaptureEnabled: Boolean, controlsEnabled: Boolean) -> Unit,
+): Boolean {
+    val config = readConfig()
+    reconfigure(config.enabled, config.callCaptureEnabled, config.callControlsEnabled)
+    return config.callControlsEnabled
 }
 
 internal suspend fun quiesceServiceJobsAfterCallShutdown(
@@ -785,7 +811,7 @@ internal suspend fun runMaterializationPassLoop(
 }
 
 /** Lifecycle shell around the lifecycle-independent durable relay transport. */
-class SyncService : Service() {
+class SyncService : Service(), CallMirrorForegroundHost {
     companion object {
         const val FGS_ID = 9_001
         const val EXTRA_RELAY_URL = "relay_url"
@@ -800,11 +826,16 @@ class SyncService : Service() {
         private val callShutdownGate = GracefulCallShutdownGate()
         private val callShutdownPhaseState = CallShutdownPhaseState()
         private val callCaptureAdmissionGate = CallCaptureAdmissionGate()
+        private val callControlsPreferenceMutex = Mutex()
 
         internal fun beginCallCaptureAdmission(): CallCaptureAdmissionTicket =
             callCaptureAdmissionGate.begin()
 
         internal fun isActive(): Boolean = activeInstance != null
+
+        /** Null unless a live service can own the CallStyle foreground slot. */
+        internal fun callMirrorForegroundHost(): CallMirrorForegroundHost? =
+            activeInstance?.takeUnless { it.shuttingDown }
 
         internal suspend fun awaitCallCaptureAdmission(ticket: CallCaptureAdmissionTicket): Boolean =
             callCaptureAdmissionGate.await(ticket, CALL_CAPTURE_ADMISSION_TIMEOUT_MILLIS)
@@ -842,6 +873,21 @@ class SyncService : Service() {
             )
         }
 
+        suspend fun reconfigureCallControlsAndAwait(context: android.content.Context): Boolean =
+            callControlsPreferenceMutex.withLock {
+                val appContext = context.applicationContext
+                val service = activeInstance
+                if (service == null) {
+                    return@withLock reconfigureCommittedCallControls(
+                        readConfig = { ServiceConfigStore.read(appContext) },
+                        reconfigure = { _, _, controlsEnabled ->
+                            if (!controlsEnabled) ProcessCallCapabilityRegistry.registry.clear()
+                        },
+                    )
+                }
+                service.reconfigureCommittedCallControls()
+            }
+
         suspend fun awaitCallShutdownRelease() {
             callShutdownGate.awaitRelease()
         }
@@ -855,6 +901,7 @@ class SyncService : Service() {
             ctx: android.content.Context,
             fromRelayJob: Boolean = false,
         ) {
+            ProcessCallCapabilityRegistry.registry.clear()
             executeCallCaptureStopRequest(
                 sharedShutdown = {
                     requestCallShutdown(
@@ -883,6 +930,7 @@ class SyncService : Service() {
         internal suspend fun prepareLocalUnpair(
             ctx: android.content.Context,
         ): PreparedLocalUnpairService {
+            ProcessCallCapabilityRegistry.registry.clear()
             executeCallCaptureStopRequest(
                 sharedShutdown = {
                     requestCallShutdown(
@@ -926,12 +974,24 @@ class SyncService : Service() {
                 ?: SyncServiceStatus.setCallCapture(false, "call_capture_disabled")
         }
 
-        /** Debug-only synthetic source setup; no telephony data is read by this path. */
-        fun startDebugCallCapture(): Boolean {
+        /**
+         * Debug-only synthetic source setup; no telephony data is read by this path. With
+         * [controls], capability capture is attached for this app's own CallStyle fixture only,
+         * bypassing the durable consent preference so host scenarios never touch user settings.
+         */
+        fun startDebugCallCapture(controls: Boolean = false): Boolean {
             if (callShutdownGate.isReserved()) return false
             val service = activeInstance ?: return false
-            return service.configureCallCapture(enabled = true, debugSynthetic = true)
+            return service.configureCallCapture(
+                enabled = true,
+                callControlsEnabled = controls,
+                debugSynthetic = true,
+            )
         }
+
+        /** True while a capability-capture session is attached (debug observation only). */
+        internal fun callControlCaptureAttached(): Boolean =
+            activeInstance?.callControlCaptureSession != null
 
         suspend fun injectDebugCallState(state: String): CallStateEvent? {
             val frameworkState = when (state) {
@@ -1001,6 +1061,8 @@ class SyncService : Service() {
     private var materializerJob: Job? = null
     private val materializationRequestGate = MaterializationRequestGate()
     private var callCaptureReservationWaiter: Job? = null
+    private var callControlCaptureSession: CallControlCaptureSession<PendingIntent>? = null
+    private var callControlCaptureSink: CallControlCaptureSink? = null
     private val actionStopGate = CallCaptureStopRequestGate()
     private val unpairCustodyTracker = UnpairCustodyTracker()
     private var retainedCallShutdownLease: CallCaptureQuiesceLease? = null
@@ -1008,6 +1070,9 @@ class SyncService : Service() {
     private val callCaptureLifecycle = CallCaptureLifecycleFence()
     private val callCaptureStartupGate = CallCaptureStartupGate()
     private val foregroundNotificationOwner = ForegroundNotificationOwner<DeliveryPresentation>()
+    private val callMirrorForegroundSlot = CallMirrorForegroundSlot<Notification>(FGS_ID) { id, notification ->
+        startForeground(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+    }
     private var shuttingDown = false
     private val shutdownCompleted = CompletableDeferred<Unit>()
     private lateinit var legacyMigration: Deferred<LegacyMigrationSummary>
@@ -1096,6 +1161,20 @@ class SyncService : Service() {
         }
         routePreferenceJob = scope.launch { routePreferenceRestarter.run() }
     }
+
+    private suspend fun reconfigureCommittedCallControls(): Boolean = scope.async {
+        reconfigureCommittedCallControls(
+            readConfig = { ServiceConfigStore.read(applicationContext) },
+            reconfigure = { serviceEnabled, callCaptureEnabled, controlsEnabled ->
+                configureCallControlCapture(
+                    serviceEnabled = serviceEnabled,
+                    callStateEnabled = callCaptureEnabled && callCaptureLifecycle.status()?.enabled == true,
+                    controlsEnabled = controlsEnabled,
+                    coordinator = callCaptureLifecycle.current(),
+                )
+            },
+        )
+    }.await()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val callCaptureAdmissionGeneration = parseCallCaptureAdmissionGeneration(
@@ -1248,11 +1327,28 @@ class SyncService : Service() {
 
     private fun startForegroundCompat(presentation: DeliveryPresentation) {
         val notif: Notification = ForegroundNotificationFactory.build(this, presentation)
-        startForeground(FGS_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+        callMirrorForegroundSlot.renderStatus(notif)
     }
+
+    private fun currentStatusNotification(): Notification? {
+        if (shuttingDown) return null
+        val presentation = DeliveryStatusPresenter.present(
+            SyncServiceStatus.routeStatus.value,
+            paired = true,
+            enabled = true,
+        )
+        return ForegroundNotificationFactory.build(this, presentation)
+    }
+
+    override fun postCallMirror(id: Int, notification: Notification): Boolean =
+        runCatching { callMirrorForegroundSlot.hold(id, notification) }.getOrDefault(false)
+
+    override fun cancelCallMirror(id: Int): Boolean =
+        runCatching { callMirrorForegroundSlot.release(id, ::currentStatusNotification) }.getOrDefault(false)
 
     private fun clearForegroundOwnership() {
         foregroundNotificationOwner.remove()
+        callMirrorForegroundSlot.clear()
     }
 
     private suspend fun shutdownForUnpair(fromRelayJob: Boolean) {
@@ -1523,7 +1619,10 @@ class SyncService : Service() {
                     // Read only after recovery. If this read fails, the helper
                     // reports a bounded failure and retries the full recovery.
                     val config = ServiceConfigStore.read(applicationContext)
-                    val admitted = config.enabled && configureCallCapture(config.callCaptureEnabled)
+                    val admitted = config.enabled && configureCallCapture(
+                        enabled = config.callCaptureEnabled,
+                        callControlsEnabled = config.callControlsEnabled,
+                    )
                     completeCallCaptureAdmissionForServiceStart(
                         callCaptureAdmissionGate,
                         admissionGeneration,
@@ -1550,11 +1649,22 @@ class SyncService : Service() {
         )
     }
 
-    private fun configureCallCapture(enabled: Boolean, debugSynthetic: Boolean = false): Boolean {
+    private fun configureCallCapture(
+        enabled: Boolean,
+        callControlsEnabled: Boolean = false,
+        debugSynthetic: Boolean = false,
+    ): Boolean {
         if (!enabled) {
+            detachCallControlCapture()
             stopCallCapture()
             SyncServiceStatus.setCallCapture(false, "call_capture_disabled")
             return false
+        }
+        if (debugSynthetic) {
+            // The host scenario must always get a fresh synthetic coordinator with the requested
+            // control-capture setting, never a live telephony coordinator left over from the user.
+            detachCallControlCapture()
+            stopCallCapture()
         }
         val accepted = callCaptureLifecycle.start(admissionReserved = callShutdownGate::isReserved) { install ->
             val source = TelephonyCallStateSource(applicationContext)
@@ -1577,7 +1687,15 @@ class SyncService : Service() {
                         CallStatePersister(applicationContext).persist(event)
                         SyncServiceStatus.setLastCallEventAt(System.currentTimeMillis())
                         SyncServiceStatus.setCallCapture(true, CallStateMaterializer.mode.capabilityCode)
+                        callControlCaptureSession?.onCallStateChanged()
                     } catch (error: Throwable) {
+                        if (
+                            error is CallStatePersistenceException &&
+                            error.latestSequence != null &&
+                            event.controls.isNotEmpty()
+                        ) {
+                            callControlCaptureSession?.onStateCommitRejected()
+                        }
                         // Expose only a bounded health code; the coordinator still serializes and
                         // suppresses callbacks while the service remains opted in.
                         SyncServiceStatus.setCallCapture(true, "call_event_persist_failed")
@@ -1598,6 +1716,13 @@ class SyncService : Service() {
             }
             val capability = if (status.enabled) CallStateMaterializer.mode.capabilityCode else null
             SyncServiceStatus.setCallCapture(status.enabled, status.lastErrorCode ?: status.reason?.code ?: capability)
+            configureCallControlCapture(
+                serviceEnabled = true,
+                callStateEnabled = status.enabled,
+                controlsEnabled = callControlsEnabled,
+                coordinator = coordinator,
+                debugSynthetic = debugSynthetic,
+            )
         }
         if (!accepted && callShutdownGate.isReserved()) {
             SyncServiceStatus.setCallCapture(false, co.twinotify.core.call.CALL_SHUTDOWN_FAILED)
@@ -1615,6 +1740,14 @@ class SyncService : Service() {
                     awaitRelease = callShutdownGate::awaitRelease,
                     readConfig = { ServiceConfigStore.read(applicationContext) },
                     configure = { configureCallCapture(it) },
+                    configureControls = { enabled ->
+                        configureCallControlCapture(
+                            serviceEnabled = true,
+                            callStateEnabled = callCaptureLifecycle.status()?.enabled == true,
+                            controlsEnabled = enabled,
+                            coordinator = callCaptureLifecycle.current(),
+                        )
+                    },
                 )
             } finally {
                 if (callCaptureReservationWaiter === waiter) callCaptureReservationWaiter = null
@@ -1714,6 +1847,7 @@ class SyncService : Service() {
         shuttingDown = true
         stopDefaultNetworkObserver()
         co.twinotify.core.actions.ProcessNotificationActionRegistry.registry.clear()
+        detachCallControlCapture()
         clearForegroundOwnership()
         transportJob?.cancelAndJoin()
         retentionJob?.cancelAndJoin()
@@ -1728,8 +1862,59 @@ class SyncService : Service() {
 
     private fun stopCallCapture(terminal: Boolean = false) {
         if (terminal) shuttingDown = true
+        detachCallControlCapture()
         callCaptureLifecycle.stop(terminal)
         SyncServiceStatus.setCallCapture(false, "call_capture_disabled")
+    }
+
+    private fun configureCallControlCapture(
+        serviceEnabled: Boolean,
+        callStateEnabled: Boolean,
+        controlsEnabled: Boolean,
+        coordinator: CallStateCoordinator?,
+        debugSynthetic: Boolean = false,
+    ) {
+        detachCallControlCapture()
+        if (!callControlCaptureEnabled(serviceEnabled, callStateEnabled, controlsEnabled) || coordinator == null) {
+            return
+        }
+        val session: CallControlCaptureSession<PendingIntent> = CallControlCaptureSession(
+            defaultDialerPackage = {
+                // The synthetic host scenario selects only this app's own CallStyle fixture, so a
+                // real dialer can never be captured while the debug source is active.
+                if (debugSynthetic) packageName else getSystemService(TelecomManager::class.java)?.defaultDialerPackage
+            },
+            currentCall = coordinator::currentCallSnapshot,
+            publish = { sourceKey: String, handles: Map<co.twinotify.core.call.CallControlKind, PendingIntent> ->
+                launchOrderedCallControlMutation(scope) {
+                    coordinator.refreshControls(sourceKey, handles)
+                }
+            },
+            clearPublished = {
+                launchOrderedCallControlMutation(scope) { coordinator.clearControls() }
+            },
+        )
+        val sink = object : CallControlCaptureSink {
+            override fun onPosted(snapshot: co.twinotify.core.call.CallCapabilityCandidate<PendingIntent>): Boolean =
+                session.onPosted(snapshot)
+
+            override fun onRemoved(sourceKey: String) {
+                session.onRemoved(sourceKey)
+            }
+        }
+        callControlCaptureSession = session
+        callControlCaptureSink = sink
+        CallControlCaptureBridge.attach(sink)
+        NotificationListenerBridge.activeCallCandidates().forEach(session::onPosted)
+        session.onCallStateChanged()
+    }
+
+    private fun detachCallControlCapture() {
+        callControlCaptureSink?.let(CallControlCaptureBridge::detach)
+        callControlCaptureSink = null
+        callControlCaptureSession?.clear()
+        callControlCaptureSession = null
+        ProcessCallCapabilityRegistry.registry.clear()
     }
 
     private suspend fun runRetentionSweep() {

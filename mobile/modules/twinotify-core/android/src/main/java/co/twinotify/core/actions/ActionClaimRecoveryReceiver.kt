@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import co.twinotify.core.service.SyncService
 import co.twinotify.core.storage.NotificationDb
+import co.twinotify.core.call.CallControlEncoder
+import co.twinotify.core.call.CallControlResultRowEncoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -57,9 +59,11 @@ internal object ActionClaimRecoveryRuntime {
         val app = context.applicationContext
         val dao = NotificationDb.get(app).reliableDeliveryDao()
         val encoder = ActionControlEncoder(app)
+        val callEncoder = CallControlEncoder(app)
         return ActionClaimRecovery(
             store = DaoActionClaimRecoveryStore(dao),
             resultEncoder = ActionResultRowEncoder(encoder::encodeResult),
+            callResultEncoder = CallControlResultRowEncoder(callEncoder::encodeResult),
             scheduler = PersistentActionClaimWakeScheduler(app),
             signalTransport = { SyncService.notifyActionOutboxChanged(app) },
         ).recover()

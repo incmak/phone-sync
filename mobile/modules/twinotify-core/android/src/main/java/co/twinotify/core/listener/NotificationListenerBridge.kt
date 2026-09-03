@@ -1,8 +1,11 @@
 package co.twinotify.core.listener
 
+import android.app.PendingIntent
 import android.content.Context
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import co.twinotify.core.call.CallCapabilityCandidate
+import co.twinotify.core.call.CallCapabilityCollector
 import java.util.Collections
 
 internal fun shouldCaptureOutbound(sourcePackage: String, selfPackage: String): Boolean =
@@ -50,6 +53,10 @@ object NotificationListenerBridge {
         val listener = synchronized(lock) { attached } ?: return emptyList()
         return runCatching { listener.activeNotifications.orEmpty().toList() }.getOrDefault(emptyList())
     }
+
+    /** Fresh typed call candidates; no caller-facing notification fields cross this boundary. */
+    fun activeCallCandidates(): List<CallCapabilityCandidate<PendingIntent>> =
+        activeNotifications().map(CallCapabilityCollector::capture)
 
     fun isAttached(): Boolean = synchronized(lock) { attached != null }
 

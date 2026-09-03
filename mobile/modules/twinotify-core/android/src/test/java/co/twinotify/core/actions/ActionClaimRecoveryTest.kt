@@ -2,6 +2,7 @@ package co.twinotify.core.actions
 
 import co.twinotify.core.storage.ActionExecution
 import co.twinotify.core.storage.OutboundMessage
+import co.twinotify.core.call.CallControlResultRowEncoder
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlinx.coroutines.test.runTest
@@ -55,6 +56,42 @@ class ActionClaimRecoveryTest {
         assertEquals(0, recovery(store, now = 61_000) { signals += 1 }.recover().finalized)
         assertEquals(0, signals)
         assertEquals(emptyList(), store.resultRows)
+    }
+
+    @Test
+    fun callControlCrashEncodesCallResultAndNeverUsesNotificationEncoder() = runTest {
+        val store = FakeRecoveryStore(
+            rows = listOf(
+                ActionExecution(
+                    invocationId = "22222222-2222-4222-8222-222222222222",
+                    canonId = "call:11111111-1111-4111-8111-111111111111",
+                    actionId = "answer:2",
+                    state = "CLAIMED",
+                    resultStatus = null,
+                    claimedAt = 1_000,
+                    completedAt = null,
+                ),
+            ),
+        )
+        var notificationEncodes = 0
+        var callEncodes = 0
+        val recovery = ActionClaimRecovery(
+            store = store,
+            resultEncoder = ActionResultRowEncoder { notificationEncodes += 1; result("notification") },
+            callResultEncoder = CallControlResultRowEncoder { input ->
+                callEncodes += 1
+                assertEquals("answer", input.kind.wire)
+                callResult(input.invocationId)
+            },
+            scheduler = ActionClaimWakeScheduler {},
+            signalTransport = {},
+            clock = { 61_000 },
+        )
+
+        assertEquals(1, recovery.recover().finalized)
+        assertEquals(0, notificationEncodes)
+        assertEquals(1, callEncodes)
+        assertEquals("call.control.result", store.resultRows.single().eventType)
     }
 
     private fun recovery(
@@ -127,4 +164,6 @@ class ActionClaimRecoveryTest {
         lastError = null,
         requiresPeerReceipt = false,
     )
+
+    private fun callResult(id: String) = result(id).copy(eventType = "call.control.result", expiresAt = 301_000)
 }

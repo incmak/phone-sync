@@ -65,6 +65,10 @@
       android:exported="false" />
 
     <receiver
+      android:name="co.twinotify.core.call.CallControlInvokeReceiver"
+      android:exported="false" />
+
+    <receiver
       android:name="co.twinotify.core.actions.ActionInvocationExpiryReceiver"
       android:exported="false" />
   </application>

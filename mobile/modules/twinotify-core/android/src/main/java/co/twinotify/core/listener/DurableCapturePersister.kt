@@ -3,6 +3,7 @@ package co.twinotify.core.listener
 import android.content.Context
 import android.util.Base64
 import android.app.Notification
+import android.app.PendingIntent
 import co.twinotify.core.actions.ActionDescriptorFactory
 import co.twinotify.core.actions.ActionGenerationCommitter
 import co.twinotify.core.actions.ProcessNotificationActionRegistry
@@ -12,6 +13,10 @@ import co.twinotify.core.crypto.NonceSource
 import co.twinotify.core.history.HistoryRepository
 import co.twinotify.core.call.CallStateEvent
 import co.twinotify.core.call.CallStatePersistResult
+import co.twinotify.core.call.CallCapabilityGenerationCommitter
+import co.twinotify.core.call.ProcessCallCapabilityRegistry
+import co.twinotify.core.call.callStatePayloadJson
+import co.twinotify.core.call.pendingGenerationOf
 import co.twinotify.core.protocol.EncryptedEnvelope
 import co.twinotify.core.protocol.InnerEventV2
 import co.twinotify.core.protocol.ProtocolJson
@@ -68,6 +73,9 @@ class DurableCapturePersister(context: Context) : CapturePersister {
     private val actionDescriptorFactory = ActionDescriptorFactory()
     private val actionCommitter = ActionGenerationCommitter<Notification.Action>(
         ProcessNotificationActionRegistry.registry,
+    )
+    private val callCapabilityCommitter = CallCapabilityGenerationCommitter(
+        ProcessCallCapabilityRegistry.registry,
     )
     private val history = HistoryRepository(appContext)
 
@@ -223,18 +231,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         val canonId = "call:${event.callSessionId}"
         val current = dao.canonical(canonId)
         val now = System.currentTimeMillis().coerceAtLeast(0L)
-        val payloadJson = JSONObject()
-            .put("call_session_id", event.callSessionId)
-            .put("state", event.state)
-            .put(
-                "direction",
-                when (event.direction) {
-                    co.twinotify.core.call.CallDirection.INCOMING -> "incoming"
-                    co.twinotify.core.call.CallDirection.OUTGOING -> "outgoing"
-                    co.twinotify.core.call.CallDirection.UNKNOWN -> "unknown"
-                },
-            )
-            .toString()
+        val payloadJson = callStatePayloadJson(event)
         val msgId = UUID.randomUUID().toString()
         val inner = InnerEventV2(
             msgId = msgId,
@@ -309,7 +306,15 @@ class DurableCapturePersister(context: Context) : CapturePersister {
                 occurredAt = now,
             )
             return when (val result = dao.commitCapturedState(desired, row, uiActivity)) {
-                is OutboundStateCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, msgId)
+                is OutboundStateCommitResult.Committed -> {
+                    callCapabilityCommitter.afterCommit(
+                        canonId,
+                        event,
+                        event.pendingGenerationOf(PendingIntent::class.java),
+                        result,
+                    )
+                    CallStatePersistResult.Persisted(event.sequence, msgId)
+                }
                 is OutboundStateCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
                 OutboundStateCommitResult.NotStateEvent -> error("call capture produced unsupported event type")
             }
@@ -326,7 +331,15 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             occurredAt = now,
         )
         return when (val result = dao.commitRecoveredCallState(desired, row, expectedLocalOrigin, uiActivity)) {
-            is CallRecoveryCommitResult.Committed -> CallStatePersistResult.Persisted(event.sequence, msgId)
+            is CallRecoveryCommitResult.Committed -> {
+                callCapabilityCommitter.afterCommit(
+                    canonId,
+                    event,
+                    event.pendingGenerationOf(PendingIntent::class.java),
+                    OutboundStateCommitResult.Committed(result.compacted),
+                )
+                CallStatePersistResult.Persisted(event.sequence, msgId)
+            }
             is CallRecoveryCommitResult.Stale -> CallStatePersistResult.Stale(result.latestSequence)
             CallRecoveryCommitResult.OwnershipLost -> CallStatePersistResult.OwnershipLost
             CallRecoveryCommitResult.NotStateEvent -> error("call recovery produced unsupported event type")

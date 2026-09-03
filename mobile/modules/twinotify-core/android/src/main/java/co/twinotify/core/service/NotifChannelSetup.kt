@@ -21,13 +21,13 @@ object NotifChannelSetup {
                 CHANNEL_FGS, "Twinotify status", NotificationManager.IMPORTANCE_LOW
             ).apply { description = "Ongoing connection status (can be hidden in system settings)." })
         }
-        if (mgr.getNotificationChannel(CHANNEL_CALLS) == null) {
-            mgr.createNotificationChannel(NotificationChannel(
-                CHANNEL_CALLS, "Mirrored call state", NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Generic call states mirrored from your paired device."
-                lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
-            })
-        }
+        val calls = mgr.getNotificationChannel(CHANNEL_CALLS) ?: NotificationChannel(
+            CHANNEL_CALLS,
+            "Mirrored call state",
+            NotificationManager.IMPORTANCE_HIGH,
+        )
+        calls.description = "Incoming call state and controls from your paired phone. Caller identity and audio are not shared."
+        calls.lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+        mgr.createNotificationChannel(calls)
     }
 }

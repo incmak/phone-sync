@@ -5,6 +5,7 @@ import co.twinotify.core.service.NotificationStateReducer
 import co.twinotify.core.storage.CanonicalNotificationState
 import java.security.MessageDigest
 import java.util.UUID
+import org.json.JSONArray
 import org.json.JSONObject
 
 sealed interface CallReduction {
@@ -20,7 +21,7 @@ sealed interface CallReduction {
     ) : CallReduction
 }
 
-/** Pure inbound call-state reduction; it carries no answer/reject/hang-up capability. */
+/** Pure inbound call-state reduction carrying only opaque capability IDs and bounded kinds. */
 object CallStateReducer {
     fun reduce(
         current: CanonicalNotificationState?,
@@ -64,6 +65,14 @@ object CallStateReducer {
             .put("call_session_id", event.callSessionId)
             .put("state", event.state)
             .put("direction", event.direction.wireValue)
+            .put(
+                "controls",
+                JSONArray().apply {
+                    event.controls.forEach { control ->
+                        put(JSONObject().put("control_id", control.controlId).put("kind", control.kind.wire))
+                    }
+                },
+            )
             .toString()
         return CallReduction.Apply(
             CanonicalNotificationState(

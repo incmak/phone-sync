@@ -6,6 +6,8 @@ import android.service.notification.StatusBarNotification
 import co.twinotify.core.filter.AppFilterStore
 import co.twinotify.core.filter.DenylistLoader
 import co.twinotify.core.metrics.MetricsStore
+import co.twinotify.core.call.CallCapabilityCollector
+import co.twinotify.core.call.CallControlCaptureBridge
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.NotificationMapDao
@@ -172,6 +174,9 @@ class TwinotifyNotificationListener : NotificationListenerService() {
     }
 
     private fun capturePosted(sbn: StatusBarNotification) {
+        // Typed CallStyle capabilities are offered before any payload capture. Only the exact
+        // current default-dialer call candidate is suppressed from ordinary mirroring.
+        if (CallControlCaptureBridge.posted(CallCapabilityCollector.capture(sbn))) return
         if (!shouldCaptureOutbound(sbn.packageName, packageName)) return
         val canonId = CanonIdBuilder.build(originDevice, sbn.packageName, sbn.id, sbn.tag)
         val snapshot = NotifPostBuilder.captureSnapshot(
@@ -191,6 +196,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         rankingMap: RankingMap?,
         reason: Int,
     ) {
+        CallControlCaptureBridge.removed(sbn.key)
         val ownPkg = sbn.packageName == packageName
         val ts = System.currentTimeMillis()
         if (ownPkg) {

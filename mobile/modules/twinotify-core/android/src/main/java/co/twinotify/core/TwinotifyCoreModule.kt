@@ -102,6 +102,22 @@ internal suspend fun persistLanOnlyConfigThenStart(
     start()
 }
 
+internal suspend fun persistCallControlsThenReconfigure(
+    persist: suspend () -> Boolean,
+    reconfigure: suspend () -> Boolean,
+    onPostCommitFailure: (Boolean) -> Unit = {},
+): Boolean {
+    val committed = persist()
+    return try {
+        reconfigure()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Exception) {
+        onPostCommitFailure(committed)
+        committed
+    }
+}
+
 internal class CallCapturePreferenceRequestGate {
     private val latestRequest = AtomicLong(0)
     private val mutationMutex = Mutex()
@@ -567,6 +583,49 @@ class TwinotifyCoreModule internal constructor(
                         readCallCapturePreference {
                             co.twinotify.core.service.ServiceConfigStore.read(ctx).callCaptureEnabled
                         }
+                    },
+                    resolve = promise::resolve,
+                    reject = promise::reject,
+                )
+            }
+        }
+
+        AsyncFunction("setCallControlsEnabled") { enabled: Boolean, promise: Promise ->
+            moduleScope.launch {
+                settleTwinotifyPromise(
+                    code = "CALL_CONTROLS",
+                    boundedMessage = "Unable to update call controls",
+                    operation = {
+                        val ctx = requireContext()
+                        persistCallControlsThenReconfigure(
+                            persist = {
+                                co.twinotify.core.service.ServiceConfigStore
+                                    .setCallControlsEnabled(ctx, enabled)
+                                    .callControlsEnabled
+                            },
+                            reconfigure = {
+                                co.twinotify.core.service.SyncService.reconfigureCallControlsAndAwait(ctx)
+                            },
+                            onPostCommitFailure = { durable ->
+                                if (!durable) {
+                                    co.twinotify.core.call.ProcessCallCapabilityRegistry.registry.clear()
+                                }
+                            },
+                        )
+                    },
+                    resolve = promise::resolve,
+                    reject = promise::reject,
+                )
+            }
+        }
+
+        AsyncFunction("getCallControlsEnabled") { promise: Promise ->
+            moduleScope.launch {
+                settleTwinotifyPromise(
+                    code = "GET_CALL_CONTROLS",
+                    boundedMessage = "call_controls_preference_unavailable",
+                    operation = {
+                        co.twinotify.core.service.ServiceConfigStore.read(requireContext()).callControlsEnabled
                     },
                     resolve = promise::resolve,
                     reject = promise::reject,

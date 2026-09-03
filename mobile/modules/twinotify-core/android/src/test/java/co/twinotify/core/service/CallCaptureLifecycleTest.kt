@@ -1254,6 +1254,17 @@ class CallCaptureLifecycleTest {
         assertEquals("call_style_deferred_no_controls", health.toEventMap()["callNotificationMode"])
     }
     @Test
+    fun conditionalControlsCapabilityCodeIsReportedAsModeNotHealthCode() {
+        SyncServiceStatus.setCallCapture(true, "call_style_conditional_controls")
+
+        val health = SyncServiceStatus.health.value
+        assertTrue(health.callCaptureEnabled)
+        assertNull(health.callCaptureDisabledReason)
+        assertNull(health.callCaptureHealthCode)
+        assertEquals("call_style_conditional_controls", health.callNotificationMode)
+        assertEquals("call_style_conditional_controls", health.toEventMap()["callNotificationMode"])
+    }
+    @Test
     fun disabledSettingNeverStartsSource() {
         assertIs<CallCaptureDecision.Disabled>(
             CallCapturePolicy.decide(false, CallSourceCapabilities(supported = true, permissionGranted = true)),

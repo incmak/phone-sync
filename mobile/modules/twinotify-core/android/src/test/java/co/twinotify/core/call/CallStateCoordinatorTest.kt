@@ -5,7 +5,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import co.twinotify.core.storage.OutboundStateCommitResult
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -19,6 +21,156 @@ import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.runTest
 
 class CallStateCoordinatorTest {
+    @Test
+    fun capabilityRefreshIncrementsCurrentSessionWithoutChangingState() = runTest {
+        val events = mutableListOf<CallStateEvent>()
+        val controlIds = ArrayDeque(listOf(ANSWER_ID, DECLINE_ID))
+        val coordinator = CallStateCoordinator(
+            source = FakeSource(),
+            emit = { events += it },
+            sessionIdFactory = { SESSION_ID },
+            controlIdFactory = { controlIds.removeFirst() },
+            dispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        coordinator.startForDebug()
+        val ringing = requireNotNull(coordinator.injectDebugState(CallFrameworkState.RINGING))
+        val refreshed = requireNotNull(
+            coordinator.refreshControls(
+                "dialer-key",
+                mapOf(CallControlKind.ANSWER to "answer-token", CallControlKind.DECLINE to "decline-token"),
+            ),
+        )
+
+        assertEquals(ringing.callSessionId, refreshed.callSessionId)
+        assertEquals("ringing", refreshed.state)
+        assertEquals(ringing.sequence + 1, refreshed.sequence)
+        assertEquals(listOf("answer", "decline"), refreshed.controls.map { it.kind.wire })
+        assertEquals(listOf(ANSWER_ID, DECLINE_ID), refreshed.controls.map { it.controlId })
+        assertEquals(2, events.size)
+        coordinator.close()
+    }
+
+    @Test
+    fun refreshRejectsPartialOutgoingAndIdleCapabilities() = runTest {
+        val coordinator = CallStateCoordinator(
+            source = FakeSource(),
+            emit = {},
+            sessionIdFactory = { SESSION_ID },
+            dispatcher = StandardTestDispatcher(testScheduler),
+        )
+        coordinator.startForDebug()
+
+        assertEquals(null, coordinator.refreshControls("dialer-key", mapOf(CallControlKind.ANSWER to "answer")))
+        coordinator.injectDebugState(CallFrameworkState.OFFHOOK)
+        assertEquals(null, coordinator.refreshControls("dialer-key", mapOf(CallControlKind.HANG_UP to "hang-up")))
+        coordinator.injectDebugState(CallFrameworkState.IDLE)
+        assertEquals(null, coordinator.refreshControls("dialer-key", emptyMap<CallControlKind, String>()))
+        coordinator.close()
+    }
+
+    @Test
+    fun organicTransitionClearsPriorGenerationBeforeEmission() = runTest {
+        val events = mutableListOf<CallStateEvent>()
+        val controlIds = ArrayDeque(listOf(ANSWER_ID, DECLINE_ID))
+        val coordinator = CallStateCoordinator(
+            source = FakeSource(),
+            emit = { events += it },
+            sessionIdFactory = { SESSION_ID },
+            controlIdFactory = { controlIds.removeFirst() },
+            dispatcher = StandardTestDispatcher(testScheduler),
+        )
+        coordinator.startForDebug()
+        coordinator.injectDebugState(CallFrameworkState.RINGING)
+        coordinator.refreshControls(
+            "dialer-key",
+            mapOf(CallControlKind.ANSWER to "answer", CallControlKind.DECLINE to "decline"),
+        )
+
+        val active = requireNotNull(coordinator.injectDebugState(CallFrameworkState.OFFHOOK))
+
+        assertTrue(active.controls.isEmpty())
+        assertEquals(null, active.pendingGeneration)
+        assertEquals(3L, active.sequence)
+        coordinator.close()
+    }
+
+    @Test
+    fun staleDurableSequenceIsRebasedBeforeNextOrganicState() = runTest {
+        val attempts = mutableListOf<CallStateEvent>()
+        val coordinator = CallStateCoordinator(
+            source = FakeSource(),
+            emit = { event ->
+                attempts += event
+                if (event.sequence == 1L) throw CallStatePersistenceException("call_state_stale", 5L)
+            },
+            sessionIdFactory = { SESSION_ID },
+            dispatcher = StandardTestDispatcher(testScheduler),
+        )
+        coordinator.startForDebug()
+
+        coordinator.injectDebugState(CallFrameworkState.RINGING)
+        val active = requireNotNull(coordinator.injectDebugState(CallFrameworkState.OFFHOOK))
+        testScheduler.advanceTimeBy(500L)
+        testScheduler.runCurrent()
+
+        assertEquals(listOf(1L, 6L, 7L), attempts.map { it.sequence })
+        assertEquals(7L, active.sequence)
+        assertEquals(0, coordinator.debugState().pendingCount)
+        coordinator.close()
+    }
+
+    @Test
+    fun staleControlFreeRevocationRebasesAndPurgesOnlyAfterWinningCommit() = runTest {
+        val registry = CallCapabilityRegistry<String>()
+        val committer = CallCapabilityGenerationCommitter(registry)
+        val attempts = mutableListOf<CallStateEvent>()
+        val controlIds = ArrayDeque(listOf(ANSWER_ID, DECLINE_ID))
+        val canon = "call:$SESSION_ID"
+        val coordinator = CallStateCoordinator(
+            source = FakeSource(),
+            emit = { event ->
+                attempts += event
+                if (event.sequence == 3L) {
+                    throw CallStatePersistenceException("call_state_stale", 5L)
+                }
+                committer.afterCommit(
+                    canon,
+                    event,
+                    event.pendingGenerationOf(String::class.java),
+                    OutboundStateCommitResult.Committed(0),
+                )
+            },
+            sessionIdFactory = { SESSION_ID },
+            controlIdFactory = { controlIds.removeFirst() },
+            dispatcher = StandardTestDispatcher(testScheduler),
+        )
+        coordinator.startForDebug()
+        coordinator.injectDebugState(CallFrameworkState.RINGING)
+        coordinator.refreshControls(
+            "dialer-key",
+            mapOf(CallControlKind.ANSWER to "answer", CallControlKind.DECLINE to "decline"),
+        )
+        assertIs<CallCapabilityLookup.Found<String>>(
+            registry.lookup(canon, 2L, ANSWER_ID, CallControlKind.ANSWER),
+        )
+
+        coordinator.clearControls()
+        assertIs<CallCapabilityLookup.Found<String>>(
+            registry.lookup(canon, 2L, ANSWER_ID, CallControlKind.ANSWER),
+        )
+        testScheduler.advanceTimeBy(251L)
+        testScheduler.runCurrent()
+
+        assertEquals(listOf(1L, 2L, 3L, 6L), attempts.map { it.sequence })
+        assertTrue(attempts.last().controls.isEmpty())
+        assertIs<CallCapabilityLookup.MissingGeneration>(
+            registry.lookup(canon, 2L, ANSWER_ID, CallControlKind.ANSWER),
+        )
+        assertEquals(0, coordinator.debugState().pendingCount)
+        coordinator.close()
+    }
+
     @Test
     fun ordering_duplicatesAndTerminalIdleAreDeterministic() = runTest {
         val source = FakeSource()
@@ -815,5 +967,7 @@ class CallStateCoordinatorTest {
     private companion object {
         const val SESSION_ID = "11111111-1111-4111-8111-111111111111"
         const val SECOND_SESSION_ID = "22222222-2222-4222-8222-222222222222"
+        const val ANSWER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        const val DECLINE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     }
 }

@@ -4,6 +4,9 @@ import co.twinotify.core.storage.ActionCompletionOutboxCommitResult
 import co.twinotify.core.storage.ActionExecution
 import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.ReliableDeliveryDao
+import co.twinotify.core.call.CallControlKind
+import co.twinotify.core.call.CallControlResultInput
+import co.twinotify.core.call.CallControlResultRowEncoder
 import kotlinx.coroutines.CancellationException
 
 interface ActionClaimRecoveryStore {
@@ -28,12 +31,38 @@ class DaoActionClaimRecoveryStore(
         execution: ActionExecution,
         now: Long,
         result: OutboundMessage,
-    ): Boolean = dao.completeActionExecutionAndEnqueue(
-        invocationId = execution.invocationId,
-        status = "outcome_unknown",
-        now = now,
-        result = result,
-    ) == ActionCompletionOutboxCommitResult.Committed
+    ): Boolean {
+        return if (execution.canonId.startsWith("call:")) {
+            if (callControlRecoveryIdentity(execution) == null) return false
+            dao.completeCallControlExecutionAndEnqueue(
+                invocationId = execution.invocationId,
+                status = "outcome_unknown",
+                now = now,
+                result = result,
+            ) == ActionCompletionOutboxCommitResult.Committed
+        } else {
+            dao.completeActionExecutionAndEnqueue(
+                invocationId = execution.invocationId,
+                status = "outcome_unknown",
+                now = now,
+                result = result,
+            ) == ActionCompletionOutboxCommitResult.Committed
+        }
+    }
+}
+
+internal data class CallControlRecoveryIdentity(
+    val kind: CallControlKind,
+    val sequence: Long,
+)
+
+internal fun callControlRecoveryIdentity(execution: ActionExecution): CallControlRecoveryIdentity? {
+    if (!execution.canonId.startsWith("call:")) return null
+    val parts = execution.actionId.split(':')
+    if (parts.size != 2) return null
+    val kind = runCatching { CallControlKind.fromWire(parts[0]) }.getOrNull() ?: return null
+    val sequence = parts[1].toLongOrNull()?.takeIf { it > 0 } ?: return null
+    return CallControlRecoveryIdentity(kind, sequence)
 }
 
 data class ActionClaimRecoverySummary(
@@ -44,6 +73,7 @@ data class ActionClaimRecoverySummary(
 class ActionClaimRecovery(
     private val store: ActionClaimRecoveryStore,
     private val resultEncoder: ActionResultRowEncoder,
+    private val callResultEncoder: CallControlResultRowEncoder? = null,
     private val scheduler: ActionClaimWakeScheduler,
     private val signalTransport: () -> Unit,
     private val clock: () -> Long = { System.currentTimeMillis().coerceAtLeast(0L) },
@@ -54,13 +84,24 @@ class ActionClaimRecovery(
         var finalized = 0
         for (execution in store.dueClaims(cutoff)) {
             val result = try {
-                resultEncoder.encode(
-                    ActionResultInput(
-                        invocationId = execution.invocationId,
-                        canonId = execution.canonId,
-                        status = "outcome_unknown",
-                    ),
-                )
+                val call = callControlRecoveryIdentity(execution)
+                if (execution.canonId.startsWith("call:")) {
+                    if (call == null) continue
+                    val encoder = callResultEncoder ?: continue
+                    encoder.encode(
+                        CallControlResultInput(
+                            execution.invocationId, execution.canonId, call.kind, "outcome_unknown",
+                        ),
+                    )
+                } else {
+                    resultEncoder.encode(
+                        ActionResultInput(
+                            invocationId = execution.invocationId,
+                            canonId = execution.canonId,
+                            status = "outcome_unknown",
+                        ),
+                    )
+                }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {

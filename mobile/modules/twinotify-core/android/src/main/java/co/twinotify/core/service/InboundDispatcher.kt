@@ -1,5 +1,6 @@
 package co.twinotify.core.service
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.util.Base64
@@ -21,6 +22,21 @@ import co.twinotify.core.actions.PendingIntentActionExecutor
 import co.twinotify.core.actions.PersistentActionClaimWakeScheduler
 import co.twinotify.core.actions.ProcessNotificationActionRegistry
 import co.twinotify.core.call.CallDirection
+import co.twinotify.core.call.CallCapabilityLookup
+import co.twinotify.core.call.CallControlClaimWakeScheduler
+import co.twinotify.core.call.CallControlEncoder
+import co.twinotify.core.call.CallControlInvocationProcessor
+import co.twinotify.core.call.CallControlInvokeRequest
+import co.twinotify.core.call.CallControlProcessResult
+import co.twinotify.core.call.CallControlResultJournal
+import co.twinotify.core.call.CallControlResultProcessor
+import co.twinotify.core.call.CallControlResultReposter
+import co.twinotify.core.call.CallControlResultRequest
+import co.twinotify.core.call.CallControlResultRowEncoder
+import co.twinotify.core.call.CallControlKind
+import co.twinotify.core.call.DaoCallControlClaimJournal
+import co.twinotify.core.call.LocalCallControlState
+import co.twinotify.core.call.ProcessCallCapabilityRegistry
 import co.twinotify.core.call.CallStateEvent
 import co.twinotify.core.call.CallStateReducer
 import co.twinotify.core.listener.NotifPostJson
@@ -123,6 +139,136 @@ fun interface AuthenticatedActionInvokeProcessor {
 fun interface AuthenticatedActionResultProcessor {
     suspend fun process(request: ActionResultRequest): ActionResultProcessResult
 }
+
+fun interface AuthenticatedCallControlInvokeProcessor {
+    suspend fun process(request: CallControlInvokeRequest): CallControlProcessResult
+}
+
+fun interface AuthenticatedCallControlResultProcessor {
+    suspend fun process(request: CallControlResultRequest): ActionResultProcessResult
+}
+
+internal suspend fun dispatchAuthenticatedCallControlInvoke(
+    inner: co.twinotify.core.protocol.InnerEventV2,
+    authenticatedPeerId: String,
+    envelopeSha256: String,
+    committedAt: Long,
+    processor: AuthenticatedCallControlInvokeProcessor,
+    rejectionJournal: ActionInvokeRejectionJournal,
+): InboundDispatchResult {
+    require(inner.type == "call.control.invoke")
+    val inbound = InboundMessage(
+        inner.msgId, inner.originDevice, envelopeSha256, inner.type, null, null,
+        "APPLIED", committedAt, committedAt, null, "READY",
+    )
+    val request = if (inner.originDevice != authenticatedPeerId) null else try {
+        val payload = inner.payloadObject()
+        val invocationId = payload.getString("invocation_id")
+        val controlId = payload.getString("control_id")
+        val sessionId = payload.getString("call_session_id")
+        val canonId = payload.getString("canon_id")
+        val kind = CallControlKind.fromWire(payload.getString("kind"))
+        requireCanonicalUuid(invocationId)
+        require(invocationId == controlId && canonId == "call:$sessionId")
+        CallControlInvokeRequest(
+            inbound, invocationId, canonId, sessionId, payload.getLong("call_sequence"),
+            controlId, kind, payload.getLong("invoked_at"),
+        ).also { require(it.callSequence > 0 && it.invokedAt >= 0) }
+    } catch (_: IllegalArgumentException) {
+        null
+    } catch (_: org.json.JSONException) {
+        null
+    }
+    if (request == null) {
+        return when (rejectionJournal.commit(inbound.copy(outcome = "REJECTED"))) {
+            ActionInvokeRejectionCommitResult.Committed -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+            ActionInvokeRejectionCommitResult.Duplicate -> InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+            ActionInvokeRejectionCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        }
+    }
+    return when (processor.process(request)) {
+        CallControlProcessResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        CallControlProcessResult.InFlight,
+        CallControlProcessResult.CompletionLost,
+        is CallControlProcessResult.Replayed,
+        is CallControlProcessResult.Completed,
+        -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+    }
+}
+
+internal suspend fun dispatchAuthenticatedCallControlResult(
+    inner: co.twinotify.core.protocol.InnerEventV2,
+    authenticatedPeerId: String,
+    envelopeSha256: String,
+    committedAt: Long,
+    processor: AuthenticatedCallControlResultProcessor,
+    rejectionJournal: ActionInvokeRejectionJournal,
+): InboundDispatchResult {
+    require(inner.type == "call.control.result")
+    val inbound = InboundMessage(
+        inner.msgId, inner.originDevice, envelopeSha256, inner.type, null, null,
+        "APPLIED", committedAt, committedAt, null, "READY",
+    )
+    val request = if (inner.originDevice != authenticatedPeerId) null else try {
+        val payload = inner.payloadObject()
+        val invocationId = payload.getString("invocation_id")
+        requireCanonicalUuid(invocationId)
+        val canonId = payload.getString("canon_id")
+        require(canonId.startsWith("call:"))
+        requireCanonicalUuid(canonId.removePrefix("call:"))
+        CallControlResultRequest(
+            inbound, invocationId, canonId,
+            CallControlKind.fromWire(payload.getString("kind")), payload.getString("status"),
+        ).also { require(it.status in CallControlEncoder.RESULT_STATUSES) }
+    } catch (_: IllegalArgumentException) {
+        null
+    } catch (_: org.json.JSONException) {
+        null
+    }
+    if (request == null) {
+        return when (rejectionJournal.commit(inbound.copy(outcome = "REJECTED"))) {
+            ActionInvokeRejectionCommitResult.Committed -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+            ActionInvokeRejectionCommitResult.Duplicate -> InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+            ActionInvokeRejectionCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+        }
+    }
+    return when (processor.process(request)) {
+        ActionResultProcessResult.Applied -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
+        ActionResultProcessResult.Duplicate -> InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256)
+        ActionResultProcessResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
+    }
+}
+
+private fun requireCanonicalUuid(value: String) {
+    require(runCatching { java.util.UUID.fromString(value).toString() }.getOrNull() == value)
+}
+
+internal fun parseAuthenticatedCallState(
+    inner: co.twinotify.core.protocol.InnerEventV2,
+): CallStateEvent? = runCatching {
+    require(inner.type == "call.state")
+    val payload = inner.payloadObject()
+    val controls = payload.optJSONArray("controls")
+    CallStateEvent(
+        callSessionId = payload.getString("call_session_id"),
+        state = payload.getString("state"),
+        direction = when (payload.getString("direction")) {
+            "incoming" -> CallDirection.INCOMING
+            "outgoing" -> CallDirection.OUTGOING
+            "unknown" -> CallDirection.UNKNOWN
+            else -> error("unsupported call direction")
+        },
+        sequence = requireNotNull(inner.sequence),
+        controls = if (controls == null) emptyList() else (0 until controls.length()).map { index ->
+            val descriptor = controls.getJSONObject(index)
+            require(descriptor.length() == 2)
+            co.twinotify.core.call.CallControlDescriptor(
+                descriptor.getString("control_id"),
+                CallControlKind.fromWire(descriptor.getString("kind")),
+            )
+        },
+    )
+}.getOrNull()
 
 internal suspend fun dispatchAuthenticatedActionResult(
     inner: co.twinotify.core.protocol.InnerEventV2,
@@ -547,6 +693,48 @@ class InboundDispatcher internal constructor(
             },
         )
     }
+    private val callControlProcessor by lazy {
+        val encoder = CallControlEncoder(ctx.applicationContext)
+        CallControlInvocationProcessor(
+            journal = DaoCallControlClaimJournal(reliableDao),
+            currentLocalCallState = { canonId ->
+                val state = reliableDao.canonical(canonId) ?: return@CallControlInvocationProcessor null
+                if (state.originDevice != DeviceIdentity.getOrCreate(ctx) || state.state != "ACTIVE") {
+                    return@CallControlInvocationProcessor null
+                }
+                val payload = runCatching { state.desiredPayloadJson?.let(::JSONObject) }.getOrNull()
+                    ?: return@CallControlInvocationProcessor null
+                val direction = when (payload.optString("direction")) {
+                    "incoming" -> CallDirection.INCOMING
+                    "outgoing" -> CallDirection.OUTGOING
+                    else -> CallDirection.UNKNOWN
+                }
+                LocalCallControlState(state.latestSequence, direction)
+            },
+            registryLookup = ProcessCallCapabilityRegistry.registry::lookup,
+            executor = CallControlInvocationProcessor.pendingIntentExecutor(ctx),
+            resultEncoder = CallControlResultRowEncoder(encoder::encodeResult),
+            wakeScheduler = CallControlClaimWakeScheduler(
+                PersistentActionClaimWakeScheduler(ctx.applicationContext)::schedule,
+            ),
+            beforeDispatch = ActionDispatchGate::awaitIfArmed,
+        )
+    }
+    private val callControlResultProcessor by lazy {
+        CallControlResultProcessor(
+            journal = CallControlResultJournal(reliableDao::commitCallControlResult),
+            repost = CallControlResultReposter { target ->
+                val current = reliableDao.canonical(target.canonId) ?: return@CallControlResultReposter
+                if (
+                    current.state != "ACTIVE" || current.latestSequence != target.notificationSequence ||
+                    current.mirrorLocalTag != target.localTag || current.mirrorLocalId != target.localId
+                ) return@CallControlResultReposter
+                DefaultAndroidNotificationPort(
+                    ctx, DeviceIdentity.getOrCreate(ctx), reliableDao,
+                ).postCallMirrorOutcome(current)
+            },
+        )
+    }
 
     /**
      * Relay callers may ignore the result; their acknowledgement semantics are
@@ -808,6 +996,33 @@ class InboundDispatcher internal constructor(
             onAuthenticatedEvent(inner.type)
             return result
         }
+        if (inner.type == "call.control.invoke") {
+            val result = dispatchAuthenticatedCallControlInvoke(
+                inner = inner,
+                authenticatedPeerId = peer?.deviceId ?: inner.originDevice,
+                envelopeSha256 = opened.envelopeSha256,
+                committedAt = System.currentTimeMillis().coerceAtLeast(0L),
+                processor = AuthenticatedCallControlInvokeProcessor(callControlProcessor::process),
+                rejectionJournal = ActionInvokeRejectionJournal(reliableDao::commitCallControlInvokeRejection),
+            )
+            if (result !is InboundDispatchResult.Rejected) {
+                SyncServiceStatus.setQueueSnapshot(reliableDao.deliveryQueueSnapshot())
+            }
+            onAuthenticatedEvent(inner.type)
+            return result
+        }
+        if (inner.type == "call.control.result") {
+            val result = dispatchAuthenticatedCallControlResult(
+                inner = inner,
+                authenticatedPeerId = peer?.deviceId ?: inner.originDevice,
+                envelopeSha256 = opened.envelopeSha256,
+                committedAt = System.currentTimeMillis().coerceAtLeast(0L),
+                processor = AuthenticatedCallControlResultProcessor(callControlResultProcessor::process),
+                rejectionJournal = ActionInvokeRejectionJournal(reliableDao::commitCallControlResultRejection),
+            )
+            onAuthenticatedEvent(inner.type)
+            return result
+        }
         if (inner.type == "call.state") {
             return dispatchCallState(inner, opened.envelopeSha256, peer?.deviceId ?: inner.originDevice)
         }
@@ -981,17 +1196,12 @@ class InboundDispatcher internal constructor(
                     DesiredStateDispatch(InboundDispatchResult.Rejected("id_conflict"), false)
                 }
             }
-            val payload = inner.payloadObject()
-            val event = CallStateEvent(
-                callSessionId = payload.getString("call_session_id"),
-                state = payload.getString("state"),
-                direction = when (payload.getString("direction")) {
-                    "incoming" -> CallDirection.INCOMING
-                    "outgoing" -> CallDirection.OUTGOING
-                    else -> CallDirection.UNKNOWN
-                },
-                sequence = requireNotNull(inner.sequence),
-            )
+            val event = parseAuthenticatedCallState(inner) ?: run {
+                return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                    InboundDispatchResult.Rejected("call_state_rejected"),
+                    false,
+                )
+            }
             val localDeviceId = DeviceIdentity.getOrCreate(ctx)
             val current = reliableDao.canonical(requireNotNull(inner.canonId))
             val nextMirrorId = reliableDao.nextMirrorLocalId()

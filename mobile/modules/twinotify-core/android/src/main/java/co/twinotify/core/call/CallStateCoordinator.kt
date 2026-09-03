@@ -19,11 +19,14 @@ internal data class CallCoordinatorDebugState(
     val pendingCount: Int,
 )
 
+private class RebasedControlFreeState(val event: CallStateEvent) : Exception()
+
 /** Serializes framework callbacks into privacy-bounded, strictly increasing call sessions. */
 class CallStateCoordinator(
     private val source: CallStateSource,
     private val emit: suspend (CallStateEvent) -> Unit,
     private val sessionIdFactory: () -> String = { UUID.randomUUID().toString() },
+    private val controlIdFactory: () -> String = { UUID.randomUUID().toString() },
     dispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default,
 ) {
     private val lock = Any()
@@ -36,6 +39,7 @@ class CallStateCoordinator(
     private var lastFrameworkState: CallFrameworkState? = null
     private var direction = CallDirection.UNKNOWN
     private var sequence = 0L
+    private var controlSourceKey: String? = null
     /**
      * Events awaiting durable custody. Framework callbacks can arrive while the first event is
      * retrying, so retain them in sequence order instead of dropping the newer state.
@@ -83,6 +87,75 @@ class CallStateCoordinator(
     suspend fun injectDebugState(frameworkState: CallFrameworkState): CallStateEvent? =
         callbackMutex.withLock { onFrameworkState(frameworkState) }
 
+    /** Publishes a fresh one-use capability generation for the current incoming call. */
+    suspend fun <T> refreshControls(
+        sourceKey: String,
+        handles: Map<CallControlKind, T>,
+    ): CallStateEvent? = callbackMutex.withLock {
+        if (!_status.get().enabled || sourceKey.isEmpty()) return@withLock null
+        drainPending()
+        val event = synchronized(lock) {
+            val currentSession = sessionId ?: return@synchronized null
+            val frameworkState = lastFrameworkState ?: return@synchronized null
+            val requiredKinds = legalControlKinds(frameworkState, direction) ?: return@synchronized null
+            if (handles.keys != requiredKinds) return@synchronized null
+            sequence += 1L
+            val controls = requiredKinds.map { kind ->
+                CallControlDescriptor(canonicalUuid(controlIdFactory(), "call control factory"), kind)
+            }
+            require(controls.map { it.controlId }.distinct().size == controls.size) {
+                "call control factory must return a fresh UUID per kind"
+            }
+            val generation = CallCapabilityGeneration(
+                sequence = sequence,
+                sourceKey = sourceKey,
+                controls = controls.associate { descriptor ->
+                    descriptor.controlId to RegisteredCallControl(
+                        descriptor.kind,
+                        requireNotNull(handles[descriptor.kind]),
+                    )
+                },
+            )
+            controlSourceKey = sourceKey
+            CallStateEvent(
+                callSessionId = currentSession,
+                state = frameworkState.wireState(),
+                direction = direction,
+                sequence = sequence,
+                controls = controls,
+                pendingGeneration = generation,
+            )
+        } ?: return@withLock null
+        publish(event)
+        event
+    }
+
+    /** Emits a newer control-free sequence only when a generation is currently advertised. */
+    suspend fun clearControls(): CallStateEvent? = callbackMutex.withLock {
+        drainPending()
+        val event = synchronized(lock) {
+            val currentSession = sessionId ?: return@synchronized null
+            val frameworkState = lastFrameworkState ?: return@synchronized null
+            if (controlSourceKey == null) return@synchronized null
+            controlSourceKey = null
+            sequence += 1L
+            CallStateEvent(
+                callSessionId = currentSession,
+                state = frameworkState.wireState(),
+                direction = direction,
+                sequence = sequence,
+            )
+        } ?: return@withLock null
+        publish(event)
+        event
+    }
+
+    internal fun currentCallSnapshot(): CallControlSessionSnapshot? = synchronized(lock) {
+        val state = lastFrameworkState ?: return@synchronized null
+        if (sessionId == null || state == CallFrameworkState.IDLE) return@synchronized null
+        CallControlSessionSnapshot(state, direction)
+    }
+
     internal fun debugState(): CallCoordinatorDebugState = synchronized(lock) {
         CallCoordinatorDebugState(
             registered = registration != null && !registrationQuiesced,
@@ -124,6 +197,7 @@ class CallStateCoordinator(
                     lastFrameworkState = null
                     direction = CallDirection.UNKNOWN
                     sequence = 0L
+                    controlSourceKey = null
                     pendingEmits.clear()
                 }
             }
@@ -139,6 +213,7 @@ class CallStateCoordinator(
             lastFrameworkState = null
             direction = CallDirection.UNKNOWN
             sequence = 0L
+            controlSourceKey = null
             pendingEmits.clear()
             retryJob?.cancel()
             retryJob = null
@@ -172,15 +247,14 @@ class CallStateCoordinator(
             if (frameworkState == CallFrameworkState.RINGING) {
                 direction = CallDirection.INCOMING
             }
+            // A framework transition invalidates every handle from the prior state. The emitted
+            // organic state is deliberately control-free until the listener refreshes it.
+            controlSourceKey = null
             lastFrameworkState = frameworkState
             sequence += 1L
             val event = CallStateEvent(
                 callSessionId = requireNotNull(sessionId),
-                state = when (frameworkState) {
-                    CallFrameworkState.RINGING -> "ringing"
-                    CallFrameworkState.OFFHOOK -> "active"
-                    CallFrameworkState.IDLE -> "idle"
-                },
+                state = frameworkState.wireState(),
                 direction = direction,
                 sequence = sequence,
             )
@@ -189,9 +263,15 @@ class CallStateCoordinator(
                 lastFrameworkState = null
                 direction = CallDirection.UNKNOWN
                 sequence = 0L
+                controlSourceKey = null
             }
             event
         }
+        publish(event)
+        return event
+    }
+
+    private suspend fun publish(event: CallStateEvent) {
         val queued = synchronized(lock) { pendingEmits.isNotEmpty() }
         if (queued) {
             enqueuePending(event)
@@ -201,9 +281,10 @@ class CallStateCoordinator(
             } catch (cancellation: CancellationException) {
                 enqueuePending(event)
                 throw cancellation
+            } catch (rebased: RebasedControlFreeState) {
+                enqueuePending(rebased.event)
             }
         }
-        return event
     }
 
     private suspend fun deliver(event: CallStateEvent): Boolean {
@@ -212,6 +293,24 @@ class CallStateCoordinator(
             true
         } catch (cancellation: CancellationException) {
             throw cancellation
+        } catch (stale: CallStatePersistenceException) {
+            val latest = stale.latestSequence
+            if (stale.code != "call_state_stale" || latest == null) {
+                _status.updateAndGet { current -> current.copy(lastErrorCode = "call_callback_emit_failed") }
+                return false
+            }
+            // This exact immutable event can never win after a higher Room sequence. Drop it and
+            // rebase so the listener can publish a fresh generation instead of retrying forever.
+            if (event.controls.isEmpty()) {
+                val nextSequence = Math.addExact(latest, 1L)
+                synchronized(lock) {
+                    if (sessionId == event.callSessionId) sequence = maxOf(sequence, nextSequence)
+                }
+                throw RebasedControlFreeState(event.copy(sequence = nextSequence))
+            }
+            synchronized(lock) { sequence = maxOf(sequence, latest) }
+            _status.updateAndGet { current -> current.copy(lastErrorCode = "call_state_stale") }
+            true
         } catch (error: Throwable) {
             _status.updateAndGet { current -> current.copy(lastErrorCode = "call_callback_emit_failed") }
             false
@@ -229,6 +328,10 @@ class CallStateCoordinator(
             } catch (cancellation: CancellationException) {
                 synchronized(lock) { pendingEmits.addFirst(next) }
                 throw cancellation
+            } catch (rebased: RebasedControlFreeState) {
+                synchronized(lock) { pendingEmits.addFirst(rebased.event) }
+                if (scheduleRetryOnFailure) scheduleRetry()
+                return false
             }
             if (!delivered) {
                 synchronized(lock) { pendingEmits.addFirst(next) }
@@ -286,4 +389,26 @@ class CallStateCoordinator(
         const val RETRY_DELAY_MS = 250L
         const val MAX_PENDING_EVENTS = 64
     }
+}
+
+private fun CallFrameworkState.wireState(): String = when (this) {
+    CallFrameworkState.RINGING -> "ringing"
+    CallFrameworkState.OFFHOOK -> "active"
+    CallFrameworkState.IDLE -> "idle"
+}
+
+private fun legalControlKinds(
+    state: CallFrameworkState,
+    direction: CallDirection,
+): LinkedHashSet<CallControlKind>? = when {
+    state == CallFrameworkState.RINGING && direction == CallDirection.INCOMING ->
+        linkedSetOf(CallControlKind.ANSWER, CallControlKind.DECLINE)
+    state == CallFrameworkState.OFFHOOK && direction == CallDirection.INCOMING ->
+        linkedSetOf(CallControlKind.HANG_UP)
+    else -> null
+}
+
+private fun canonicalUuid(value: String, source: String): String {
+    require(UUID.fromString(value).toString() == value) { "$source must return a lower-case canonical UUID" }
+    return value
 }

@@ -11,7 +11,10 @@ import co.twinotify.core.listener.NotifPostJson
 import co.twinotify.core.call.CallStateMaterializer
 import co.twinotify.core.storage.CanonicalNotificationState
 import co.twinotify.core.storage.ReliableDeliveryDao
+import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.actions.ProcessMirrorAdvertisedActions
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 
 sealed interface NotificationPostOutcome {
     data object Applied : NotificationPostOutcome
@@ -35,6 +38,12 @@ internal fun effectivePostAvailability(context: Context): Boolean {
         notificationsEnabled = NotificationManagerCompat.from(appContext).areNotificationsEnabled(),
     )
 }
+
+internal fun peerDisplayNameForCall(
+    callOriginDevice: String,
+    peerDeviceId: String?,
+    peerDisplayName: String?,
+): String? = peerDisplayName?.takeIf { peerDeviceId == callOriginDevice }
 
 interface AndroidNotificationPort {
     fun postMirror(state: CanonicalNotificationState): Boolean
@@ -105,12 +114,38 @@ class DefaultAndroidNotificationPort(
         if (state.originDevice == localDeviceId || state.state != "ACTIVE") return NotificationPostOutcome.RetryableFailure
         val id = state.mirrorLocalId ?: return NotificationPostOutcome.RetryableFailure
         val tag = state.mirrorLocalTag ?: return NotificationPostOutcome.RetryableFailure
+        val dao = reliableDao ?: return NotificationPostOutcome.RetryableFailure
         if (!notificationsAvailable()) return NotificationPostOutcome.PermissionBlocked
         return runCatching {
+            val invocations = dao.actionInvocationsForNotification(state.canonId, state.latestSequence)
+            val peerName = runBlocking(Dispatchers.IO) {
+                val peer = PeerStore.load(appContext)
+                peerDisplayNameForCall(state.originDevice, peer?.deviceId, peer?.displayName)
+            }
             NotifChannelSetup.ensureChannels(appContext)
-            NotificationManagerCompat.from(appContext).notify(tag, id, CallStateMaterializer.build(appContext, state, id))
-            NotificationPostOutcome.Applied
+            val notification = CallStateMaterializer.build(appContext, state, id, invocations, peerName)
+            // CallStyle is only admitted from a foreground service; the running sync service
+            // owns that slot. Without it the desired state stays unapplied and retries later.
+            val host = SyncService.callMirrorForegroundHost()
+                ?: return@runCatching NotificationPostOutcome.RetryableFailure
+            if (host.postCallMirror(id, notification)) {
+                NotificationPostOutcome.Applied
+            } else {
+                NotificationPostOutcome.RetryableFailure
+            }
         }.getOrDefault(NotificationPostOutcome.RetryableFailure)
+    }
+
+    override fun cancelCallMirror(localTag: String, localId: Int): Boolean {
+        val host = SyncService.callMirrorForegroundHost()
+        if (host != null) return host.cancelCallMirror(localId)
+        // No live service: a foreground-slot notification cannot outlive the service that
+        // posted it, so only a stale plain notification could remain.
+        return runCatching {
+            NotificationManagerCompat.from(appContext).cancel(localTag, localId)
+            NotificationManagerCompat.from(appContext).cancel(localId)
+            true
+        }.getOrDefault(false)
     }
 
     override fun cancelMirror(localTag: String, localId: Int): Boolean {

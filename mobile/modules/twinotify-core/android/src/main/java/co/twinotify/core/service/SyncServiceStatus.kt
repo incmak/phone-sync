@@ -557,13 +557,19 @@ object SyncServiceStatus {
         _health.value = _health.value.copy(lastErrorCode = code?.take(128))
     }
 
+    /** Truthful call-notification capability modes reported by the materializer; never health codes. */
+    private val CALL_NOTIFICATION_MODES = setOf(
+        "call_style_deferred_no_controls",
+        "call_style_conditional_controls",
+    )
+
     fun setCallCapture(
         enabled: Boolean,
         healthCode: String?,
         notificationMode: String? = null,
     ) {
         val capabilityMode = notificationMode ?: healthCode
-            ?.takeIf { enabled && it == "call_style_deferred_no_controls" }
+            ?.takeIf { enabled && it in CALL_NOTIFICATION_MODES }
         val boundedHealth = healthCode
             ?.takeUnless { it == capabilityMode }
             ?.take(64)

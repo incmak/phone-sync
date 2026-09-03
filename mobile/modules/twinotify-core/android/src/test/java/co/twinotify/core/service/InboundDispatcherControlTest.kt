@@ -252,6 +252,89 @@ class InboundDispatcherControlTest {
     }
 
     @Test
+    fun authenticatedCallControlInvokeForwardsClosedPayloadAfterPeerCheck() = runTest {
+        var captured: co.twinotify.core.call.CallControlInvokeRequest? = null
+        val event = callControlInvokeEvent()
+
+        val result = dispatchAuthenticatedCallControlInvoke(
+            inner = event,
+            authenticatedPeerId = "mirror-device",
+            envelopeSha256 = "d".repeat(64),
+            committedAt = 2_000,
+            processor = AuthenticatedCallControlInvokeProcessor { request ->
+                captured = request
+                co.twinotify.core.call.CallControlProcessResult.Completed("dispatched")
+            },
+            rejectionJournal = ActionInvokeRejectionJournal { error("valid invoke must not reject") },
+        )
+
+        assertEquals(InboundDispatchResult.Accepted(event.msgId, "d".repeat(64)), result)
+        assertEquals("call:11111111-1111-4111-8111-111111111111", captured?.canonId)
+        assertEquals("answer", captured?.kind?.wire)
+        assertEquals("call.control.invoke", captured?.inbound?.eventType)
+    }
+
+    @Test
+    fun malformedOrWrongPeerCallControlIsDurablyRejectedWithoutProcessing() = runTest {
+        for (event in listOf(
+            callControlInvokeEvent().copy(payloadJson = "{}"),
+            callControlInvokeEvent().copy(originDevice = "not-the-peer"),
+        )) {
+            var rejected: InboundMessage? = null
+            val result = dispatchAuthenticatedCallControlInvoke(
+                inner = event,
+                authenticatedPeerId = "mirror-device",
+                envelopeSha256 = "e".repeat(64),
+                committedAt = 2_000,
+                processor = AuthenticatedCallControlInvokeProcessor { error("rejected invoke must not process") },
+                rejectionJournal = ActionInvokeRejectionJournal { row ->
+                    rejected = row
+                    ActionInvokeRejectionCommitResult.Committed
+                },
+            )
+            assertEquals(InboundDispatchResult.Accepted(event.msgId, "e".repeat(64)), result)
+            assertEquals("REJECTED", rejected?.outcome)
+        }
+    }
+
+    @Test
+    fun inboundCallStateForwardsControlsAndAcceptsOlderPayloadWithoutControls() {
+        val withControls = InnerEventV2(
+            "77777777-7777-4777-8777-777777777777", "origin-device", "call.state",
+            "call:11111111-1111-4111-8111-111111111111", 2, 1_000, 301_000,
+            """{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming","controls":[{"control_id":"22222222-2222-4222-8222-222222222222","kind":"answer"},{"control_id":"33333333-3333-4333-8333-333333333333","kind":"decline"}]}""",
+        )
+        val parsed = requireNotNull(parseAuthenticatedCallState(withControls))
+        assertEquals(listOf("answer", "decline"), parsed.controls.map { it.kind.wire })
+
+        val legacyCompatible = withControls.copy(
+            payloadJson = """{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming"}""",
+        )
+        assertEquals(emptyList(), requireNotNull(parseAuthenticatedCallState(legacyCompatible)).controls)
+        assertNull(parseAuthenticatedCallState(withControls.copy(payloadJson = "{\"controls\":[{}]}")))
+    }
+
+    @Test
+    fun authenticatedCallControlResultForwardsBoundedResultAfterPeerCheck() = runTest {
+        var captured: co.twinotify.core.call.CallControlResultRequest? = null
+        val event = callControlResultEvent()
+        val result = dispatchAuthenticatedCallControlResult(
+            inner = event,
+            authenticatedPeerId = "origin-device",
+            envelopeSha256 = "f".repeat(64),
+            committedAt = 2_000,
+            processor = AuthenticatedCallControlResultProcessor { request ->
+                captured = request
+                ActionResultProcessResult.Applied
+            },
+            rejectionJournal = ActionInvokeRejectionJournal { error("valid result must not reject") },
+        )
+        assertEquals(InboundDispatchResult.Accepted(event.msgId, "f".repeat(64)), result)
+        assertEquals("answer", captured?.kind?.wire)
+        assertEquals("dispatched", captured?.status)
+    }
+
+    @Test
     fun notificationRequesterRunsAfterItsDurableCommitReleasesStateMutex() = runTest {
         val stateMutex = Mutex()
         val firstRequesterEntered = CompletableDeferred<Unit>()
@@ -452,6 +535,41 @@ class InboundDispatcherControlTest {
         payloadJson = """{
           "invocation_id":"22222222-2222-4222-8222-222222222222",
           "canon_id":"origin:pkg:1:tag",
+          "status":"dispatched"
+        }""".trimIndent(),
+    )
+
+    private fun callControlInvokeEvent() = InnerEventV2(
+        msgId = "66666666-6666-4666-8666-666666666666",
+        originDevice = "mirror-device",
+        type = "call.control.invoke",
+        canonId = null,
+        sequence = null,
+        createdAt = 1_000,
+        expiresAt = 16_000,
+        payloadJson = """{
+          "invocation_id":"22222222-2222-4222-8222-222222222222",
+          "canon_id":"call:11111111-1111-4111-8111-111111111111",
+          "call_session_id":"11111111-1111-4111-8111-111111111111",
+          "call_sequence":2,
+          "control_id":"22222222-2222-4222-8222-222222222222",
+          "kind":"answer",
+          "invoked_at":1000
+        }""".trimIndent(),
+    )
+
+    private fun callControlResultEvent() = InnerEventV2(
+        msgId = "88888888-8888-4888-8888-888888888888",
+        originDevice = "origin-device",
+        type = "call.control.result",
+        canonId = null,
+        sequence = null,
+        createdAt = 1_000,
+        expiresAt = 301_000,
+        payloadJson = """{
+          "invocation_id":"22222222-2222-4222-8222-222222222222",
+          "canon_id":"call:11111111-1111-4111-8111-111111111111",
+          "kind":"answer",
           "status":"dispatched"
         }""".trimIndent(),
     )
