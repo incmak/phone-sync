@@ -254,6 +254,33 @@ class ServiceLifecycleTest {
     }
 
     @Test
+    fun serviceOwnsDefaultNetworkHandoffRecoveryForItsFullTransportLifetime() {
+        val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
+        val observer = File(sourceRoot, "service/DefaultNetworkChangeObserver.kt").readText()
+        val service = File(sourceRoot, "service/SyncService.kt").readText()
+        val start = service.substringAfter("onStart = {").substringBefore("START_STICKY")
+        val destroy = service
+            .substringAfter("override fun onDestroy()")
+            .substringBefore("override fun onBind")
+        val unpair = service
+            .substringAfter("private suspend fun shutdownForUnpair")
+            .substringBefore("private fun startTransport")
+        val actionStop = service
+            .substringAfter("private suspend fun finalizeActionStop")
+            .substringBefore("private fun stopCallCapture")
+
+        assertTrue(observer.contains("registerDefaultNetworkCallback"))
+        assertSourceOrder(
+            start,
+            "ensureDefaultNetworkObserver()",
+            "routePreferenceRestarter.ensureStarted()",
+        )
+        assertTrue(destroy.contains("stopDefaultNetworkObserver()"))
+        assertTrue(unpair.contains("stopDefaultNetworkObserver()"))
+        assertTrue(actionStop.contains("stopDefaultNetworkObserver()"))
+    }
+
+    @Test
     fun listenerHealthPermissionRemainsIndependentFromPostAvailability() {
         val sourceRoot = File(System.getProperty("user.dir"), "src/main/java/co/twinotify/core")
         val listenerSource = File(sourceRoot, "listener/TwinotifyNotificationListener.kt").readText()

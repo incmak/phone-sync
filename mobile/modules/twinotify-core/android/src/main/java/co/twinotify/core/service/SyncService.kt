@@ -40,6 +40,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
@@ -52,6 +53,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,6 +62,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.coroutineScope
+import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -364,6 +367,7 @@ internal class LiveServiceTransportLoop(
     private val onAuthenticatedRoute: suspend (RouteKind) -> Unit = {},
     private val onEstablishedFailure: (Throwable) -> Unit = {},
     private val publishHealth: suspend (RouteHealth) -> Unit,
+    private val trace: (String) -> Unit = {},
 ) {
     private val healthState = MutableStateFlow(RouteHealth())
     val health: StateFlow<RouteHealth> = healthState.asStateFlow()
@@ -400,7 +404,11 @@ internal class LiveServiceTransportLoop(
             try {
                 coordinator.run()
             } finally {
-                healthPublisher.cancelAndJoin()
+                trace("coordinator exited")
+                withContext(NonCancellable) {
+                    healthPublisher.cancelAndJoin()
+                }
+                trace("health publisher stopped")
             }
         }
     }
@@ -986,6 +994,7 @@ class SyncService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var transportJob: Job? = null
+    private var defaultNetworkObserver: Closeable? = null
     private var routePreferenceJob: Job? = null
     private var retentionJob: Job? = null
     private var healthJob: Job? = null
@@ -1170,6 +1179,7 @@ class SyncService : Service() {
                 scope.launch { runRetentionSweep() }
                 // Initial start and live preference changes share one serialized owner. It
                 // rereads the durable config, so a start racing a toggle cannot use stale order.
+                ensureDefaultNetworkObserver()
                 routePreferenceRestarter.ensureStarted()
                 START_STICKY
             },
@@ -1178,6 +1188,7 @@ class SyncService : Service() {
 
     override fun onDestroy() {
         shuttingDown = true
+        stopDefaultNetworkObserver()
         clearForegroundOwnership()
         SyncServiceStatus.setState(SyncState.DISCONNECTED)
         // Android destruction cannot await durable shutdown. Keep any ACTIVE call rows as the
@@ -1247,6 +1258,7 @@ class SyncService : Service() {
     private suspend fun shutdownForUnpair(fromRelayJob: Boolean) {
         if (shuttingDown) return
         shuttingDown = true
+        stopDefaultNetworkObserver()
         clearForegroundOwnership()
         stopCallCapture(terminal = true)
         val activeRelay = transportJob
@@ -1271,6 +1283,18 @@ class SyncService : Service() {
         )
         if (!fromRelayJob) stopForeground(STOP_FOREGROUND_REMOVE)
         shutdownCompleted.complete(Unit)
+    }
+
+    private fun ensureDefaultNetworkObserver() {
+        if (defaultNetworkObserver != null) return
+        defaultNetworkObserver = observeDefaultNetworkChanges(applicationContext) {
+            routePreferenceRestarter.forceRestart()
+        }
+    }
+
+    private fun stopDefaultNetworkObserver() {
+        defaultNetworkObserver?.close()
+        defaultNetworkObserver = null
     }
 
     private fun startTransport(relayInput: String?, preferLan: Boolean) {
@@ -1688,6 +1712,7 @@ class SyncService : Service() {
     private suspend fun finalizeActionStop() {
         if (shuttingDown) return
         shuttingDown = true
+        stopDefaultNetworkObserver()
         co.twinotify.core.actions.ProcessNotificationActionRegistry.registry.clear()
         clearForegroundOwnership()
         transportJob?.cancelAndJoin()

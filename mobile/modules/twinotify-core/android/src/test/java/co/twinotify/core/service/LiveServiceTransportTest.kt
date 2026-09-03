@@ -69,6 +69,24 @@ class LiveServiceTransportTest {
     }
 
     @Test
+    fun serviceLoopFinishesHealthPublisherCleanupWhenCancelled() = runTest {
+        val trace = mutableListOf<String>()
+        val loop = LiveServiceTransportLoop(
+            outbox = OutboxRepository(EmptyStore()),
+            loadRoutes = { LiveTransportRoutes(lan = FakeRoute(RouteKind.LAN), relay = null) },
+            queuedCount = { 0 },
+            publishHealth = {},
+            trace = trace::add,
+        )
+
+        val job = launch { loop.run(preferLan = true) }
+        runCurrent()
+        job.cancelAndJoin()
+
+        assertEquals(listOf("coordinator exited", "health publisher stopped"), trace.takeLast(2))
+    }
+
+    @Test
     fun serviceLoopSurvivesEstablishedLanFailureAndFallsBackToRelay() = runTest {
         val lan = FakeRoute(
             kind = RouteKind.LAN,

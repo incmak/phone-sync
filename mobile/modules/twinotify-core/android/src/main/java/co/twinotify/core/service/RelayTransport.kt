@@ -117,6 +117,7 @@ class RelayTransport(
     private val random: Random = Random.Default,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val reconnect: Boolean = true,
+    private val afterCleanup: () -> Unit = {},
 ) {
     private val pendingEventTypes = Collections.synchronizedMap(HashMap<String, String>())
     fun run(url: RelayWebSocketUrl): Flow<TransportEvent> = channelFlow {
@@ -349,8 +350,9 @@ class RelayTransport(
                         if (!closedGracefully) cancelOnce(socket)
                     }
                 }
-                if (normalTermination) emit(TransportEvent.Closed(result?.reason))
             }
+            afterCleanup()
+            if (normalTermination) emit(TransportEvent.Closed(result?.reason))
         }
     }
 

@@ -12,6 +12,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
@@ -239,6 +240,34 @@ class RelayTransportTest {
         job.cancelAndJoin()
         assertEquals(1, closeCallsBeforeCollectorRelease)
         assertTrue(!failure.thread.isAlive)
+    }
+
+    @Test
+    fun preAuthFailureCollectorCancellationCompletesRelayCleanup() = runTest {
+        val connector = AsyncConnector()
+        var cleanupCompleted = false
+        val job = backgroundScope.launch {
+            RelayTransport(
+                RecordingStore().repo,
+                connector = connector,
+                reconnect = false,
+                afterCleanup = { cleanupCompleted = true },
+            ).run(endpoint).collect { event ->
+                if (event is TransportEvent.Failed) {
+                    throw CancellationException("route rejects a pre-auth failure")
+                }
+            }
+        }
+        runCurrent()
+
+        val failure = connector.failAsync(0, IllegalStateException("offline"))
+        assertTrue(failure.started.await(1, TimeUnit.SECONDS))
+        runCurrent()
+        failure.thread.join(1_000L)
+        runCurrent()
+
+        assertTrue(job.isCompleted, "relay cleanup remained pinned after its collector stopped")
+        assertTrue(cleanupCompleted)
     }
 
     @Test

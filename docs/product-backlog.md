@@ -1,6 +1,6 @@
 # Twinotify Product Backlog
 
-**Last reviewed:** 2026-09-01
+**Last reviewed:** 2026-09-03
 
 **Purpose:** Local source of truth for user-visible follow-up work that is not
 owned by the reliability, direct-LAN, relay-hardening, or protected-release
@@ -20,6 +20,7 @@ observations never become `DONE` from host or emulator tests alone.
 | PB-001 | P0 | Preserve multiple messages and conversation fidelity | SOURCE COMPLETE | physical two-phone fixture |
 | PB-002 | P0 | Make the persistent service notification truthful and open Twinotify | SOURCE COMPLETE | physical notification/tap regression |
 | PB-008 | P0 | Restore transport automatically after process/package restart | SOURCE COMPLETE | physical lifecycle/OEM regression |
+| PB-012 | P0 | Recover transport automatically after Android changes the default network | SOURCE COMPLETE | physical mobile-data/Wi-Fi handoff regression |
 | PB-003 | P1 | Show useful, private, groupable notification history with explicit clearing | DONE | none |
 | PB-004 | P1 | Make the themed launcher icon render correctly on supported Android launchers | SOURCE COMPLETE | physical launcher captures |
 | PB-005 | P1 | Make relay setup consumer-friendly with a safe default service | BLOCKED | approved production relay URL and service policy |
@@ -305,6 +306,36 @@ enabled mirroring and all required permissions remain valid.
 - Reboot, process death, package replacement, and ordinary activity recreation do not create duplicate services or transport coordinators.
 - A user-paused state remains paused across every lifecycle event.
 - Tests cover persisted-intent truth, idempotent startup, permission loss, and OEM-denied background start; both physical phones cover upgrade, force-stop, and reboot.
+
+## PB-012 — Automatic recovery after a default-network handoff
+
+**Implementation:** Source complete. See the
+[implementation plan with emulator evidence](superpowers/plans/2026-09-02-default-network-handoff-recovery.md).
+An API 37 emulator run verified a true no-default-network interval followed by
+a replacement network: the active route advanced from generation 1 to 2
+without opening Twinotify or tapping Retry, pairing and enabled intent remained
+intact, and exactly one `SyncService` remained active. Physical mobile-data to
+Wi-Fi and Wi-Fi to mobile-data handoffs on both target phones remain pending.
+
+**Problem:** A transport opened on mobile data can remain indefinitely in
+reconnecting state after Android replaces that default network with Wi-Fi. The
+service previously had no default-network observer, and a relay failure before
+authentication could also pin cancellation while trying to publish a terminal
+event to a route adapter that had already stopped collecting.
+
+**Scope:** Observe Android default-network replacement for the lifetime of an
+enabled `SyncService`, route replacement through the existing serialized
+transport owner, and make relay/service cleanup cancellation-safe. Do not
+change retry timing, route preference, pairing state, relay policy, protocol,
+or the single-outbox-drainer ownership model.
+
+**Acceptance:**
+
+- Registering the observer on an existing default network does not restart a healthy transport.
+- A different usable default network starts one fresh route generation without user action.
+- The prior route generation and relay workers finish before the replacement begins; exactly one service/coordinator owns delivery.
+- Pairing, enabled intent, route preference, and queued messages survive the handoff unchanged.
+- JVM tests cover network transition policy and cancellation cleanup; emulator evidence covers generation replacement; both physical phones cover mobile-data/Wi-Fi handoffs in both directions.
 
 ## PB-009 — Truthful mirrored and latency metrics
 
