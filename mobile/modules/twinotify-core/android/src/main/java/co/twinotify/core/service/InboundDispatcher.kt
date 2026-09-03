@@ -400,6 +400,26 @@ data class SupersessionReceiptEntry(
     val receipt: co.twinotify.core.storage.OutboundMessage,
 )
 
+/**
+ * A supersession bundle is prepared outside the Room transaction, so an older inbound row can
+ * change state between preflight and commit. Prepare again a bounded number of times before
+ * giving up; a transient race must never reject a valid newer delivery.
+ */
+internal suspend fun <T> commitWithSupersessionRetry(
+    attempts: Int = 3,
+    prepare: suspend () -> co.twinotify.core.storage.SupersessionBundle?,
+    commit: suspend (co.twinotify.core.storage.SupersessionBundle) -> T,
+    isUnavailable: (T) -> Boolean,
+): T? {
+    var result: T? = null
+    repeat(attempts.coerceAtLeast(1)) {
+        val bundle = prepare() ?: return null
+        result = commit(bundle)
+        if (!isUnavailable(requireNotNull(result))) return result
+    }
+    return result
+}
+
 sealed interface SupersessionPreparation {
     data class Prepared(val entries: List<SupersessionReceiptEntry>) : SupersessionPreparation
     data object Unavailable : SupersessionPreparation
@@ -1105,27 +1125,36 @@ class InboundDispatcher internal constructor(
                 receiptMsgId = null,
                 relayAckState = "NONE",
             )
-            val preparedSupersession = when (val prepared = prepareSupersessionRejections(
-                reliableDao.pendingSupersededInboundPreflight(canonId, requireNotNull(inner.sequence)),
-            ) { older, reason -> DurableReceiptFactory(ctx).createRejected(older.msgId, older.envelopeSha256, reason) }) {
-                is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
-                    prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
-                )
-                SupersessionPreparation.Unavailable -> return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
-                    InboundDispatchResult.Rejected("supersession_receipt_unavailable"),
-                    false,
-                )
+            val prepareSupersession: suspend () -> co.twinotify.core.storage.SupersessionBundle? = {
+                when (val prepared = prepareSupersessionRejections(
+                    reliableDao.pendingSupersededInboundPreflight(canonId, requireNotNull(inner.sequence)),
+                ) { older, reason -> DurableReceiptFactory(ctx).createRejected(older.msgId, older.envelopeSha256, reason) }) {
+                    is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
+                        prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
+                    )
+                    SupersessionPreparation.Unavailable -> null
+                }
             }
             var commitDesired = desired
-            var commitResult: co.twinotify.core.storage.InboundDesiredCommitResult? = null
-            for (attempt in 0 until 3) {
-                commitResult = reliableDao.commitInboundDesired(inbound, commitDesired, preparedSupersession)
-                if (commitResult !is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision) {
-                    break
-                }
-                val retryId = reliableDao.nextMirrorLocalId()
-                commitDesired = commitDesired.copy(mirrorLocalId = retryId)
-            }
+            val commitResult = commitWithSupersessionRetry(
+                prepare = prepareSupersession,
+                commit = { bundle ->
+                    var attemptResult: co.twinotify.core.storage.InboundDesiredCommitResult? = null
+                    for (attempt in 0 until 3) {
+                        attemptResult = reliableDao.commitInboundDesired(inbound, commitDesired, bundle)
+                        if (attemptResult !is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision) {
+                            break
+                        }
+                        val retryId = reliableDao.nextMirrorLocalId()
+                        commitDesired = commitDesired.copy(mirrorLocalId = retryId)
+                    }
+                    requireNotNull(attemptResult)
+                },
+                isUnavailable = { it is co.twinotify.core.storage.InboundDesiredCommitResult.SupersessionUnavailable },
+            ) ?: return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                InboundDispatchResult.Rejected("supersession_receipt_unavailable"),
+                false,
+            )
             // Every branch below reports state that is already durable, or refuses.
             // Nothing here may report acceptance for a row that was not committed.
             when (val result = commitResult) {
@@ -1258,21 +1287,28 @@ class InboundDispatcher internal constructor(
                 receiptMsgId = null,
                 relayAckState = "NONE",
             )
-            val supersession = when (val prepared = prepareSupersessionRejections(
-                reliableDao.pendingSupersededInboundPreflight(requireNotNull(inner.canonId), requireNotNull(inner.sequence)),
-            ) { older, reason -> DurableReceiptFactory(ctx).createRejected(older.msgId, older.envelopeSha256, reason) }) {
-                is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
-                    prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
-                )
-                SupersessionPreparation.Unavailable -> return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
-                    InboundDispatchResult.Rejected("supersession_receipt_unavailable"),
-                    false,
-                )
-            }
-            val commit = reliableDao.commitInboundDesired(
-                inbound,
-                (reduction as co.twinotify.core.call.CallReduction.Apply).state,
-                supersession,
+            val commit = commitWithSupersessionRetry(
+                prepare = {
+                    when (val prepared = prepareSupersessionRejections(
+                        reliableDao.pendingSupersededInboundPreflight(requireNotNull(inner.canonId), requireNotNull(inner.sequence)),
+                    ) { older, reason -> DurableReceiptFactory(ctx).createRejected(older.msgId, older.envelopeSha256, reason) }) {
+                        is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
+                            prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
+                        )
+                        SupersessionPreparation.Unavailable -> null
+                    }
+                },
+                commit = { bundle ->
+                    reliableDao.commitInboundDesired(
+                        inbound,
+                        (reduction as co.twinotify.core.call.CallReduction.Apply).state,
+                        bundle,
+                    )
+                },
+                isUnavailable = { it is co.twinotify.core.storage.InboundDesiredCommitResult.SupersessionUnavailable },
+            ) ?: return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
+                InboundDispatchResult.Rejected("supersession_receipt_unavailable"),
+                false,
             )
             when (commit) {
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Duplicate ->

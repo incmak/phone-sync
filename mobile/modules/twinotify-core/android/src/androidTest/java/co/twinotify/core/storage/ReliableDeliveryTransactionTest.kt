@@ -1308,6 +1308,39 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun newerDesiredIgnoresPreparedReceiptsForRowsAppliedAfterPreflight() = runBlocking {
+        // Ringing (1) is materialized while ringing-with-controls (2) is already prepared with a
+        // superseding receipt for it. The stale entry must not reject the newer delivery.
+        val old = inbound("old", "digest-old").copy(
+            eventType = "call.state", canonId = CANON_ID, sequence = 1, committedAt = 10,
+        )
+        assertEquals(
+            InboundDesiredCommitResult.Committed,
+            dao.commitInboundDesired(old, canonical(sequence = 1, state = "ACTIVE", payload = "ringing", updatedAt = 10).copy(materializedSequence = 0)),
+        )
+        assertEquals(MaterializationResult.Completed, dao.completeMaterialization(CANON_ID, 1, appliedAt = 15, receipt = null))
+        val incoming = inbound("new", "digest-new").copy(
+            eventType = "call.state", canonId = CANON_ID, sequence = 2, committedAt = 20,
+        )
+        val staleReceipt = outbound("stale-receipt", null, "peer.receipt").copy(
+            canonId = null, envelopeSha256 = "stale-digest", requiresPeerReceipt = false,
+        )
+
+        assertEquals(
+            InboundDesiredCommitResult.Committed,
+            dao.commitInboundDesired(
+                incoming,
+                canonical(sequence = 2, state = "ACTIVE", payload = "ringing-controls", updatedAt = 20).copy(materializedSequence = 1),
+                SupersessionBundle(listOf(SupersessionEntry(old.msgId, old.envelopeSha256, staleReceipt))),
+            ),
+        )
+        assertEquals("APPLIED", dao.inbound(old.msgId)?.outcome)
+        assertNull(dao.outboundMessage(staleReceipt.msgId))
+        assertEquals("PENDING_PLATFORM", dao.inbound(incoming.msgId)?.outcome)
+        assertEquals(2, dao.canonical(CANON_ID)?.latestSequence)
+    }
+
+    @Test
     fun newerDesiredAtomicallyTerminalizesOlderInboundAndRejectsReceiptIdConflictWithoutMutation() = runBlocking {
         dao.putCanonical(canonical(sequence = 2, state = "ACTIVE", payload = "old"))
         val old = inbound("old", "digest-old").copy(

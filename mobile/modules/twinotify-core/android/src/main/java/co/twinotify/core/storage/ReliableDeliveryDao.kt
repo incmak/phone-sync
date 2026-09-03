@@ -1498,9 +1498,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         supersession: SupersessionBundle,
         terminalAt: Long,
     ): SupersessionMutationResult {
-        if (older.isEmpty() && supersession.entries.isEmpty()) return SupersessionMutationResult.Applied
+        if (older.isEmpty()) return SupersessionMutationResult.Applied
         val byId = supersession.entries.associateBy { it.inboundMsgId }
-        if (byId.size != supersession.entries.size || byId.keys != older.map { it.msgId }.toSet() ||
+        // The bundle was prepared outside this transaction. A row that was applied in the
+        // meantime simply no longer needs its prepared receipt; a row that appeared in the
+        // meantime has no receipt and forces the caller to prepare again.
+        if (byId.size != supersession.entries.size || !byId.keys.containsAll(older.map { it.msgId }) ||
             older.any { byId[it.msgId]?.envelopeSha256 != it.envelopeSha256 } ||
             supersession.entries.map { it.receipt.msgId }.distinct().size != supersession.entries.size
         ) return SupersessionMutationResult.Invalid
