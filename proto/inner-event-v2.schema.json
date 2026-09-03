@@ -7,7 +7,7 @@
     "v": { "const": 2 },
     "msg_id": { "type": "string", "format": "uuid" },
     "origin_device": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "notif.action.invoke", "notif.action.result", "call.state", "peer.receipt", "peer.probe", "lan.bootstrap", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
+    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "notif.action.invoke", "notif.action.result", "call.state", "call.control.invoke", "call.control.result", "peer.receipt", "peer.probe", "lan.bootstrap", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
     "canon_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
     "sequence": { "type": "integer", "minimum": 1 },
     "created_at": { "type": "integer", "minimum": 0 },
@@ -31,7 +31,132 @@
             "properties": {
               "call_session_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
               "state": { "type": "string", "enum": ["ringing", "active", "idle"] },
-              "direction": { "type": "string", "enum": ["incoming", "outgoing", "unknown"] }
+              "direction": { "type": "string", "enum": ["incoming", "outgoing", "unknown"] },
+              "controls": {
+                "type": "array",
+                "maxItems": 2,
+                "items": {
+                  "type": "object",
+                  "required": ["control_id", "kind"],
+                  "properties": {
+                    "control_id": { "type": "string", "format": "uuid" },
+                    "kind": { "type": "string", "enum": ["answer", "decline", "hang_up"] }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "required": ["controls"],
+                  "properties": { "controls": { "minItems": 1 } }
+                },
+                "then": {
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "state": { "const": "ringing" },
+                        "direction": { "const": "incoming" },
+                        "controls": {
+                          "minItems": 2,
+                          "maxItems": 2,
+                          "allOf": [
+                            {
+                              "contains": {
+                                "type": "object",
+                                "properties": { "kind": { "const": "answer" } },
+                                "required": ["kind"]
+                              },
+                              "minContains": 1,
+                              "maxContains": 1
+                            },
+                            {
+                              "contains": {
+                                "type": "object",
+                                "properties": { "kind": { "const": "decline" } },
+                                "required": ["kind"]
+                              },
+                              "minContains": 1,
+                              "maxContains": 1
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "state": { "const": "active" },
+                        "direction": { "const": "incoming" },
+                        "controls": {
+                          "minItems": 1,
+                          "maxItems": 1,
+                          "contains": {
+                            "type": "object",
+                            "properties": { "kind": { "const": "hang_up" } },
+                            "required": ["kind"]
+                          },
+                          "minContains": 1,
+                          "maxContains": 1
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["call.control.invoke", "call.control.result"] } } },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["canon_id"] },
+            { "required": ["sequence"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "call.control.invoke" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["invocation_id", "canon_id", "call_session_id", "call_sequence", "control_id", "kind", "invoked_at"],
+            "properties": {
+              "invocation_id": { "type": "string", "format": "uuid" },
+              "canon_id": { "type": "string", "pattern": "^call:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+              "call_session_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+              "call_sequence": { "type": "integer", "minimum": 1 },
+              "control_id": { "type": "string", "format": "uuid" },
+              "kind": { "type": "string", "enum": ["answer", "decline", "hang_up"] },
+              "invoked_at": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "call.control.result" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["invocation_id", "canon_id", "kind", "status"],
+            "properties": {
+              "invocation_id": { "type": "string", "format": "uuid" },
+              "canon_id": { "type": "string", "pattern": "^call:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+              "kind": { "type": "string", "enum": ["answer", "decline", "hang_up"] },
+              "status": {
+                "type": "string",
+                "enum": ["dispatched", "outcome_unknown", "capability_gone", "call_gone", "stale_state", "expired", "failed"]
+              }
             },
             "additionalProperties": false
           }

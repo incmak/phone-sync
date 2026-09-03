@@ -1,0 +1,14 @@
+{
+  "v": 2,
+  "msg_id": "44444444-4444-4444-8444-444444444444",
+  "origin_device": "origin-device",
+  "type": "call.control.result",
+  "created_at": 1788267350000,
+  "expires_at": 1788267650000,
+  "payload": {
+    "invocation_id": "2a846785-e576-47d0-8c4b-e4fba30d88bd",
+    "canon_id": "call:11111111-1111-4111-8111-111111111111",
+    "kind": "answer",
+    "status": "dispatched"
+  }
+}

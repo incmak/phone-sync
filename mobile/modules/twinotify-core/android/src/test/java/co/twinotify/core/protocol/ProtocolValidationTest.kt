@@ -3,6 +3,7 @@ package co.twinotify.core.protocol
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
+import org.json.JSONArray
 import org.json.JSONObject
 
 class ProtocolValidationTest {
@@ -90,6 +91,84 @@ class ProtocolValidationTest {
         )
 
         cases.forEach { raw ->
+            assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
+        }
+    }
+
+    @Test
+    fun callState_acceptsOnlyCompleteControlsForIncomingState() {
+        ProtocolJson.decodeInner(callStateWithControlsJson("ringing", "incoming", "answer,decline"))
+        ProtocolJson.decodeInner(callStateWithControlsJson("active", "incoming", "hang_up"))
+
+        for (
+            raw in listOf(
+                callStateWithControlsJson("ringing", "incoming", "answer"),
+                callStateWithControlsJson("ringing", "incoming", "answer,answer"),
+                callStateWithControlsJson("ringing", "incoming", "answer,decline")
+                    .replace(OTHER_CONTROL_ID, CONTROL_ID),
+                callStateWithControlsJson("active", "incoming", "answer"),
+                callStateWithControlsJson("active", "unknown", "hang_up"),
+                callStateWithControlsJson("idle", "incoming", "hang_up"),
+            )
+        ) {
+            assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
+        }
+    }
+
+    @Test
+    fun callControlInvoke_isOneUseShortLivedAndPrivacyBounded() {
+        val decoded = ProtocolJson.decodeInner(callControlInvokeJson())
+        assertEquals("call.control.invoke", decoded.type)
+        assertEquals(null, decoded.canonId)
+        assertEquals(null, decoded.sequence)
+
+        for (
+            raw in listOf(
+                callControlInvokeJson().replace("\"expires_at\":16000", "\"expires_at\":16001"),
+                callControlInvokeJson()
+                    .replace(CONTROL_ID, OTHER_CONTROL_ID, ignoreCase = false)
+                    .replaceFirst(OTHER_CONTROL_ID, CONTROL_ID),
+                callControlInvokeJson().replace("\"kind\":\"answer\"", "\"kind\":\"mute\""),
+                callControlInvokeJson().replace("\"invoked_at\":1000", "\"invoked_at\":1001"),
+                callControlInvokeJson().replace(
+                    "\"canon_id\":\"call:$CALL_SESSION_ID\"",
+                    "\"canon_id\":\"call:$OTHER_CONTROL_ID\"",
+                ),
+                callControlInvokeJson().replace("\"created_at\":1000", "\"canon_id\":\"call:$CALL_SESSION_ID\",\"created_at\":1000"),
+                callControlInvokeJson().replace("\"created_at\":1000", "\"sequence\":1,\"created_at\":1000"),
+                callControlInvokeJson().replace(
+                    "\"invoked_at\":1000",
+                    "\"invoked_at\":1000,\"phone_number\":\"+15551234567\"",
+                ),
+                callControlInvokeJson().replace("\"call_sequence\":2", "\"call_sequence\":0"),
+            )
+        ) {
+            assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
+        }
+    }
+
+    @Test
+    fun callControlResult_acceptsOnlyTruthfulTerminalStatuses() {
+        ProtocolJson.decodeInner(callControlResultJson("dispatched"))
+        for (status in listOf("outcome_unknown", "capability_gone", "call_gone", "stale_state", "expired", "failed")) {
+            ProtocolJson.decodeInner(callControlResultJson(status))
+        }
+        for (
+            raw in listOf(
+                callControlResultJson("answered"),
+                callControlResultJson("dispatched").replace("\"expires_at\":301000", "\"expires_at\":301001"),
+                callControlResultJson("dispatched").replace("\"kind\":\"answer\"", "\"kind\":\"mute\""),
+                callControlResultJson("dispatched").replace(
+                    "\"canon_id\":\"call:$CALL_SESSION_ID\"",
+                    "\"canon_id\":\"call:not-a-uuid\"",
+                ),
+                callControlResultJson("dispatched").replace(
+                    "\"status\":\"dispatched\"",
+                    "\"status\":\"dispatched\",\"phone_number\":\"+15551234567\"",
+                ),
+                callControlResultJson("dispatched").replace("\"created_at\":1000", "\"sequence\":1,\"created_at\":1000"),
+            )
+        ) {
             assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
         }
     }
@@ -184,6 +263,37 @@ class ProtocolValidationTest {
     private companion object {
         fun callStateJson() = """
             {"v":2,"msg_id":"22222222-2222-4222-8222-222222222222","origin_device":"dev-a","type":"call.state","canon_id":"call:11111111-1111-4111-8111-111111111111","sequence":1,"created_at":1000,"expires_at":2000,"payload":{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming"}}
+        """.trimIndent()
+
+        const val CALL_SESSION_ID = "11111111-1111-4111-8111-111111111111"
+        const val CONTROL_ID = "2a846785-e576-47d0-8c4b-e4fba30d88bd"
+        const val OTHER_CONTROL_ID = "0d47171d-c1ae-463a-bae7-3e8778517c0f"
+
+        fun callStateWithControlsJson(state: String, direction: String, kindsCsv: String): String {
+            val controls = JSONArray()
+            kindsCsv.split(',').forEachIndexed { index, kind ->
+                controls.put(
+                    JSONObject()
+                        .put("control_id", if (index == 0) CONTROL_ID else OTHER_CONTROL_ID)
+                        .put("kind", kind),
+                )
+            }
+            return JSONObject(callStateJson())
+                .put("payload", JSONObject().apply {
+                    put("call_session_id", CALL_SESSION_ID)
+                    put("state", state)
+                    put("direction", direction)
+                    put("controls", controls)
+                })
+                .toString()
+        }
+
+        fun callControlInvokeJson() = """
+            {"v":2,"msg_id":"33333333-3333-4333-8333-333333333333","origin_device":"mirror-device","type":"call.control.invoke","created_at":1000,"expires_at":16000,"payload":{"invocation_id":"$CONTROL_ID","canon_id":"call:$CALL_SESSION_ID","call_session_id":"$CALL_SESSION_ID","call_sequence":2,"control_id":"$CONTROL_ID","kind":"answer","invoked_at":1000}}
+        """.trimIndent()
+
+        fun callControlResultJson(status: String) = """
+            {"v":2,"msg_id":"44444444-4444-4444-8444-444444444444","origin_device":"origin-device","type":"call.control.result","created_at":1000,"expires_at":301000,"payload":{"invocation_id":"$CONTROL_ID","canon_id":"call:$CALL_SESSION_ID","kind":"answer","status":"$status"}}
         """.trimIndent()
 
         const val ACTION_ID = "b6d3142a-e936-4d7d-b15a-bdf318bb0539"

@@ -101,13 +101,13 @@ func validateFixtureDeclaration(fixture protocolFixture) error {
 			return fmt.Errorf("unsupported server fixture code %q", fixture.ExpectedCode)
 		}
 	case "cross_layer":
-		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" && fixture.Type != "notif_action_invoke" && fixture.Type != "notif_action_result" && fixture.Type != "lan_bootstrap_inner" && fixture.Type != "peer_probe_inner" {
+		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" && fixture.Type != "notif_action_invoke" && fixture.Type != "notif_action_result" && fixture.Type != "lan_bootstrap_inner" && fixture.Type != "peer_probe_inner" && fixture.Type != "call_control_invoke" && fixture.Type != "call_control_result" {
 			return fmt.Errorf("unknown cross-layer fixture type %q", fixture.Type)
 		}
 		if !fixture.Valid && fixture.Type == "outer_inner_pair" && fixture.ExpectedCode != "outer_inner_id_mismatch" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
-		if !fixture.Valid && (fixture.Type == "call_state" || fixture.Type == "notif_post_payload" || fixture.Type == "notif_action_invoke" || fixture.Type == "notif_action_result" || fixture.Type == "lan_bootstrap_inner" || fixture.Type == "peer_probe_inner") && fixture.ExpectedCode != "invalid_frame" {
+		if !fixture.Valid && (fixture.Type == "call_state" || fixture.Type == "notif_post_payload" || fixture.Type == "notif_action_invoke" || fixture.Type == "notif_action_result" || fixture.Type == "lan_bootstrap_inner" || fixture.Type == "peer_probe_inner" || fixture.Type == "call_control_invoke" || fixture.Type == "call_control_result") && fixture.ExpectedCode != "invalid_frame" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
 	default:
@@ -327,6 +327,9 @@ func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []b
 			CanonID string `json:"canon_id"`
 			Payload struct {
 				SessionID string `json:"call_session_id"`
+				Controls  []struct {
+					ControlID string `json:"control_id"`
+				} `json:"controls"`
 			} `json:"payload"`
 		}
 		if err := json.Unmarshal(raw, &inner); err != nil || inner.Type != "call.state" {
@@ -334,6 +337,13 @@ func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []b
 		}
 		if !callSessionIDPattern.MatchString(inner.Payload.SessionID) || inner.CanonID != "call:"+strings.ToLower(inner.Payload.SessionID) {
 			return fixtureCodeError("invalid_frame")
+		}
+		controlIDs := make(map[string]struct{}, len(inner.Payload.Controls))
+		for _, control := range inner.Payload.Controls {
+			if _, duplicate := controlIDs[control.ControlID]; duplicate {
+				return fixtureCodeError("invalid_frame")
+			}
+			controlIDs[control.ControlID] = struct{}{}
 		}
 		return nil
 	case "notif_post_payload":
@@ -356,6 +366,54 @@ func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []b
 			"notif_action_result": "notif.action.result",
 		}[fixtureType]
 		if inner.Type != expectedType {
+			return fixtureCodeError("invalid_frame")
+		}
+		return nil
+	case "call_control_invoke":
+		if err := validateJSON(validator.innerV2, raw); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		var inner struct {
+			Type      string `json:"type"`
+			CreatedAt int64  `json:"created_at"`
+			ExpiresAt int64  `json:"expires_at"`
+			Payload   struct {
+				InvocationID  string `json:"invocation_id"`
+				CanonID       string `json:"canon_id"`
+				CallSessionID string `json:"call_session_id"`
+				ControlID     string `json:"control_id"`
+				InvokedAt     int64  `json:"invoked_at"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		if inner.Type != "call.control.invoke" ||
+			inner.Payload.InvocationID != inner.Payload.ControlID ||
+			inner.Payload.CanonID != "call:"+inner.Payload.CallSessionID ||
+			inner.Payload.InvokedAt != inner.CreatedAt ||
+			inner.ExpiresAt-inner.CreatedAt != 15_000 {
+			return fixtureCodeError("invalid_frame")
+		}
+		return nil
+	case "call_control_result":
+		if err := validateJSON(validator.innerV2, raw); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		var inner struct {
+			Type      string `json:"type"`
+			CreatedAt int64  `json:"created_at"`
+			ExpiresAt int64  `json:"expires_at"`
+			Payload   struct {
+				CanonID string `json:"canon_id"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		if inner.Type != "call.control.result" ||
+			!callCanonIDPattern.MatchString(inner.Payload.CanonID) ||
+			inner.ExpiresAt-inner.CreatedAt != 300_000 {
 			return fixtureCodeError("invalid_frame")
 		}
 		return nil
@@ -387,3 +445,4 @@ func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []b
 }
 
 var callSessionIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var callCanonIDPattern = regexp.MustCompile(`^call:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

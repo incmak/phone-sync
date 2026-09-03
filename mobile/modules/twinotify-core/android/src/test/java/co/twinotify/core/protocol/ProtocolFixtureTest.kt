@@ -8,6 +8,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -15,6 +16,16 @@ import org.json.JSONObject
  * service.  The fixture manifest is the contract: tests do not silently grow a second list.
  */
 class ProtocolFixtureTest {
+    @Test
+    fun jsonEquivalence_comparesNestedArraysStructurally() {
+        val expected = JSONObject(
+            """{"controls":[{"control_id":"one","kind":"answer"},{"control_id":"two","kind":"decline"}]}""",
+        )
+        val actual = JSONObject(expected.toString())
+
+        assertJsonEquivalent(expected, actual)
+    }
+
     @Test
     fun validFixtures_roundTripWithoutChangingBytesOrStructure() {
         val manifest = JSONObject(ProtocolFixtures.manifest())
@@ -42,16 +53,19 @@ class ProtocolFixtureTest {
                         )
                     }
                 }
-                "peer_receipt_inner", "lan_bootstrap_inner", "peer_probe_inner" -> {
-                    val event = ProtocolJson.decodeInner(raw)
-                    assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
-                }
                 "call_state" -> {
                     val event = ProtocolJson.decodeInner(raw)
                     assertEquals("call.state", event.type)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
                 }
-                "notif_action_invoke", "notif_action_result", "lan_bootstrap_inner", "peer_probe_inner" -> {
+                "peer_receipt_inner",
+                "notif_action_invoke",
+                "notif_action_result",
+                "lan_bootstrap_inner",
+                "peer_probe_inner",
+                "call_control_invoke",
+                "call_control_result",
+                -> {
                     val event = ProtocolJson.decodeInner(raw)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
                 }
@@ -101,7 +115,13 @@ class ProtocolFixtureTest {
                     val error = assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
                     assertEquals(expectedCode, observedFixtureCode(error))
                 }
-                "notif_action_invoke", "notif_action_result", "lan_bootstrap_inner", "peer_probe_inner" -> {
+                "notif_action_invoke",
+                "notif_action_result",
+                "lan_bootstrap_inner",
+                "peer_probe_inner",
+                "call_control_invoke",
+                "call_control_result",
+                -> {
                     val error = assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
                     assertEquals(expectedCode, observedFixtureCode(error))
                 }
@@ -124,6 +144,9 @@ class ProtocolFixtureTest {
             "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("notif.action") == true ->
             "invalid_frame"
+        error is IllegalArgumentException &&
+            (error.message?.contains("call control") == true || error.message?.contains("call.control") == true) ->
+            "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("lan.bootstrap") == true ->
             "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("peer.probe") == true ->
@@ -140,13 +163,22 @@ class ProtocolFixtureTest {
         val actualKeys = actual.keys().asSequence().toSet()
         assertEquals(expectedKeys, actualKeys)
         expectedKeys.forEach { key ->
-            val expectedValue = expected.get(key)
-            val actualValue = actual.get(key)
-            if (expectedValue is JSONObject && actualValue is JSONObject) {
-                assertJsonEquivalent(expectedValue, actualValue)
-            } else {
-                assertEquals(expectedValue, actualValue, key)
-            }
+            assertJsonValueEquivalent(expected.get(key), actual.get(key), key)
+        }
+    }
+
+    private fun assertJsonArrayEquivalent(expected: JSONArray, actual: JSONArray, label: String) {
+        assertEquals(expected.length(), actual.length(), "$label length")
+        for (index in 0 until expected.length()) {
+            assertJsonValueEquivalent(expected.get(index), actual.get(index), "$label[$index]")
+        }
+    }
+
+    private fun assertJsonValueEquivalent(expected: Any, actual: Any, label: String) {
+        when {
+            expected is JSONObject && actual is JSONObject -> assertJsonEquivalent(expected, actual)
+            expected is JSONArray && actual is JSONArray -> assertJsonArrayEquivalent(expected, actual, label)
+            else -> assertEquals(expected, actual, label)
         }
     }
 }

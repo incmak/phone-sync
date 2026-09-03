@@ -25,6 +25,24 @@
       "valid": true
     },
     {
+      "file": "v2-valid/call-state-controls-valid.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/call-control-invoke-valid.json",
+      "scope": "cross_layer",
+      "type": "call_control_invoke",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/call-control-result-valid.json",
+      "scope": "cross_layer",
+      "type": "call_control_result",
+      "valid": true
+    },
+    {
       "file": "v2-valid/notif-post-actions-valid.json",
       "scope": "cross_layer",
       "type": "notif_post_payload",
@@ -124,6 +142,36 @@
       "file": "v2-invalid/call-state-invalid-direction.json",
       "scope": "cross_layer",
       "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-controls-invalid-set.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-state-controls-duplicate-id.json",
+      "scope": "cross_layer",
+      "type": "call_state",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-control-invoke-privacy-field.json",
+      "scope": "cross_layer",
+      "type": "call_control_invoke",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-control-invoke-id-mismatch.json",
+      "scope": "cross_layer",
+      "type": "call_control_invoke",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/call-control-result-bad-status.json",
+      "scope": "cross_layer",
+      "type": "call_control_result",
       "expected_code": "invalid_frame"
     },
     {

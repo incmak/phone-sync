@@ -19,6 +19,8 @@ object ProtocolJson {
     private const val MAX_REPLY_BYTES = 4096
     private const val ACTION_INVOKE_TTL_MS = 120_000L
     private const val ACTION_RESULT_TTL_MS = 600_000L
+    private const val CALL_CONTROL_INVOKE_TTL_MS = 15_000L
+    private const val CALL_CONTROL_RESULT_TTL_MS = 300_000L
     private const val LAN_BOOTSTRAP_TTL_MS = 600_000L
     private const val PEER_PROBE_TTL_MS = 120_000L
     private const val ENVELOPE_TYPE = "enc"
@@ -31,6 +33,16 @@ object ProtocolJson {
         "expired",
         "failed",
     )
+    private val callControlResultStatuses = setOf(
+        "dispatched",
+        "outcome_unknown",
+        "capability_gone",
+        "call_gone",
+        "stale_state",
+        "expired",
+        "failed",
+    )
+    private val callControlKinds = setOf("answer", "decline", "hang_up")
 
     private val innerTypes = setOf(
         "notif.post",
@@ -39,6 +51,8 @@ object ProtocolJson {
         "notif.action.invoke",
         "notif.action.result",
         "call.state",
+        "call.control.invoke",
+        "call.control.result",
         "peer.receipt",
         "peer.probe",
         "lan.bootstrap",
@@ -211,6 +225,27 @@ object ProtocolJson {
                 "notif.action.result expires_at must be created_at + $ACTION_RESULT_TTL_MS"
             }
         }
+        if (event.type == "call.control.invoke") {
+            require(event.canonId == null && event.sequence == null) {
+                "call.control.invoke must not carry canon_id or sequence"
+            }
+            validateCallControlInvoke(payload)
+            require(event.expiresAt - event.createdAt == CALL_CONTROL_INVOKE_TTL_MS) {
+                "call.control.invoke expires_at must be created_at + $CALL_CONTROL_INVOKE_TTL_MS"
+            }
+            require(payload.getLong("invoked_at") == event.createdAt) {
+                "call.control.invoke invoked_at must equal created_at"
+            }
+        }
+        if (event.type == "call.control.result") {
+            require(event.canonId == null && event.sequence == null) {
+                "call.control.result must not carry canon_id or sequence"
+            }
+            validateCallControlResult(payload)
+            require(event.expiresAt - event.createdAt == CALL_CONTROL_RESULT_TTL_MS) {
+                "call.control.result expires_at must be created_at + $CALL_CONTROL_RESULT_TTL_MS"
+            }
+        }
     }
 
     private fun validateEnvelope(envelope: EncryptedEnvelope) {
@@ -283,7 +318,7 @@ object ProtocolJson {
     private fun validateCallStatePayload(payload: JSONObject, canonId: String?, sequence: Long?) {
         requireOnlyKeys(
             payload,
-            setOf("call_session_id", "state", "direction"),
+            setOf("call_session_id", "state", "direction", "controls"),
             "call.state payload",
         )
         val sessionId = requiredUuid(payload, "call_session_id", "call.state payload")
@@ -301,6 +336,100 @@ object ProtocolJson {
         val direction = requiredString(payload, "direction", "call.state payload")
         require(direction in setOf("incoming", "outgoing", "unknown")) {
             "unsupported call.state direction $direction"
+        }
+        validateCallControls(payload, state, direction)
+    }
+
+    private fun validateCallControls(payload: JSONObject, state: String, direction: String) {
+        if (!payload.has("controls")) return
+        val controls = try {
+            payload.getJSONArray("controls")
+        } catch (error: JSONException) {
+            throw ProtocolException("call.state payload controls must be an array", error)
+        }
+        require(controls.length() <= 2) { "call.state payload controls must have at most 2 items" }
+        val parsed = List(controls.length()) { index ->
+            val item = try {
+                controls.getJSONObject(index)
+            } catch (error: JSONException) {
+                throw ProtocolException("call control descriptor must be an object", error)
+            }
+            requireOnlyKeys(item, setOf("control_id", "kind"), "call control descriptor")
+            requiredUuid(item, "control_id", "call control descriptor") to
+                requiredString(item, "kind", "call control descriptor")
+        }
+        require(parsed.map { it.first }.toSet().size == parsed.size) {
+            "call controls require unique control_id"
+        }
+        require(parsed.map { it.second }.toSet().size == parsed.size) {
+            "call controls require unique kind"
+        }
+        require(parsed.all { it.second in callControlKinds }) { "unsupported call control kind" }
+        val kinds = parsed.map { it.second }.toSet()
+        val legal = when {
+            parsed.isEmpty() -> true
+            state == "ringing" && direction == "incoming" -> kinds == setOf("answer", "decline")
+            state == "active" && direction == "incoming" -> kinds == setOf("hang_up")
+            else -> false
+        }
+        require(legal) { "call controls do not match call state" }
+    }
+
+    private fun validateCallControlInvoke(payload: JSONObject) {
+        requireOnlyKeys(
+            payload,
+            setOf(
+                "invocation_id",
+                "canon_id",
+                "call_session_id",
+                "call_sequence",
+                "control_id",
+                "kind",
+                "invoked_at",
+            ),
+            "call.control.invoke payload",
+        )
+        val invocationId = requiredUuid(payload, "invocation_id", "call.control.invoke payload")
+        val controlId = requiredUuid(payload, "control_id", "call.control.invoke payload")
+        require(invocationId == controlId) { "call control invocation must equal control id" }
+        val sessionId = requiredUuid(payload, "call_session_id", "call.control.invoke payload")
+        require(sessionId == UUID.fromString(sessionId).toString()) {
+            "call.control.invoke payload call_session_id must be a lower-case canonical UUID"
+        }
+        require(requiredString(payload, "canon_id", "call.control.invoke payload") == "call:$sessionId") {
+            "call.control.invoke payload canon_id must equal call:<call_session_id>"
+        }
+        require(requiredNonNegativeLong(payload, "call_sequence", "call.control.invoke payload") >= 1) {
+            "call.control.invoke payload call_sequence must be positive"
+        }
+        require(requiredString(payload, "kind", "call.control.invoke payload") in callControlKinds) {
+            "unsupported call.control.invoke kind"
+        }
+        requiredNonNegativeLong(payload, "invoked_at", "call.control.invoke payload")
+    }
+
+    private fun validateCallControlResult(payload: JSONObject) {
+        requireOnlyKeys(
+            payload,
+            setOf("invocation_id", "canon_id", "kind", "status"),
+            "call.control.result payload",
+        )
+        requiredUuid(payload, "invocation_id", "call.control.result payload")
+        val canonId = requiredString(payload, "canon_id", "call.control.result payload")
+        require(canonId.startsWith("call:")) {
+            "call.control.result payload canon_id must identify a call"
+        }
+        val sessionId = canonId.removePrefix("call:")
+        validateUuid(sessionId, "call.control.result payload canon_id session")
+        require(sessionId == UUID.fromString(sessionId).toString()) {
+            "call.control.result payload canon_id must contain a lower-case canonical UUID"
+        }
+        require(requiredString(payload, "kind", "call.control.result payload") in callControlKinds) {
+            "unsupported call.control.result kind"
+        }
+        val status = requiredString(payload, "status", "call.control.result payload")
+        require(status in callControlResultStatuses) {
+            "unsupported call.control.result status $status"
         }
     }
 
