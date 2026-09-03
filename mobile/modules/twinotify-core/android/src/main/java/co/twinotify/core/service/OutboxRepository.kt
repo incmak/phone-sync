@@ -35,7 +35,8 @@ interface OutboxStore {
 
 data class RelayAckRecord(val msgId: String, val envelopeSha256: String)
 
-enum class CustodyRoute { LAN, RELAY }
+/** String-backed in Room (`custodyRoute` stores `name`); adding a value needs no migration. */
+enum class CustodyRoute { LAN, BLUETOOTH, RELAY }
 
 sealed interface CustodyResult {
     data object Missing : CustodyResult
@@ -111,15 +112,27 @@ class OutboxRepository(
             -> OutboxTransition.Retained
         }
 
-    /** Direct-route adapter boundary; durable custody stays route-neutral below this method. */
-    suspend fun onLanAccepted(msgId: String, acceptedAt: Long = clock()): OutboxTransition =
-        when (onCustodyAccepted(msgId, CustodyRoute.LAN, acceptedAt)) {
+    /**
+     * Direct-route adapter boundary shared by every direct transport; durable custody stays
+     * route-neutral below this method. [route] names the granted direct route and must not
+     * be the relay, whose acceptance carries different semantics via [onRelayAccepted].
+     */
+    suspend fun onDirectAccepted(
+        msgId: String,
+        route: CustodyRoute,
+        acceptedAt: Long = clock(),
+    ): OutboxTransition {
+        require(route == CustodyRoute.LAN || route == CustodyRoute.BLUETOOTH) {
+            "direct acceptance requires a direct custody route"
+        }
+        return when (onCustodyAccepted(msgId, route, acceptedAt)) {
             CustodyResult.Missing -> OutboxTransition.Missing
             CustodyResult.DeletedReceipt -> OutboxTransition.Deleted
             CustodyResult.Accepted,
             CustodyResult.AlreadyAccepted,
             -> OutboxTransition.Retained
         }
+    }
 
     suspend fun onPeerReceipt(
         ackedMsgId: String,

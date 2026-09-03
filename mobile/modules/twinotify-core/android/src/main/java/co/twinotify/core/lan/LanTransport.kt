@@ -1,14 +1,16 @@
 package co.twinotify.core.lan
 
+import co.twinotify.core.direct.DirectCommand
+import co.twinotify.core.direct.DirectDelivery
+import co.twinotify.core.direct.DirectDeliveryEvent
+import co.twinotify.core.direct.DirectWire
 import co.twinotify.core.service.AuthenticatedRouteSession
+import co.twinotify.core.service.CustodyRoute
 import co.twinotify.core.service.InboundDispatchResult
 import co.twinotify.core.service.OutboxRepository
-import co.twinotify.core.service.OutboxTransition
 import co.twinotify.core.service.RouteKind
 import co.twinotify.core.service.TransportRoute
 import co.twinotify.core.storage.OutboundMessage
-import java.util.Collections
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -16,10 +18,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -35,187 +35,82 @@ sealed interface LanTransportEvent {
 }
 
 /**
- * One authenticated direct-route session.
+ * One authenticated direct LAN session.
  *
- * It owns no outbox loop: the coordinator selects due rows and calls [send]. Here
- * there is exactly one ordered inbound processor and exactly one writer, and both
- * suspend under pressure rather than dropping anything.
+ * This is a wire adapter only: every ordering, custody and shutdown invariant lives
+ * in [DirectDelivery], which this class runs under [CustodyRoute.LAN]. The mapping
+ * between [LanFrame] and [DirectCommand] is one-to-one and carries no state, so the
+ * bytes on the LAN socket are exactly what they were before the engine was shared.
  *
- * Ordering and bounds come from construction rather than from bookkeeping. The
- * inbound path reads, commits and acknowledges one frame at a time on a single
- * coroutine, so a slow commit applies TCP backpressure to the peer and no frame is
- * ever committed without being acknowledged in the same step. The writer queue is
- * bounded to [LanFrameLimits.MAX_BUFFERED_FRAMES]; because every legal frame is
- * capped at [LanFrameLimits.MAX_FRAME_BYTES], that count bound is also the byte
- * bound of [LanFrameLimits.MAX_BUFFERED_BYTES].
+ * The writer queue is bounded by the connection to [LanFrameLimits.MAX_BUFFERED_FRAMES];
+ * because every legal frame is capped at [LanFrameLimits.MAX_FRAME_BYTES], that count
+ * bound is also the byte bound of [LanFrameLimits.MAX_BUFFERED_BYTES].
  */
 class LanTransport(
-    private val connection: AuthenticatedLanConnection,
-    private val outbox: OutboxRepository,
-    private val heartbeatIntervalMillis: Long = DEFAULT_HEARTBEAT_INTERVAL_MILLIS,
-    private val dispatch: suspend (String) -> InboundDispatchResult,
+    connection: AuthenticatedLanConnection,
+    outbox: OutboxRepository,
+    heartbeatIntervalMillis: Long = DEFAULT_HEARTBEAT_INTERVAL_MILLIS,
+    dispatch: suspend (String) -> InboundDispatchResult,
 ) {
-    init {
-        require(heartbeatIntervalMillis > 0)
-    }
+    private val delivery = DirectDelivery(
+        wire = LanDirectWire(connection),
+        outbox = outbox,
+        custodyRoute = CustodyRoute.LAN,
+        heartbeatIntervalMillis = heartbeatIntervalMillis,
+        dispatch = dispatch,
+    )
 
-    val peerDeviceId: String get() = connection.peerDeviceId
+    val peerDeviceId: String get() = delivery.peerDeviceId
 
-    /**
-     * Digest we actually put on the wire per in-flight message. An acknowledgement
-     * that does not match what we sent must not take custody of the stored row.
-     */
-    private data class InFlight(val envelopeSha256: String, val eventType: String)
-
-    private val inFlight = Collections.synchronizedMap(HashMap<String, InFlight>())
-
-    private val started = AtomicBoolean(false)
-
-    /**
-     * Write one stored row to the peer, byte-for-byte as persisted. Returns only once
-     * the frame has reached the connection, so a caller is never told a row was sent
-     * while it still sits in a queue that teardown could discard. Concurrent callers
-     * serialize on the connection's single writer and suspend rather than drop.
-     */
-    suspend fun send(message: OutboundMessage) {
-        inFlight[message.msgId] = InFlight(message.envelopeSha256, message.eventType)
-        connection.send(LanFrame.Put(message.envelopeJson.encodeToByteArray()))
-    }
+    /** Write one stored row to the peer, byte-for-byte as persisted. See [DirectDelivery.send]. */
+    suspend fun send(message: OutboundMessage) = delivery.send(message)
 
     /** Ask the peer to end the session with a stable code. */
-    suspend fun close(code: String) {
-        connection.send(LanFrame.Close(code))
-    }
+    suspend fun close(code: String) = delivery.close(code)
 
-    /**
-     * Run the session. The returned flow is the single ordered inbound processor.
-     * It completes when the peer closes, when the connection breaks, or when a
-     * protocol violation ends the session.
-     */
-    fun run(): Flow<LanTransportEvent> = channelFlow {
-        // `send` would otherwise read as either this scope's emit or LanTransport.send.
-        val events = this
-        if (!started.compareAndSet(false, true)) {
-            events.send(LanTransportEvent.Closed("session_already_started"))
-            return@channelFlow
-        }
-        val heartbeat = launch {
-            var token = 0L
-            while (isActive) {
-                delay(heartbeatIntervalMillis)
-                try {
-                    connection.send(LanFrame.Ping(token++))
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Throwable) {
-                    // Unblock the inbound reader so the session reports connection_lost.
-                    connection.close()
-                    return@launch
-                }
-            }
-        }
-        try {
-            connection.incoming.collect { frame ->
-                when (frame) {
-                    is LanFrame.Put -> {
-                        val outcome = commitInbound(frame)
-                        if (outcome is LanTransportEvent.Closed) throw SessionEnd(outcome)
-                        events.send(outcome)
-                    }
-                    is LanFrame.Accepted -> {
-                        val outcome = acknowledgeOutbound(frame)
-                        if (outcome is LanTransportEvent.Closed) throw SessionEnd(outcome)
-                        if (outcome != null) events.send(outcome)
-                    }
-                    is LanFrame.Ping -> connection.send(LanFrame.Pong(frame.token))
-                    is LanFrame.Pong -> Unit
-                    is LanFrame.Close -> throw SessionEnd(LanTransportEvent.Closed(frame.code))
-                    // The connection refuses handshake frames after authentication.
-                    is LanFrame.Hello, is LanFrame.HelloAck ->
-                        throw SessionEnd(LanTransportEvent.Closed("unexpected_handshake_frame"))
-                }
-            }
-            events.send(LanTransportEvent.Closed("peer_closed"))
-        } catch (end: SessionEnd) {
-            // A terminal frame must stop the session, not merely skip to the next frame.
-            events.send(end.event)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
-            events.send(LanTransportEvent.Closed("connection_lost"))
-        } finally {
-            withContext(NonCancellable) {
-                heartbeat.cancelAndJoin()
-                connection.close()
-            }
+    /** Run the session. See [DirectDelivery.run]; this only renames the events. */
+    fun run(): Flow<LanTransportEvent> = delivery.run().map { event ->
+        when (event) {
+            is DirectDeliveryEvent.PeerAccepted -> LanTransportEvent.PeerAccepted(event.msgId, event.eventType)
+            is DirectDeliveryEvent.Committed -> LanTransportEvent.Committed(event.msgId, event.duplicate)
+            is DirectDeliveryEvent.Closed -> LanTransportEvent.Closed(event.code)
         }
     }
 
     private companion object {
         const val DEFAULT_HEARTBEAT_INTERVAL_MILLIS = 3_000L
     }
+}
 
-    /** Not a coroutine cancellation: it unwinds one collect to end one session. */
-    private class SessionEnd(val event: LanTransportEvent) : Exception(null, null, false, false)
+/** Stateless one-to-one mapping between the LAN frame set and the direct command set. */
+private class LanDirectWire(private val connection: AuthenticatedLanConnection) : DirectWire {
+    override val peerDeviceId: String get() = connection.peerDeviceId
 
-    /**
-     * Commit one inbound envelope, then acknowledge it. The acknowledgement is written
-     * only after [dispatch] returns, which is after its Room transaction boundary, so a
-     * peer is never told to release a row we have not durably stored.
-     */
-    private suspend fun commitInbound(frame: LanFrame.Put): LanTransportEvent {
-        val envelope = frame.envelope.decodeToString()
-        val result = try {
-            dispatch(envelope)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
-            // Custody is unproven, so refuse rather than acknowledge. The peer retries.
-            connection.send(LanFrame.Close("dispatch_failed"))
-            return LanTransportEvent.Closed("dispatch_failed")
-        }
-        return when (result) {
-            is InboundDispatchResult.Accepted -> {
-                connection.send(LanFrame.Accepted(result.msgId, result.envelopeSha256))
-                LanTransportEvent.Committed(result.msgId, duplicate = false)
-            }
-            is InboundDispatchResult.Duplicate -> {
-                // Replays the original acceptance without rematerializing anything.
-                connection.send(LanFrame.Accepted(result.msgId, result.envelopeSha256))
-                LanTransportEvent.Committed(result.msgId, duplicate = true)
-            }
-            is InboundDispatchResult.AcceptedAfterCustody -> try {
-                connection.send(LanFrame.Accepted(result.msgId, result.envelopeSha256))
-                LanTransportEvent.Committed(result.msgId, duplicate = false)
-            } finally {
-                // The authenticated control has already completed shutdown + wipe. Service stop
-                // must happen after the acceptance attempt and must survive write cancellation.
-                result.finalizeAfterCustody()
-            }
-            is InboundDispatchResult.Rejected -> {
-                connection.send(LanFrame.Close(result.code))
-                LanTransportEvent.Closed(result.code)
-            }
+    override val incoming: Flow<DirectCommand> = connection.incoming.map { frame ->
+        when (frame) {
+            is LanFrame.Put -> DirectCommand.Put(frame.envelope)
+            is LanFrame.Accepted -> DirectCommand.Accepted(frame.msgId, frame.envelopeSha256)
+            is LanFrame.Ping -> DirectCommand.Ping(frame.token)
+            is LanFrame.Pong -> DirectCommand.Pong(frame.token)
+            is LanFrame.Close -> DirectCommand.Close(frame.code)
+            // The connection refuses handshake frames after authentication. Should one
+            // arrive anyway, the session ends with the same stable code it always used,
+            // without answering the peer.
+            is LanFrame.Hello, is LanFrame.HelloAck -> DirectCommand.Close("unexpected_handshake_frame")
         }
     }
 
-    /** Take custody of one outbound row, but only for the digest we actually sent. */
-    private suspend fun acknowledgeOutbound(frame: LanFrame.Accepted): LanTransportEvent? {
-        val sent = inFlight[frame.msgId]
-        if (sent != null && sent.envelopeSha256 != frame.envelopeSha256) {
-            connection.send(LanFrame.Close("ack_digest_mismatch"))
-            return LanTransportEvent.Closed("ack_digest_mismatch")
-        }
-        inFlight.remove(frame.msgId)
-        return when (outbox.onLanAccepted(frame.msgId)) {
-            // Ordinary rows stay until an authenticated peer receipt; receipt rows are deleted.
-            OutboxTransition.Retained,
-            OutboxTransition.Deleted,
-            -> LanTransportEvent.PeerAccepted(frame.msgId, sent?.eventType)
-            // Nothing to take custody of, and nothing worth ending the session over.
-            else -> null
-        }
-    }
+    override suspend fun send(command: DirectCommand) = connection.send(
+        when (command) {
+            is DirectCommand.Put -> LanFrame.Put(command.envelope)
+            is DirectCommand.Accepted -> LanFrame.Accepted(command.msgId, command.envelopeSha256)
+            is DirectCommand.Ping -> LanFrame.Ping(command.token)
+            is DirectCommand.Pong -> LanFrame.Pong(command.token)
+            is DirectCommand.Close -> LanFrame.Close(command.code)
+        },
+    )
+
+    override fun close() = connection.close()
 }
 
 /**

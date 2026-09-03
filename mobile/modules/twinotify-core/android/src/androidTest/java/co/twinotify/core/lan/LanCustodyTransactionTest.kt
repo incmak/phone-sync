@@ -3,6 +3,7 @@ package co.twinotify.core.lan
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import co.twinotify.core.service.CustodyRoute
 import co.twinotify.core.service.DaoOutboxStore
 import co.twinotify.core.service.InboundDispatchResult
 import co.twinotify.core.service.OutboxRepository
@@ -72,7 +73,7 @@ class LanCustodyTransactionTest {
         dao.insertOutbound(row(MSG_A, requiresPeerReceipt = true))
         val outbox = OutboxRepository(DaoOutboxStore(dao))
 
-        outbox.onLanAccepted(MSG_A)
+        outbox.onDirectAccepted(MSG_A, CustodyRoute.LAN)
         assertNotNull(dao.outboundMessage(MSG_A), "acceptance alone must not release the row")
 
         outbox.onPeerReceipt(MSG_A, DIGEST_A, status = "applied")
@@ -83,7 +84,7 @@ class LanCustodyTransactionTest {
     fun receiptRowIsDeletedByDirectAcceptanceSoReceiptsCannotRecurse(): Unit = runBlocking {
         dao.insertOutbound(row(MSG_B, requiresPeerReceipt = false, eventType = "peer.receipt"))
 
-        OutboxRepository(DaoOutboxStore(dao)).onLanAccepted(MSG_B)
+        OutboxRepository(DaoOutboxStore(dao)).onDirectAccepted(MSG_B, CustodyRoute.LAN)
 
         assertNull(dao.outboundMessage(MSG_B), "a receipt row must not survive its own acceptance")
     }
@@ -108,9 +109,9 @@ class LanCustodyTransactionTest {
         dao.insertOutbound(row(MSG_A, requiresPeerReceipt = true))
         val outbox = OutboxRepository(DaoOutboxStore(dao))
 
-        outbox.onLanAccepted(MSG_A, acceptedAt = 5_000L)
+        outbox.onDirectAccepted(MSG_A, CustodyRoute.LAN, acceptedAt = 5_000L)
         val firstAcceptedAt = dao.outboundMessage(MSG_A)!!.custodyAcceptedAt
-        outbox.onLanAccepted(MSG_A, acceptedAt = 9_000L)
+        outbox.onDirectAccepted(MSG_A, CustodyRoute.LAN, acceptedAt = 9_000L)
 
         // Asserting the value is present matters: two nulls would compare equal and
         // let this pass without custody ever being taken.

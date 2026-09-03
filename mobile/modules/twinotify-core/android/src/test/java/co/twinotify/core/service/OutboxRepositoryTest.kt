@@ -6,6 +6,7 @@ import co.twinotify.core.storage.RelayReceiptResult
 import co.twinotify.core.storage.LegacyForwardResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
@@ -67,13 +68,50 @@ class OutboxRepositoryTest {
         store.rows["m1"] = message("m1", requiresPeerReceipt = true)
         val repo = OutboxRepository(store, clock)
 
-        assertEquals(OutboxTransition.Retained, repo.onLanAccepted("m1", 1_000))
+        assertEquals(OutboxTransition.Retained, repo.onDirectAccepted("m1", CustodyRoute.LAN, 1_000))
         assertEquals(OutboxTransition.Retained, repo.onRelayAccepted("m1", 2_000))
 
         val row = store.rows.getValue("m1")
         assertEquals(1_000, row.custodyAcceptedAt)
         assertEquals("LAN", row.custodyRoute)
         assertEquals("ACCEPTED", row.relayCustodyState)
+    }
+
+    @Test
+    fun bluetoothDirectAcceptanceRecordsBluetoothCustodyWithoutRelayCustody() = kotlinx.coroutines.test.runTest {
+        val store = FakeOutboxStore()
+        store.rows["m1"] = message("m1", requiresPeerReceipt = true)
+        val repo = OutboxRepository(store, clock)
+
+        assertEquals(OutboxTransition.Retained, repo.onDirectAccepted("m1", CustodyRoute.BLUETOOTH, 1_000))
+
+        val row = store.rows.getValue("m1")
+        assertEquals(1_000, row.custodyAcceptedAt)
+        assertEquals("BLUETOOTH", row.custodyRoute)
+        assertEquals("NONE", row.relayCustodyState)
+        assertEquals(OutboxTransition.Retained, repo.onDirectAccepted("m1", CustodyRoute.LAN, 2_000))
+        assertEquals("BLUETOOTH", store.rows.getValue("m1").custodyRoute)
+    }
+
+    @Test
+    fun directAcceptanceMapsEveryCustodyResultToOneTransition() = kotlinx.coroutines.test.runTest {
+        val store = FakeOutboxStore()
+        store.rows["receipt"] = message("receipt", requiresPeerReceipt = false)
+        val repo = OutboxRepository(store, clock)
+
+        assertEquals(OutboxTransition.Deleted, repo.onDirectAccepted("receipt", CustodyRoute.BLUETOOTH, 1_000))
+        assertNull(store.rows["receipt"])
+        assertEquals(OutboxTransition.Missing, repo.onDirectAccepted("absent", CustodyRoute.LAN, 1_000))
+    }
+
+    @Test
+    fun relayIsNotADirectCustodyRoute() = kotlinx.coroutines.test.runTest {
+        val store = FakeOutboxStore()
+        store.rows["m1"] = message("m1", requiresPeerReceipt = true)
+        val repo = OutboxRepository(store, clock)
+
+        assertFailsWith<IllegalArgumentException> { repo.onDirectAccepted("m1", CustodyRoute.RELAY, 1_000) }
+        assertEquals("NEW", store.rows.getValue("m1").state)
     }
 
     @Test

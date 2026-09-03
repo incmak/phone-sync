@@ -33,6 +33,7 @@ import kotlinx.coroutines.SupervisorJob
 
 internal enum class LocalUnpairCustodyOutcome(val statusCode: String) {
     LAN("lan"),
+    BLUETOOTH("bluetooth"),
     RELAY("relay"),
     TIMEOUT("timeout"),
     UNAVAILABLE("unavailable"),
@@ -81,6 +82,7 @@ internal class LocalUnpairCoordinator(
                 try {
                     when (reservation.await(custodyTimeoutMillis)) {
                         CustodyRoute.LAN -> LocalUnpairCustodyOutcome.LAN
+                        CustodyRoute.BLUETOOTH -> LocalUnpairCustodyOutcome.BLUETOOTH
                         CustodyRoute.RELAY -> LocalUnpairCustodyOutcome.RELAY
                         null -> LocalUnpairCustodyOutcome.TIMEOUT
                     }
