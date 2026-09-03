@@ -7,6 +7,7 @@ import type {
   MetricsSnapshot,
   NotificationDetail,
   MirrorActionInvocationResult,
+  BluetoothRouteSettings,
 } from '../modules/twinotify-core/src/TwinotifyCoreModule';
 
 export function useTwinotifyCore() {
@@ -64,6 +65,20 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.getCallStatePermissionAsync(),
     requestCallStatePermissionAsync: () =>
       TwinotifyCoreModule.requestCallStatePermissionAsync(),
+    getBluetoothRoutePermissionAsync: () =>
+      TwinotifyCoreModule.getBluetoothRoutePermissionAsync(),
+    requestBluetoothRoutePermissionAsync: () =>
+      TwinotifyCoreModule.requestBluetoothRoutePermissionAsync(),
+    startBluetoothAssociation: (): Promise<{ associated: boolean }> =>
+      TwinotifyCoreModule.startBluetoothAssociation(),
+    getBluetoothRouteSettings: (): Promise<BluetoothRouteSettings> =>
+      TwinotifyCoreModule.getBluetoothRouteSettings(),
+    getBluetoothRouteEnabled: (): Promise<boolean> =>
+      TwinotifyCoreModule.getBluetoothRouteEnabled(),
+    setBluetoothRouteEnabled: (enabled: boolean): Promise<boolean> =>
+      TwinotifyCoreModule.setBluetoothRouteEnabled(enabled),
+    removeBluetoothAssociation: (): Promise<void> =>
+      TwinotifyCoreModule.removeBluetoothAssociation(),
     getSyncStatus: (): Promise<SyncStatus> =>
       TwinotifyCoreModule.getSyncStatus(),
     getPairStatus: (): Promise<PairStatus> =>

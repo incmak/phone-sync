@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import co.twinotify.core.auth.JwtMinter
+import co.twinotify.core.bluetooth.BluetoothRouteGate
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.NotificationDb
@@ -628,6 +629,14 @@ internal inline fun <T> executeForegroundServiceRequest(
 }
 
 /** Owns foreground notification rendering across promotion, health refresh, and removal. */
+/** `connectedDevice` is declared only while the Bluetooth route may actually hold a connection. */
+internal fun foregroundServiceTypesFor(bluetoothRouteActive: Boolean): Int =
+    if (bluetoothRouteActive) {
+        ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+    } else {
+        ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+    }
+
 internal class ForegroundNotificationOwner<T : Any> {
     private var active = false
     private var rendered: T? = null
@@ -1008,6 +1017,12 @@ class SyncService : Service(), CallMirrorForegroundHost {
             activeInstance?.routePreferenceRestarter?.forceRestart()
         }
 
+        /** Called only after the Bluetooth route preference or binding is durable. */
+        fun notifyBluetoothRouteChanged() {
+            val service = activeInstance ?: return
+            service.scope.launch { service.refreshBluetoothForegroundType() }
+        }
+
         /** Existing sessions poll the durable outbox; a dead service is safely re-evaluated. */
         fun notifyActionOutboxChanged(context: android.content.Context) {
             if (activeInstance != null) return
@@ -1071,8 +1086,12 @@ class SyncService : Service(), CallMirrorForegroundHost {
     private val callCaptureStartupGate = CallCaptureStartupGate()
     private val foregroundNotificationOwner = ForegroundNotificationOwner<DeliveryPresentation>()
     private val callMirrorForegroundSlot = CallMirrorForegroundSlot<Notification>(FGS_ID) { id, notification ->
-        startForeground(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
+        startForeground(id, notification, foregroundServiceTypesFor(bluetoothRouteActive))
     }
+
+    /** True only while the Bluetooth route is durably enabled and every nearby permission is granted. */
+    @Volatile
+    private var bluetoothRouteActive = false
     private var shuttingDown = false
     private val shutdownCompleted = CompletableDeferred<Unit>()
     private lateinit var legacyMigration: Deferred<LegacyMigrationSummary>
@@ -1102,6 +1121,8 @@ class SyncService : Service(), CallMirrorForegroundHost {
         outbox = OutboxRepository(DaoOutboxStore(dao))
         peerControls = PeerControlOutbox(applicationContext, dao)
         val localDevice = kotlinx.coroutines.runBlocking { DeviceIdentity.getOrCreate(applicationContext) }
+        // Settled before the first startForeground so the declared type never exceeds what is allowed.
+        bluetoothRouteActive = kotlinx.coroutines.runBlocking { BluetoothRouteGate.foregroundActive(applicationContext) }
         val capturePersister = co.twinotify.core.listener.DurableCapturePersister(applicationContext)
         snapshotCoordinator = SnapshotCoordinator(
             dao = dao,
@@ -1323,6 +1344,14 @@ class SyncService : Service(), CallMirrorForegroundHost {
 
     private fun updatePostPermissionStatus() {
         SyncServiceStatus.setPostPermission(effectivePostAvailability(this))
+    }
+
+    private suspend fun refreshBluetoothForegroundType() {
+        val active = BluetoothRouteGate.foregroundActive(applicationContext)
+        if (active == bluetoothRouteActive) return
+        bluetoothRouteActive = active
+        // Re-declare the foreground type; a held call slot defers this until the call ends.
+        currentStatusNotification()?.let(callMirrorForegroundSlot::renderStatus)
     }
 
     private fun startForegroundCompat(presentation: DeliveryPresentation) {

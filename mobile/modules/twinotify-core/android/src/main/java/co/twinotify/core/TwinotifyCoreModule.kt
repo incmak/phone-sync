@@ -58,6 +58,14 @@ import expo.modules.interfaces.permissions.Permissions
 
 internal fun recentActivityLimit(limit: Int): Int = limit.coerceIn(1, 20)
 
+private val BLUETOOTH_ROUTE_PERMISSIONS: Array<String> =
+    co.twinotify.core.bluetooth.BluetoothAssociationPolicy.RUNTIME_PERMISSIONS.toTypedArray()
+
+/** Booleans only: no association ID or Bluetooth address crosses the bridge. */
+internal data class BluetoothRouteSettings(val associated: Boolean, val enabled: Boolean) {
+    fun toMap(): Map<String, Any?> = mapOf("associated" to associated, "enabled" to enabled)
+}
+
 internal fun co.twinotify.core.storage.UiActivityEvent.toRecentActivityMap(
     artworkDataUri: String? = null,
 ): Map<String, Any?> = mapOf(
@@ -353,7 +361,12 @@ class TwinotifyCoreModule internal constructor(
             }
         }
 
+        OnActivityResult { _, payload ->
+            co.twinotify.core.bluetooth.BluetoothAssociationFlow.onActivityResult(payload.requestCode, payload.resultCode)
+        }
+
         OnDestroy {
+            co.twinotify.core.bluetooth.BluetoothAssociationFlow.cancelActive()
             offlinePairing.destroy()
             moduleScope.cancel()
         }
@@ -663,6 +676,103 @@ class TwinotifyCoreModule internal constructor(
                 promise,
                 Manifest.permission.NEARBY_WIFI_DEVICES,
             )
+        }
+
+        AsyncFunction("getBluetoothRoutePermissionAsync") { promise: Promise ->
+            Permissions.getPermissionsWithPermissionsManager(
+                appContext.permissions,
+                promise,
+                *BLUETOOTH_ROUTE_PERMISSIONS,
+            )
+        }
+
+        AsyncFunction("requestBluetoothRoutePermissionAsync") { promise: Promise ->
+            Permissions.askForPermissionsWithPermissionsManager(
+                appContext.permissions,
+                promise,
+                *BLUETOOTH_ROUTE_PERMISSIONS,
+            )
+        }
+
+        /** Generic CDM picker. Resolves `associated=false` when the user declines or the flow times out. */
+        AsyncFunction("startBluetoothAssociation") { promise: Promise ->
+            val activity = appContext.currentActivity
+            if (activity == null) {
+                promise.reject(
+                    "BLUETOOTH_ASSOCIATION",
+                    co.twinotify.core.bluetooth.BluetoothAssociationFailure.ACTIVITY_UNAVAILABLE.code,
+                    null,
+                )
+                return@AsyncFunction
+            }
+            moduleScope.launch {
+                try {
+                    val provisional = co.twinotify.core.bluetooth.BluetoothAssociationFlow.run(requireContext(), activity)
+                    promise.resolve(mapOf("associated" to (provisional != null)))
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (e: co.twinotify.core.bluetooth.BluetoothAssociationException) {
+                    promise.reject("BLUETOOTH_ASSOCIATION", e.failure.code, null)
+                } catch (_: Throwable) {
+                    promise.reject(
+                        "BLUETOOTH_ASSOCIATION",
+                        co.twinotify.core.bluetooth.BluetoothAssociationFailure.ASSOCIATION_FAILED.code,
+                        null,
+                    )
+                }
+            }
+        }
+
+        AsyncFunction("getBluetoothRouteSettings") { promise: Promise ->
+            moduleScope.launch {
+                settleTwinotifyPromise(
+                    code = "BLUETOOTH_ROUTE_SETTINGS",
+                    boundedMessage = "bluetooth_route_settings_unavailable",
+                    operation = { bluetoothRouteSettings(requireContext()).toMap() },
+                    resolve = promise::resolve,
+                    reject = promise::reject,
+                )
+            }
+        }
+
+        AsyncFunction("getBluetoothRouteEnabled") { promise: Promise ->
+            moduleScope.launch {
+                settleTwinotifyPromise(
+                    code = "GET_BLUETOOTH_ROUTE",
+                    boundedMessage = "bluetooth_route_preference_unavailable",
+                    operation = { bluetoothRouteSettings(requireContext()).enabled },
+                    resolve = promise::resolve,
+                    reject = promise::reject,
+                )
+            }
+        }
+
+        AsyncFunction("setBluetoothRouteEnabled") { enabled: Boolean, promise: Promise ->
+            moduleScope.launch {
+                settleTwinotifyPromise(
+                    code = "SET_BLUETOOTH_ROUTE",
+                    boundedMessage = "Unable to update the Bluetooth route",
+                    operation = { setBluetoothRouteEnabled(requireContext(), enabled) },
+                    resolve = promise::resolve,
+                    reject = promise::reject,
+                )
+            }
+        }
+
+        /** Explicit user action: it disassociates the exact stored association in CDM. */
+        AsyncFunction("removeBluetoothAssociation") { promise: Promise ->
+            moduleScope.launch {
+                settleTwinotifyPromise(
+                    code = "REMOVE_BLUETOOTH_ASSOCIATION",
+                    boundedMessage = "Unable to remove the Bluetooth association",
+                    operation = {
+                        removeBluetoothAssociation(requireContext())
+                        null
+                    },
+                    resolve = promise::resolve,
+                    reject = promise::reject,
+                )
+            }
         }
 
         AsyncFunction("isNotificationListenerGranted") { promise: Promise ->
@@ -1287,6 +1397,47 @@ class TwinotifyCoreModule internal constructor(
                 }
             }
         }
+    }
+
+    private suspend fun bluetoothRouteSettings(ctx: Context): BluetoothRouteSettings {
+        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx)
+        val peer = PeerStore.load(ctx)
+        val associated = peer != null &&
+            store.loadValidated(peer, co.twinotify.core.bluetooth.BluetoothAssociations.currentIds(ctx)) != null
+        return BluetoothRouteSettings(associated = associated, enabled = associated && store.routeEnabled())
+    }
+
+    private suspend fun setBluetoothRouteEnabled(ctx: Context, enabled: Boolean): Boolean {
+        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx)
+        if (!enabled) {
+            store.setRouteEnabled(false)
+            co.twinotify.core.service.SyncService.notifyBluetoothRouteChanged()
+            return false
+        }
+        val peer = PeerStore.load(ctx)
+        val validated = peer != null &&
+            store.loadValidated(peer, co.twinotify.core.bluetooth.BluetoothAssociations.currentIds(ctx)) != null
+        val allowed = co.twinotify.core.bluetooth.BluetoothAssociationPolicy.canEnableRoute(
+            permissionsGranted = co.twinotify.core.bluetooth.BluetoothAssociationPolicy.permissionsGranted(ctx),
+            peerConfirmed = peer != null,
+            bindingValidated = validated,
+        )
+        if (!allowed) return false
+        store.setRouteEnabled(true)
+        co.twinotify.core.service.SyncService.notifyBluetoothRouteChanged()
+        return store.routeEnabled()
+    }
+
+    private suspend fun removeBluetoothAssociation(ctx: Context) {
+        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx)
+        val stored = store.storedAssociationId()
+        val provisional = co.twinotify.core.bluetooth.ProvisionalBluetoothAssociations.current()?.associationId
+        store.clear()
+        co.twinotify.core.bluetooth.ProvisionalBluetoothAssociations.clear()
+        setOfNotNull(stored, provisional).forEach { id ->
+            co.twinotify.core.bluetooth.BluetoothAssociations.disassociate(ctx, id)
+        }
+        co.twinotify.core.service.SyncService.notifyBluetoothRouteChanged()
     }
 
     private fun resolveOnMain(promise: Promise, value: Any?) {

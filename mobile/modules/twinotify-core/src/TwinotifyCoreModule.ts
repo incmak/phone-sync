@@ -9,6 +9,9 @@ import type {
   MirrorActionInvocationResult,
 } from './TwinotifyCore.types';
 
+/** Booleans only: the native side never exposes an association ID or address. */
+export type BluetoothRouteSettings = { associated: boolean; enabled: boolean };
+
 export type {
   DeliveryRoute,
   DeliveryRoutePhase,
@@ -144,6 +147,17 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   requestCallStatePermissionAsync(): Promise<PermissionResponse>;
   getNearbyWifiPermissionAsync(): Promise<PermissionResponse>;
   requestNearbyWifiPermissionAsync(): Promise<PermissionResponse>;
+  // Bluetooth direct route: nearby-device permissions and a generic companion association
+  getBluetoothRoutePermissionAsync(): Promise<PermissionResponse>;
+  requestBluetoothRoutePermissionAsync(): Promise<PermissionResponse>;
+  /** Opens the system companion picker; `associated` is false when the user declines or it times out. */
+  startBluetoothAssociation(): Promise<{ associated: boolean }>;
+  getBluetoothRouteSettings(): Promise<BluetoothRouteSettings>;
+  getBluetoothRouteEnabled(): Promise<boolean>;
+  /** Returns the durable value; enabling fails closed until an authenticated association exists. */
+  setBluetoothRouteEnabled(enabled: boolean): Promise<boolean>;
+  /** Explicit user action: removes the stored companion association. */
+  removeBluetoothAssociation(): Promise<void>;
   getSyncStatus(): Promise<SyncStatus>;
   getRouteStatus(): Promise<RouteStatus>;
   /** Try a direct LAN route before the relay. */

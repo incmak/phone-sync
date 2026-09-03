@@ -104,6 +104,17 @@ const mockTwinotifyCore = {
   requestNearbyWifiPermissionAsync: jest.fn(async () => ({
     status: 'granted', granted: true, canAskAgain: true, expires: 'never',
   })),
+  getBluetoothRoutePermissionAsync: jest.fn(async () => ({
+    status: 'undetermined', granted: false, canAskAgain: true, expires: 'never',
+  })),
+  requestBluetoothRoutePermissionAsync: jest.fn(async () => ({
+    status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+  })),
+  startBluetoothAssociation: jest.fn(async () => ({ associated: false })),
+  getBluetoothRouteSettings: jest.fn(async () => ({ associated: false, enabled: false })),
+  getBluetoothRouteEnabled: jest.fn(async () => false),
+  setBluetoothRouteEnabled: jest.fn(async () => false),
+  removeBluetoothAssociation: jest.fn(async () => {}),
   isNotificationListenerGranted: jest.fn(async () => false),
   openListenerSettings: jest.fn(async () => {}),
   isPostNotificationsGranted: jest.fn(async () => false),
@@ -189,6 +200,16 @@ global.__RESET_OFFLINE_TEST_STATE__ = () => {
   mockTwinotifyCore.requestNearbyWifiPermissionAsync.mockResolvedValue({
     status: 'granted', granted: true, canAskAgain: true, expires: 'never',
   });
+  mockTwinotifyCore.getBluetoothRoutePermissionAsync.mockResolvedValue({
+    status: 'undetermined', granted: false, canAskAgain: true, expires: 'never',
+  });
+  mockTwinotifyCore.requestBluetoothRoutePermissionAsync.mockResolvedValue({
+    status: 'granted', granted: true, canAskAgain: true, expires: 'never',
+  });
+  mockTwinotifyCore.startBluetoothAssociation.mockResolvedValue({ associated: false });
+  mockTwinotifyCore.getBluetoothRouteSettings.mockResolvedValue({ associated: false, enabled: false });
+  mockTwinotifyCore.getBluetoothRouteEnabled.mockResolvedValue(false);
+  mockTwinotifyCore.setBluetoothRouteEnabled.mockResolvedValue(false);
   mockTwinotifyCore.isNotificationListenerGranted.mockResolvedValue(false);
   mockTwinotifyCore.isPostNotificationsGranted.mockResolvedValue(false);
 };

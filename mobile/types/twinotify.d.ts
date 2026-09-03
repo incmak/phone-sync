@@ -88,6 +88,13 @@ export interface TwinotifyCoreAPI {
   setCallControlsEnabled(enabled: boolean): Promise<boolean>;
   getCallStatePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
   requestCallStatePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
+  getBluetoothRoutePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
+  requestBluetoothRoutePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
+  startBluetoothAssociation(): Promise<{ associated: boolean }>;
+  getBluetoothRouteSettings(): Promise<{ associated: boolean; enabled: boolean }>;
+  getBluetoothRouteEnabled(): Promise<boolean>;
+  setBluetoothRouteEnabled(enabled: boolean): Promise<boolean>;
+  removeBluetoothAssociation(): Promise<void>;
   getSyncStatus(): Promise<SyncStatus>;
   getPairStatus(): Promise<PairStatus>;
   getPreferLan(): Promise<boolean>;
