@@ -694,7 +694,11 @@ class TwinotifyCoreModule internal constructor(
             )
         }
 
-        /** Generic CDM picker. Resolves `associated=false` when the user declines or the flow times out. */
+        /**
+         * Generic CDM picker, then the signed RFCOMM handshake against the confirmed peer. The
+         * binding is saved only after the handshake verifies. Resolves `associated=false` when the
+         * user declines or the picker times out; rejects with one bounded code otherwise.
+         */
         AsyncFunction("startBluetoothAssociation") { promise: Promise ->
             val activity = appContext.currentActivity
             if (activity == null) {
@@ -708,10 +712,17 @@ class TwinotifyCoreModule internal constructor(
             moduleScope.launch {
                 try {
                     val provisional = co.twinotify.core.bluetooth.BluetoothAssociationFlow.run(requireContext(), activity)
+                    if (provisional != null) {
+                        co.twinotify.core.bluetooth.BluetoothAssociationCompletion.complete(requireContext(), provisional)
+                    }
                     promise.resolve(mapOf("associated" to (provisional != null)))
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (e: co.twinotify.core.bluetooth.BluetoothAssociationException) {
+                    promise.reject("BLUETOOTH_ASSOCIATION", e.failure.code, null)
+                } catch (e: co.twinotify.core.bluetooth.BluetoothConnectException) {
+                    promise.reject("BLUETOOTH_ASSOCIATION", e.failure.code, null)
+                } catch (e: co.twinotify.core.bluetooth.BluetoothHandshakeException) {
                     promise.reject("BLUETOOTH_ASSOCIATION", e.failure.code, null)
                 } catch (_: Throwable) {
                     promise.reject(

@@ -150,7 +150,12 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   // Bluetooth direct route: nearby-device permissions and a generic companion association
   getBluetoothRoutePermissionAsync(): Promise<PermissionResponse>;
   requestBluetoothRoutePermissionAsync(): Promise<PermissionResponse>;
-  /** Opens the system companion picker; `associated` is false when the user declines or it times out. */
+  /**
+   * Opens the system companion picker, then proves the picked device is the confirmed peer over a
+   * signed RFCOMM handshake before saving the binding. `associated` is false when the user declines
+   * or the picker times out; a peer that cannot be reached or verified rejects with a bounded
+   * `bluetooth_*` code and leaves no association behind.
+   */
   startBluetoothAssociation(): Promise<{ associated: boolean }>;
   getBluetoothRouteSettings(): Promise<BluetoothRouteSettings>;
   getBluetoothRouteEnabled(): Promise<boolean>;

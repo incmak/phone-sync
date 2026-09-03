@@ -18,8 +18,13 @@ import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
+import co.twinotify.core.crypto.CryptoStore
+import co.twinotify.core.storage.DeviceIdentity
+import co.twinotify.core.storage.PeerStore
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Pure decisions for the Bluetooth route. Nothing here touches the Android runtime. */
@@ -57,6 +62,7 @@ enum class BluetoothAssociationFailure(val code: String) {
     ASSOCIATION_IN_PROGRESS("bluetooth_association_in_progress"),
     ASSOCIATION_FAILED("bluetooth_association_failed"),
     DEVICE_NOT_DUAL("bluetooth_device_not_dual"),
+    PEER_NOT_CONFIRMED("bluetooth_peer_not_confirmed"),
 }
 
 class BluetoothAssociationException(val failure: BluetoothAssociationFailure) : RuntimeException(failure.code)
@@ -96,6 +102,63 @@ object BluetoothAssociations {
 
     internal fun companionDeviceManager(context: Context): CompanionDeviceManager? =
         context.applicationContext.getSystemService(CompanionDeviceManager::class.java)
+}
+
+/**
+ * Second half of the public association operation. A provisional association proves only
+ * that the user picked a device; this proves the device is the confirmed Twinotify peer by
+ * running the signed RFCOMM handshake, and only then writes the durable binding. Any
+ * failure, including cancellation, closes the socket, discards the provisional state, and
+ * disassociates that exact provisional ID so an unverified association is never left enabled.
+ */
+object BluetoothAssociationCompletion {
+    suspend fun complete(context: Context, provisional: ProvisionalBluetoothAssociation): BluetoothBinding {
+        val appContext = context.applicationContext
+        try {
+            val peer = PeerStore.load(appContext)
+                ?: throw BluetoothAssociationException(BluetoothAssociationFailure.PEER_NOT_CONFIRMED)
+            if (!BluetoothAssociationPolicy.permissionsGranted(appContext)) {
+                throw BluetoothAssociationException(BluetoothAssociationFailure.PERMISSION_DENIED)
+            }
+            val adapter = appContext.getSystemService(BluetoothManager::class.java)?.adapter
+                ?.takeIf { it.isEnabled }
+                ?: throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
+            val localDeviceId = DeviceIdentity.getOrCreate(appContext)
+            val signingKeys = CryptoStore.loadOrGenerate(appContext).second
+            val connector = BluetoothConnector(
+                localDeviceId = localDeviceId,
+                peerDeviceId = peer.deviceId,
+                links = AndroidBluetoothLinkProvider(appContext, adapter, provisional.device),
+                authenticator = SignedBluetoothWireAuthenticator { role ->
+                    BluetoothHandshake(
+                        localDeviceId = localDeviceId,
+                        peerDeviceId = peer.deviceId,
+                        localSigningKey = signingKeys.secretKey,
+                        peerSigningKey = peer.signPubkey,
+                        role = role,
+                    )
+                },
+            )
+            // Association proves identity only; route sessions are the coordinator's to open.
+            connector.connect().close()
+            val binding = BluetoothBinding(
+                associationId = provisional.associationId,
+                peerDeviceId = peer.deviceId,
+                peerSigningKeySha256 = BluetoothBinding.signingKeyDigest(peer.signPubkey),
+            )
+            BluetoothBindingStore.forContext(appContext).save(binding)
+            ProvisionalBluetoothAssociations.clear()
+            return binding
+        } catch (error: Throwable) {
+            withContext(NonCancellable) { discard(appContext, provisional) }
+            throw error
+        }
+    }
+
+    private fun discard(context: Context, provisional: ProvisionalBluetoothAssociation) {
+        ProvisionalBluetoothAssociations.clear()
+        BluetoothAssociations.disassociate(context, provisional.associationId)
+    }
 }
 
 /** Durable enablement plus every runtime permission: the input to the foreground-service type. */
