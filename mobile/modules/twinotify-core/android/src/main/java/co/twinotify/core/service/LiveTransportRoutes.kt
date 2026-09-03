@@ -1,10 +1,28 @@
 package co.twinotify.core.service
 
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.util.Log
+import co.twinotify.core.bluetooth.AndroidBluetoothLinkProvider
+import co.twinotify.core.bluetooth.AuthenticatedBluetoothWire
+import co.twinotify.core.bluetooth.BluetoothAssociationException
+import co.twinotify.core.bluetooth.BluetoothAssociationFailure
+import co.twinotify.core.bluetooth.BluetoothAssociationPolicy
+import co.twinotify.core.bluetooth.BluetoothAssociations
+import co.twinotify.core.bluetooth.BluetoothBinding
+import co.twinotify.core.bluetooth.BluetoothBindingStore
+import co.twinotify.core.bluetooth.BluetoothConnectException
+import co.twinotify.core.bluetooth.BluetoothConnector
+import co.twinotify.core.bluetooth.BluetoothHandshake
+import co.twinotify.core.bluetooth.BluetoothHandshakeException
+import co.twinotify.core.bluetooth.BluetoothLinkProvider
+import co.twinotify.core.bluetooth.BluetoothRole
+import co.twinotify.core.bluetooth.BluetoothRoute
+import co.twinotify.core.bluetooth.SignedBluetoothWireAuthenticator
 import co.twinotify.core.crypto.CryptoStore
+import co.twinotify.core.direct.DirectDeliveryEvent
 import co.twinotify.core.lan.AuthenticatedLanConnection
 import co.twinotify.core.lan.DirectLanConnector
 import co.twinotify.core.lan.JsseLanDialer
@@ -48,6 +66,7 @@ import kotlinx.coroutines.launch
 
 data class LiveTransportRoutes(
     val lan: TransportRoute?,
+    val bluetooth: TransportRoute?,
     val relay: TransportRoute?,
 )
 
@@ -147,15 +166,49 @@ class LiveRelayRouteConfig(
     val hooks: LiveRelayRouteHooks = LiveRelayRouteHooks(dispatch = { null }),
 )
 
+/** Trust facts one Bluetooth route needs. The association ID stands in for the address, which stays in memory. */
+class LiveBluetoothRouteConfig(
+    val localDeviceId: String,
+    val peerDeviceId: String,
+    localSigningKey: ByteArray,
+    peerSigningKey: ByteArray,
+    val associationId: Int,
+    val protocolVersion: Int,
+) {
+    private val localKey = localSigningKey.copyOf()
+    private val peerKey = peerSigningKey.copyOf()
+    val localSigningKey: ByteArray get() = localKey.copyOf()
+    val peerSigningKey: ByteArray get() = peerKey.copyOf()
+
+    init {
+        require(localDeviceId != peerDeviceId) { "bluetooth_identity_collision" }
+        require(protocolVersion > 0) { "bluetooth_protocol_invalid" }
+    }
+
+    internal fun handshake(role: BluetoothRole) = BluetoothHandshake(
+        localDeviceId = localDeviceId,
+        peerDeviceId = peerDeviceId,
+        localSigningKey = localKey,
+        peerSigningKey = peerKey,
+        role = role,
+    )
+}
+
 class LiveTransportRouteDependencies(
     val loadPeer: suspend () -> PeerRecord?,
     val loadValidatedBinding: suspend (PeerRecord) -> LanBinding?,
     val loadLocalIdentity: suspend () -> LiveLocalRouteIdentity,
     val buildLanRoute: (LiveLanRouteConfig) -> TransportRoute,
     val buildRelayRoute: (LiveRelayRouteConfig) -> TransportRoute,
+    val loadValidatedBluetoothBinding: suspend (PeerRecord) -> BluetoothBinding? = { null },
+    val buildBluetoothRoute: (LiveBluetoothRouteConfig) -> TransportRoute? = { null },
 )
 
-/** Loads route trust without letting unusable LAN state remove a valid relay path. */
+/**
+ * Loads route trust without letting unusable direct state remove a valid path. Each direct
+ * binding is validated on its own: a corrupt LAN binding leaves Bluetooth and relay usable,
+ * and a stale Bluetooth association leaves LAN and relay usable.
+ */
 class LiveTransportRoutesFactory(
     private val dependencies: LiveTransportRouteDependencies,
 ) {
@@ -164,32 +217,47 @@ class LiveTransportRoutesFactory(
         utcEpochDay: Long = Instant.now().atZone(ZoneOffset.UTC).toLocalDate().toEpochDay(),
     ): LiveTransportRoutes {
         val relayRoute = relay?.let(dependencies.buildRelayRoute)
-        val peer = dependencies.loadPeer() ?: return LiveTransportRoutes(null, relayRoute)
-        val binding = try {
-            dependencies.loadValidatedBinding(peer)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
-            null
-        } ?: return LiveTransportRoutes(null, relayRoute)
-        val identity = try {
-            dependencies.loadLocalIdentity()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
-            return LiveTransportRoutes(null, relayRoute)
+        val peer = dependencies.loadPeer() ?: return LiveTransportRoutes(null, null, relayRoute)
+        val lanBinding = loadTrustOrNull { dependencies.loadValidatedBinding(peer) }
+        val bluetoothBinding = loadTrustOrNull { dependencies.loadValidatedBluetoothBinding(peer) }
+        if (lanBinding == null && bluetoothBinding == null) return LiveTransportRoutes(null, null, relayRoute)
+        val identity = loadTrustOrNull { dependencies.loadLocalIdentity() }
+            ?: return LiveTransportRoutes(null, null, relayRoute)
+        val lan = lanBinding?.let { binding ->
+            dependencies.buildLanRoute(
+                LiveLanRouteConfig(
+                    localDeviceId = identity.deviceId,
+                    peerDeviceId = peer.deviceId,
+                    localSigningKey = identity.signingKey,
+                    peerSigningKey = peer.signPubkey,
+                    peerTlsSpkiSha256 = binding.peerTlsSpkiSha256,
+                    lanSecret = binding.lanSecret,
+                    protocolVersion = binding.protocolVersion,
+                    utcEpochDay = utcEpochDay,
+                ),
+            )
         }
-        val config = LiveLanRouteConfig(
-            localDeviceId = identity.deviceId,
-            peerDeviceId = peer.deviceId,
-            localSigningKey = identity.signingKey,
-            peerSigningKey = peer.signPubkey,
-            peerTlsSpkiSha256 = binding.peerTlsSpkiSha256,
-            lanSecret = binding.lanSecret,
-            protocolVersion = binding.protocolVersion,
-            utcEpochDay = utcEpochDay,
-        )
-        return LiveTransportRoutes(dependencies.buildLanRoute(config), relayRoute)
+        val bluetooth = bluetoothBinding?.let { binding ->
+            dependencies.buildBluetoothRoute(
+                LiveBluetoothRouteConfig(
+                    localDeviceId = identity.deviceId,
+                    peerDeviceId = peer.deviceId,
+                    localSigningKey = identity.signingKey,
+                    peerSigningKey = peer.signPubkey,
+                    associationId = binding.associationId,
+                    protocolVersion = binding.protocolVersion,
+                ),
+            )
+        }
+        return LiveTransportRoutes(lan, bluetooth, relayRoute)
+    }
+
+    private suspend fun <T> loadTrustOrNull(load: suspend () -> T?): T? = try {
+        load()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Throwable) {
+        null
     }
 
     companion object {
@@ -198,9 +266,11 @@ class LiveTransportRoutesFactory(
             outbox: OutboxRepository,
             dispatch: suspend (String) -> InboundDispatchResult,
             onLanEvent: suspend (LanTransportEvent) -> Unit = {},
+            onBluetoothEvent: suspend (DirectDeliveryEvent) -> Unit = {},
         ): LiveTransportRoutesFactory {
             val appContext = context.applicationContext
             val attemptFactory = DefaultLiveLanAttemptFactory(AndroidLiveLanPlatform(appContext))
+            val bluetoothStore = BluetoothBindingStore.forContext(appContext)
             return LiveTransportRoutesFactory(
                 LiveTransportRouteDependencies(
                     loadPeer = { PeerStore.load(appContext) },
@@ -209,6 +279,35 @@ class LiveTransportRoutesFactory(
                         val deviceId = DeviceIdentity.getOrCreate(appContext)
                         val signingKeys = CryptoStore.loadOrGenerate(appContext).second
                         LiveLocalRouteIdentity(deviceId, signingKeys.secretKey)
+                    },
+                    loadValidatedBluetoothBinding = { peer ->
+                        if (!bluetoothStore.routeEnabled() || !BluetoothAssociationPolicy.permissionsGranted(appContext)) {
+                            null
+                        } else {
+                            bluetoothStore.loadValidated(peer, BluetoothAssociations.currentIds(appContext))
+                        }
+                    },
+                    buildBluetoothRoute = { config ->
+                        LiveBluetoothTransportRoute(
+                            config,
+                            linkFactory = AndroidLiveBluetoothLinkFactory(appContext),
+                            sessionFactory = { wire ->
+                                BluetoothRoute(
+                                    connect = { wire },
+                                    outbox = outbox,
+                                    dispatch = dispatch,
+                                    onEvent = onBluetoothEvent,
+                                ).open()
+                            },
+                            allowAttempt = {
+                                val peer = PeerStore.load(appContext)
+                                peer != null &&
+                                    bluetoothStore.routeEnabled() &&
+                                    BluetoothAssociationPolicy.permissionsGranted(appContext) &&
+                                    bluetoothStore.loadValidated(peer, BluetoothAssociations.currentIds(appContext))
+                                        ?.associationId == config.associationId
+                            },
+                        )
                     },
                     buildLanRoute = { config ->
                         LiveLanTransportRoute(
@@ -538,6 +637,81 @@ private class LiveRelayRouteSession(
         if (!stopped.compareAndSet(false, true)) return
         job.cancelAndJoin()
         closed.complete(code)
+    }
+}
+
+/** Resolves the associated device into radio operations for one attempt. The address never leaves it. */
+fun interface LiveBluetoothLinkFactory {
+    suspend fun open(config: LiveBluetoothRouteConfig): BluetoothLinkProvider
+}
+
+/**
+ * A fresh connector is created for every coordinator open. [allowAttempt] re-validates the
+ * binding, enablement and permissions each time, so a route disabled or disassociated after
+ * the transport generation started stops opening without a restart.
+ */
+class LiveBluetoothTransportRoute(
+    private val config: LiveBluetoothRouteConfig,
+    private val linkFactory: LiveBluetoothLinkFactory,
+    private val sessionFactory: suspend (AuthenticatedBluetoothWire) -> AuthenticatedRouteSession,
+    private val allowAttempt: suspend () -> Boolean = { true },
+    private val connect: suspend (LiveBluetoothRouteConfig, BluetoothLinkProvider) -> AuthenticatedBluetoothWire =
+        ::signedConnect,
+) : TransportRoute {
+    override val kind: RouteKind = RouteKind.BLUETOOTH
+
+    override suspend fun open(): AuthenticatedRouteSession {
+        check(allowAttempt()) { "bluetooth_route_unavailable" }
+        val links = linkFactory.open(config)
+        val wire = try {
+            connect(config, links)
+        } catch (error: Throwable) {
+            val code = when (error) {
+                is BluetoothConnectException -> error.failure.code
+                is BluetoothHandshakeException -> error.failure.code
+                is BluetoothAssociationException -> error.failure.code
+                else -> "bluetooth_open_failed"
+            }
+            runCatching { Log.w("Twinotify", code) }
+            throw error
+        }
+        try {
+            return sessionFactory(wire)
+        } catch (error: Throwable) {
+            wire.close()
+            throw error
+        }
+    }
+
+    private companion object {
+        suspend fun signedConnect(
+            config: LiveBluetoothRouteConfig,
+            links: BluetoothLinkProvider,
+        ): AuthenticatedBluetoothWire = BluetoothConnector(
+            localDeviceId = config.localDeviceId,
+            peerDeviceId = config.peerDeviceId,
+            links = links,
+            authenticator = SignedBluetoothWireAuthenticator { role: BluetoothRole -> config.handshake(role) },
+        ).connect()
+    }
+}
+
+/** Looks the stored association up in CDM on every attempt; a removed association opens nothing. */
+private class AndroidLiveBluetoothLinkFactory(
+    private val context: Context,
+) : LiveBluetoothLinkFactory {
+    override suspend fun open(config: LiveBluetoothRouteConfig): BluetoothLinkProvider {
+        val manager = BluetoothAssociations.companionDeviceManager(context)
+            ?: throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
+        val association = manager.myAssociations.firstOrNull { it.id == config.associationId }
+            ?: throw BluetoothAssociationException(BluetoothAssociationFailure.ASSOCIATION_FAILED)
+        // The address is read for this attempt only; it is compared by the connector, never stored.
+        val address = association.deviceMacAddress?.toString()?.uppercase()
+            ?: throw BluetoothAssociationException(BluetoothAssociationFailure.ASSOCIATION_FAILED)
+        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
+            ?.takeIf { it.isEnabled }
+            ?: throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
+        return AndroidBluetoothLinkProvider(context, adapter, adapter.getRemoteDevice(address))
     }
 }
 

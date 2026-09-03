@@ -13,7 +13,7 @@ export type ChangeEventPayload = {
 };
 
 /** Which route is carrying delivery. `none` means no route is authenticated. */
-export type DeliveryRoute = 'lan' | 'relay' | 'none';
+export type DeliveryRoute = 'lan' | 'bluetooth' | 'relay' | 'none';
 
 export type DeliveryRoutePhase =
   | 'idle'

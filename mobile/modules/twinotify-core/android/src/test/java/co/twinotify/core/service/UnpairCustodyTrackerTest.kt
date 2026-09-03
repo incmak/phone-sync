@@ -66,6 +66,18 @@ class UnpairCustodyTrackerTest {
     }
 
     @Test
+    fun bluetoothCustodyReleasesTheReservedUnpairMessage() = runTest {
+        val tracker = UnpairCustodyTracker()
+        val reservation = tracker.reserve("unpair")
+
+        assertFalse(tracker.accept("other", CustodyRoute.BLUETOOTH))
+        assertTrue(tracker.accept("unpair", CustodyRoute.BLUETOOTH))
+
+        assertEquals(CustodyRoute.BLUETOOTH, reservation.await(5_000L))
+        assertEquals(0, tracker.pendingCount())
+    }
+
+    @Test
     fun closedReservationRemovesItsOwnEntry() = runTest {
         val tracker = UnpairCustodyTracker()
         val reservation = tracker.reserve("message")

@@ -25,8 +25,12 @@ function itemName(total: number, kind: RouteStatus['user_content_kind']): string
   return `${total} ${noun}${total === 1 ? '' : 's'}`;
 }
 
+function isDirect(route: RouteStatus['route']): boolean {
+  return route === 'lan' || route === 'bluetooth';
+}
+
 function evidenceLine(status: RouteStatus): DeliveryPresentation['peerLine'] {
-  if (status.route === 'lan' && status.phase === 'authenticated') return 'Reachable now';
+  if (isDirect(status.route) && status.phase === 'authenticated') return 'Reachable now';
   if (status.peer_evidence === 'recent') return 'Checked in recently';
   return 'Not confirmed online';
 }
@@ -81,6 +85,16 @@ export function presentRoute(status: RouteStatus, paired: boolean, enabled: bool
       state: 'direct',
       label: 'Direct on Wi-Fi',
       explanation: 'Your phones are talking directly over Wi-Fi.',
+      queuedCount,
+      peerLine: 'Reachable now',
+    };
+  }
+
+  if (status.phase === 'authenticated' && status.route === 'bluetooth') {
+    return {
+      state: 'direct',
+      label: 'Direct Bluetooth',
+      explanation: 'Your phones are talking directly over Bluetooth.',
       queuedCount,
       peerLine: 'Reachable now',
     };

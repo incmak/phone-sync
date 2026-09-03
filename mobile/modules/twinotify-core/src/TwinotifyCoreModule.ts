@@ -49,7 +49,7 @@ export type RecentActivityItem = {
   direction: 'SENT' | 'RECEIVED';
   kind: 'NOTIFICATION' | 'DISMISSAL' | 'CALL';
   status: 'QUEUED' | 'APPLIED' | 'DELIVERED' | 'DISMISSED' | 'EXPIRED' | 'FAILED';
-  route: 'LAN' | 'RELAY' | null;
+  route: 'LAN' | 'BLUETOOTH' | 'RELAY' | null;
   occurredAt: number;
 };
 export type HistoryItem = RecentActivityItem & {

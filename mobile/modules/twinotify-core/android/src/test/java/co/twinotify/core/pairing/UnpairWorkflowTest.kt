@@ -382,4 +382,78 @@ class UnpairWorkflowTest {
 
         assertEquals(listOf("lan-identity-delete", "application-key-rotation"), steps)
     }
+
+    @Test
+    fun fullWipeClearsEveryDirectBindingBeforeRotatingApplicationKeys() = runBlocking {
+        val steps = mutableListOf<String>()
+
+        UnpairWipeOrder(
+            clearLanBinding = { steps += "lan-binding-clear" },
+            deleteLanIdentity = { steps += "lan-identity-delete" },
+            clearBluetoothBinding = { steps += "bluetooth-binding-clear" },
+        ).beforeApplicationKeyRotation {
+            steps += "application-key-rotation"
+        }
+
+        assertEquals(
+            listOf("lan-binding-clear", "lan-identity-delete", "bluetooth-binding-clear", "application-key-rotation"),
+            steps,
+        )
+    }
+
+    @Test
+    fun bluetoothUnpairClearsBindingAndDisassociatesOnlyTheStoredId() = runBlocking {
+        val disassociated = mutableListOf<Int>()
+        val reported = mutableListOf<String>()
+        var clears = 0
+
+        BluetoothUnpairOps.clearBindingAndDisassociate(
+            storedAssociationId = { 41 },
+            clearBinding = { clears += 1 },
+            disassociate = { id -> disassociated += id; true },
+            report = { reported += it },
+        )
+        BluetoothUnpairOps.clearBindingAndDisassociate(
+            storedAssociationId = { null },
+            clearBinding = { clears += 1 },
+            disassociate = { id -> disassociated += id; true },
+            report = { reported += it },
+        )
+
+        assertEquals(2, clears)
+        assertEquals(listOf(41), disassociated)
+        assertTrue(reported.isEmpty())
+    }
+
+    @Test
+    fun bluetoothDisassociationFailureIsReportedAsBoundedCodeWithoutBlockingTheWipe() = runBlocking {
+        val reported = mutableListOf<String>()
+        var clears = 0
+
+        BluetoothUnpairOps.clearBindingAndDisassociate(
+            storedAssociationId = { 41 },
+            clearBinding = { clears += 1 },
+            disassociate = { false },
+            report = { reported += it },
+        )
+        BluetoothUnpairOps.clearBindingAndDisassociate(
+            storedAssociationId = { 42 },
+            clearBinding = { clears += 1 },
+            disassociate = { throw IllegalStateException("cdm unavailable") },
+            report = { reported += it },
+        )
+        BluetoothUnpairOps.clearBindingAndDisassociate(
+            storedAssociationId = { throw IllegalStateException("store unreadable") },
+            clearBinding = { clears += 1 },
+            disassociate = { error("no id to remove") },
+            report = { reported += it },
+        )
+
+        assertEquals(3, clears, "a disassociation failure must not keep the local binding")
+        assertEquals(
+            listOf(BLUETOOTH_DISASSOCIATION_REQUIRED, BLUETOOTH_DISASSOCIATION_REQUIRED, BLUETOOTH_DISASSOCIATION_REQUIRED),
+            reported,
+        )
+        assertEquals("bluetooth_disassociation_required", BLUETOOTH_DISASSOCIATION_REQUIRED)
+    }
 }

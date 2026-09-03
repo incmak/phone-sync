@@ -1,5 +1,6 @@
 package co.twinotify.core.service
 
+import co.twinotify.core.direct.DirectDeliveryEvent
 import co.twinotify.core.lan.AuthenticatedLanConnection
 import co.twinotify.core.lan.LanCandidate
 import co.twinotify.core.lan.LanConnectionRole
@@ -47,10 +48,12 @@ class LiveTransportRoutesTest {
             co.twinotify.core.lan.LanTransportEvent.PeerAccepted("lan", "peer.receipt"),
         )
         recordRelayCustodyObservation(TransportEvent.RelayAccepted("stale", 2L, null))
+        recordBluetoothCustodyObservation(DirectDeliveryEvent.PeerAccepted("bt", "notif.post"))
 
         val snapshot = ProductObservationTracker.snapshot()
         assertEquals(1L, snapshot.custodyCounts.getValue("relay").getValue("unpair"))
         assertEquals(1L, snapshot.custodyCounts.getValue("lan").getValue("peer_receipt"))
+        assertEquals(1L, snapshot.custodyCounts.getValue("bluetooth").getValue("notif_post"))
         assertEquals(0L, snapshot.custodyCounts.getValue("relay").getValue("notif_post"))
     }
 
@@ -96,6 +99,7 @@ class LiveTransportRoutesTest {
         val tracker = UnpairCustodyTracker()
         val relay = tracker.reserve("relay-unpair")
         val lan = tracker.reserve("lan-unpair")
+        val bluetooth = tracker.reserve("bluetooth-unpair")
 
         assertFalse(acceptRelayUnpairCustody(TransportEvent.RelayAccepted("stale", 1L), tracker))
         assertTrue(acceptRelayUnpairCustody(TransportEvent.RelayAccepted("relay-unpair", 2L), tracker))
@@ -105,10 +109,125 @@ class LiveTransportRoutesTest {
                 tracker,
             ),
         )
+        assertFalse(acceptBluetoothUnpairCustody(DirectDeliveryEvent.PeerAccepted("stale", null), tracker))
+        assertTrue(acceptBluetoothUnpairCustody(DirectDeliveryEvent.PeerAccepted("bluetooth-unpair", "unpair"), tracker))
 
         assertEquals(CustodyRoute.RELAY, relay.await(5_000L))
         assertEquals(CustodyRoute.LAN, lan.await(5_000L))
+        assertEquals(CustodyRoute.BLUETOOTH, bluetooth.await(5_000L))
         assertEquals(0, tracker.pendingCount())
+    }
+
+    @Test
+    fun validatedBluetoothBindingBuildsBluetoothRouteIndependentlyOfLan() = runTest {
+        val expectedBluetooth = route(RouteKind.BLUETOOTH)
+        val relay = route(RouteKind.RELAY)
+        var config: LiveBluetoothRouteConfig? = null
+        val routes = LiveTransportRoutesFactory(
+            LiveTransportRouteDependencies(
+                loadPeer = { PEER },
+                loadValidatedBinding = { throw IllegalStateException("sealed record invalid") },
+                loadLocalIdentity = { LiveLocalRouteIdentity(LOCAL, LOCAL_SIGNING_KEY) },
+                buildLanRoute = { error("invalid LAN trust must not build LAN") },
+                buildRelayRoute = { relay },
+                loadValidatedBluetoothBinding = { peer -> BLUETOOTH_BINDING.takeIf { it.peerDeviceId == peer.deviceId } },
+                buildBluetoothRoute = { built -> config = built; expectedBluetooth },
+            ),
+        ).create(relay = LiveRelayRouteConfig(events = { emptyFlow() }), utcEpochDay = DAY)
+
+        assertNull(routes.lan, "a corrupt LAN binding must not disable Bluetooth")
+        assertSame(expectedBluetooth, routes.bluetooth)
+        assertSame(relay, routes.relay)
+        assertEquals(BLUETOOTH_BINDING.associationId, config?.associationId)
+        assertEquals(LOCAL, config?.localDeviceId)
+        assertEquals(PEER.deviceId, config?.peerDeviceId)
+        assertContentEquals(LOCAL_SIGNING_KEY, config?.localSigningKey)
+        assertContentEquals(PEER.signPubkey, config?.peerSigningKey)
+        assertEquals(BLUETOOTH_BINDING.protocolVersion, config?.protocolVersion)
+    }
+
+    @Test
+    fun staleBluetoothAssociationDisablesOnlyBluetoothAndPreservesLanAndRelay() = runTest {
+        val expectedLan = route(RouteKind.LAN)
+        val relay = route(RouteKind.RELAY)
+        for (bluetoothLoader in listOf<suspend (PeerRecord) -> co.twinotify.core.bluetooth.BluetoothBinding?>(
+            { null },
+            { throw IllegalStateException("association store unavailable") },
+        )) {
+            val routes = LiveTransportRoutesFactory(
+                LiveTransportRouteDependencies(
+                    loadPeer = { PEER },
+                    loadValidatedBinding = { BINDING },
+                    loadLocalIdentity = { LiveLocalRouteIdentity(LOCAL, LOCAL_SIGNING_KEY) },
+                    buildLanRoute = { expectedLan },
+                    buildRelayRoute = { relay },
+                    loadValidatedBluetoothBinding = bluetoothLoader,
+                    buildBluetoothRoute = { error("stale association must not build Bluetooth") },
+                ),
+            ).create(relay = LiveRelayRouteConfig(events = { emptyFlow() }), utcEpochDay = DAY)
+
+            assertSame(expectedLan, routes.lan)
+            assertNull(routes.bluetooth)
+            assertSame(relay, routes.relay)
+        }
+    }
+
+    @Test
+    fun noDirectBindingAtAllSkipsIdentityAndKeepsRelay() = runTest {
+        val relay = route(RouteKind.RELAY)
+        var identityLoads = 0
+        val routes = LiveTransportRoutesFactory(
+            LiveTransportRouteDependencies(
+                loadPeer = { PEER },
+                loadValidatedBinding = { null },
+                loadLocalIdentity = { identityLoads++; LiveLocalRouteIdentity(LOCAL, LOCAL_SIGNING_KEY) },
+                buildLanRoute = { error("no LAN trust") },
+                buildRelayRoute = { relay },
+                loadValidatedBluetoothBinding = { null },
+                buildBluetoothRoute = { error("no Bluetooth trust") },
+            ),
+        ).create(relay = LiveRelayRouteConfig(events = { emptyFlow() }), utcEpochDay = DAY)
+
+        assertNull(routes.lan)
+        assertNull(routes.bluetooth)
+        assertSame(relay, routes.relay)
+        assertEquals(0, identityLoads)
+    }
+
+    @Test
+    fun bluetoothRouteRefusesToOpenWhenTheBindingNoLongerValidates() = runTest {
+        var linkOpens = 0
+        val route = LiveBluetoothTransportRoute(
+            bluetoothConfig(),
+            linkFactory = { linkOpens++; error("links must not open") },
+            sessionFactory = { error("nothing to authenticate") },
+            allowAttempt = { false },
+        )
+
+        assertFailsWith<IllegalStateException> { route.open() }
+        assertEquals(0, linkOpens)
+    }
+
+    @Test
+    fun bluetoothRouteRevalidatesAndBuildsOneConnectorPerOpen() = runTest {
+        val validations = mutableListOf<Boolean>()
+        val links = mutableListOf<LiveBluetoothRouteConfig>()
+        val wires = mutableListOf<co.twinotify.core.bluetooth.AuthenticatedBluetoothWire>()
+        val route = LiveBluetoothTransportRoute(
+            bluetoothConfig(),
+            linkFactory = { config -> links += config; NoopLinks },
+            sessionFactory = { wire -> wires += wire; RecordingSession(RouteKind.BLUETOOTH) },
+            allowAttempt = { validations += true; true },
+            connect = { config, _ -> authenticatedWire(config.peerDeviceId) },
+        )
+
+        assertEquals(RouteKind.BLUETOOTH, route.kind)
+        route.open().close("first")
+        route.open().close("second")
+
+        assertEquals(listOf(true, true), validations)
+        assertEquals(2, links.size)
+        assertEquals(listOf(PEER.deviceId, PEER.deviceId), wires.map { it.peerDeviceId })
     }
 
     @Test
@@ -423,6 +542,35 @@ class LiveTransportRoutesTest {
         utcEpochDay = DAY,
     )
 
+    private fun bluetoothConfig() = LiveBluetoothRouteConfig(
+        localDeviceId = LOCAL,
+        peerDeviceId = PEER.deviceId,
+        localSigningKey = LOCAL_SIGNING_KEY,
+        peerSigningKey = PEER.signPubkey,
+        associationId = BLUETOOTH_BINDING.associationId,
+        protocolVersion = BLUETOOTH_BINDING.protocolVersion,
+    )
+
+    private fun authenticatedWire(peerDeviceId: String) = co.twinotify.core.bluetooth.AuthenticatedBluetoothWire(
+        peerDeviceId,
+        ByteArray(32),
+        co.twinotify.core.bluetooth.BluetoothSocketWire(NoopSocket),
+    )
+
+    private object NoopSocket : co.twinotify.core.bluetooth.BluetoothStreamSocket {
+        override val remoteAddress: String = "AA:BB:CC:DD:EE:FF"
+        override val inputStream = java.io.ByteArrayInputStream(ByteArray(0))
+        override val outputStream = java.io.ByteArrayOutputStream()
+        override fun close() = Unit
+    }
+
+    private object NoopLinks : co.twinotify.core.bluetooth.BluetoothLinkProvider {
+        override val peerAddress: String = "AA:BB:CC:DD:EE:FF"
+        override suspend fun cancelDiscovery() = Unit
+        override suspend fun listen(): co.twinotify.core.bluetooth.BluetoothLinkListener = error("not listening")
+        override suspend fun connect(): co.twinotify.core.bluetooth.BluetoothStreamSocket = error("not dialing")
+    }
+
     private fun route(kind: RouteKind) = object : TransportRoute {
         override val kind = kind
         override suspend fun open(): AuthenticatedRouteSession = error("not opened")
@@ -547,5 +695,10 @@ class LiveTransportRoutesTest {
             "binding",
         )
         val BINDING = LanBinding(ByteArray(32) { 5 }, ByteArray(32) { 6 }, 1, 123)
+        val BLUETOOTH_BINDING = co.twinotify.core.bluetooth.BluetoothBinding(
+            associationId = 41,
+            peerDeviceId = PEER.deviceId,
+            peerSigningKeySha256 = co.twinotify.core.bluetooth.BluetoothBinding.signingKeyDigest(PEER.signPubkey),
+        )
     }
 }

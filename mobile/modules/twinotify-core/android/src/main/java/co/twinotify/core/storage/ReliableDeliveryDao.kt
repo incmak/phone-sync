@@ -1645,7 +1645,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         acceptedAt: Long,
         retryAt: Long,
     ): CustodyAcceptanceResult {
-        require(route == "LAN" || route == "RELAY")
+        require(route == "LAN" || route == "BLUETOOTH" || route == "RELAY")
         val row = outboundMessage(msgId) ?: return CustodyAcceptanceResult.Missing
         if (!row.requiresPeerReceipt) {
             return when (acceptReceipt(msgId)) {

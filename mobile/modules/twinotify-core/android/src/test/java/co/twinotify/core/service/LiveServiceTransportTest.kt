@@ -48,7 +48,7 @@ class LiveServiceTransportTest {
             outbox = OutboxRepository(EmptyStore()),
             loadRoutes = {
                 routeLoads += 1
-                LiveTransportRoutes(lan = lan, relay = null)
+                LiveTransportRoutes(lan = lan, bluetooth = null, relay = null)
             },
             queuedCount = { 0 },
             retryRequests = SyncServiceStatus.routeRetryRequested,
@@ -73,7 +73,7 @@ class LiveServiceTransportTest {
         val trace = mutableListOf<String>()
         val loop = LiveServiceTransportLoop(
             outbox = OutboxRepository(EmptyStore()),
-            loadRoutes = { LiveTransportRoutes(lan = FakeRoute(RouteKind.LAN), relay = null) },
+            loadRoutes = { LiveTransportRoutes(lan = FakeRoute(RouteKind.LAN), bluetooth = null, relay = null) },
             queuedCount = { 0 },
             publishHealth = {},
             trace = trace::add,
@@ -101,7 +101,7 @@ class LiveServiceTransportTest {
         val relay = FakeRoute(RouteKind.RELAY)
         val loop = LiveServiceTransportLoop(
             outbox = OutboxRepository(EmptyStore()),
-            loadRoutes = { LiveTransportRoutes(lan = lan, relay = relay) },
+            loadRoutes = { LiveTransportRoutes(lan = lan, bluetooth = null, relay = relay) },
             queuedCount = { 0 },
             publishHealth = {},
         )
@@ -122,7 +122,7 @@ class LiveServiceTransportTest {
         val lan = FakeRoute(RouteKind.LAN)
         val loop = LiveServiceTransportLoop(
             outbox = OutboxRepository(EmptyStore()),
-            loadRoutes = { LiveTransportRoutes(lan = lan, relay = null) },
+            loadRoutes = { LiveTransportRoutes(lan = lan, bluetooth = null, relay = null) },
             queuedCount = { 0 },
             publishHealth = {},
         )
@@ -153,12 +153,46 @@ class LiveServiceTransportTest {
     }
 
     @Test
+    fun serviceLoopGrantsBluetoothAndReportsItAsDirectPeerEvidence() = runTest {
+        val bluetooth = FakeRoute(RouteKind.BLUETOOTH)
+        val statuses = mutableListOf<SyncRouteStatus>()
+        val loop = LiveServiceTransportLoop(
+            outbox = OutboxRepository(EmptyStore()),
+            loadRoutes = { LiveTransportRoutes(lan = null, bluetooth = bluetooth, relay = null) },
+            queuedCount = { 0 },
+            publishHealth = { statuses += it.toSyncRouteStatus() },
+        )
+
+        val job = launch { loop.run(preferLan = true) }
+        runCurrent()
+
+        assertEquals(1, bluetooth.opens)
+        val status = statuses.last()
+        assertEquals(SyncRouteStatus(RouteKind.BLUETOOTH, RoutePhase.AUTHENTICATED, 0), status)
+        assertEquals(SyncState.CONNECTED, status.toSyncState())
+        val public = status.toPublicMap()
+        assertEquals("bluetooth", public["route"])
+        @Suppress("UNCHECKED_CAST")
+        val presentation = public["presentation"] as Map<String, Any?>
+        assertEquals("direct", presentation["state"])
+        assertEquals("Direct Bluetooth", presentation["label"])
+        assertEquals("Reachable now", presentation["peer_line"])
+        val empty = co.twinotify.core.storage.DeliveryQueueSnapshot(0, 0, 0, 0, 0, 0, co.twinotify.core.storage.UserContentKind.NOTIFICATIONS)
+        assertEquals(
+            PeerEvidence.DIRECT,
+            DeliveryStatusModel.resolve(status, empty, DeliveryConditions(), PeerEvidence.STALE).peerEvidence,
+        )
+        job.cancelAndJoin()
+        assertEquals(1, bluetooth.session().closeCount)
+    }
+
+    @Test
     fun retryRequestIsRoutedToTheLiveCoordinator() = runTest {
         val retries = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
         val lan = FakeRoute(RouteKind.LAN, failOpen = true)
         val loop = LiveServiceTransportLoop(
             outbox = OutboxRepository(EmptyStore()),
-            loadRoutes = { LiveTransportRoutes(lan = lan, relay = null) },
+            loadRoutes = { LiveTransportRoutes(lan = lan, bluetooth = null, relay = null) },
             queuedCount = { 0 },
             retryRequests = retries,
             publishHealth = {},

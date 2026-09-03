@@ -211,6 +211,7 @@ internal object ProductObservationTracker {
     )
     private val custody = linkedMapOf(
         "lan" to EVENT_KEYS.associateWith { AtomicLong() },
+        "bluetooth" to EVENT_KEYS.associateWith { AtomicLong() },
         "relay" to EVENT_KEYS.associateWith { AtomicLong() },
     )
     private val authenticatedInbound = EVENT_KEYS.associateWith { AtomicLong() }
@@ -327,6 +328,17 @@ internal fun recordLanCustodyObservation(
     ProductObservationTracker.recordCustody("lan", event.eventType)
 }
 
+internal fun acceptBluetoothUnpairCustody(
+    event: co.twinotify.core.direct.DirectDeliveryEvent.PeerAccepted,
+    tracker: UnpairCustodyTracker,
+): Boolean = tracker.accept(event.msgId, CustodyRoute.BLUETOOTH)
+
+internal fun recordBluetoothCustodyObservation(
+    event: co.twinotify.core.direct.DirectDeliveryEvent.PeerAccepted,
+) {
+    ProductObservationTracker.recordCustody("bluetooth", event.eventType)
+}
+
 /** Per-route-generation feature gate shared by relay authentication and LAN probe scheduling. */
 internal class RelayPeerFeatureSession(
     private val ensureBootstrap: suspend () -> DeliveryConditions,
@@ -391,7 +403,9 @@ internal class LiveServiceTransportLoop(
             outbox = outbox,
             lan = routes.lan,
             relay = routes.relay,
-            preferLan = preferLan,
+            bluetooth = routes.bluetooth,
+            // The durable "prefer LAN" setting now ranks every direct route ahead of relay.
+            preferDirect = preferLan,
             queuedCount = queuedCount,
             retryRequests = retryRequests,
             directAttemptRequests = directAttemptRequests,
@@ -1017,10 +1031,15 @@ class SyncService : Service(), CallMirrorForegroundHost {
             activeInstance?.routePreferenceRestarter?.forceRestart()
         }
 
-        /** Called only after the Bluetooth route preference or binding is durable. */
+        /**
+         * Called only after the Bluetooth route preference or binding is durable. Routes are
+         * loaded once per transport generation, so the change also restarts the coordinator
+         * through the same serialized owner a preference toggle uses.
+         */
         fun notifyBluetoothRouteChanged() {
             val service = activeInstance ?: return
             service.scope.launch { service.refreshBluetoothForegroundType() }
+            service.routePreferenceRestarter.forceRestart()
         }
 
         /** Existing sessions poll the durable outbox; a dead service is safely re-evaluated. */
@@ -1548,6 +1567,16 @@ class SyncService : Service(), CallMirrorForegroundHost {
                     acceptLanUnpairCustody(event, unpairCustodyTracker)
                     updateQueueHealthNow()
                 },
+                onBluetoothEvent = { event ->
+                    if (event is co.twinotify.core.direct.DirectDeliveryEvent.Closed) {
+                        runCatching { android.util.Log.w("Twinotify", event.code) }
+                    }
+                    if (event is co.twinotify.core.direct.DirectDeliveryEvent.PeerAccepted) {
+                        recordBluetoothCustodyObservation(event)
+                        acceptBluetoothUnpairCustody(event, unpairCustodyTracker)
+                    }
+                    updateQueueHealthNow()
+                },
             )
             LiveServiceTransportLoop(
                 outbox = outbox,
@@ -1569,6 +1598,10 @@ class SyncService : Service(), CallMirrorForegroundHost {
                     val code = when (error) {
                         is co.twinotify.core.lan.LanConnectionException -> error.failure.code
                         is co.twinotify.core.lan.LanFrameException -> error.failure.code
+                        is co.twinotify.core.bluetooth.BluetoothConnectException -> error.failure.code
+                        is co.twinotify.core.bluetooth.BluetoothWireException -> error.failure.code
+                        is co.twinotify.core.bluetooth.BluetoothFrameException -> error.failure.code
+                        is co.twinotify.core.bluetooth.BluetoothHandshakeException -> error.failure.code
                         else -> error.javaClass.simpleName.ifBlank { "route_failure" }
                     }
                     runCatching { android.util.Log.w("Twinotify", code) }

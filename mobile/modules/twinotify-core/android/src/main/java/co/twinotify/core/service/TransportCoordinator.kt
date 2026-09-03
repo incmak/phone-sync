@@ -22,7 +22,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-enum class RouteKind { LAN, RELAY, NONE }
+enum class RouteKind {
+    LAN,
+    BLUETOOTH,
+    RELAY,
+    NONE;
+
+    /** A route whose session talks to the peer without the relay. */
+    val isDirect: Boolean get() = this == LAN || this == BLUETOOTH
+}
 
 enum class RoutePhase { IDLE, CONNECTING, AUTHENTICATED, RECONNECTING }
 
@@ -77,8 +85,10 @@ data class LanRetryPolicy(
  *
  * Exactly one session is granted at a time and only that session's pump reads
  * [OutboxRepository.sendable], so two routes can never drain the outbox together.
- * A direct LAN session is preferred whenever one can be authenticated; relay
- * carries delivery whenever it cannot.
+ * Direct routes are preferred in the order given (LAN, then Bluetooth) whenever one
+ * can be authenticated; relay carries delivery whenever none can. A candidate may
+ * authenticate while another session owns the lease, but it is granted only after
+ * that owner's close has fully joined.
  *
  * Reconnect is bounded, and its backoff resets only after a session has stayed
  * authenticated for [STABILITY_WINDOW_MS]. A route that authenticates and dies
@@ -86,17 +96,18 @@ data class LanRetryPolicy(
  */
 class TransportCoordinator(
     private val outbox: OutboxRepository,
-    private val lan: TransportRoute?,
+    lan: TransportRoute?,
     private val relay: TransportRoute?,
+    bluetooth: TransportRoute? = null,
     /** Chooses route order only; the coordinator still grants exactly one session. */
-    private val preferLan: Boolean = true,
+    private val preferDirect: Boolean = true,
     private val queuedCount: suspend () -> Int = { 0 },
     private val retryPolicy: RetryPolicy = RetryPolicy(),
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val idlePollMs: Long = 1_000L,
     /** Emits when a user asks to reconnect now, cutting the current backoff short. */
     private val retryRequests: Flow<Unit> = emptyFlow(),
-    /** Authenticated peer requests that both phones overlap one bounded LAN attempt. */
+    /** Authenticated peer requests that both phones overlap one bounded direct attempt. */
     private val directAttemptRequests: Flow<Unit> = emptyFlow(),
     private val relayProbeScheduler: RelayProbeScheduler = RelayProbeScheduler {},
     private val lanRetryPolicy: LanRetryPolicy = LanRetryPolicy(),
@@ -104,6 +115,12 @@ class TransportCoordinator(
     private val directAttemptFloorMs: Long = 15_000L,
     private val onEstablishedFailure: (Throwable) -> Unit = {},
 ) {
+    /** Direct routes in preference order. LAN outranks Bluetooth. */
+    private val directRoutes: List<TransportRoute> = listOfNotNull(lan, bluetooth).also { routes ->
+        require(routes.map { it.kind }.distinct().size == routes.size) { "duplicate direct route kind" }
+        require(routes.all { it.kind.isDirect }) { "direct routes must be LAN or Bluetooth" }
+    }
+
     private val healthState = MutableStateFlow(RouteHealth())
     val health: StateFlow<RouteHealth> = healthState.asStateFlow()
 
@@ -112,14 +129,20 @@ class TransportCoordinator(
     var lastBackoffMs: Long = 0L
         private set
 
-    /** Last delay assigned only to a failed direct attempt. Relay reconnect is separate. */
+    /** Last delay assigned only to a failed LAN attempt. Relay reconnect is separate. */
     @Volatile
     var lastLanBackoffMs: Long = 0L
         private set
 
+    /** Last delay assigned only to a failed Bluetooth attempt. */
+    @Volatile
+    var lastBluetoothBackoffMs: Long = 0L
+        private set
+
     suspend fun run() {
-        if (preferLan && lan != null && relay != null) {
-            runLanPreferred(lan, relay)
+        val relayRoute = relay
+        if (preferDirect && directRoutes.isNotEmpty() && relayRoute != null) {
+            runDirectPreferred(relayRoute)
         } else {
             runStaticPreference()
         }
@@ -170,29 +193,23 @@ class TransportCoordinator(
     }
 
     /**
-     * LAN-preferred operation keeps relay delivery live while an ungranted LAN candidate
-     * authenticates. The candidate is granted only after relay close has fully joined.
+     * Direct-preferred operation keeps the current owner live while an ungranted candidate
+     * authenticates. Relay is the owner of last resort; a lower-priority direct owner keeps
+     * probing only the direct routes ranked above it. Each direct route has its own cooldown.
      */
-    private suspend fun runLanPreferred(lanRoute: TransportRoute, relayRoute: TransportRoute) {
-        val lanRetry = LanRetryState()
+    private suspend fun runDirectPreferred(relayRoute: TransportRoute) {
+        val retries = directRoutes.associateWith { DirectRetryState(it.kind) }
         var openRelayFirst = false
         var relayFailures = 0
         while (currentCoroutineContext().isActive) {
-            if (!openRelayFirst && clock() >= lanRetry.nextAttemptAt) {
-                publish(RouteKind.NONE, RoutePhase.CONNECTING)
-                val direct = openRoute(lanRoute)
-                lanRetry.lastAttemptAt = clock()
+            if (!openRelayFirst) {
+                val direct = openDueDirect(retries)
                 if (direct != null) {
-                    publish(RouteKind.LAN, RoutePhase.AUTHENTICATED)
-                    val authenticatedAt = clock()
-                    carryOwned(direct)
-                    recordLanSessionEnd(lanRetry, authenticatedAt)
-                    publish(RouteKind.NONE, RoutePhase.RECONNECTING)
-                    // Direct loss must never make relay wait behind the LAN cooldown.
+                    carryGrantedDirect(direct.route, direct.session, clock(), retries)
+                    // Direct loss must never make relay wait behind a direct cooldown.
                     openRelayFirst = true
                     continue
                 }
-                recordLanFailure(lanRetry)
             }
             openRelayFirst = false
 
@@ -207,32 +224,13 @@ class TransportCoordinator(
             relayFailures = 0
             publish(RouteKind.RELAY, RoutePhase.AUTHENTICATED)
 
-            val relayResult = try {
-                carryRelayUntilPromotion(relaySession, lanRoute, lanRetry)
-            } catch (error: Throwable) {
-                try {
-                    closeGrantedSession(relaySession, COORDINATOR_STOPPED)
-                } catch (closeError: Throwable) {
-                    if (error !is CancellationException) throw closeError
-                }
-                throw error
-            }
-            when (val result = relayResult) {
-                is RelayCarryResult.Promoted -> {
-                    try {
-                        closeGrantedSession(relaySession, ROUTE_PROMOTED_TO_LAN)
-                    } catch (error: Throwable) {
-                        withContext(NonCancellable) { result.session.close(LAN_PROMOTION_FAILED) }
-                        throw error
-                    }
-                    publish(RouteKind.LAN, RoutePhase.AUTHENTICATED)
-                    val authenticatedAt = result.authenticatedAt
-                    carryOwned(result.session)
-                    recordLanSessionEnd(lanRetry, authenticatedAt)
-                    publish(RouteKind.NONE, RoutePhase.RECONNECTING)
+            when (val result = carryOwnerUntilPromotion(relaySession, directRoutes, retries, probeTicker = true)) {
+                is CarryResult.Promoted -> {
+                    handOff(relaySession, result)
+                    carryGrantedDirect(result.route, result.session, result.authenticatedAt, retries)
                     openRelayFirst = true
                 }
-                is RelayCarryResult.Ended -> {
+                is CarryResult.Ended -> {
                     result.failure?.let {
                         if (it is CancellationException) throw it
                         runCatching { onEstablishedFailure(it) }
@@ -247,6 +245,100 @@ class TransportCoordinator(
                 }
             }
         }
+    }
+
+    /** Attempts direct routes in preference order, but only those whose cooldown is due. */
+    private suspend fun openDueDirect(retries: Map<TransportRoute, DirectRetryState>): Granted? {
+        for (route in directRoutes) {
+            val retry = retries.getValue(route)
+            if (clock() < retry.nextAttemptAt) continue
+            publish(RouteKind.NONE, RoutePhase.CONNECTING)
+            val session = openRoute(route)
+            retry.lastAttemptAt = clock()
+            if (session != null) return Granted(route, session)
+            recordDirectFailure(retry)
+        }
+        return null
+    }
+
+    /**
+     * Carries one granted direct session to its end. A lower-priority owner keeps probing the
+     * direct routes ranked above it and hands the lease over when one authenticates; the
+     * top-ranked owner has nothing to probe and is simply carried.
+     */
+    private suspend fun carryGrantedDirect(
+        grantedRoute: TransportRoute,
+        grantedSession: AuthenticatedRouteSession,
+        grantedAt: Long,
+        retries: Map<TransportRoute, DirectRetryState>,
+    ) {
+        var route = grantedRoute
+        var session = grantedSession
+        var authenticatedAt = grantedAt
+        while (true) {
+            publish(session.kind, RoutePhase.AUTHENTICATED)
+            val candidates = directRoutes.subList(0, directRoutes.indexOf(route))
+            if (candidates.isEmpty()) {
+                carryOwned(session)
+                recordDirectSessionEnd(retries.getValue(route), authenticatedAt)
+                publish(RouteKind.NONE, RoutePhase.RECONNECTING)
+                return
+            }
+            when (val result = carryOwnerUntilPromotion(session, candidates, retries, probeTicker = false)) {
+                is CarryResult.Promoted -> {
+                    handOff(session, result)
+                    route = result.route
+                    session = result.session
+                    authenticatedAt = result.authenticatedAt
+                }
+                is CarryResult.Ended -> {
+                    endDirectOwner(session, result.failure)
+                    recordDirectSessionEnd(retries.getValue(route), authenticatedAt)
+                    publish(RouteKind.NONE, RoutePhase.RECONNECTING)
+                    return
+                }
+            }
+        }
+    }
+
+    /** Runs the promotion loop, closing the owner if the loop itself throws. */
+    private suspend fun carryOwnerUntilPromotion(
+        owner: AuthenticatedRouteSession,
+        candidates: List<TransportRoute>,
+        retries: Map<TransportRoute, DirectRetryState>,
+        probeTicker: Boolean,
+    ): CarryResult = try {
+        carryUntilPromotion(owner, candidates, retries, probeTicker)
+    } catch (error: Throwable) {
+        try {
+            closeGrantedSession(owner, COORDINATOR_STOPPED)
+        } catch (closeError: Throwable) {
+            if (error !is CancellationException) throw closeError
+        }
+        throw error
+    }
+
+    /** Closes the current owner fully before the authenticated candidate may drain anything. */
+    private suspend fun handOff(owner: AuthenticatedRouteSession, result: CarryResult.Promoted) {
+        try {
+            closeGrantedSession(owner, promotedTo(result.session.kind))
+        } catch (error: Throwable) {
+            withContext(NonCancellable) { result.session.close(promotionFailed(result.session.kind)) }
+            throw error
+        }
+    }
+
+    private suspend fun endDirectOwner(session: AuthenticatedRouteSession, failure: Throwable?) {
+        val cancellation = failure as? CancellationException
+        if (failure != null && cancellation == null) runCatching { onEstablishedFailure(failure) }
+        try {
+            closeGrantedSession(session, if (failure == null) COORDINATOR_STOPPED else ESTABLISHED_ROUTE_FAILURE)
+        } catch (error: CancellationException) {
+            if (cancellation == null) throw error
+        } catch (_: Throwable) {
+            // The route is already terminal; its stable close code is sufficient.
+        }
+        cancellation?.let { throw it }
     }
 
     private suspend fun openRoute(route: TransportRoute): AuthenticatedRouteSession? = try {
@@ -279,38 +371,44 @@ class TransportCoordinator(
         }
     }
 
-    private suspend fun carryRelayUntilPromotion(
-        relaySession: AuthenticatedRouteSession,
-        lanRoute: TransportRoute,
-        retry: LanRetryState,
-    ): RelayCarryResult = coroutineScope {
+    /**
+     * Carries [owner] while probing [candidates] in preference order. A candidate that
+     * authenticates is returned ungranted: the caller must close the owner first. The
+     * owner's pump is joined before this returns, so the outbox never has two readers.
+     */
+    private suspend fun carryUntilPromotion(
+        owner: AuthenticatedRouteSession,
+        candidates: List<TransportRoute>,
+        retries: Map<TransportRoute, DirectRetryState>,
+        probeTicker: Boolean,
+    ): CarryResult = coroutineScope {
         val ownerContext = currentCoroutineContext()
-        val signals = Channel<RelaySignal>(Channel.UNLIMITED)
-        val relayWatcher = launch {
+        val signals = Channel<CarrySignal>(Channel.UNLIMITED)
+        val ownerWatcher = launch {
             val failure = try {
-                relaySession.awaitClosed()
+                owner.awaitClosed()
                 null
             } catch (error: Throwable) {
                 error
             }
-            signals.send(RelaySignal.RelayEnded(failure))
+            signals.send(CarrySignal.OwnerEnded(failure))
         }
-        val relayPump = if (relaySession.selfDraining) null else launch {
+        val ownerPump = if (owner.selfDraining) null else launch {
             val failure = try {
-                pump(relaySession)
+                pump(owner)
                 null
             } catch (error: Throwable) {
                 error
             }
-            signals.send(RelaySignal.RelayEnded(failure))
+            signals.send(CarrySignal.OwnerEnded(failure))
         }
         val retryWatcher = launch {
-            retryRequests.collect { signals.send(RelaySignal.UserRetry) }
+            retryRequests.collect { signals.send(CarrySignal.UserRetry) }
         }
         val directWatcher = launch {
-            directAttemptRequests.collect { signals.send(RelaySignal.DirectRequest) }
+            directAttemptRequests.collect { signals.send(CarrySignal.DirectRequest) }
         }
-        val probeTicker = launch {
+        val ticker = if (!probeTicker) null else launch {
             while (currentCoroutineContext().isActive) {
                 ensureProbeSafely(requestDirect = false)
                 delay(relayProbeIntervalMs)
@@ -320,50 +418,57 @@ class TransportCoordinator(
         var handedOff = false
         try {
             while (currentCoroutineContext().isActive) {
-                val waitMs = (retry.nextAttemptAt - clock()).coerceAtLeast(0L)
+                val nextDue = candidates.minOf { retries.getValue(it).nextAttemptAt }
+                val waitMs = (nextDue - clock()).coerceAtLeast(0L)
                 val timer = launch {
                     delay(waitMs)
-                    signals.send(RelaySignal.CooldownDue)
+                    signals.send(CarrySignal.CooldownDue)
                 }
                 val signal = try {
                     signals.receive()
                 } finally {
                     timer.cancelAndJoin()
                 }
-                when (signal) {
-                    is RelaySignal.RelayEnded -> return@coroutineScope RelayCarryResult.Ended(signal.failure)
-                    RelaySignal.DirectRequest -> {
-                        val sinceAttempt = retry.lastAttemptAt?.let { clock() - it } ?: Long.MAX_VALUE
-                        if (sinceAttempt < directAttemptFloorMs) continue
+                val now = clock()
+                val due = when (signal) {
+                    is CarrySignal.OwnerEnded -> return@coroutineScope CarryResult.Ended(signal.failure)
+                    // The anti-storm floor applies per route: a peer request never reopens a
+                    // route attempted within the last floor interval.
+                    CarrySignal.DirectRequest -> candidates.filter { route ->
+                        val sinceAttempt = retries.getValue(route).lastAttemptAt?.let { now - it } ?: Long.MAX_VALUE
+                        sinceAttempt >= directAttemptFloorMs
                     }
-                    RelaySignal.UserRetry,
-                    RelaySignal.CooldownDue,
-                    -> Unit
+                    CarrySignal.UserRetry -> candidates
+                    CarrySignal.CooldownDue -> candidates.filter { retries.getValue(it).nextAttemptAt <= now }
                 }
+                if (due.isEmpty()) continue
 
-                retry.lastAttemptAt = clock()
                 ensureProbeSafely(requestDirect = true)
-                candidate = openRoute(lanRoute)
-                if (candidate == null) {
-                    recordLanFailure(retry)
-                    continue
+                for (route in due) {
+                    val retry = retries.getValue(route)
+                    retry.lastAttemptAt = clock()
+                    candidate = openRoute(route)
+                    if (candidate == null) {
+                        recordDirectFailure(retry)
+                        continue
+                    }
+                    // If the owner ended during open(), the authenticated candidate still wins.
+                    handedOff = true
+                    return@coroutineScope CarryResult.Promoted(route, candidate, clock())
                 }
-
-                // If relay ended during open(), the authenticated candidate still wins.
-                handedOff = true
-                return@coroutineScope RelayCarryResult.Promoted(candidate, clock())
             }
-            RelayCarryResult.Ended(null)
+            CarryResult.Ended(null)
         } finally {
             withContext(NonCancellable) {
-                relayWatcher.cancelAndJoin()
-                relayPump?.cancelAndJoin()
+                ownerWatcher.cancelAndJoin()
+                ownerPump?.cancelAndJoin()
                 retryWatcher.cancelAndJoin()
                 directWatcher.cancelAndJoin()
-                probeTicker.cancelAndJoin()
+                ticker?.cancelAndJoin()
                 signals.close()
-                if (!handedOff || !ownerContext.isActive) {
-                    candidate?.close(LAN_PROMOTION_FAILED)
+                val unused = candidate
+                if (unused != null && (!handedOff || !ownerContext.isActive)) {
+                    unused.close(promotionFailed(unused.kind))
                 }
             }
         }
@@ -375,30 +480,39 @@ class TransportCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            // Probe persistence is retried on the next tick; relay delivery stays live.
+            // Probe persistence is retried on the next tick; delivery stays live.
         }
     }
 
-    private fun recordLanSessionEnd(retry: LanRetryState, authenticatedAt: Long) {
+    private fun recordDirectSessionEnd(retry: DirectRetryState, authenticatedAt: Long) {
         if (clock() - authenticatedAt >= STABILITY_WINDOW_MS) {
             retry.failures = 0
             retry.nextAttemptAt = clock()
-            lastLanBackoffMs = 0L
+            recordDirectBackoff(retry.kind, 0L)
         } else {
-            recordLanFailure(retry)
+            recordDirectFailure(retry)
         }
     }
 
-    private fun recordLanFailure(retry: LanRetryState) {
+    private fun recordDirectFailure(retry: DirectRetryState) {
         val wait = lanRetryPolicy.delay(retry.failures)
         retry.failures += 1
         retry.nextAttemptAt = clock() + wait
-        lastLanBackoffMs = wait
+        recordDirectBackoff(retry.kind, wait)
+    }
+
+    private fun recordDirectBackoff(kind: RouteKind, wait: Long) {
+        when (kind) {
+            RouteKind.LAN -> lastLanBackoffMs = wait
+            RouteKind.BLUETOOTH -> lastBluetoothBackoffMs = wait
+            RouteKind.RELAY, RouteKind.NONE -> Unit
+        }
     }
 
     /** Open routes in the configured order, granting at most one authenticated session. */
     private suspend fun openPreferred(): AuthenticatedRouteSession? {
-        val routes = if (preferLan) listOfNotNull(lan, relay) else listOfNotNull(relay, lan)
+        val relayRoute = listOfNotNull(relay)
+        val routes = if (preferDirect) directRoutes + relayRoute else relayRoute + directRoutes
         for (route in routes) {
             val session = try {
                 route.open()
@@ -504,31 +618,44 @@ class TransportCoordinator(
         private const val COORDINATOR_STOPPED = "coordinator_stopped"
         private const val ESTABLISHED_ROUTE_FAILURE = "established_route_failure"
         private const val ROUTE_PROMOTED_TO_LAN = "route_promoted_to_lan"
+        private const val ROUTE_PROMOTED_TO_BLUETOOTH = "route_promoted_to_bluetooth"
         private const val LAN_PROMOTION_FAILED = "lan_promotion_failed"
+        private const val BLUETOOTH_PROMOTION_FAILED = "bluetooth_promotion_failed"
 
         /** How long a session must stay authenticated before its route counts as healthy. */
         const val STABILITY_WINDOW_MS = 30_000L
+
+        private fun promotedTo(kind: RouteKind): String =
+            if (kind == RouteKind.BLUETOOTH) ROUTE_PROMOTED_TO_BLUETOOTH else ROUTE_PROMOTED_TO_LAN
+
+        private fun promotionFailed(kind: RouteKind): String =
+            if (kind == RouteKind.BLUETOOTH) BLUETOOTH_PROMOTION_FAILED else LAN_PROMOTION_FAILED
     }
 
-    private data class LanRetryState(
+    /** Per-route cooldown state. Every direct route backs off independently of the others. */
+    private class DirectRetryState(
+        val kind: RouteKind,
         var failures: Int = 0,
         var nextAttemptAt: Long = 0L,
         var lastAttemptAt: Long? = null,
     )
 
-    private sealed interface RelayCarryResult {
-        data class Promoted(
+    private class Granted(val route: TransportRoute, val session: AuthenticatedRouteSession)
+
+    private sealed interface CarryResult {
+        class Promoted(
+            val route: TransportRoute,
             val session: AuthenticatedRouteSession,
             val authenticatedAt: Long,
-        ) : RelayCarryResult
+        ) : CarryResult
 
-        data class Ended(val failure: Throwable?) : RelayCarryResult
+        class Ended(val failure: Throwable?) : CarryResult
     }
 
-    private sealed interface RelaySignal {
-        data object CooldownDue : RelaySignal
-        data object UserRetry : RelaySignal
-        data object DirectRequest : RelaySignal
-        data class RelayEnded(val failure: Throwable?) : RelaySignal
+    private sealed interface CarrySignal {
+        data object CooldownDue : CarrySignal
+        data object UserRetry : CarrySignal
+        data object DirectRequest : CarrySignal
+        class OwnerEnded(val failure: Throwable?) : CarrySignal
     }
 }

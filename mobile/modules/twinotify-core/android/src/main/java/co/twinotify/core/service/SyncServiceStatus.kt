@@ -205,6 +205,16 @@ internal object DeliveryStatusPresenter {
                 peerLine = "Reachable now",
             )
         }
+        if (status.phase == RoutePhase.AUTHENTICATED && status.route == RouteKind.BLUETOOTH) {
+            return DeliveryPresentation(
+                state = "direct",
+                label = "Direct Bluetooth",
+                explanation = "Your phones are talking directly over Bluetooth.",
+                action = null,
+                queuedCount = queued,
+                peerLine = "Reachable now",
+            )
+        }
         if (status.phase == RoutePhase.AUTHENTICATED && status.route == RouteKind.RELAY) {
             val explanation = when {
                 status.deliveryReason == DeliveryReason.LAN_BINDING_CONFLICT ->
@@ -257,7 +267,7 @@ internal object DeliveryStatusPresenter {
     }
 
     private fun evidenceLine(status: SyncRouteStatus): String = when {
-        status.route == RouteKind.LAN && status.phase == RoutePhase.AUTHENTICATED -> "Reachable now"
+        status.route.isDirect && status.phase == RoutePhase.AUTHENTICATED -> "Reachable now"
         status.peerEvidence == PeerEvidence.RECENT -> "Checked in recently"
         else -> "Not confirmed online"
     }
@@ -276,7 +286,7 @@ internal object DeliveryStatusModel {
         relayEvidence: PeerEvidence,
     ): SyncRouteStatus {
         val evidence = if (
-            status.route == RouteKind.LAN && status.phase == RoutePhase.AUTHENTICATED
+            status.route.isDirect && status.phase == RoutePhase.AUTHENTICATED
         ) {
             PeerEvidence.DIRECT
         } else {

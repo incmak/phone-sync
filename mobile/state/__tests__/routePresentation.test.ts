@@ -40,6 +40,11 @@ describe('presentRoute delivery truth table', () => {
       expected: ['Direct on Wi-Fi', 'Your phones are talking directly over Wi-Fi.', 'Reachable now', undefined],
     },
     {
+      name: 'direct bluetooth',
+      value: status({ route: 'bluetooth', phase: 'authenticated', peer_evidence: 'direct' }),
+      expected: ['Direct Bluetooth', 'Your phones are talking directly over Bluetooth.', 'Reachable now', undefined],
+    },
+    {
       name: 'fresh relay',
       value: status({ route: 'relay', phase: 'authenticated', peer_evidence: 'recent' }),
       expected: ['Via relay', 'Your other phone checked in recently. Delivery is encrypted end to end.', 'Checked in recently', undefined],
