@@ -230,7 +230,7 @@ cd mobile/android
 
 Expected: both commands PASS and every fixture in the manifest is consumed.
 
-- [ ] **Step 6: Commit the protocol**
+- [x] **Step 6: Commit the protocol**
 
 ```bash
 git add proto relay/internal/server/fixture_test.go mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/protocol/ProtocolJson.kt mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/protocol
@@ -404,7 +404,7 @@ Expected: JVM tests PASS. The instrumented test PASSes on the explicitly selecte
 API 34+ device; if no device is attached, record it as pending without changing
 the JVM result.
 
-- [ ] **Step 6: Commit capability selection**
+- [x] **Step 6: Commit capability selection**
 
 ```bash
 git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/call mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/call mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/call
@@ -562,7 +562,7 @@ cd mobile/android
 
 Expected: PASS, including proof that no handle is installed before Room commit.
 
-- [ ] **Step 7: Commit capture integration**
+- [x] **Step 7: Commit capture integration**
 
 ```bash
 git add mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/call mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/listener mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service/SyncService.kt mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/call mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/listener
@@ -1058,7 +1058,7 @@ cd mobile/android
 Expected: JVM tests PASS; connected test PASSes on an explicitly selected
 device or is reported pending if no device is available.
 
-- [ ] **Step 7: Commit invocation processing**
+- [x] **Step 7: Commit invocation processing**
 
 ```bash
 git add mobile/modules/twinotify-core/android/src/main/AndroidManifest.xml mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/call mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/actions/ActionInvocationExpiryReceiver.kt mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/storage/ReliableDeliveryDao.kt mobile/modules/twinotify-core/android/src/main/java/co/twinotify/core/service mobile/modules/twinotify-core/android/src/test/java/co/twinotify/core/call mobile/modules/twinotify-core/android/src/androidTest/java/co/twinotify/core/storage/ActionClaimTransactionTest.kt
@@ -1306,7 +1306,7 @@ Expected: JS and JVM tests PASS. Instrumentation proves the incoming
 notification contains answer/decline extras, ongoing contains hang-up, fallback
 contains none, stable tag/id is preserved, and `idle` cancels it.
 
-- [ ] **Step 7: Commit native call UX and consent**
+- [x] **Step 7: Commit native call UX and consent**
 
 ```bash
 git add mobile/app/settings/index.tsx mobile/app/__tests__ mobile/hooks/useTwinotifyCore.ts mobile/modules/twinotify-core
@@ -1446,7 +1446,7 @@ prove it contains neither the debug call-control components nor any forbidden
 permission from Global Constraints. Record unavailable physical or Docker gates
 as pending rather than passing.
 
-- [ ] **Step 7: Complete point-by-point interaction review and commit evidence**
+- [x] **Step 7: Complete point-by-point interaction review and commit evidence**
 
 Review every call interaction against the full anti-slop design law: native
 controls work by real pointer tap, fallback surfaces have no dead controls,
