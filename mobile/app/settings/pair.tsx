@@ -20,6 +20,32 @@ import { OnboardingState } from '../../state/onboardingState';
 const BLUETOOTH_EXPLANATION =
   'Keeps encrypted sync working nearby when Wi-Fi is unavailable. Call audio is not routed.';
 
+/**
+ * Bounded native codes become copy the user can act on. Anything that fails while proving the
+ * other phone means the two setups did not overlap, which is the one thing a person can fix.
+ */
+function bluetoothFailureCopy(code: string): [string, string] {
+  if (code === 'bluetooth_association_in_progress') {
+    return ['Setup already running', 'Finish the Bluetooth setup already open on this phone, then try again.'];
+  }
+  if (code === 'bluetooth_device_unusable') {
+    return ['Choose the other phone', 'That selection cannot be used for Bluetooth sync. Nothing changed.'];
+  }
+  if (code === 'bluetooth_peer_not_confirmed') {
+    return ['Pair the phones first', 'Bluetooth fallback needs a confirmed pair. Nothing changed.'];
+  }
+  if (code.startsWith('bluetooth_connect') || code.startsWith('bluetooth_handshake') ||
+    code.startsWith('bluetooth_identity') || code.startsWith('bluetooth_role') ||
+    code.startsWith('bluetooth_protocol') || code.startsWith('bluetooth_replayed') ||
+    code.startsWith('bluetooth_signature') || code.startsWith('bluetooth_frame')) {
+    return [
+      'Could not confirm the other phone',
+      'Start Bluetooth setup on both phones at the same time and choose each other. Nothing changed.',
+    ];
+  }
+  return ['Bluetooth fallback unavailable', 'Nothing changed. Try again.'];
+}
+
 export default function PairDetailScreen() {
   const theme = useTheme();
 
@@ -135,7 +161,8 @@ export default function PairDetailScreen() {
       await reloadBluetooth();
     } catch (error) {
       // Bounded native failure codes arrive as the rejection message.
-      if ((error as { message?: string } | null)?.message === 'bluetooth_unavailable') {
+      const code = (error as { message?: string } | null)?.message ?? '';
+      if (code === 'bluetooth_unavailable') {
         Alert.alert(
           'Turn on Bluetooth',
           'Bluetooth is off on this phone, so the fallback cannot be set up. Nothing changed.',
@@ -145,7 +172,8 @@ export default function PairDetailScreen() {
           ],
         );
       } else {
-        Alert.alert('Bluetooth fallback unavailable', 'Nothing changed. Try again.');
+        const [title, body] = bluetoothFailureCopy(code);
+        Alert.alert(title, body);
       }
     } finally {
       setBluetoothBusy(false);

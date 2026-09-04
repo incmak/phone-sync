@@ -208,6 +208,20 @@ describe('Bluetooth fallback association', () => {
     expect(screen.getByRole('button', { name: 'Set up Bluetooth fallback' })).toBeTruthy();
   });
 
+  it('tells the user to set both phones up together when the handshake cannot confirm the peer', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const screen = await renderPair();
+    global.__TWINOTIFY_CORE__.startBluetoothAssociation.mockRejectedValue(new Error('bluetooth_connect_timeout'));
+
+    fireEvent.press(screen.getByRole('button', { name: 'Set up Bluetooth fallback' }));
+
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Could not confirm the other phone',
+      'Start Bluetooth setup on both phones at the same time and choose each other. Nothing changed.',
+    );
+  });
+
   it('shows one 48dp route switch only after association', async () => {
     const screen = await renderPair({ associated: true, enabled: true });
 

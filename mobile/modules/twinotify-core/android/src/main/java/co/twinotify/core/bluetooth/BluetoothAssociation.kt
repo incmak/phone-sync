@@ -39,8 +39,13 @@ object BluetoothAssociationPolicy {
     /** The whole association flow, advertising included, ends after this. */
     const val ASSOCIATION_TIMEOUT_MILLIS = 120_000L
 
-    /** The selected BLE identity must also serve the Classic RFCOMM socket this route uses. */
-    fun acceptsSelectedDeviceType(type: Int?): Boolean = type == BluetoothDevice.DEVICE_TYPE_DUAL
+    /**
+     * The picker discovers over an LE scan, so the chosen device reports LE or unknown until the
+     * adapter has also seen it over Classic. Requiring DUAL here rejected every real peer. Accept
+     * any device the picker actually returned and let the signed RFCOMM handshake that follows
+     * prove Classic support, which is the only honest proof available at this point.
+     */
+    fun acceptsSelectedDeviceType(type: Int?): Boolean = type != null
 
     fun canEnableRoute(permissionsGranted: Boolean, peerConfirmed: Boolean, bindingValidated: Boolean): Boolean =
         permissionsGranted && peerConfirmed && bindingValidated
@@ -61,7 +66,7 @@ enum class BluetoothAssociationFailure(val code: String) {
     ADVERTISING_FAILED("bluetooth_advertising_failed"),
     ASSOCIATION_IN_PROGRESS("bluetooth_association_in_progress"),
     ASSOCIATION_FAILED("bluetooth_association_failed"),
-    DEVICE_NOT_DUAL("bluetooth_device_not_dual"),
+    DEVICE_UNUSABLE("bluetooth_device_unusable"),
     PEER_NOT_CONFIRMED("bluetooth_peer_not_confirmed"),
 }
 
@@ -228,7 +233,7 @@ class BluetoothAssociationFlow private constructor(
         val device = info.associatedDevice?.bleDevice?.device
         if (!BluetoothAssociationPolicy.acceptsSelectedDeviceType(deviceType(device))) {
             runCatching { companionDeviceManager.disassociate(info.id) }
-            throw BluetoothAssociationException(BluetoothAssociationFailure.DEVICE_NOT_DUAL)
+            throw BluetoothAssociationException(BluetoothAssociationFailure.DEVICE_UNUSABLE)
         }
         return ProvisionalBluetoothAssociation(info.id, requireNotNull(device))
             .also(ProvisionalBluetoothAssociations::replace)

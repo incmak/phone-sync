@@ -30,10 +30,12 @@ class BluetoothAssociationPolicyTest {
 
     @Test
     fun onlyDualModeDevicesAreAccepted() {
+        // An LE-discovered peer reports LE or unknown, never DUAL, so a DUAL-only rule refused
+        // every real phone. Only the absence of a device is a rejection here.
         assertTrue(BluetoothAssociationPolicy.acceptsSelectedDeviceType(BluetoothDevice.DEVICE_TYPE_DUAL))
-        assertFalse(BluetoothAssociationPolicy.acceptsSelectedDeviceType(BluetoothDevice.DEVICE_TYPE_LE))
-        assertFalse(BluetoothAssociationPolicy.acceptsSelectedDeviceType(BluetoothDevice.DEVICE_TYPE_CLASSIC))
-        assertFalse(BluetoothAssociationPolicy.acceptsSelectedDeviceType(BluetoothDevice.DEVICE_TYPE_UNKNOWN))
+        assertTrue(BluetoothAssociationPolicy.acceptsSelectedDeviceType(BluetoothDevice.DEVICE_TYPE_LE))
+        assertTrue(BluetoothAssociationPolicy.acceptsSelectedDeviceType(BluetoothDevice.DEVICE_TYPE_CLASSIC))
+        assertTrue(BluetoothAssociationPolicy.acceptsSelectedDeviceType(BluetoothDevice.DEVICE_TYPE_UNKNOWN))
         assertFalse(BluetoothAssociationPolicy.acceptsSelectedDeviceType(null))
     }
 
