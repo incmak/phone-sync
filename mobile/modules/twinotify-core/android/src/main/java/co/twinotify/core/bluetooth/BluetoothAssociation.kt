@@ -262,6 +262,17 @@ class BluetoothAssociationFlow private constructor(
 
         suspend fun run(context: Context, activity: Activity): ProvisionalBluetoothAssociation? {
             val appContext = context.applicationContext
+            if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.BLUETOOTH_CONNECT) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                throw BluetoothAssociationException(BluetoothAssociationFailure.PERMISSION_DENIED)
+            }
+            // A disabled radio cannot advertise or open the picker. Report it as its own bounded
+            // failure so the caller can say what is wrong instead of a generic retry.
+            val adapter = appContext.getSystemService(BluetoothManager::class.java)?.adapter
+            if (adapter == null || !adapter.isEnabled) {
+                throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
+            }
             val manager = BluetoothAssociations.companionDeviceManager(appContext)
                 ?: throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
             val flow = BluetoothAssociationFlow(appContext, activity, manager)

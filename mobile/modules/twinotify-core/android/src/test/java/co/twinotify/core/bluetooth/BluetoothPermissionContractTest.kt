@@ -6,6 +6,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class BluetoothPermissionContractTest {
@@ -25,6 +26,16 @@ class BluetoothPermissionContractTest {
         assertTrue(manifest.contains("android.permission.BLUETOOTH_CONNECT"))
         assertTrue(manifest.contains("android.permission.BLUETOOTH_ADVERTISE"))
         assertTrue(manifest.contains("android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"))
+    }
+
+    @Test
+    fun manifestDeclaresTheCompanionDeviceSetupFeature() {
+        // CompanionDeviceManager.associate throws IllegalStateException without this, so the
+        // association flow fails on every device. Only a device run catches it otherwise.
+        val declaration = Regex(
+            """<uses-feature\s+android:name="android\.software\.companion_device_setup"\s+android:required="false"\s*/>""",
+        ).find(manifest)
+        assertNotNull(declaration, "companion device setup must be declared as an optional feature")
     }
 
     @Test

@@ -152,6 +152,21 @@ describe('Bluetooth fallback association', () => {
     expect(screen.getByRole('button', { name: 'Set up Bluetooth fallback' })).toBeTruthy();
   });
 
+  it('says Bluetooth is off and offers the system toggle instead of a bare retry', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const screen = await renderPair();
+    global.__TWINOTIFY_CORE__.startBluetoothAssociation.mockRejectedValue(new Error('bluetooth_unavailable'));
+
+    fireEvent.press(screen.getByRole('button', { name: 'Set up Bluetooth fallback' }));
+
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+    const [title, body, buttons] = alertSpy.mock.calls[0];
+    expect(title).toBe('Turn on Bluetooth');
+    expect(body).toBe('Bluetooth is off on this phone, so the fallback cannot be set up. Nothing changed.');
+    expect((buttons as { text: string }[]).map((button) => button.text)).toEqual(['Not now', 'Open settings']);
+    expect(screen.getByRole('button', { name: 'Set up Bluetooth fallback' })).toBeTruthy();
+  });
+
   it('shows one 48dp route switch only after association', async () => {
     const screen = await renderPair({ associated: true, enabled: true });
 

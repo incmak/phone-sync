@@ -6,12 +6,12 @@ import {
   StyleSheet,
   Text,
   View,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 
 import { useTheme, TwCard, TwFingerprint, TwButton, TwSpinner, TwRow, TwSwitch } from '../../components';
-import { HandoffDisclosureMark } from '../../components/HandoffTrace';
 import TwinotifyCoreModule, {
   BluetoothRouteSettings,
   PairStatus,
@@ -84,6 +84,16 @@ export default function PairDetailScreen() {
     }
   }, []);
 
+  const openBluetoothSettings = useCallback(() => {
+    void (async () => {
+      try {
+        await Linking.sendIntent('android.settings.BLUETOOTH_SETTINGS');
+      } catch {
+        // Quick settings remains available; nothing else changed.
+      }
+    })();
+  }, []);
+
   const handleBluetoothAssociation = useCallback(async () => {
     if (bluetoothBusy) return;
     setBluetoothBusy(true);
@@ -114,12 +124,24 @@ export default function PairDetailScreen() {
       // either way, so a cancelled association returns quietly.
       await TwinotifyCoreModule.startBluetoothAssociation();
       await reloadBluetooth();
-    } catch {
-      Alert.alert('Bluetooth fallback unavailable', 'Nothing changed. Try again.');
+    } catch (error) {
+      // Bounded native failure codes arrive as the rejection message.
+      if ((error as { message?: string } | null)?.message === 'bluetooth_unavailable') {
+        Alert.alert(
+          'Turn on Bluetooth',
+          'Bluetooth is off on this phone, so the fallback cannot be set up. Nothing changed.',
+          [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'Open settings', onPress: openBluetoothSettings },
+          ],
+        );
+      } else {
+        Alert.alert('Bluetooth fallback unavailable', 'Nothing changed. Try again.');
+      }
     } finally {
       setBluetoothBusy(false);
     }
-  }, [bluetoothBusy, reloadBluetooth]);
+  }, [bluetoothBusy, openBluetoothSettings, reloadBluetooth]);
 
   const handleBluetoothRouteChange = useCallback(async (next: boolean) => {
     const previous = bluetooth?.enabled ?? false;
@@ -250,24 +272,14 @@ export default function PairDetailScreen() {
 
         {pairStatus?.paired && bluetooth !== null && (
           <View style={styles.bluetoothGroup}>
-            <TwRow
-              title="Bluetooth fallback"
-              subtitle={bluetooth.associated ? `Associated. ${BLUETOOTH_EXPLANATION}` : BLUETOOTH_EXPLANATION}
-              onPress={bluetooth.associated ? undefined : () => { void handleBluetoothAssociation(); }}
-              accessibilityLabel={
-                bluetooth.associated ? 'Bluetooth fallback, associated' : 'Set up Bluetooth fallback'
-              }
-              trailing={
-                bluetooth.associated ? undefined : (
-                  <View testID="pair-bluetooth-disclosure" style={styles.disclosureSlot}>
-                    <HandoffDisclosureMark color={theme.accentText} />
-                  </View>
-                )
-              }
-              style={styles.ledgerRow}
-            />
             {bluetooth.associated ? (
               <>
+                <TwRow
+                  title="Bluetooth fallback"
+                  subtitle={`Associated. ${BLUETOOTH_EXPLANATION}`}
+                  accessibilityLabel="Bluetooth fallback, associated"
+                  style={styles.ledgerRow}
+                />
                 <TwRow
                   title="Use Bluetooth fallback"
                   subtitle={bluetooth.enabled
@@ -293,7 +305,26 @@ export default function PairDetailScreen() {
                   style={styles.ledgerRow}
                 />
               </>
-            ) : null}
+            ) : (
+              // Setting Bluetooth up is the same kind of action as adding nearby Wi-Fi, so it
+              // uses the same card rather than a ledger row.
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Set up Bluetooth fallback"
+                onPress={() => { void handleBluetoothAssociation(); }}
+                style={({ pressed }) => [
+                  styles.bluetoothAction,
+                  { backgroundColor: pressed ? theme.hover : theme.fill },
+                ]}
+              >
+                <Text style={[styles.nearbyTitle, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
+                  Bluetooth fallback
+                </Text>
+                <Text style={[styles.nearbyBody, { color: theme.ink2, fontFamily: theme.fonts.ui }]}>
+                  {BLUETOOTH_EXPLANATION}
+                </Text>
+              </Pressable>
+            )}
           </View>
         )}
 
@@ -350,14 +381,14 @@ const styles = StyleSheet.create({
   nearbyTitle: { fontSize: 15, lineHeight: 21 },
   nearbyBody: { fontSize: 13, lineHeight: 19, marginTop: 3 },
   bluetoothGroup: { gap: 2, marginTop: 24 },
-  ledgerRow: { paddingHorizontal: 0, paddingVertical: 12, alignItems: 'flex-start' },
-  disclosureSlot: {
-    minWidth: 44,
-    minHeight: 44,
-    alignItems: 'center',
+  bluetoothAction: {
+    minHeight: 72,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     justifyContent: 'center',
-    marginTop: -2,
   },
+  ledgerRow: { paddingHorizontal: 0, paddingVertical: 12, alignItems: 'flex-start' },
   controlSlot: {
     minWidth: 44,
     minHeight: 44,

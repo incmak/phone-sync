@@ -15,6 +15,15 @@
                    android:usesPermissionFlags="neverForLocation" />
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+
+  <!--
+    CompanionDeviceManager.associate throws IllegalStateException without this declaration.
+    Optional so the app still installs on devices without companion device setup; the
+    Bluetooth route simply stays unavailable there.
+  -->
+  <uses-feature
+      android:name="android.software.companion_device_setup"
+      android:required="false" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
   <queries>
