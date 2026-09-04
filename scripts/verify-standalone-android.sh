@@ -75,7 +75,10 @@ verify_apk() {
 
   local manifest
   manifest=$("$aapt2" dump xmltree --file AndroidManifest.xml "$apk" 2>/dev/null) || die "unable to inspect release manifest"
-  if grep -Eq 'co\.twinotify\.core\.e2e\.(E2eControlReceiver|E2eStateProvider|CallControlFixtureReceiver)|co\.twinotify\.e2e\.CONTROL|com\.twinotify\.app\.e2e' <<<"$manifest"; then
+  # Every debug-only surface lives under co.twinotify.core.e2e, so the whole
+  # package is rejected rather than a hand-maintained list of class names that
+  # a new control (BluetoothRouteControl, for one) could be added outside of.
+  if grep -Eq 'co\.twinotify\.core\.e2e\.[A-Za-z0-9_$]+|co\.twinotify\.e2e\.CONTROL|com\.twinotify\.app\.e2e' <<<"$manifest"; then
     die "release manifest contains a debug E2E receiver or provider"
   fi
 
@@ -145,6 +148,14 @@ self_test() {
         '    <provider android:name="co.twinotify.core.e2e.E2eStateProvider" android:authorities="com.twinotify.app.e2e" android:exported="true" />' \
         '  </application>' \
         '</manifest>' > "$fixture_dir/AndroidManifest.xml"
+    elif [[ "$include_e2e" == bluetooth ]]; then
+      printf '%s\n' \
+        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.twinotify.app" android:versionCode="1" android:versionName="1">' \
+        '  <uses-sdk android:minSdkVersion="34" android:targetSdkVersion="35" />' \
+        '  <application android:debuggable="false">' \
+        '    <receiver android:name="co.twinotify.core.e2e.BluetoothRouteControl" android:exported="true" />' \
+        '  </application>' \
+        '</manifest>' > "$fixture_dir/AndroidManifest.xml"
     else
       printf '%s\n' \
         '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.twinotify.app" android:versionCode="1" android:versionName="1">' \
@@ -186,13 +197,16 @@ self_test() {
   expect_failure debug-certificate "$ROOT_DIR/scripts/verify-standalone-android.sh" --apk "$debug_apk" --provenance "$tmp/provenance.json" --expected-cert-sha256 "$cert" --expected-commit "$commit"
   expect_failure missing-protected-fingerprint env EXPECTED_RELEASE_CERT_SHA256="$cert" "$ROOT_DIR/scripts/verify-standalone-android.sh" --apk "$release_apk" --provenance "$tmp/provenance.json" --expected-commit "$commit"
 
-  local no_bundle_apk e2e_apk
+  local no_bundle_apk e2e_apk bluetooth_apk
   no_bundle_apk="$tmp/no-bundle.apk"
   e2e_apk="$tmp/e2e.apk"
+  bluetooth_apk="$tmp/e2e-bluetooth.apk"
   build_fixture "$no_bundle_apk" "$release_keystore" false false
   build_fixture "$e2e_apk" "$release_keystore" true true
+  build_fixture "$bluetooth_apk" "$release_keystore" true bluetooth
   expect_failure missing-bundle "$ROOT_DIR/scripts/verify-standalone-android.sh" --apk "$no_bundle_apk" --provenance "$tmp/provenance.json" --expected-cert-sha256 "$cert" --expected-commit "$commit"
   expect_failure e2e-component "$ROOT_DIR/scripts/verify-standalone-android.sh" --apk "$e2e_apk" --provenance "$tmp/provenance.json" --expected-cert-sha256 "$cert" --expected-commit "$commit"
+  expect_failure bluetooth-route-control "$ROOT_DIR/scripts/verify-standalone-android.sh" --apk "$bluetooth_apk" --provenance "$tmp/provenance.json" --expected-cert-sha256 "$cert" --expected-commit "$commit"
 
   jq '.git_commit = ("0" * 40)' "$tmp/provenance.json" > "$tmp/wrong-commit.json"
   expect_failure wrong-commit "$ROOT_DIR/scripts/verify-standalone-android.sh" --apk "$release_apk" --provenance "$tmp/wrong-commit.json" --expected-cert-sha256 "$cert" --expected-commit "$commit"

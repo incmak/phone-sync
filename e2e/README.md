@@ -82,6 +82,59 @@ The predecessor automation is implemented and host-tested through commit
 actual aggregate hardware execution is still pending physical two-phone run;
 host fixtures are not physical acceptance.
 
+## Direct Bluetooth route gate
+
+`bluetooth-direct-route` is the only scenario allowed to claim a Bluetooth
+route. It faults LAN and the relay on both phones through the app-internal
+route control, never an OS radio change, waits for the coordinator to grant
+Bluetooth, then delivers one small notification and one maximum-size fixture.
+Each delivery must show digest-backed custody on the `bluetooth` route plus an
+authenticated peer receipt. The plan then restores LAN and requires the
+promotion to open a strictly later route generation, which is the host-side
+proof that the coordinator closed Bluetooth before LAN drained the outbox: one
+enum-valued route per generation cannot describe two concurrent drainers.
+
+The debug control surface is four commands. Each is built by a constructor in
+`e2e/internal/control`, so the host cannot express something the device would
+reject:
+
+| Command | Host names | Device returns |
+| --- | --- | --- |
+| `ROUTE_FAULT` | `route` (`LAN`, `BLUETOOTH`, `RELAY`), `enabled` | `route`, `enabled` |
+| `AWAIT_ROUTE` | `route`, `phase`, `timeout_ms` | `route`, `phase`, `status`, `elapsed_ms` |
+| `ENQUEUE_FIXTURE` | `bytes` (1 to 1,048,576) | `bytes`, `status`, `elapsed_ms` |
+| `AWAIT_PEER_RECEIPT` | `timeout_ms` | `status`, `awaiting_peer_count`, `elapsed_ms` |
+
+Commands are uppercase snake case because that is the receiver's existing
+allowlist convention, not the lowercase JSON the plan sketched. Blocking
+commands are bounded at 10,000 ms rather than the plan's 15,000 ms: Android
+delivers this process's broadcasts one at a time, so a command that waits must
+release the queue first and must not hold it longer than an already-proven
+command. The host retries instead of asking for one longer wait.
+
+No Bluetooth address, device name, SSID, association identifier, service UUID,
+peer key, envelope, or notification content is reachable from any of these
+responses, and the evidence writer rejects them if one ever appears.
+`ENQUEUE_FIXTURE` reports the envelope byte count this device actually
+persisted, read back from the durable outbox, so an undershoot is visible
+rather than assumed.
+
+From the repository root, provide two distinct already-paired and
+Bluetooth-associated targets and a private evidence directory:
+
+```sh
+E2E_DEVICE_A='<serial-a>' \
+E2E_DEVICE_B='<serial-b>' \
+E2E_BLUETOOTH_EVIDENCE_DIR='/private/path/bluetooth-route' \
+make e2e-bluetooth-route
+```
+
+Status: host-verified against the deterministic fake bridge only. Emulator
+instances have no usable Bluetooth between them, so this scenario has never
+been executed on hardware. It cannot satisfy `PHY-BLUETOOTH-01`; the physical
+matrix in `docs/test-scenarios.md` and the record contract in
+`docs/evidence/bluetooth-route/README.md` remain pending a two-phone run.
+
 ## Stock call control gate
 
 `call-control-correctness` runs three children in this exact order:

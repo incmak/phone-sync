@@ -435,6 +435,69 @@ project-owned target build is unavailable, leave this scenario pending. The
 `make e2e-call-control` synthetic gate must not be recorded as
 `PHY-CALL-CONTROL-01`.
 
+### PHY-BLUETOOTH-01 - direct Bluetooth route on two phones
+
+- [ ] Status - pending physical two-phone run.
+
+Use two Android 14+ phones with a project-owned target build installed on both,
+already paired in Twinotify and already associated for Bluetooth through the
+system Companion Device Manager picker on each phone. Bluetooth here carries
+Twinotify data only. It routes no call audio, uses no HFP or LE Audio profile,
+and captures no microphone or speaker stream. Any observation that suggests
+otherwise fails this record.
+
+1. Pair Twinotify normally, associate Bluetooth on both phones, then turn Wi-Fi
+   off on both and make the relay unreachable. Confirm the connection surface
+   reports direct Bluetooth and that no route claims LAN or relay.
+2. Exercise every envelope kind across the link: state digest and snapshot,
+   notification post, update and cancel, action invoke and result, call state,
+   call control, peer receipt, and unpair. Each must show custody on the
+   `bluetooth` route and an authenticated peer receipt.
+3. Run the disruption set: screens on, screens off, both apps backgrounded,
+   force-stop and reopen each app, Bluetooth off and on, out of range and back,
+   reboot of each phone, Nearby devices permission revoked and granted,
+   association removed, and a competing headphone or car connection active.
+4. Send the exact maximum legal envelope, 1,048,576 bytes, and record the
+   observed envelope size, the peak resident memory delta, that no GATT
+   fragmentation path was taken, and that nothing was silently dropped.
+5. Collect 100 small control round trips and compute p95.
+6. Hold an idle authenticated route for 8 hours and record reconnect count,
+   foreground service survival, battery delta, and that logs stayed bounded.
+7. Re-enable Wi-Fi and prove LAN promotion closed or joined the Bluetooth
+   session before LAN owned the outbox, with the route generation advancing
+   exactly once and no message sent twice.
+
+Required matrix; every cell needs `pass` before a build is supported:
+
+| Case | Required observation | Threshold |
+| --- | --- | --- |
+| Envelope coverage | every kind shows `bluetooth` custody and a peer receipt | no kind missing |
+| Screens off and backgrounded | route stays authenticated, delivery continues | no route loss |
+| Force-stop, reboot, Bluetooth off and on | route reopens without operator repair | reconnect under 60 s |
+| Out of range and re-entry | queue holds, then drains on re-entry | no loss, no duplicate |
+| Permission revoke, association removal | route stops cleanly, product copy stays truthful | no crash, no silent retry |
+| Maximum envelope | 1,048,576 byte envelope delivered whole | bounded memory, no drop |
+| 100 control round trips | p95 latency | under 750 ms |
+| 8-hour idle hold | reconnect count, service survival, battery delta | service alive, logs bounded |
+| LAN promotion | Bluetooth closed before LAN drains | one drainer, generation advances once |
+
+Compute p95 across all 100 round trips on one associated pair. A build is
+supported only when every required cell passes, p95 is under 750 ms, the
+maximum envelope arrives whole, and the promotion case shows exactly one
+drainer. Write one JSON record per case using the contract in
+[`docs/evidence/bluetooth-route/README.md`](evidence/bluetooth-route/README.md),
+under a directory named from the sanitized `Build.MODEL`, SDK level, and date.
+
+Retain only sanitized model names, SHA-256 build identifiers, SDK level,
+Bluetooth stack version where the platform exposes it, app version, route and
+phase enums, generation numbers, counts, byte sizes, latency, and stable error
+codes. Never retain Bluetooth addresses, device names, association identifiers,
+service UUIDs, SSIDs, BSSIDs, keys, envelopes, notification text, or any caller
+data. If two suitable Bluetooth-capable phones or a project-owned target build
+is unavailable, leave this scenario pending. The `make e2e-bluetooth-route`
+scenario runs against emulators or a fake bridge and must never be recorded as
+`PHY-BLUETOOTH-01`.
+
 ### Release evidence layout and audit
 
 Place the APK, sanitized E2E result, sanitized timeline, operator notes, and

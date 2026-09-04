@@ -83,7 +83,7 @@ func TestRouteEvidenceAcceptsSanitizedRecord(t *testing.T) {
 
 func TestRouteEvidenceRejectsUnknownRouteOrPhase(t *testing.T) {
 	bad := validRoute()
-	bad.Route = "bluetooth"
+	bad.Route = "nfc"
 	if err := bad.Validate(); err == nil {
 		t.Fatal("expected an unknown route to be rejected")
 	}

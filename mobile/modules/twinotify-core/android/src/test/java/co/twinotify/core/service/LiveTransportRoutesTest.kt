@@ -209,6 +209,20 @@ class LiveTransportRoutesTest {
     }
 
     @Test
+    fun relayRouteRefusesToOpenWhenTheDebugFaultIsArmed() = runTest {
+        var eventReads = 0
+        val route = LiveRelayTransportRoute(
+            events = { eventReads++; error("relay events must not be collected") },
+            hooks = LiveRelayRouteHooks(dispatch = { null }),
+            allowAttempt = { false },
+        )
+
+        assertEquals(RouteKind.RELAY, route.kind)
+        assertFailsWith<IllegalStateException> { route.open() }
+        assertEquals(0, eventReads)
+    }
+
+    @Test
     fun bluetoothRouteRevalidatesAndBuildsOneConnectorPerOpen() = runTest {
         val validations = mutableListOf<Boolean>()
         val links = mutableListOf<LiveBluetoothRouteConfig>()

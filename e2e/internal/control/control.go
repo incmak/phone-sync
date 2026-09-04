@@ -137,6 +137,97 @@ func NewCallControlAwaitCommand(requestID, kind string, timeout time.Duration) (
 	}, nil
 }
 
+var routeFaultRoutes = map[string]bool{"LAN": true, "BLUETOOTH": true, "RELAY": true}
+
+var awaitRoutePhases = map[string]bool{
+	"IDLE": true, "CONNECTING": true, "AUTHENTICATED": true, "RECONNECTING": true,
+}
+
+// MaxRouteAwait bounds how long a device may block a control broadcast waiting
+// for a route or a peer receipt. The plan asks for 15s, but the device-side
+// validator has always capped a blocking wait at 10s and that bound is what
+// keeps one stuck route from holding the per-process broadcast queue for the
+// rest of the run. The host retries instead of asking for a longer single wait.
+const MaxRouteAwait = 10 * time.Second
+
+// MaxFixtureBytes is the protocol envelope maximum. A fixture may ask for the
+// exact legal maximum and nothing above it.
+const MaxFixtureBytes = 1_048_576
+
+// NewRouteFaultCommand makes exactly one route unavailable to the device's own
+// route factory, or restores it. Only the closed route enum crosses ADB.
+func NewRouteFaultCommand(requestID, route string, enabled bool) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("route fault request ID is required")
+	}
+	if !routeFaultRoutes[route] {
+		return Command{}, errors.New("route fault route is outside the closed contract")
+	}
+	return Command{
+		RequestID: requestID,
+		Name:      "ROUTE_FAULT",
+		Params:    map[string]string{"route": route, "enabled": strconv.FormatBool(enabled)},
+	}, nil
+}
+
+// NewAwaitRouteCommand blocks on the device until its own route status reaches
+// the named route and phase. It returns only enums, a status, and a duration.
+func NewAwaitRouteCommand(requestID, route, phase string, timeout time.Duration) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("await route request ID is required")
+	}
+	if !routeFaultRoutes[route] {
+		return Command{}, errors.New("await route is outside the closed contract")
+	}
+	if !awaitRoutePhases[phase] {
+		return Command{}, errors.New("await route phase is outside the closed contract")
+	}
+	if timeout < time.Millisecond || timeout > MaxRouteAwait {
+		return Command{}, errors.New("await route timeout is outside 1ms..10s")
+	}
+	return Command{
+		RequestID: requestID,
+		Name:      "AWAIT_ROUTE",
+		Params: map[string]string{
+			"route": route, "phase": phase,
+			"timeout_ms": strconv.FormatInt(timeout.Milliseconds(), 10),
+		},
+	}, nil
+}
+
+// NewEnqueueFixtureCommand asks the device to author one synthetic outbound
+// envelope of the given size through the production capture boundary. The host
+// names a byte count and nothing else; the device authors the content.
+func NewEnqueueFixtureCommand(requestID string, bytes int) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("fixture request ID is required")
+	}
+	if bytes < 1 || bytes > MaxFixtureBytes {
+		return Command{}, errors.New("fixture size is outside 1..1048576 bytes")
+	}
+	return Command{
+		RequestID: requestID,
+		Name:      "ENQUEUE_FIXTURE",
+		Params:    map[string]string{"bytes": strconv.Itoa(bytes)},
+	}, nil
+}
+
+// NewAwaitPeerReceiptCommand blocks until nothing on the device is still
+// awaiting an authenticated peer receipt.
+func NewAwaitPeerReceiptCommand(requestID string, timeout time.Duration) (Command, error) {
+	if requestID == "" {
+		return Command{}, errors.New("await receipt request ID is required")
+	}
+	if timeout < time.Millisecond || timeout > MaxRouteAwait {
+		return Command{}, errors.New("await receipt timeout is outside 1ms..10s")
+	}
+	return Command{
+		RequestID: requestID,
+		Name:      "AWAIT_PEER_RECEIPT",
+		Params:    map[string]string{"timeout_ms": strconv.FormatInt(timeout.Milliseconds(), 10)},
+	}, nil
+}
+
 type Result struct {
 	RequestID string          `json:"request_id"`
 	Code      string          `json:"code"`

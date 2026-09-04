@@ -301,7 +301,8 @@ class LiveTransportRoutesFactory(
                             },
                             allowAttempt = {
                                 val peer = PeerStore.load(appContext)
-                                peer != null &&
+                                debugRouteAvailable(appContext, RouteKind.BLUETOOTH) &&
+                                    peer != null &&
                                     bluetoothStore.routeEnabled() &&
                                     BluetoothAssociationPolicy.permissionsGranted(appContext) &&
                                     bluetoothStore.loadValidated(peer, BluetoothAssociations.currentIds(appContext))
@@ -321,20 +322,38 @@ class LiveTransportRoutesFactory(
                                     onEvent = onLanEvent,
                                 ).open()
                             },
-                            allowAttempt = {
-                                val debuggable = appContext.applicationInfo.flags and
-                                    android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
-                                val faultUntil = appContext.getSharedPreferences("e2e-control", Context.MODE_PRIVATE)
-                                    .getLong("lan_fault_until_ms", 0L)
-                                !debuggable || faultUntil <= System.currentTimeMillis()
-                            },
+                            allowAttempt = { debugRouteAvailable(appContext, RouteKind.LAN) },
                         )
                     },
-                    buildRelayRoute = { config -> LiveRelayTransportRoute(config.events, config.hooks) },
+                    buildRelayRoute = { config ->
+                        LiveRelayTransportRoute(
+                            config.events,
+                            config.hooks,
+                            allowAttempt = { debugRouteAvailable(appContext, RouteKind.RELAY) },
+                        )
+                    },
                 ),
             )
         }
     }
+}
+
+/**
+ * Debug-only route fault seam shared by every live route.
+ *
+ * A release build is never debuggable, so this is unconditionally true in
+ * production and no release component can reach the preferences it reads. In a
+ * debug build the E2E control surface can make exactly one route unavailable
+ * for a bounded window, which is how a scenario forces the coordinator down to
+ * the route it wants to prove.
+ */
+private fun debugRouteAvailable(context: Context, route: RouteKind): Boolean {
+    val debuggable = context.applicationInfo.flags and
+        android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+    if (!debuggable) return true
+    val faultUntil = context.getSharedPreferences("e2e-control", Context.MODE_PRIVATE)
+        .getLong(route.name.lowercase() + "_fault_until_ms", 0L)
+    return faultUntil <= System.currentTimeMillis()
 }
 
 fun liveRelayRouteConfig(
@@ -566,10 +585,12 @@ private class LiveLanOwnedSession(
 class LiveRelayTransportRoute(
     private val events: () -> Flow<TransportEvent>,
     private val hooks: LiveRelayRouteHooks,
+    private val allowAttempt: () -> Boolean = { true },
 ) : TransportRoute {
     override val kind: RouteKind = RouteKind.RELAY
 
     override suspend fun open(): AuthenticatedRouteSession {
+        check(allowAttempt()) { "relay_debug_unavailable" }
         val authenticated = CompletableDeferred<Unit>()
         val closed = CompletableDeferred<String>()
         val job = CoroutineScope(currentCoroutineContext()).launch {

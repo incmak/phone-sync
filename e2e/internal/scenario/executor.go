@@ -24,6 +24,7 @@ const (
 	actionRestart
 	actionReconcile
 	actionLanAvailability
+	actionRouteFault
 	actionControl
 	actionBurstStart
 	actionNotificationFixture
@@ -45,6 +46,7 @@ type action struct {
 	params   map[string]string
 	delivery bool
 	count    int
+	route    string
 }
 
 func (a action) eventID() string {
@@ -67,6 +69,8 @@ func (a action) eventID() string {
 		return "reconcile:" + a.device
 	case actionLanAvailability:
 		return "lan-available:" + a.device + ":" + fmt.Sprint(a.enabled)
+	case actionRouteFault:
+		return "route-available:" + a.device + ":" + a.route + ":" + fmt.Sprint(a.enabled)
 	case actionControl:
 		return "control:" + a.device + ":" + strings.ToLower(strings.ReplaceAll(a.command, "_", "-"))
 	case actionBurstStart:
@@ -140,6 +144,9 @@ func parseAction(raw string) (action, error) {
 	if parsed, matched, err := parseCallControlAction(raw); matched {
 		return parsed, err
 	}
+	if parsed, matched, err := parseBluetoothRouteAction(raw); matched {
+		return parsed, err
+	}
 	if strings.HasPrefix(raw, "A.control.call-state:") {
 		state := strings.TrimPrefix(raw, "A.control.call-state:")
 		if state != "ringing" && state != "active" && state != "idle" {
@@ -208,7 +215,8 @@ func splitAction(raw string) []string {
 }
 
 func knownPredicate(predicate string) bool {
-	if knownNotificationActionPredicate(predicate) || knownCallControlPredicate(predicate) {
+	if knownNotificationActionPredicate(predicate) || knownCallControlPredicate(predicate) ||
+		knownBluetoothRoutePredicate(predicate) {
 		return true
 	}
 	if _, _, ok := parseTrackedSequencePredicate(predicate); ok {
@@ -288,7 +296,8 @@ func parseCustodyPredicate(predicate string) (device, route, event string, want 
 		return "", "", "", 0, false
 	}
 	head := strings.Split(parts[0], ".")
-	if len(head) != 3 || (head[0] != "A" && head[0] != "B") || head[1] != "custody" || (head[2] != "lan" && head[2] != "relay") {
+	if len(head) != 3 || (head[0] != "A" && head[0] != "B") || head[1] != "custody" ||
+		(head[2] != "lan" && head[2] != "bluetooth" && head[2] != "relay") {
 		return "", "", "", 0, false
 	}
 	allowed := map[string]bool{
@@ -374,6 +383,7 @@ type Executor struct {
 	baseline              map[string]map[string]string
 	baselineState         map[string]Observation
 	lanFaulted            map[string]bool
+	routeFaulted          map[string]map[string]bool
 	networkFaulted        map[string]bool
 	deliveryRoute         *RouteEvidence
 	routeTransitions      []RouteEvidence
@@ -382,7 +392,9 @@ type Executor struct {
 	trackedHashes         map[string]bool
 	trackedActionSetHash  string
 	trackedMirrorIdentity string
-	direct                bool
+	// directRoute names the route every delivery in this plan must be carried
+	// by. Empty means the plan makes no direct-route claim.
+	directRoute           string
 	unpairedStableSamples int
 	burstCancel           context.CancelFunc
 	burstDone             <-chan error
@@ -399,7 +411,7 @@ func NewExecutor(bridge Bridge, stepTimeout time.Duration) *Executor {
 	if bridge == nil || stepTimeout <= 0 {
 		panic("scenario bridge and positive timeout are required")
 	}
-	return &Executor{bridge: bridge, stepTimeout: stepTimeout, baseline: map[string]map[string]string{}, baselineState: map[string]Observation{}, lanFaulted: map[string]bool{}, networkFaulted: map[string]bool{}}
+	return &Executor{bridge: bridge, stepTimeout: stepTimeout, baseline: map[string]map[string]string{}, baselineState: map[string]Observation{}, lanFaulted: map[string]bool{}, routeFaulted: map[string]map[string]bool{}, networkFaulted: map[string]bool{}}
 }
 
 func (e *Executor) Run(ctx context.Context, name string) error {
@@ -434,6 +446,7 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.baseline = map[string]map[string]string{}
 		e.baselineState = map[string]Observation{}
 		e.lanFaulted = map[string]bool{}
+		e.routeFaulted = map[string]map[string]bool{}
 		e.networkFaulted = map[string]bool{}
 		e.deliveryRoute = nil
 		e.routeTransitions = nil
@@ -447,7 +460,13 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		e.burstDone = nil
 		e.fixtureUninstalled = false
 		e.originClaimPauseArmed = false
-		e.direct = strings.HasPrefix(plan.Name, "lan-direct-") || plan.Name == "lan-restart-persistence"
+		e.directRoute = ""
+		switch {
+		case strings.HasPrefix(plan.Name, "lan-direct-") || plan.Name == "lan-restart-persistence":
+			e.directRoute = "lan"
+		case isBluetoothRoutePlan(plan.Name):
+			e.directRoute = "bluetooth"
+		}
 		e.callControl = isCallControlPlan(plan.Name)
 		e.callControlSequence = 0
 		e.callControlStableSamples = 0
@@ -495,6 +514,26 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 				}
 			}
 		}
+		for device, routes := range e.routeFaulted {
+			for route, faulted := range routes {
+				if !faulted {
+					continue
+				}
+				command, buildErr := control.NewRouteFaultCommand("cleanup", routeFaultWireNames[route], false)
+				if buildErr != nil {
+					if runErr == nil {
+						runErr = fmt.Errorf("restore %s fault %s: %w", route, device, buildErr)
+					}
+					continue
+				}
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
+				_, err := e.bridge.Control(cleanupCtx, device, command.Name, command.Params)
+				cancel()
+				if runErr == nil && err != nil {
+					runErr = fmt.Errorf("restore %s fault %s: %w", route, device, err)
+				}
+			}
+		}
 		for device, faulted := range e.networkFaulted {
 			if faulted {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.stepTimeout)
@@ -529,6 +568,11 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 		result.RouteTransitions = append([]RouteEvidence(nil), e.routeTransitions...)
 		if runErr == nil && plan.Name == "lan-relay-fallback-return" {
 			if evidenceErr := VerifyAutomaticPromotion(result.RouteTransitions); evidenceErr != nil {
+				runErr = evidenceErr
+			}
+		}
+		if runErr == nil && isBluetoothRoutePlan(plan.Name) {
+			if evidenceErr := VerifyBluetoothPromotion(result.RouteTransitions); evidenceErr != nil {
 				runErr = evidenceErr
 			}
 		}
@@ -728,6 +772,24 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 		return "", e.bridge.Restart(ctx, a.device)
 	case actionReconcile:
 		return "", e.bridge.Reconcile(ctx, a.device)
+	case actionRouteFault:
+		if e.routeFaulted[a.device] == nil {
+			e.routeFaulted[a.device] = map[string]bool{}
+		}
+		if !a.enabled {
+			e.routeFaulted[a.device][a.route] = true
+		}
+		response, err := e.bridge.Control(ctx, a.device, a.command, a.params)
+		if err != nil {
+			return "", err
+		}
+		if response.Code != "ok" {
+			return "", oracleFailure("control_rejected")
+		}
+		if a.enabled {
+			e.routeFaulted[a.device][a.route] = false
+		}
+		return "", nil
 	case actionLanAvailability:
 		if !a.enabled {
 			e.lanFaulted[a.device] = true
@@ -792,6 +854,9 @@ func (e *Executor) action(ctx context.Context, raw string) (string, error) {
 			if _, err := parseCallControlAwaitResult(response, a.params["kind"]); err != nil {
 				return "", err
 			}
+		}
+		if err := verifyBluetoothControlResult(a, response); err != nil {
+			return "", err
 		}
 		return routeEvent, nil
 	case actionBurstStart:
@@ -958,8 +1023,8 @@ func (e *Executor) observeDeliveryRoute(ctx context.Context, a action) (string, 
 	if err != nil {
 		return "", err
 	}
-	if e.direct && (observed.Route != "lan" || observed.RoutePhase != "authenticated") {
-		return "", oracleFailure("missing_authenticated_lan")
+	if e.directRoute != "" && (observed.Route != e.directRoute || observed.RoutePhase != "authenticated") {
+		return "", oracleFailure("missing_authenticated_" + e.directRoute)
 	}
 	if observed.Route != "" && observed.Route != "none" && observed.RoutePhase != "authenticated" {
 		return "", errors.New("delivery action has no authenticated route observation")
@@ -1003,6 +1068,10 @@ func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) er
 		(predicate == "A.route.relay" || predicate == "A.route.lan") {
 		e.recordRouteTransition(matchedA)
 	}
+	if err == nil && isBluetoothRoutePlan(name) &&
+		(predicate == "A.route.bluetooth" || predicate == "A.route.lan") {
+		e.recordRouteTransition(matchedA)
+	}
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		return oracleFailure(oracleCode(predicate))
 	}
@@ -1023,7 +1092,7 @@ func (e *Executor) recordRouteTransition(observed Observation) {
 func routeEvidenceFromObservation(observed Observation) RouteEvidence {
 	peerEvidence := observed.PeerEvidence
 	if peerEvidence == "" {
-		if observed.Route == "lan" && observed.RoutePhase == "authenticated" {
+		if (observed.Route == "lan" || observed.Route == "bluetooth") && observed.RoutePhase == "authenticated" {
 			peerEvidence = "direct"
 		} else {
 			peerEvidence = "unknown"
@@ -1324,6 +1393,9 @@ func oracleCode(predicate string) string {
 	if code, ok := callControlOracleCode(predicate); ok {
 		return code
 	}
+	if code, ok := bluetoothRouteOracleCode(predicate); ok {
+		return code
+	}
 	switch {
 	case strings.Contains(predicate, ".route."):
 		return "missing_authenticated_lan"
@@ -1418,7 +1490,7 @@ func userDeliveryCount(state Observation) int {
 // direct delivery from a relay session that merely looked healthy.
 func routeSatisfied(want string, o Observation) bool {
 	switch want {
-	case "lan", "relay":
+	case "lan", "bluetooth", "relay":
 		return o.Route == want && o.RoutePhase == "authenticated"
 	case "queued":
 		// Durable work with nothing carrying it. This is the state the product

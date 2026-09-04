@@ -32,7 +32,7 @@ type RouteEvidence struct {
 }
 
 var (
-	routeKinds  = map[string]bool{"lan": true, "relay": true, "none": true}
+	routeKinds  = map[string]bool{"lan": true, "bluetooth": true, "relay": true, "none": true}
 	routePhases = map[string]bool{
 		"idle": true, "connecting": true, "authenticated": true, "reconnecting": true,
 	}
@@ -115,6 +115,39 @@ func VerifyAutomaticPromotion(transitions []RouteEvidence) error {
 		}
 		if transition.Route == "relay" && transition.PeerEvidence == "direct" {
 			return errors.New("relay must not claim direct peer evidence")
+		}
+	}
+	return nil
+}
+
+// CustodyRouteNames is the complete set of durable custody routes, in the
+// order the device reports them. A route missing from an observation is a
+// malformed observation, not an empty count.
+var CustodyRouteNames = []string{"lan", "bluetooth", "relay"}
+
+// VerifyBluetoothPromotion validates the content-free route sequence emitted by
+// the Bluetooth scenario: the run delivered on an authenticated direct
+// Bluetooth route, then LAN took the lease in a strictly later generation.
+// One enum-valued route per generation, with the generation advancing, is the
+// host-side evidence that the coordinator closed Bluetooth before LAN drained;
+// two concurrent drainers cannot produce this sequence.
+func VerifyBluetoothPromotion(transitions []RouteEvidence) error {
+	want := []string{"bluetooth", "lan"}
+	if len(transitions) != len(want) {
+		return fmt.Errorf("expected %d route transitions, observed %d", len(want), len(transitions))
+	}
+	for index, transition := range transitions {
+		if transition.Route != want[index] {
+			return fmt.Errorf("route transition %d is %q, want %q", index, transition.Route, want[index])
+		}
+		if transition.Phase != "authenticated" {
+			return fmt.Errorf("route transition %d is not authenticated", index)
+		}
+		if transition.PeerEvidence != "direct" {
+			return fmt.Errorf("route transition %d is not direct peer evidence", index)
+		}
+		if index > 0 && transition.Generation <= transitions[index-1].Generation {
+			return fmt.Errorf("route transition %d did not open a later generation", index)
 		}
 	}
 	return nil
@@ -492,11 +525,11 @@ func validateObservationShape(value map[string]any) error {
 	}
 	if raw, present := value["custody_counts"]; present {
 		routes, ok := raw.(map[string]any)
-		if !ok || len(routes) != 2 {
-			return errors.New("custody_counts must contain lan and relay")
+		if !ok || len(routes) != len(CustodyRouteNames) {
+			return errors.New("custody_counts must contain lan, bluetooth and relay")
 		}
 		events := map[string]bool{"notif_post": true, "notif_update": true, "notif_cancel": true, "call_state": true, "state_digest": true, "state_snapshot_begin": true, "state_snapshot_item": true, "state_snapshot_end": true, "unpair": true, "peer_receipt": true}
-		for _, route := range []string{"lan", "relay"} {
+		for _, route := range CustodyRouteNames {
 			counts, ok := routes[route].(map[string]any)
 			if !ok || len(counts) != len(events) {
 				return fmt.Errorf("custody_counts.%s is invalid", route)

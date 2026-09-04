@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -132,7 +133,7 @@ func validObservationPayloadForTest() map[string]any {
 		},
 		"product_observations": map[string]any{
 			"paired":             true,
-			"custody_counts":     map[string]any{"lan": counts, "relay": cloneMap(counts)},
+			"custody_counts":     map[string]any{"lan": counts, "bluetooth": cloneMap(counts), "relay": cloneMap(counts)},
 			"peer_receipt_count": 0.0, "snapshot_digest_count": 0.0, "snapshot_begin_count": 0.0,
 			"snapshot_end_count": 0.0, "snapshot_commit_count": 0.0, "user_dismiss_count": 0.0, "unpair_inbound_count": 0.0,
 			"unpair_outcome": "none", "active_queue_count": 0.0, "active_queue_bytes": 0.0,
@@ -396,7 +397,7 @@ func (f *fakeBridge) Post(_ context.Context, device, tag, text string) error {
 }
 
 func completeCustodyCounts() map[string]map[string]int64 {
-	result := map[string]map[string]int64{"lan": {}, "relay": {}}
+	result := map[string]map[string]int64{"lan": {}, "bluetooth": {}, "relay": {}}
 	for route := range result {
 		for _, event := range []string{"notif_post", "notif_update", "notif_cancel", "call_state", "state_digest", "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair", "peer_receipt"} {
 			result[route][event] = 0
@@ -1203,12 +1204,17 @@ type directSemanticBridge struct {
 	notificationSequences  map[string]int
 	lastControlTap         string
 	callSessions           int
+	// routeFaults[device][route] mirrors the device's own route-availability
+	// prefs, so the fake grants exactly the LAN > Bluetooth > relay order the
+	// coordinator would.
+	routeFaults map[string]map[string]bool
+	promoted    bool
 }
 
 func newDirectSemanticBridge(omit string) *directSemanticBridge {
 	counts := func() map[string]map[string]int64 {
 		keys := []string{"notif_post", "notif_update", "notif_cancel", "call_state", "state_digest", "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair", "peer_receipt"}
-		result := map[string]map[string]int64{"lan": {}, "relay": {}}
+		result := map[string]map[string]int64{"lan": {}, "bluetooth": {}, "relay": {}}
 		for route := range result {
 			for _, key := range keys {
 				result[route][key] = 0
@@ -1229,6 +1235,7 @@ func newDirectSemanticBridge(omit string) *directSemanticBridge {
 		states: map[string]scenario.Observation{"A": state(), "B": state()}, omit: omit,
 		hash: strings.Repeat("a", 64), session: "11111111-1111-4111-8111-111111111111",
 		notificationSequences: map[string]int{},
+		routeFaults:           map[string]map[string]bool{"A": {}, "B": {}},
 	}
 	if omit == "route" {
 		a := bridge.states["A"]
@@ -1240,6 +1247,38 @@ func newDirectSemanticBridge(omit string) *directSemanticBridge {
 
 func (b *directSemanticBridge) Control(_ context.Context, device, name string, params map[string]string) (control.Result, error) {
 	switch name {
+	case "ROUTE_FAULT":
+		route := strings.ToLower(params["route"])
+		faulted := params["enabled"] == "true"
+		if b.omit == "promotion" && route == "lan" && !faulted {
+			return control.Result{Code: "ok"}, nil
+		}
+		b.routeFaults[device][route] = faulted
+		b.applyRoutePriority(device)
+		return control.Result{Code: "ok"}, nil
+	case "AWAIT_ROUTE":
+		state := b.states[device]
+		want := strings.ToLower(params["route"])
+		status := "timeout"
+		if state.Route == want && state.RoutePhase == "authenticated" {
+			status = "matched"
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"route": state.Route, "phase": state.RoutePhase, "status": status, "elapsed_ms": 4,
+		})
+		return control.Result{Code: "ok", Payload: payload}, nil
+	case "ENQUEUE_FIXTURE":
+		size, _ := strconv.Atoi(params["bytes"])
+		b.recordCustody("A", "notif_post")
+		b.recordReceipt("A")
+		b.afterDelivery()
+		payload, _ := json.Marshal(map[string]any{"bytes": size, "status": "enqueued", "elapsed_ms": 6})
+		return control.Result{Code: "ok", Payload: payload}, nil
+	case "AWAIT_PEER_RECEIPT":
+		payload, _ := json.Marshal(map[string]any{
+			"status": "receipted", "awaiting_peer_count": 0, "elapsed_ms": 7,
+		})
+		return control.Result{Code: "ok", Payload: payload}, nil
 	case "SET_LAN_AVAILABLE":
 		state := b.states[device]
 		state.Route = map[bool]string{true: "lan", false: "relay"}[params["available"] == "true"]
@@ -1421,6 +1460,35 @@ func (b *directSemanticBridge) Control(_ context.Context, device, name string, p
 	default:
 		return control.Result{Code: "ok"}, nil
 	}
+}
+
+// applyRoutePriority grants exactly one route in LAN > Bluetooth > relay order,
+// opening a new generation on every change so no two routes ever share one.
+func (b *directSemanticBridge) applyRoutePriority(device string) {
+	faults := b.routeFaults[device]
+	granted := "none"
+	switch {
+	case !faults["lan"]:
+		granted = "lan"
+	case !faults["bluetooth"]:
+		granted = "bluetooth"
+	case !faults["relay"]:
+		granted = "relay"
+	}
+	if b.omit == "bluetooth-route" && granted == "bluetooth" {
+		granted = "relay"
+	}
+	state := b.states[device]
+	if state.Route == granted {
+		return
+	}
+	state.Route = granted
+	state.RoutePhase = "authenticated"
+	if granted == "none" {
+		state.RoutePhase = "idle"
+	}
+	state.RouteGeneration++
+	b.states[device] = state
 }
 
 func (b *directSemanticBridge) recordCustody(device, event string) {

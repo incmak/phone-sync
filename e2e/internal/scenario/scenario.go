@@ -223,6 +223,9 @@ func PlanWithBurstCount(name string, burstCount int) (ScenarioPlan, error) {
 	if plan, ok := callControlPlan(name); ok {
 		return plan, nil
 	}
+	if plan, ok := bluetoothRoutePlan(name); ok {
+		return plan, nil
+	}
 	if name == "core-correctness" {
 		children := make([]ScenarioPlan, 0, 5)
 		for _, child := range []string{"post", "update", "dismiss-origin", "rapid-post-update-cancel", "offline"} {
@@ -807,11 +810,11 @@ func parseProductObservations(payload []byte) (productObservations, error) {
 		return productObservations{}, errors.New("E2E state malformed unpair_outcome")
 	}
 	var custodyRaw map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(fields["custody_counts"], &custodyRaw); err != nil || len(custodyRaw) != 2 {
+	if err := json.Unmarshal(fields["custody_counts"], &custodyRaw); err != nil || len(custodyRaw) != len(CustodyRouteNames) {
 		return productObservations{}, errors.New("E2E state malformed custody_counts")
 	}
 	custody := map[string]map[string]int64{}
-	for _, route := range []string{"lan", "relay"} {
+	for _, route := range CustodyRouteNames {
 		counts, ok := custodyRaw[route]
 		if !ok || len(counts) != len(productEventKeys) {
 			return productObservations{}, fmt.Errorf("E2E state malformed custody_counts.%s", route)
