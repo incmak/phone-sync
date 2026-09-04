@@ -26,7 +26,7 @@ import kotlinx.coroutines.withContext
  *
  * A wire adapter only: every ordering, custody and shutdown invariant lives in
  * [DirectDelivery], which this class runs under [CustodyRoute.BLUETOOTH]. The wire is
- * typed as [AuthenticatedBluetoothWire] on purpose, so an RFCOMM stream that has not
+ * typed as [AuthenticatedBluetoothWire] on purpose, so an L2CAP stream that has not
  * passed the signed handshake cannot be turned into a route session at all.
  */
 class BluetoothTransport(

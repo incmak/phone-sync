@@ -18,7 +18,7 @@ import kotlinx.coroutines.test.runTest
 @OptIn(ExperimentalCoroutinesApi::class)
 class BluetoothConnectorTest {
     @Test
-    fun smallerDeviceIdIsTheClientAndDialsAfterCancellingDiscovery() = runTest {
+    fun smallerDeviceIdIsTheClientAndDials() = runTest {
         val socket = FakeSocket(PEER_ADDRESS)
         val links = FakeLinks(connect = { socket })
         val authenticator = RecordingAuthenticator(LARGER)
@@ -27,7 +27,7 @@ class BluetoothConnectorTest {
         assertEquals(BluetoothRole.CLIENT, connector.normalRole)
         val wire = connector.connect()
 
-        assertEquals(listOf("cancelDiscovery", "connect"), links.calls)
+        assertEquals(listOf("connect"), links.calls)
         assertEquals(listOf(BluetoothRole.CLIENT), authenticator.roles)
         assertEquals(LARGER, wire.peerDeviceId)
         assertEquals(0, currentTime)
@@ -46,7 +46,7 @@ class BluetoothConnectorTest {
         assertEquals(BluetoothRole.SERVER, connector.normalRole)
         val wire = connector.connect()
 
-        assertEquals(listOf("cancelDiscovery", "listen"), links.calls)
+        assertEquals(listOf("listen"), links.calls)
         assertTrue(stranger.closed, "a socket from another address must be closed before any byte is parsed")
         assertFalse(stranger.read, "a socket from another address must not be read")
         assertFalse(expected.closed)
@@ -54,6 +54,22 @@ class BluetoothConnectorTest {
         assertSame(expected, authenticator.sockets.single())
         assertTrue(listener.closed, "the listener must close once a socket is chosen")
         assertEquals(SMALLER, wire.peerDeviceId)
+    }
+
+    @Test
+    fun anUnknowablePeerAddressAcceptsTheFirstSocketAndLeavesIdentityToTheHandshake() = runTest {
+        // Under LE privacy the peer dials from a rotating resolvable private address, so an
+        // address filter would reject the real peer. The signed handshake is the identity check.
+        val first = FakeSocket("00:00:00:00:00:00")
+        val listener = FakeListener(listOf(first))
+        val links = FakeLinks(listen = { listener }, peerAddress = null)
+        val authenticator = RecordingAuthenticator(SMALLER)
+        val connector = connector(localDeviceId = LARGER, peerDeviceId = SMALLER, links = links, authenticator = authenticator)
+
+        connector.connect()
+
+        assertFalse(first.closed, "the only offered socket must be handed to the handshake")
+        assertSame(first, authenticator.sockets.single())
     }
 
     @Test
@@ -68,7 +84,7 @@ class BluetoothConnectorTest {
 
         val wire = connector.connect()
 
-        assertEquals(listOf("cancelDiscovery", "connect", "listen"), links.calls)
+        assertEquals(listOf("connect", "listen"), links.calls)
         assertEquals(15_000, currentTime)
         assertEquals(listOf(BluetoothRole.SERVER), authenticator.roles)
         assertEquals(LARGER, wire.peerDeviceId)
@@ -84,7 +100,7 @@ class BluetoothConnectorTest {
 
         val wire = connector.connect()
 
-        assertEquals(listOf("cancelDiscovery", "listen", "connect"), links.calls)
+        assertEquals(listOf("listen", "connect"), links.calls)
         assertTrue(listener.closed)
         assertEquals(15_000, currentTime)
         assertEquals(listOf(BluetoothRole.CLIENT), authenticator.roles)
@@ -100,9 +116,19 @@ class BluetoothConnectorTest {
 
         assertEquals(BluetoothConnectFailure.CONNECT_TIMEOUT, error.failure)
         assertEquals("bluetooth_connect_timeout", error.message)
-        assertEquals(listOf("cancelDiscovery", "connect", "listen"), links.calls)
+        assertEquals(listOf("connect", "listen"), links.calls)
         // 12 s normal ceiling, reverse attempt at 15 s, 12 s reverse ceiling.
         assertEquals(27_000, currentTime)
+    }
+
+    @Test
+    fun theBoundedCeilingsAreTheOnesTheRouteAdvertisesFor() = runTest {
+        assertEquals(12_000L, BluetoothConnector.DEFAULT_CONNECT_TIMEOUT_MILLIS)
+        assertEquals(10_000L, BluetoothConnector.DEFAULT_HANDSHAKE_TIMEOUT_MILLIS)
+        assertEquals(15_000L, BluetoothConnector.DEFAULT_REVERSE_ATTEMPT_DELAY_MILLIS)
+        // A rendezvous must keep advertising for the whole connector window, reverse attempt
+        // included, or the peer stops being findable half way through its own attempt.
+        assertEquals(27_000L, BluetoothConnector.RENDEZVOUS_WINDOW_MILLIS)
     }
 
     @Test
@@ -170,12 +196,13 @@ class BluetoothConnectorTest {
     private class FakeLinks(
         private val connect: suspend () -> BluetoothStreamSocket = { error("unexpected connect") },
         private val listen: suspend () -> BluetoothLinkListener = { error("unexpected listen") },
+        peerAddress: String? = PEER_ADDRESS,
     ) : BluetoothLinkProvider {
         val calls = mutableListOf<String>()
-        override val peerAddress: String = PEER_ADDRESS
-        override suspend fun cancelDiscovery() { calls += "cancelDiscovery" }
+        override val peerAddress: String? = peerAddress
         override suspend fun listen(): BluetoothLinkListener { calls += "listen"; return listen.invoke() }
         override suspend fun connect(): BluetoothStreamSocket { calls += "connect"; return connect.invoke() }
+        override fun close() { calls += "close" }
     }
 
     private class FakeListener(sockets: List<FakeSocket>) : BluetoothLinkListener {

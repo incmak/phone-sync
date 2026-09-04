@@ -133,7 +133,7 @@ func bluetoothRouteOracleCode(predicate string) (string, bool) {
 // device reports success.
 var forbiddenBluetoothFields = []string{
 	"address", "bluetooth_address", "mac", "device_name", "name", "association",
-	"association_id", "uuid", "service_uuid", "rfcomm_uuid", "ssid", "bssid",
+	"association_id", "uuid", "service_uuid", "l2cap_uuid", "psm", "ssid", "bssid",
 	"peer_key", "public_key", "envelope", "ciphertext", "payload", "text", "title",
 }
 

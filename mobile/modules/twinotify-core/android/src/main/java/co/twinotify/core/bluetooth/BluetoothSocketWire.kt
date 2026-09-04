@@ -56,7 +56,7 @@ internal suspend fun <T> blockingUntilReleased(release: () -> Unit, block: () ->
 }
 
 /**
- * One RFCOMM stream as a [DirectWire]: exactly one collector, one mutexed writer, every
+ * One LE L2CAP stream as a [DirectWire]: exactly one collector, one mutexed writer, every
  * read and write under a deadline, and any timeout or protocol failure closes the socket.
  * Before the handshake it is also the [BluetoothHandshakeChannel]; only
  * [AuthenticatedBluetoothWire] is ever handed to a route.

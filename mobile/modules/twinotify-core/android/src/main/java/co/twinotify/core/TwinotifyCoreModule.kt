@@ -697,7 +697,7 @@ class TwinotifyCoreModule internal constructor(
         }
 
         /**
-         * Generic CDM picker, then the signed RFCOMM handshake against the confirmed peer. The
+         * Generic CDM picker, then the signed L2CAP handshake against the confirmed peer. The
          * binding is saved only after the handshake verifies. Resolves `associated=false` when the
          * user declines or the picker times out; rejects with one bounded code otherwise.
          */

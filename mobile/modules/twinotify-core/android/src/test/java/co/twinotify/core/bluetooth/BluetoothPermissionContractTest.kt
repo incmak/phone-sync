@@ -70,7 +70,7 @@ class BluetoothPermissionContractTest {
     }
 
     @Test
-    fun bluetoothSourcesUseNoWatchProfileNoSingleDeviceShortcutAndNoInsecureRfcomm() {
+    fun bluetoothSourcesUseNoWatchProfileNoSingleDeviceShortcutAndNoClassicSocket() {
         val sources = File(projectDir, "src/main/java/co/twinotify/core/bluetooth")
             .walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
@@ -80,8 +80,10 @@ class BluetoothPermissionContractTest {
             "setDeviceProfile(",
             "DEVICE_PROFILE_WATCH",
             "setSingleDevice(true)",
-            "InsecureRfcomm",
+            "Rfcomm",
             "00001101-0000-1000-8000-00805f9b34fb",
+            "startDiscovery(",
+            "cancelDiscovery(",
         )) {
             assertFalse(sources.contains(banned, ignoreCase = true), "bluetooth sources must not use $banned")
         }

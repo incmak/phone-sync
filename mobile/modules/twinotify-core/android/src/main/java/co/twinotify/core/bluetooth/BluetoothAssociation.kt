@@ -4,10 +4,6 @@ import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
-import android.bluetooth.le.AdvertiseCallback
-import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
-import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.ScanFilter
 import android.companion.AssociationInfo
 import android.companion.AssociationRequest
@@ -21,6 +17,7 @@ import androidx.core.content.ContextCompat
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.PeerStore
+import java.io.Closeable
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
@@ -40,10 +37,19 @@ object BluetoothAssociationPolicy {
     const val ASSOCIATION_TIMEOUT_MILLIS = 120_000L
 
     /**
-     * The picker discovers over an LE scan, so the chosen device reports LE or unknown until the
-     * adapter has also seen it over Classic. Requiring DUAL here rejected every real peer. Accept
-     * any device the picker actually returned and let the signed RFCOMM handshake that follows
-     * prove Classic support, which is the only honest proof available at this point.
+     * The one advertisement covers the picker and the connect that follows it.
+     *
+     * It cannot be stopped and restarted in between: the stack gives every new advertising set a
+     * fresh resolvable private address, which would invalidate the address the peer's picker just
+     * recorded and leave its dial timing out against nobody.
+     */
+    const val ADVERTISEMENT_TIMEOUT_MILLIS = ASSOCIATION_TIMEOUT_MILLIS + 27_000L
+
+    /**
+     * The picker discovers over an LE scan, so the chosen device reports LE or unknown.
+     * Requiring DUAL here rejected every real peer, and the route no longer needs a Classic
+     * radio at all: it runs over an LE L2CAP channel. Accept any device the picker actually
+     * returned and let the signed handshake prove it is the confirmed Twinotify peer.
      */
     fun acceptsSelectedDeviceType(type: Int?): Boolean = type != null
 
@@ -66,6 +72,10 @@ enum class BluetoothAssociationFailure(val code: String) {
     ADVERTISING_FAILED("bluetooth_advertising_failed"),
     ASSOCIATION_IN_PROGRESS("bluetooth_association_in_progress"),
     ASSOCIATION_FAILED("bluetooth_association_failed"),
+    LISTEN_FAILED("bluetooth_listen_failed"),
+    SCAN_FAILED("bluetooth_scan_failed"),
+    PEER_NOT_DISCOVERED("bluetooth_peer_not_discovered"),
+    PEER_PSM_UNAVAILABLE("bluetooth_peer_psm_unavailable"),
     DEVICE_UNUSABLE("bluetooth_device_unusable"),
     PEER_NOT_CONFIRMED("bluetooth_peer_not_confirmed"),
 }
@@ -76,11 +86,23 @@ class BluetoothAssociationException(val failure: BluetoothAssociationFailure) : 
  * A user-approved association that has not yet proven the Twinotify peer identity. It lives in
  * memory only: the address never reaches storage, and no [BluetoothBinding] exists until the
  * authenticated handshake saves one.
+ *
+ * It also carries the L2CAP server socket opened before the advertisement started, so the PSM the
+ * peer read off the air is the one this phone is still accepting on, plus the peer's own PSM read
+ * from its advertisement. Closing it releases that socket.
  */
 class ProvisionalBluetoothAssociation internal constructor(
     val associationId: Int,
     internal val device: BluetoothDevice,
-)
+    internal val peerPsm: Int,
+    internal val listener: BluetoothL2capListener,
+    private val advertisement: DiscoveryAdvertisement,
+) : Closeable {
+    override fun close() {
+        listener.close()
+        advertisement.close()
+    }
+}
 
 object ProvisionalBluetoothAssociations {
     private val current = AtomicReference<ProvisionalBluetoothAssociation?>(null)
@@ -88,11 +110,11 @@ object ProvisionalBluetoothAssociations {
     fun current(): ProvisionalBluetoothAssociation? = current.get()
 
     internal fun replace(value: ProvisionalBluetoothAssociation?) {
-        current.set(value)
+        current.getAndSet(value)?.takeIf { it !== value }?.close()
     }
 
     fun clear() {
-        current.set(null)
+        current.getAndSet(null)?.close()
     }
 }
 
@@ -112,7 +134,7 @@ object BluetoothAssociations {
 /**
  * Second half of the public association operation. A provisional association proves only
  * that the user picked a device; this proves the device is the confirmed Twinotify peer by
- * running the signed RFCOMM handshake, and only then writes the durable binding. Any
+ * running the signed L2CAP handshake, and only then writes the durable binding. Any
  * failure, including cancellation, closes the socket, discards the provisional state, and
  * disassociates that exact provisional ID so an unverified association is never left enabled.
  */
@@ -125,15 +147,25 @@ object BluetoothAssociationCompletion {
             if (!BluetoothAssociationPolicy.permissionsGranted(appContext)) {
                 throw BluetoothAssociationException(BluetoothAssociationFailure.PERMISSION_DENIED)
             }
-            val adapter = appContext.getSystemService(BluetoothManager::class.java)?.adapter
+            appContext.getSystemService(BluetoothManager::class.java)?.adapter
                 ?.takeIf { it.isEnabled }
                 ?: throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
             val localDeviceId = DeviceIdentity.getOrCreate(appContext)
             val signingKeys = CryptoStore.loadOrGenerate(appContext).second
+            // The provisional is still advertising the service and PSM it published before the
+            // picker opened. An L2CAP channel rides an LE ACL link and only a connectable
+            // advertiser can be dialled, so that advertisement has to outlive the picker: it
+            // stops when the provisional is closed, win or lose.
+            val links = AndroidBluetoothLinkProvider(
+                context = appContext,
+                device = provisional.device,
+                peerPsm = provisional.peerPsm,
+                listener = provisional.listener,
+            )
             val connector = BluetoothConnector(
                 localDeviceId = localDeviceId,
                 peerDeviceId = peer.deviceId,
-                links = AndroidBluetoothLinkProvider(appContext, adapter, provisional.device),
+                links = links,
                 authenticator = SignedBluetoothWireAuthenticator { role ->
                     BluetoothHandshake(
                         localDeviceId = localDeviceId,
@@ -145,13 +177,18 @@ object BluetoothAssociationCompletion {
                 },
             )
             // Association proves identity only; route sessions are the coordinator's to open.
-            connector.connect().close()
+            try {
+                connector.connect().close()
+            } finally {
+                links.close()
+            }
             val binding = BluetoothBinding(
                 associationId = provisional.associationId,
                 peerDeviceId = peer.deviceId,
                 peerSigningKeySha256 = BluetoothBinding.signingKeyDigest(peer.signPubkey),
             )
             BluetoothBindingStore.forContext(appContext).save(binding)
+            // Clearing closes the provisional, which stops the advertisement and the listener.
             ProvisionalBluetoothAssociations.clear()
             return binding
         } catch (error: Throwable) {
@@ -162,6 +199,7 @@ object BluetoothAssociationCompletion {
 
     private fun discard(context: Context, provisional: ProvisionalBluetoothAssociation) {
         ProvisionalBluetoothAssociations.clear()
+        provisional.close()
         BluetoothAssociations.disassociate(context, provisional.associationId)
     }
 }
@@ -214,29 +252,50 @@ class BluetoothAssociationFlow private constructor(
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
             ?.takeIf { it.isEnabled }
             ?: throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
-        val advertiser = adapter.bluetoothLeAdvertiser
-            ?: throw BluetoothAssociationException(BluetoothAssociationFailure.ADVERTISING_FAILED)
-        val advertisement = DiscoveryAdvertisement(context, advertiser) {
-            outcome.completeExceptionally(BluetoothAssociationException(BluetoothAssociationFailure.ADVERTISING_FAILED))
+        // Listen first, then advertise: the PSM published over the air has to be one this phone
+        // is already accepting on. Both stay open past the picker and stop with the provisional.
+        val listener = BluetoothDiscovery.openListener(context, adapter)
+        val advertisement = DiscoveryAdvertisement(
+            context = context,
+            advertiser = BluetoothDiscovery.advertiser(adapter),
+            psm = listener.psm,
+            timeoutMillis = BluetoothAssociationPolicy.ADVERTISEMENT_TIMEOUT_MILLIS,
+        ) {
+            outcome.completeExceptionally(
+                BluetoothAssociationException(BluetoothAssociationFailure.ADVERTISING_FAILED),
+            )
         }
-        val info = try {
+        var handedOver = false
+        try {
             advertisement.start()
             companionDeviceManager.associate(request(), ContextCompat.getMainExecutor(context), callback)
-            withTimeoutOrNull(BluetoothAssociationPolicy.ASSOCIATION_TIMEOUT_MILLIS) { outcome.await() }
+            val info = withTimeoutOrNull(BluetoothAssociationPolicy.ASSOCIATION_TIMEOUT_MILLIS) { outcome.await() }
+            if (info == null) {
+                outcome.complete(null)
+                return null
+            }
+            // The picker discovers over an LE scan, so this is a ScanResult whose record carries
+            // the peer's advertised PSM. Its address is a resolvable private one, valid only
+            // while the peer keeps that same advertising set running.
+            val scanResult = info.associatedDevice?.bleDevice
+            if (!BluetoothAssociationPolicy.acceptsSelectedDeviceType(deviceType(scanResult?.device))) {
+                runCatching { companionDeviceManager.disassociate(info.id) }
+                throw BluetoothAssociationException(BluetoothAssociationFailure.DEVICE_UNUSABLE)
+            }
+            val peer = BluetoothDiscovery.readPeer(requireNotNull(scanResult))
+            if (peer == null) {
+                runCatching { companionDeviceManager.disassociate(info.id) }
+                throw BluetoothAssociationException(BluetoothAssociationFailure.PEER_PSM_UNAVAILABLE)
+            }
+            handedOver = true
+            return ProvisionalBluetoothAssociation(info.id, peer.device, peer.psm, listener, advertisement)
+                .also(ProvisionalBluetoothAssociations::replace)
         } finally {
-            advertisement.stop()
+            if (!handedOver) {
+                advertisement.close()
+                listener.close()
+            }
         }
-        if (info == null) {
-            outcome.complete(null)
-            return null
-        }
-        val device = info.associatedDevice?.bleDevice?.device
-        if (!BluetoothAssociationPolicy.acceptsSelectedDeviceType(deviceType(device))) {
-            runCatching { companionDeviceManager.disassociate(info.id) }
-            throw BluetoothAssociationException(BluetoothAssociationFailure.DEVICE_UNUSABLE)
-        }
-        return ProvisionalBluetoothAssociation(info.id, requireNotNull(device))
-            .also(ProvisionalBluetoothAssociations::replace)
     }
 
     private fun deviceType(device: BluetoothDevice?): Int? {
@@ -303,48 +362,5 @@ class BluetoothAssociationFlow private constructor(
         fun cancelActive() {
             active.get()?.outcome?.complete(null)
         }
-    }
-}
-
-/** Advertises the discovery service for the life of one association flow and no longer. */
-private class DiscoveryAdvertisement(
-    private val context: Context,
-    private val advertiser: BluetoothLeAdvertiser,
-    private val onFailure: () -> Unit,
-) : AdvertiseCallback() {
-    fun start() {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            throw BluetoothAssociationException(BluetoothAssociationFailure.PERMISSION_DENIED)
-        }
-        val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-            .setConnectable(true)
-            .setTimeout(BluetoothAssociationPolicy.ASSOCIATION_TIMEOUT_MILLIS.toInt())
-            .build()
-        val data = AdvertiseData.Builder()
-            .addServiceUuid(ParcelUuid(BluetoothConstants.DISCOVERY_SERVICE_UUID))
-            .setIncludeDeviceName(false)
-            .build()
-        try {
-            advertiser.startAdvertising(settings, data, this)
-        } catch (_: IllegalStateException) {
-            throw BluetoothAssociationException(BluetoothAssociationFailure.ADVERTISING_FAILED)
-        }
-    }
-
-    fun stop() {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
-        runCatching { advertiser.stopAdvertising(this) }
-    }
-
-    override fun onStartFailure(errorCode: Int) {
-        onFailure()
     }
 }

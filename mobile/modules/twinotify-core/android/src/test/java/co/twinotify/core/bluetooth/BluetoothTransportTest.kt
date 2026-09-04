@@ -28,7 +28,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 /**
- * Runs the real RFCOMM wire over an in-memory stream pair. Real time is used on purpose:
+ * Runs the real L2CAP wire over an in-memory stream pair. Real time is used on purpose:
  * the wire's blocking reads run on IO threads, and a virtual-time scheduler would fire the
  * wire's own deadlines while a test thread is legitimately blocked.
  */
@@ -87,7 +87,7 @@ class BluetoothTransportTest {
 
         assertEquals("route_promoted_to_lan", awaitWithin { session.awaitClosed() })
         assertEquals(BluetoothFrame.Close("route_promoted_to_lan"), socket.written().last())
-        assertTrue(socket.closed, "session close must close the RFCOMM socket")
+        assertTrue(socket.closed, "session close must close the L2CAP socket")
         val writesAfterFirstClose = socket.written().size
 
         session.close("second_close_ignored")

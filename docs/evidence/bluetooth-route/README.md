@@ -12,7 +12,7 @@ that could end up in a shared artifact.
 
 `PHY-BLUETOOTH-01` in [`docs/test-scenarios.md`](../../test-scenarios.md)
 records whether a project-owned target build carries Twinotify's existing
-end-to-end-encrypted v2 envelopes over a user-associated secure RFCOMM link
+end-to-end-encrypted v2 envelopes over a user-associated LE L2CAP link
 when Wi-Fi is unavailable, and hands the outbox back to LAN cleanly when Wi-Fi
 returns. A record is valid only when both phones were associated through the
 system Companion Device Manager picker, the link authenticated against the

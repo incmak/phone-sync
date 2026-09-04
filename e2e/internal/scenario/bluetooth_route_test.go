@@ -132,9 +132,9 @@ func TestBluetoothDirectRouteEvidenceCarriesNoDeviceIdentifiers(t *testing.T) {
 	}
 	text := strings.ToLower(string(raw))
 	for _, forbidden := range []string{
-		"association_id", "association", "bluetooth_address", "device_name", "rfcomm_uuid",
+		"association_id", "association", "bluetooth_address", "device_name", "psm",
 		"service_uuid", "mac", "ssid", "bssid", "aa:bb:cc:dd:ee:ff",
-		"7c6f5d5e-6f54-4f6e-9b63-5457494e4f54", "5d7101b8-cad0-4d22-a41e-5457494e4f54",
+		"5d7101b8-cad0-4d22-a41e-5457494e4f54",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("evidence retained %q: %s", forbidden, raw)

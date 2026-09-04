@@ -4,7 +4,7 @@ import co.twinotify.core.direct.DirectCommand
 import java.security.MessageDigest
 
 /**
- * Closed-world post-handshake frame set for the RFCOMM stream. It maps one-to-one onto
+ * Closed-world post-handshake frame set for the L2CAP stream. It maps one-to-one onto
  * [DirectCommand]; the handshake messages are not frames and never appear here.
  */
 sealed interface BluetoothFrame {

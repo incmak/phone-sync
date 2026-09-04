@@ -8,7 +8,7 @@ import java.io.DataOutputStream
 import java.security.MessageDigest
 import java.security.SecureRandom
 
-/** The socket role. The RFCOMM client speaks first; the roles are bound into the transcript by position. */
+/** The socket role. The dialling client speaks first; the roles are bound into the transcript by position. */
 enum class BluetoothRole {
     CLIENT,
     SERVER;
@@ -212,7 +212,7 @@ class BluetoothReplayGuard {
 }
 
 /**
- * Three-message mutual Ed25519 challenge that binds one RFCOMM socket to the stored
+ * Three-message mutual Ed25519 challenge that binds one L2CAP socket to the stored
  * Twinotify peer. Client hello, server hello with signature over `"server" || transcript`,
  * client finish with signature over `"client" || transcript`. Every check is against the
  * exact stored peer identity and key; the session identifier is SHA-256 of the transcript.

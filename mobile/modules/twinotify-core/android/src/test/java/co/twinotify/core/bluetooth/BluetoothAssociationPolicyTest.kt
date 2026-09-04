@@ -29,6 +29,21 @@ class BluetoothAssociationPolicyTest {
     }
 
     @Test
+    fun theAdvertisementOutlivesThePickerAndTheConnectThatFollowsIt() {
+        // The stack gives every new advertising set a fresh resolvable private address, so an
+        // advertisement stopped at selection and restarted for the connect would leave the peer
+        // dialling an address nobody answers on. One advertisement has to cover both phases.
+        assertEquals(
+            BluetoothAssociationPolicy.ASSOCIATION_TIMEOUT_MILLIS + BluetoothConnector.RENDEZVOUS_WINDOW_MILLIS,
+            BluetoothAssociationPolicy.ADVERTISEMENT_TIMEOUT_MILLIS,
+        )
+        assertTrue(
+            BluetoothAssociationPolicy.ADVERTISEMENT_TIMEOUT_MILLIS <= 180_000L,
+            "AdvertiseSettings rejects a timeout above 180 s",
+        )
+    }
+
+    @Test
     fun onlyDualModeDevicesAreAccepted() {
         // An LE-discovered peer reports LE or unknown, never DUAL, so a DUAL-only rule refused
         // every real phone. Only the absence of a device is a rejection here.
@@ -64,13 +79,10 @@ class BluetoothAssociationPolicyTest {
 
     @Test
     fun constantsMatchTheRouteContract() {
-        assertEquals(UUID.fromString("7c6f5d5e-6f54-4f6e-9b63-5457494e4f54"), BluetoothConstants.RFCOMM_SERVICE_UUID)
         assertEquals(UUID.fromString("5d7101b8-cad0-4d22-a41e-5457494e4f54"), BluetoothConstants.DISCOVERY_SERVICE_UUID)
-        assertEquals("bluetooth-rfcomm-v1", BluetoothConstants.ROUTE_LABEL)
+        // The transport is an LE L2CAP connection-oriented channel, and the label says so: a
+        // Classic RFCOMM socket cannot reach the resolvable private address the picker returns.
+        assertEquals("bluetooth-l2cap-v1", BluetoothConstants.ROUTE_LABEL)
         assertEquals(1, BluetoothConstants.PROTOCOL_VERSION)
-        assertFalse(
-            BluetoothConstants.RFCOMM_SERVICE_UUID == UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"),
-            "the private RFCOMM service must never be the public SPP UUID",
-        )
     }
 }

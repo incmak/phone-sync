@@ -226,10 +226,11 @@ class LiveTransportRoutesTest {
     fun bluetoothRouteRevalidatesAndBuildsOneConnectorPerOpen() = runTest {
         val validations = mutableListOf<Boolean>()
         val links = mutableListOf<LiveBluetoothRouteConfig>()
+        val opened = mutableListOf<RecordingLinks>()
         val wires = mutableListOf<co.twinotify.core.bluetooth.AuthenticatedBluetoothWire>()
         val route = LiveBluetoothTransportRoute(
             bluetoothConfig(),
-            linkFactory = { config -> links += config; NoopLinks },
+            linkFactory = { config -> links += config; RecordingLinks().also(opened::add) },
             sessionFactory = { wire -> wires += wire; RecordingSession(RouteKind.BLUETOOTH) },
             allowAttempt = { validations += true; true },
             connect = { config, _ -> authenticatedWire(config.peerDeviceId) },
@@ -242,6 +243,26 @@ class LiveTransportRoutesTest {
         assertEquals(listOf(true, true), validations)
         assertEquals(2, links.size)
         assertEquals(listOf(PEER.deviceId, PEER.deviceId), wires.map { it.peerDeviceId })
+        assertEquals(listOf(1, 1), opened.map { it.closed }, "a won attempt must still stop advertising and scanning")
+    }
+
+    @Test
+    fun aFailedBluetoothAttemptStopsAdvertisingAndScanning() = runTest {
+        val opened = mutableListOf<RecordingLinks>()
+        val route = LiveBluetoothTransportRoute(
+            bluetoothConfig(),
+            linkFactory = { RecordingLinks().also(opened::add) },
+            sessionFactory = { error("no session for a failed attempt") },
+            allowAttempt = { true },
+            connect = { _, _ -> throw co.twinotify.core.bluetooth.BluetoothConnectException(
+                co.twinotify.core.bluetooth.BluetoothConnectFailure.CONNECT_TIMEOUT,
+            ) },
+        )
+
+        val error = assertFailsWith<co.twinotify.core.bluetooth.BluetoothConnectException> { route.open() }
+
+        assertEquals("bluetooth_connect_timeout", error.message)
+        assertEquals(listOf(1), opened.map { it.closed })
     }
 
     @Test
@@ -578,11 +599,13 @@ class LiveTransportRoutesTest {
         override fun close() = Unit
     }
 
-    private object NoopLinks : co.twinotify.core.bluetooth.BluetoothLinkProvider {
-        override val peerAddress: String = "AA:BB:CC:DD:EE:FF"
-        override suspend fun cancelDiscovery() = Unit
+    /** A rendezvous stands in for the radio; [closed] proves the attempt stops advertising. */
+    private class RecordingLinks : co.twinotify.core.bluetooth.BluetoothLinkProvider {
+        var closed = 0
+        override val peerAddress: String? = null
         override suspend fun listen(): co.twinotify.core.bluetooth.BluetoothLinkListener = error("not listening")
         override suspend fun connect(): co.twinotify.core.bluetooth.BluetoothStreamSocket = error("not dialing")
+        override fun close() { closed += 1 }
     }
 
     private fun route(kind: RouteKind) = object : TransportRoute {

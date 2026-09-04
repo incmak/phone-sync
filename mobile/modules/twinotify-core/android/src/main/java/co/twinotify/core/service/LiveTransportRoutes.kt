@@ -1,11 +1,11 @@
 package co.twinotify.core.service
 
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.util.Log
-import co.twinotify.core.bluetooth.AndroidBluetoothLinkProvider
 import co.twinotify.core.bluetooth.AuthenticatedBluetoothWire
 import co.twinotify.core.bluetooth.BluetoothAssociationException
 import co.twinotify.core.bluetooth.BluetoothAssociationFailure
@@ -15,12 +15,18 @@ import co.twinotify.core.bluetooth.BluetoothBinding
 import co.twinotify.core.bluetooth.BluetoothBindingStore
 import co.twinotify.core.bluetooth.BluetoothConnectException
 import co.twinotify.core.bluetooth.BluetoothConnector
+import co.twinotify.core.bluetooth.BluetoothDiscovery
+import co.twinotify.core.bluetooth.BluetoothL2capListener
+import co.twinotify.core.bluetooth.BluetoothLinkListener
 import co.twinotify.core.bluetooth.BluetoothHandshake
 import co.twinotify.core.bluetooth.BluetoothHandshakeException
 import co.twinotify.core.bluetooth.BluetoothLinkProvider
 import co.twinotify.core.bluetooth.BluetoothRole
 import co.twinotify.core.bluetooth.BluetoothRoute
+import co.twinotify.core.bluetooth.BluetoothStreamSocket
+import co.twinotify.core.bluetooth.DiscoveryAdvertisement
 import co.twinotify.core.bluetooth.SignedBluetoothWireAuthenticator
+import co.twinotify.core.bluetooth.dialL2capChannel
 import co.twinotify.core.crypto.CryptoStore
 import co.twinotify.core.direct.DirectDeliveryEvent
 import co.twinotify.core.lan.AuthenticatedLanConnection
@@ -695,6 +701,10 @@ class LiveBluetoothTransportRoute(
             }
             runCatching { Log.w("Twinotify", code) }
             throw error
+        } finally {
+            // Advertising, scanning and the unused listener stop the moment the attempt ends,
+            // win or lose. The connected socket is the wire's and outlives this.
+            runCatching { links.close() }
         }
         try {
             return sessionFactory(wire)
@@ -717,22 +727,67 @@ class LiveBluetoothTransportRoute(
     }
 }
 
-/** Looks the stored association up in CDM on every attempt; a removed association opens nothing. */
+/**
+ * Opens one bounded LE rendezvous per route attempt.
+ *
+ * The stored CDM association still gates the attempt, but its address cannot be dialled: the
+ * picker discovered the peer over a BLE scan, so the association records a resolvable private
+ * address rather than the phone's real one. Instead each attempt opens an L2CAP listener,
+ * advertises the discovery service with that listener's PSM, and scans for the peer advertising
+ * the same service. Advertising and scanning live only for the attempt window and stop on close,
+ * win or lose, so nothing advertises continuously.
+ */
 private class AndroidLiveBluetoothLinkFactory(
     private val context: Context,
 ) : LiveBluetoothLinkFactory {
     override suspend fun open(config: LiveBluetoothRouteConfig): BluetoothLinkProvider {
         val manager = BluetoothAssociations.companionDeviceManager(context)
             ?: throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
-        val association = manager.myAssociations.firstOrNull { it.id == config.associationId }
-            ?: throw BluetoothAssociationException(BluetoothAssociationFailure.ASSOCIATION_FAILED)
-        // The address is read for this attempt only; it is compared by the connector, never stored.
-        val address = association.deviceMacAddress?.toString()?.uppercase()
+        manager.myAssociations.firstOrNull { it.id == config.associationId }
             ?: throw BluetoothAssociationException(BluetoothAssociationFailure.ASSOCIATION_FAILED)
         val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
             ?.takeIf { it.isEnabled }
             ?: throw BluetoothAssociationException(BluetoothAssociationFailure.BLUETOOTH_UNAVAILABLE)
-        return AndroidBluetoothLinkProvider(context, adapter, adapter.getRemoteDevice(address))
+        val listener = BluetoothDiscovery.openListener(context, adapter)
+        val advertisement = DiscoveryAdvertisement(
+            context = context,
+            advertiser = BluetoothDiscovery.advertiser(adapter),
+            psm = listener.psm,
+            timeoutMillis = BluetoothConnector.RENDEZVOUS_WINDOW_MILLIS,
+        )
+        try {
+            advertisement.start()
+        } catch (error: Throwable) {
+            listener.close()
+            throw error
+        }
+        return BluetoothRendezvousLinkProvider(context, adapter, listener, advertisement)
+    }
+}
+
+/**
+ * Listens on a PSM this attempt is advertising, and dials whichever peer is advertising the same
+ * discovery service. The connector's own 12 s ceiling bounds the scan; close stops both radios.
+ */
+private class BluetoothRendezvousLinkProvider(
+    private val context: Context,
+    private val adapter: BluetoothAdapter,
+    private val listener: BluetoothL2capListener,
+    private val advertisement: DiscoveryAdvertisement,
+) : BluetoothLinkProvider {
+    /** LE privacy: the peer dials from a rotating address, so the handshake is the identity check. */
+    override val peerAddress: String? = null
+
+    override suspend fun listen(): BluetoothLinkListener = listener
+
+    override suspend fun connect(): BluetoothStreamSocket {
+        val peer = BluetoothDiscovery.awaitPeer(context, adapter, BluetoothConnector.DEFAULT_CONNECT_TIMEOUT_MILLIS)
+        return dialL2capChannel(context, peer.device, peer.psm)
+    }
+
+    override fun close() {
+        advertisement.close()
+        listener.close()
     }
 }
 
