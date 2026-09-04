@@ -69,6 +69,7 @@ export function useTwinotifyCore() {
       TwinotifyCoreModule.getBluetoothRoutePermissionAsync(),
     requestBluetoothRoutePermissionAsync: () =>
       TwinotifyCoreModule.requestBluetoothRoutePermissionAsync(),
+    requestBluetoothEnable: TwinotifyCoreModule.requestBluetoothEnable,
     startBluetoothAssociation: (): Promise<{ associated: boolean }> =>
       TwinotifyCoreModule.startBluetoothAssociation(),
     getBluetoothRouteSettings: (): Promise<BluetoothRouteSettings> =>

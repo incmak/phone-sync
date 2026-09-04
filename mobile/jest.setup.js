@@ -110,6 +110,7 @@ const mockTwinotifyCore = {
   requestBluetoothRoutePermissionAsync: jest.fn(async () => ({
     status: 'granted', granted: true, canAskAgain: true, expires: 'never',
   })),
+  requestBluetoothEnable: jest.fn(async () => true),
   startBluetoothAssociation: jest.fn(async () => ({ associated: false })),
   getBluetoothRouteSettings: jest.fn(async () => ({ associated: false, enabled: false })),
   getBluetoothRouteEnabled: jest.fn(async () => false),
@@ -210,6 +211,7 @@ global.__RESET_OFFLINE_TEST_STATE__ = () => {
   mockTwinotifyCore.getBluetoothRouteSettings.mockResolvedValue({ associated: false, enabled: false });
   mockTwinotifyCore.getBluetoothRouteEnabled.mockResolvedValue(false);
   mockTwinotifyCore.setBluetoothRouteEnabled.mockResolvedValue(false);
+  mockTwinotifyCore.requestBluetoothEnable.mockResolvedValue(true);
   mockTwinotifyCore.removeBluetoothAssociation.mockResolvedValue(undefined);
   mockTwinotifyCore.isNotificationListenerGranted.mockResolvedValue(false);
   mockTwinotifyCore.isPostNotificationsGranted.mockResolvedValue(false);

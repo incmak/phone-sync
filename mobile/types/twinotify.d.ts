@@ -90,6 +90,7 @@ export interface TwinotifyCoreAPI {
   requestCallStatePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
   getBluetoothRoutePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
   requestBluetoothRoutePermissionAsync(): Promise<import('expo-modules-core').PermissionResponse>;
+  requestBluetoothEnable(): Promise<boolean>;
   startBluetoothAssociation(): Promise<{ associated: boolean }>;
   getBluetoothRouteSettings(): Promise<{ associated: boolean; enabled: boolean }>;
   getBluetoothRouteEnabled(): Promise<boolean>;

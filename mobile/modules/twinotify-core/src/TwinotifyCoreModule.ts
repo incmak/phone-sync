@@ -156,6 +156,8 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
    * or the picker times out; a peer that cannot be reached or verified rejects with a bounded
    * `bluetooth_*` code and leaves no association behind.
    */
+  /** Asks Android to turn Bluetooth on. Resolves true only once the radio is actually on. */
+  requestBluetoothEnable(): Promise<boolean>;
   startBluetoothAssociation(): Promise<{ associated: boolean }>;
   getBluetoothRouteSettings(): Promise<BluetoothRouteSettings>;
   getBluetoothRouteEnabled(): Promise<boolean>;

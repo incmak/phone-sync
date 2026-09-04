@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -6,7 +6,6 @@ import {
   StyleSheet,
   Text,
   View,
-  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -84,13 +83,23 @@ export default function PairDetailScreen() {
     }
   }, []);
 
-  const openBluetoothSettings = useCallback(() => {
+  // Set after the association callback exists, so turning Bluetooth on can resume the setup
+  // the user already asked for instead of making them tap again.
+  const associateRef = useRef<() => Promise<void>>(async () => {});
+
+  const turnOnBluetoothAndRetry = useCallback(() => {
     void (async () => {
+      let enabled = false;
       try {
-        await Linking.sendIntent('android.settings.BLUETOOTH_SETTINGS');
+        enabled = await TwinotifyCoreModule.requestBluetoothEnable();
       } catch {
-        // Quick settings remains available; nothing else changed.
+        enabled = false;
       }
+      if (enabled) {
+        await associateRef.current();
+        return;
+      }
+      Alert.alert('Bluetooth is still off', 'Nothing changed. Turn Bluetooth on to set up the fallback.');
     })();
   }, []);
 
@@ -132,7 +141,7 @@ export default function PairDetailScreen() {
           'Bluetooth is off on this phone, so the fallback cannot be set up. Nothing changed.',
           [
             { text: 'Not now', style: 'cancel' },
-            { text: 'Open settings', onPress: openBluetoothSettings },
+            { text: 'Turn on', onPress: turnOnBluetoothAndRetry },
           ],
         );
       } else {
@@ -141,7 +150,11 @@ export default function PairDetailScreen() {
     } finally {
       setBluetoothBusy(false);
     }
-  }, [bluetoothBusy, openBluetoothSettings, reloadBluetooth]);
+  }, [bluetoothBusy, reloadBluetooth, turnOnBluetoothAndRetry]);
+
+  useEffect(() => {
+    associateRef.current = handleBluetoothAssociation;
+  }, [handleBluetoothAssociation]);
 
   const handleBluetoothRouteChange = useCallback(async (next: boolean) => {
     const previous = bluetooth?.enabled ?? false;

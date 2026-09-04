@@ -163,7 +163,48 @@ describe('Bluetooth fallback association', () => {
     const [title, body, buttons] = alertSpy.mock.calls[0];
     expect(title).toBe('Turn on Bluetooth');
     expect(body).toBe('Bluetooth is off on this phone, so the fallback cannot be set up. Nothing changed.');
-    expect((buttons as { text: string }[]).map((button) => button.text)).toEqual(['Not now', 'Open settings']);
+    expect((buttons as { text: string }[]).map((button) => button.text)).toEqual(['Not now', 'Turn on']);
+    expect(screen.getByRole('button', { name: 'Set up Bluetooth fallback' })).toBeTruthy();
+  });
+
+  it('turns Bluetooth on inside the app and resumes the setup the user asked for', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const screen = await renderPair();
+    global.__TWINOTIFY_CORE__.startBluetoothAssociation
+      .mockRejectedValueOnce(new Error('bluetooth_unavailable'))
+      .mockResolvedValueOnce({ associated: true });
+    global.__TWINOTIFY_CORE__.requestBluetoothEnable.mockResolvedValue(true);
+    global.__TWINOTIFY_CORE__.getBluetoothRouteSettings
+      .mockResolvedValue({ associated: true, enabled: false });
+
+    fireEvent.press(screen.getByRole('button', { name: 'Set up Bluetooth fallback' }));
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+
+    const buttons = alertSpy.mock.calls[0][2] as { text: string; onPress?: () => void }[];
+    buttons.find((button) => button.text === 'Turn on')?.onPress?.();
+
+    await waitFor(() => expect(global.__TWINOTIFY_CORE__.requestBluetoothEnable).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(global.__TWINOTIFY_CORE__.startBluetoothAssociation).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('switch', { name: 'Use Bluetooth fallback, Off' })).toBeTruthy();
+  });
+
+  it('says nothing changed when the user declines the system Bluetooth prompt', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const screen = await renderPair();
+    global.__TWINOTIFY_CORE__.startBluetoothAssociation.mockRejectedValue(new Error('bluetooth_unavailable'));
+    global.__TWINOTIFY_CORE__.requestBluetoothEnable.mockResolvedValue(false);
+
+    fireEvent.press(screen.getByRole('button', { name: 'Set up Bluetooth fallback' }));
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+    const buttons = alertSpy.mock.calls[0][2] as { text: string; onPress?: () => void }[];
+    buttons.find((button) => button.text === 'Turn on')?.onPress?.();
+
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(2));
+    expect(alertSpy).toHaveBeenLastCalledWith(
+      'Bluetooth is still off',
+      'Nothing changed. Turn Bluetooth on to set up the fallback.',
+    );
+    expect(global.__TWINOTIFY_CORE__.startBluetoothAssociation).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('button', { name: 'Set up Bluetooth fallback' })).toBeTruthy();
   });
 

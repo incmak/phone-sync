@@ -362,10 +362,12 @@ class TwinotifyCoreModule internal constructor(
         }
 
         OnActivityResult { _, payload ->
+            co.twinotify.core.bluetooth.BluetoothEnableRequest.onActivityResult(payload.requestCode, payload.resultCode)
             co.twinotify.core.bluetooth.BluetoothAssociationFlow.onActivityResult(payload.requestCode, payload.resultCode)
         }
 
         OnDestroy {
+            co.twinotify.core.bluetooth.BluetoothEnableRequest.cancelActive()
             co.twinotify.core.bluetooth.BluetoothAssociationFlow.cancelActive()
             offlinePairing.destroy()
             moduleScope.cancel()
@@ -699,6 +701,35 @@ class TwinotifyCoreModule internal constructor(
          * binding is saved only after the handshake verifies. Resolves `associated=false` when the
          * user declines or the picker times out; rejects with one bounded code otherwise.
          */
+        AsyncFunction("requestBluetoothEnable") { promise: Promise ->
+            val activity = appContext.currentActivity
+            if (activity == null) {
+                promise.reject(
+                    "BLUETOOTH_ENABLE",
+                    co.twinotify.core.bluetooth.BluetoothAssociationFailure.ACTIVITY_UNAVAILABLE.code,
+                    null,
+                )
+                return@AsyncFunction
+            }
+            moduleScope.launch {
+                try {
+                    promise.resolve(
+                        co.twinotify.core.bluetooth.BluetoothEnableRequest.request(requireContext(), activity),
+                    )
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (e: co.twinotify.core.bluetooth.BluetoothAssociationException) {
+                    promise.reject("BLUETOOTH_ENABLE", e.failure.code, null)
+                } catch (_: Throwable) {
+                    promise.reject(
+                        "BLUETOOTH_ENABLE",
+                        co.twinotify.core.bluetooth.BluetoothAssociationFailure.ASSOCIATION_FAILED.code,
+                        null,
+                    )
+                }
+            }
+        }
+
         AsyncFunction("startBluetoothAssociation") { promise: Promise ->
             val activity = appContext.currentActivity
             if (activity == null) {
