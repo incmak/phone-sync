@@ -150,7 +150,7 @@ export default function SettingsScreen() {
     );
   }, [persistCallCapture]);
 
-  const relayDisplay = relayUrl ?? (pairStatus.paired ? 'Direct Wi-Fi only' : 'Not configured');
+  const relayDisplay = relayUrl ?? (pairStatus.paired ? 'No relay. Direct delivery only.' : 'Not configured');
   const version = Constants.expoConfig?.version ?? '1.0.0';
   const callUnsupported = syncStatus.callCaptureDisabledReason === 'call_telephony_unsupported';
   const callPermissionDenied = syncStatus.callCaptureDisabledReason === 'call_permission_denied';

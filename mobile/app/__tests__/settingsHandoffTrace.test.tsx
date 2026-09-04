@@ -53,7 +53,7 @@ describe('Settings handoff ledger', () => {
   it('keeps the direct Wi-Fi only branch truthful without an impossible preference control', async () => {
     const screen = await renderSettings();
 
-    await waitFor(() => expect(screen.getByText('Direct Wi-Fi only')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('No relay. Direct delivery only.')).toBeTruthy());
     expect(screen.getByText('Delivery route')).toBeTruthy();
     expect(screen.queryByRole('switch', { name: 'Prefer direct delivery' })).toBeNull();
   });
