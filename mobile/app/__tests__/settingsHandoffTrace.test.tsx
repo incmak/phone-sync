@@ -40,14 +40,14 @@ describe('Settings handoff ledger', () => {
   it('rolls back the visible preference when relay persistence is rejected', async () => {
     const screen = await renderSettings({ relayUrl: 'https://relay.example.test' });
 
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' })).toBeTruthy());
-    const routePreference = screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' });
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Prefer direct delivery' })).toBeTruthy());
+    const routePreference = screen.getByRole('switch', { name: 'Prefer direct delivery' });
     expect(screen.getByText('Relay server')).toBeTruthy();
     expect(routePreference.props.accessibilityState.checked).toBe(false);
 
     global.__TWINOTIFY_CORE__.setPreferLan.mockRejectedValueOnce(new Error('storage unavailable'));
     fireEvent.press(routePreference);
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' }).props.accessibilityState.checked).toBe(false));
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Prefer direct delivery' }).props.accessibilityState.checked).toBe(false));
   });
 
   it('keeps the direct Wi-Fi only branch truthful without an impossible preference control', async () => {
@@ -55,7 +55,7 @@ describe('Settings handoff ledger', () => {
 
     await waitFor(() => expect(screen.getByText('Direct Wi-Fi only')).toBeTruthy());
     expect(screen.getByText('Delivery route')).toBeTruthy();
-    expect(screen.queryByRole('switch', { name: 'Prefer direct Wi-Fi delivery' })).toBeNull();
+    expect(screen.queryByRole('switch', { name: 'Prefer direct delivery' })).toBeNull();
   });
 
   it('keeps actions named with their subtitle and routes them to the original destination', async () => {
@@ -75,18 +75,18 @@ describe('Settings handoff ledger', () => {
   it('keeps a scalable ledger and separate 44dp trailing-control slot', async () => {
     const screen = await renderSettings({ relayUrl: 'https://relay.example.test' });
 
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Prefer direct delivery' })).toBeTruthy());
     for (const text of [
       screen.getByText('Settings'),
       screen.getByText('Pairing'),
-      screen.getByText('Prefer direct Wi-Fi'),
-      screen.getByText('Uses the relay first, with direct Wi-Fi as backup'),
+      screen.getByText('Prefer direct delivery'),
+      screen.getByText('Uses the relay first, with direct Wi-Fi and Bluetooth as backups.'),
     ]) {
       const style = StyleSheet.flatten(text.props.style);
       expect(text.props.allowFontScaling).not.toBe(false);
       expect(style.lineHeight).toBeUndefined();
     }
-    expect(StyleSheet.flatten(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' }).props.style).minWidth).toBeGreaterThanOrEqual(44);
-    expect(StyleSheet.flatten(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' }).props.style).minHeight).toBeGreaterThanOrEqual(44);
+    expect(StyleSheet.flatten(screen.getByRole('switch', { name: 'Prefer direct delivery' }).props.style).minWidth).toBeGreaterThanOrEqual(48);
+    expect(StyleSheet.flatten(screen.getByRole('switch', { name: 'Prefer direct delivery' }).props.style).minHeight).toBeGreaterThanOrEqual(48);
   });
 });

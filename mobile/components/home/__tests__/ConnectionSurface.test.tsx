@@ -3,6 +3,7 @@ import { fireEvent, render } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 
 import { ConnectionSurface } from '../ConnectionSurface';
+import { presentRoute } from '../../../state/routePresentation';
 import type { DeliveryPresentation } from '../../../state/routePresentation';
 
 const route = (over: Partial<DeliveryPresentation> = {}): DeliveryPresentation => ({
@@ -41,6 +42,27 @@ test('keeps route truth, switch, trace, and peer action in one surface', () => {
   fireEvent.press(screen.getByRole('button', { name: 'Open paired phone' }));
   expect(toggle).toHaveBeenCalledWith(false);
   expect(openPeer).toHaveBeenCalledTimes(1);
+});
+
+test('renders an authenticated Bluetooth route as direct Bluetooth', () => {
+  const { screen } = surface(presentRoute({
+    route: 'bluetooth',
+    phase: 'authenticated',
+    queued_count: 0,
+    pending_local_count: 0,
+    awaiting_peer_count: 0,
+    held_by_relay_count: 0,
+    peer_evidence: 'unknown',
+    delivery_reason: 'none',
+    user_content_kind: 'notifications',
+    route_generation: 4,
+  }, true));
+
+  expect(screen.getByText('Direct Bluetooth')).toBeTruthy();
+  expect(screen.getByText('Your phones are talking directly over Bluetooth.')).toBeTruthy();
+  expect(screen.getByText('Reachable now')).toBeTruthy();
+  expect(screen.UNSAFE_getByProps({ testID: 'handoff-trace-direct' })).toBeTruthy();
+  expect(screen.queryByText(/call audio|headset|hands-free/i)).toBeNull();
 });
 
 test('reserves Reachable now for direct and renders weaker relay evidence', () => {

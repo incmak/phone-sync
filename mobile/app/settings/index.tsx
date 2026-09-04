@@ -248,13 +248,13 @@ export default function SettingsScreen() {
             <>
               <TwRow title="Relay server" subtitle={relayDisplay} style={styles.ledgerRow} />
               <TwRow
-                title="Prefer direct Wi-Fi"
+                title="Prefer direct delivery"
                 subtitle={
                   preferLan === null
                     ? 'Loading delivery preference'
                     : preferLan
-                    ? 'Delivers straight to your other phone when it is on the same Wi-Fi'
-                    : 'Uses the relay first, with direct Wi-Fi as backup'
+                    ? 'Uses direct Wi-Fi first, then Bluetooth nearby, before the relay.'
+                    : 'Uses the relay first, with direct Wi-Fi and Bluetooth as backups.'
                 }
                 trailing={
                   <View style={styles.controlSlot}>
@@ -263,7 +263,8 @@ export default function SettingsScreen() {
                       onChange={handlePreferLanChange}
                       size="md"
                       disabled={preferLan === null}
-                      accessibilityLabel="Prefer direct Wi-Fi delivery"
+                      touchTargetSize={48}
+                      accessibilityLabel="Prefer direct delivery"
                     />
                   </View>
                 }

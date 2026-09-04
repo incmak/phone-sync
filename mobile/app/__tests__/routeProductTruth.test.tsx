@@ -24,8 +24,8 @@ describe('route product truth', () => {
     await OnboardingState.setRelayUrl('https://relay.example.test');
     const screen = render(<SettingsScreen />);
     await waitFor(() => expect(global.__TWINOTIFY_CORE__.getPreferLan).toHaveBeenCalled());
-    expect(screen.getByText('Uses the relay first, with direct Wi-Fi as backup')).toBeTruthy();
-    expect(screen.getByRole('switch', { name: 'Prefer direct Wi-Fi delivery' }).props.accessibilityState.checked).toBe(false);
+    expect(screen.getByText('Uses the relay first, with direct Wi-Fi and Bluetooth as backups.')).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Prefer direct delivery' }).props.accessibilityState.checked).toBe(false);
     expect(screen.queryByText(/phase 3/i)).toBeNull();
   });
 
@@ -34,7 +34,7 @@ describe('route product truth', () => {
     await waitFor(() => expect(screen.getByText('Direct Wi-Fi only')).toBeTruthy());
 
     expect(screen.getByText('Delivery route')).toBeTruthy();
-    expect(screen.queryByRole('switch', { name: 'Prefer direct Wi-Fi delivery' })).toBeNull();
+    expect(screen.queryByRole('switch', { name: 'Prefer direct delivery' })).toBeNull();
     expect(screen.queryByText(/relay first/i)).toBeNull();
   });
 

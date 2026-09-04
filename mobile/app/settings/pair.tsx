@@ -10,9 +10,16 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 
-import { useTheme, TwCard, TwFingerprint, TwButton, TwSpinner } from '../../components';
-import TwinotifyCoreModule, { PairStatus } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
+import { useTheme, TwCard, TwFingerprint, TwButton, TwSpinner, TwRow, TwSwitch } from '../../components';
+import { HandoffDisclosureMark } from '../../components/HandoffTrace';
+import TwinotifyCoreModule, {
+  BluetoothRouteSettings,
+  PairStatus,
+} from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../../state/onboardingState';
+
+const BLUETOOTH_EXPLANATION =
+  'Keeps encrypted sync working nearby when Wi-Fi is unavailable. Call audio is not routed.';
 
 export default function PairDetailScreen() {
   const theme = useTheme();
@@ -20,6 +27,8 @@ export default function PairDetailScreen() {
   const [pairStatus, setPairStatus] = useState<PairStatus | null>(null);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [unpairing, setUnpairing] = useState(false);
+  const [bluetooth, setBluetooth] = useState<BluetoothRouteSettings | null>(null);
+  const [bluetoothBusy, setBluetoothBusy] = useState(false);
 
   useEffect(() => {
     TwinotifyCoreModule.getPairStatus()
@@ -35,6 +44,9 @@ export default function PairDetailScreen() {
           } catch {}
         }
       })
+      .catch(() => {});
+    TwinotifyCoreModule.getBluetoothRouteSettings()
+      .then(setBluetooth)
       .catch(() => {});
   }, []);
 
@@ -63,6 +75,98 @@ export default function PairDetailScreen() {
       ],
     );
   }, []);
+
+  const reloadBluetooth = useCallback(async () => {
+    try {
+      setBluetooth(await TwinotifyCoreModule.getBluetoothRouteSettings());
+    } catch {
+      // Keep the last durable answer rather than guessing at association state.
+    }
+  }, []);
+
+  const handleBluetoothAssociation = useCallback(async () => {
+    if (bluetoothBusy) return;
+    setBluetoothBusy(true);
+    try {
+      const permission = await TwinotifyCoreModule.requestBluetoothRoutePermissionAsync();
+      if (!permission.granted) {
+        if (permission.canAskAgain) {
+          Alert.alert(
+            'Nearby devices permission needed',
+            'Bluetooth fallback needs the Nearby devices permission. Nothing changed.',
+          );
+        } else {
+          Alert.alert(
+            'Nearby devices permission needed',
+            'Allow Nearby devices in Android settings to set up Bluetooth fallback. Nothing changed.',
+            [
+              { text: 'Not now', style: 'cancel' },
+              {
+                text: 'Open settings',
+                onPress: () => { void TwinotifyCoreModule.openAppSettings().catch(() => {}); },
+              },
+            ],
+          );
+        }
+        return;
+      }
+      // The picker can be cancelled; the durable settings below stay authoritative
+      // either way, so a cancelled association returns quietly.
+      await TwinotifyCoreModule.startBluetoothAssociation();
+      await reloadBluetooth();
+    } catch {
+      Alert.alert('Bluetooth fallback unavailable', 'Nothing changed. Try again.');
+    } finally {
+      setBluetoothBusy(false);
+    }
+  }, [bluetoothBusy, reloadBluetooth]);
+
+  const handleBluetoothRouteChange = useCallback(async (next: boolean) => {
+    const previous = bluetooth?.enabled ?? false;
+    setBluetoothBusy(true);
+    try {
+      const durable = await TwinotifyCoreModule.setBluetoothRouteEnabled(next);
+      setBluetooth((current) => (current ? { ...current, enabled: durable } : current));
+      if (durable !== next) {
+        Alert.alert(
+          'Bluetooth fallback unavailable',
+          'Nothing changed. Check Nearby devices permission and try again.',
+        );
+      }
+    } catch {
+      setBluetooth((current) => (current ? { ...current, enabled: previous } : current));
+      Alert.alert('Bluetooth fallback unavailable', 'Nothing changed. Try again.');
+    } finally {
+      setBluetoothBusy(false);
+    }
+  }, [bluetooth?.enabled]);
+
+  const handleRemoveBluetooth = useCallback(() => {
+    Alert.alert(
+      'Remove Bluetooth fallback?',
+      'Twinotify will stop nearby Bluetooth sync with this paired phone. Wi-Fi and relay pairing stay unchanged.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setBluetoothBusy(true);
+              try {
+                await TwinotifyCoreModule.removeBluetoothAssociation();
+                await reloadBluetooth();
+              } catch {
+                Alert.alert('Bluetooth fallback unavailable', 'Nothing changed. Try again.');
+              } finally {
+                setBluetoothBusy(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  }, [reloadBluetooth]);
 
   const handleEnableNearby = useCallback(() => {
     void OnboardingState.setPairingMode('nearby');
@@ -144,6 +248,55 @@ export default function PairDetailScreen() {
           </Pressable>
         )}
 
+        {pairStatus?.paired && bluetooth !== null && (
+          <View style={styles.bluetoothGroup}>
+            <TwRow
+              title="Bluetooth fallback"
+              subtitle={bluetooth.associated ? `Associated. ${BLUETOOTH_EXPLANATION}` : BLUETOOTH_EXPLANATION}
+              onPress={bluetooth.associated ? undefined : () => { void handleBluetoothAssociation(); }}
+              accessibilityLabel={
+                bluetooth.associated ? 'Bluetooth fallback, associated' : 'Set up Bluetooth fallback'
+              }
+              trailing={
+                bluetooth.associated ? undefined : (
+                  <View testID="pair-bluetooth-disclosure" style={styles.disclosureSlot}>
+                    <HandoffDisclosureMark color={theme.accentText} />
+                  </View>
+                )
+              }
+              style={styles.ledgerRow}
+            />
+            {bluetooth.associated ? (
+              <>
+                <TwRow
+                  title="Use Bluetooth fallback"
+                  subtitle={bluetooth.enabled
+                    ? 'On. Encrypted sync can use Bluetooth when higher-priority delivery is unavailable.'
+                    : 'Off. The association is kept until you remove it.'}
+                  trailing={
+                    <View style={styles.controlSlot}>
+                      <TwSwitch
+                        checked={bluetooth.enabled}
+                        onChange={(next) => { void handleBluetoothRouteChange(next); }}
+                        size="md"
+                        touchTargetSize={48}
+                        disabled={bluetoothBusy}
+                        accessibilityLabel={`Use Bluetooth fallback, ${bluetooth.enabled ? 'On' : 'Off'}`}
+                      />
+                    </View>
+                  }
+                  style={styles.ledgerRow}
+                />
+                <TwRow
+                  title="Remove Bluetooth fallback"
+                  onPress={handleRemoveBluetooth}
+                  style={styles.ledgerRow}
+                />
+              </>
+            ) : null}
+          </View>
+        )}
+
         <View style={styles.spacer} />
 
         <TwButton
@@ -196,5 +349,21 @@ const styles = StyleSheet.create({
   nearbyAction: { minHeight: 72, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14, marginTop: 24, justifyContent: 'center' },
   nearbyTitle: { fontSize: 15, lineHeight: 21 },
   nearbyBody: { fontSize: 13, lineHeight: 19, marginTop: 3 },
+  bluetoothGroup: { gap: 2, marginTop: 24 },
+  ledgerRow: { paddingHorizontal: 0, paddingVertical: 12, alignItems: 'flex-start' },
+  disclosureSlot: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -2,
+  },
+  controlSlot: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -2,
+  },
   spacer: { flex: 1, minHeight: 32 },
 });

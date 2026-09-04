@@ -210,6 +210,7 @@ global.__RESET_OFFLINE_TEST_STATE__ = () => {
   mockTwinotifyCore.getBluetoothRouteSettings.mockResolvedValue({ associated: false, enabled: false });
   mockTwinotifyCore.getBluetoothRouteEnabled.mockResolvedValue(false);
   mockTwinotifyCore.setBluetoothRouteEnabled.mockResolvedValue(false);
+  mockTwinotifyCore.removeBluetoothAssociation.mockResolvedValue(undefined);
   mockTwinotifyCore.isNotificationListenerGranted.mockResolvedValue(false);
   mockTwinotifyCore.isPostNotificationsGranted.mockResolvedValue(false);
 };
