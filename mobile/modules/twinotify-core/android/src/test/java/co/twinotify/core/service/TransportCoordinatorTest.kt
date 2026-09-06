@@ -975,6 +975,87 @@ class TransportCoordinatorTest {
         fixture.stop()
     }
 
+    @Test
+    fun standaloneBluetoothPromotesToLanOnlyAfterBluetoothCloseCompletes() = runTest {
+        val allowClose = CompletableDeferred<Unit>()
+        val store = FakeStore(rows = listOf(row("standalone")))
+        val lan = FakeRoute(RouteKind.LAN, openFailuresRemaining = 1)
+        val bluetooth = FakeRoute(
+            RouteKind.BLUETOOTH,
+            sessionFactory = { FakeSession(RouteKind.BLUETOOTH, allowClose = allowClose) },
+        )
+        val coordinator = coordinator(store, lan = lan, relay = null, bluetooth = bluetooth)
+        val job = backgroundScope.launch { coordinator.run() }
+        try {
+            runCurrent()
+            assertEquals(RouteKind.BLUETOOTH, coordinator.health.value.active)
+            assertEquals(listOf("standalone"), bluetooth.session().sent.map { it.msgId })
+            advanceTimeBy(15_001)
+            runCurrent()
+            assertTrue(bluetooth.session().closeStarted.isCompleted, "relay-free Bluetooth never promoted")
+            assertFalse(bluetooth.session().closeCompleted.isCompleted)
+            assertTrue(lan.session().sent.isEmpty(), "LAN sent before Bluetooth released the lease")
+            val reads = store.sendableCalls
+            advanceTimeBy(3_000)
+            runCurrent()
+            assertEquals(reads, store.sendableCalls)
+            allowClose.complete(Unit)
+            runCurrent()
+            assertEquals(RouteKind.LAN, coordinator.health.value.active)
+            assertEquals(listOf("route_promoted_to_lan"), bluetooth.session().closeCodes)
+            assertTrue(store.maxConcurrentDrains <= 1)
+        } finally {
+            allowClose.complete(Unit)
+            job.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun standaloneBluetoothRecoveryWaitsForItsOwnCooldownWithoutBusyLooping() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val bluetooth = FakeRoute(RouteKind.BLUETOOTH, openFailuresRemaining = 1)
+        val coordinator = coordinator(store, lan = null, relay = null, bluetooth = bluetooth)
+        val job = backgroundScope.launch { coordinator.run() }
+        try {
+            runCurrent()
+            assertEquals(1, bluetooth.opens)
+            assertEquals(15_000L, coordinator.lastBluetoothBackoffMs)
+            advanceTimeBy(14_999)
+            runCurrent()
+            assertEquals(1, bluetooth.opens)
+            advanceTimeBy(2)
+            runCurrent()
+            assertEquals(RouteKind.BLUETOOTH, coordinator.health.value.active)
+            assertEquals(2, bluetooth.opens)
+        } finally {
+            job.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun standaloneBluetoothUserRetryCutsTheDirectCooldownShort() = runTest {
+        val store = FakeStore(rows = emptyList())
+        val bluetooth = FakeRoute(RouteKind.BLUETOOTH, openFailuresRemaining = 1)
+        val retries = kotlinx.coroutines.flow.MutableSharedFlow<Unit>()
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = null, relay = null, bluetooth = bluetooth,
+            clock = { testScheduler.currentTime }, retryRequests = retries,
+        )
+        val job = backgroundScope.launch { coordinator.run() }
+        try {
+            runCurrent()
+            assertEquals(1, bluetooth.opens)
+            advanceTimeBy(100)
+            retries.emit(Unit)
+            runCurrent()
+            assertEquals(RouteKind.BLUETOOTH, coordinator.health.value.active)
+            assertEquals(2, bluetooth.opens)
+        } finally {
+            job.cancelAndJoin()
+        }
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     // The coordinator and the outbox both read the test's virtual clock, so retry

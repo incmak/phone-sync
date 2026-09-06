@@ -9,7 +9,7 @@ import (
 	"github.com/twinotify/phone-sync/e2e/internal/control"
 )
 
-// The Bluetooth scenario is the only plan allowed to claim a Bluetooth route.
+// Bluetooth plans require explicit route isolation and Bluetooth custody.
 //
 // It faults LAN and the relay on both phones so nothing else can carry the
 // traffic, waits for the coordinator to grant Bluetooth, delivers one small
@@ -46,6 +46,59 @@ const bluetoothAwaitTimeout = control.MaxRouteAwait
 const bluetoothFixtureBytes = control.MaxFixtureBytes
 
 func bluetoothRoutePlan(name string) (ScenarioPlan, bool) {
+	if name == "bluetooth-standalone-delivery" {
+		var steps []Step
+		for _, step := range bluetoothRouteSteps["bluetooth-direct-route"] {
+			if step.Action == "A.route.restore:lan" {
+				break
+			}
+			if step.Action == "A.shell.post:n1" {
+				steps = append(steps, Step{Action: "A.enqueue-fixture:8192"})
+				continue
+			}
+			if strings.Contains(step.Action, "await-") {
+				step.Action = ""
+			}
+			steps = append(steps, step)
+		}
+		steps = append(steps, Step{Predicate: "direct.terminal"})
+		return ScenarioPlan{Name: name, Steps: steps}, true
+	}
+	if name == "bluetooth-call-control-correctness" {
+		children := make([]ScenarioPlan, 0, len(callControlScenarioOrder))
+		for _, callName := range callControlScenarioOrder {
+			child, _ := bluetoothRoutePlan("bluetooth-" + callName)
+			children = append(children, child)
+		}
+		return ScenarioPlan{Name: name, Children: children}, true
+	}
+	if isBluetoothCallControlPlan(name) {
+		callName := strings.TrimPrefix(name, "bluetooth-")
+		steps := []Step{
+			{Action: "A.route.fail:lan"}, {Action: "B.route.fail:lan"},
+			{Action: "A.route.fail:relay"}, {Action: "B.route.fail:relay"},
+			{Predicate: "A.route.bluetooth"},
+			{Predicate: "B.route.bluetooth"},
+		}
+		steps = append(steps, callControlSteps[callName]...)
+		controls, states := 1, 2
+		if callName == "call-control-answer" {
+			controls, states = 2, 3
+		}
+		steps = append(steps,
+			Step{Predicate: fmt.Sprintf("A.custody.bluetooth:call_state:%d", states)},
+			Step{Predicate: fmt.Sprintf("B.custody.bluetooth:call_control_invoke:%d", controls)},
+			Step{Predicate: fmt.Sprintf("A.custody.bluetooth:call_control_result:%d", controls)},
+			Step{Predicate: fmt.Sprintf("A.peer-receipt.delta:%d", states)},
+			Step{Predicate: "A.route.bluetooth"}, Step{Predicate: "B.route.bluetooth"},
+			Step{Predicate: "direct.terminal"},
+		)
+		// Call controls terminate at direct custody (requiresPeerReceipt=false);
+		// call state requires an authenticated peer receipt.
+		// The executor restores faults even on failure. No LAN promotion is required:
+		// this gate must be usable by a pair with Bluetooth as its only route.
+		return ScenarioPlan{Name: name, Steps: steps}, true
+	}
 	steps, ok := bluetoothRouteSteps[name]
 	if !ok {
 		return ScenarioPlan{}, false
@@ -53,7 +106,13 @@ func bluetoothRoutePlan(name string) (ScenarioPlan, bool) {
 	return ScenarioPlan{Name: name, Steps: append([]Step(nil), steps...)}, true
 }
 
-func isBluetoothRoutePlan(name string) bool { return bluetoothRouteSteps[name] != nil }
+func isBluetoothRoutePlan(name string) bool {
+	return bluetoothRouteSteps[name] != nil || name == "bluetooth-standalone-delivery" || isBluetoothCallControlPlan(name)
+}
+
+func isBluetoothCallControlPlan(name string) bool {
+	return strings.HasPrefix(name, "bluetooth-call-control-") && callControlSteps[strings.TrimPrefix(name, "bluetooth-")] != nil
+}
 
 // routeFaultWireNames maps the scenario language's lowercase route token onto
 // the closed uppercase enum the device accepts.

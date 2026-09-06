@@ -235,8 +235,8 @@ class E2eControlSecurityTest {
         assertTrue(observation.getLong("peak_queue_bytes") in 0..134_217_728)
         assertTrue(observation.getLong("snapshot_commit_count") in 0..1_000_000_000)
         val custody = observation.getJSONObject("custody_counts")
-        assertEquals(setOf("lan", "relay"), custody.keys().asSequence().toSet())
-        for (route in listOf("lan", "relay")) {
+        assertEquals(setOf("lan", "bluetooth", "relay"), custody.keys().asSequence().toSet())
+        for (route in listOf("lan", "bluetooth", "relay")) {
             val counts = custody.getJSONObject(route)
             assertTrue(counts.keys().asSequence().all { it in E2eStateProvider.ALLOWED_EVENT_COUNT_KEYS })
             assertTrue(counts.keys().asSequence().all { counts.getLong(it) in 0..1_000_000_000 })
@@ -244,6 +244,29 @@ class E2eControlSecurityTest {
         val serialized = observation.toString()
         for (forbidden in listOf("device_id", "package", "canon", "msg_id", "title", "text", "token", "tls", "relay_url")) {
             assertFalse(serialized.contains(forbidden, ignoreCase = true), forbidden)
+        }
+    }
+
+    @Test
+    fun persistedBluetoothCustodyIsReportedAfterProcessCountersAreCleared() = runBlocking {
+        val dao = co.twinotify.core.storage.NotificationDb.get(context).reliableDeliveryDao()
+        val id = java.util.UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        dao.insertOutbound(co.twinotify.core.storage.OutboundMessage(
+            msgId = id, canonId = null, sequence = null, eventType = "notif.post",
+            protocolVersion = 2, envelopeJson = "{}", envelopeSha256 = "a".repeat(64), byteSize = 2,
+            createdAt = now, expiresAt = now + 60_000, custodyAcceptedAt = now,
+            custodyRoute = "BLUETOOTH", attempts = 1, nextAttemptAt = now + 60_000,
+            state = "AWAITING_PEER", lastError = null, requiresPeerReceipt = true,
+        ))
+        try {
+            co.twinotify.core.service.ProductObservationTracker.clear()
+            val counts = JSONObject(E2eStateProvider.snapshotJson(context))
+                .getJSONObject("product_observations").getJSONObject("custody_counts")
+            assertTrue(counts.has("bluetooth"), "Bluetooth custody route is missing")
+            assertEquals(1L, counts.getJSONObject("bluetooth").getLong("notif_post"))
+        } finally {
+            dao.deleteOutbound(id)
         }
     }
 

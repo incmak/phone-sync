@@ -24,9 +24,10 @@ or LE Audio profile, and captures no microphone or speaker stream. A record
 that implies otherwise is invalid.
 
 The host scenario (`make e2e-bluetooth-route`) exercises the same protocol
-against emulators or a deterministic fake bridge. Emulator instances have no
-usable Bluetooth between them, so its artifacts live in a separate directory
-and must not be copied into, or counted toward, this evidence. The absence of a
+against emulators or a deterministic fake bridge. Recent Android Emulator versions support simulated Bluetooth between compatible
+instances. API 37 emulators were used for the separate
+[September 5 verification](2026-09-05-emulator-verification.md). Their artifacts
+must not be counted as physical-device evidence. The absence of a
 physical evidence directory is a pending gate, not a pass.
 
 ## Directory layout

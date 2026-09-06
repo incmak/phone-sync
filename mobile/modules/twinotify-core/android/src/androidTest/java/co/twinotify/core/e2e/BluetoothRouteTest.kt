@@ -147,6 +147,35 @@ class BluetoothRouteTest {
     }
 
     @Test
+    fun fixtureBudgetIncludesAndroidJsonEscapingOfBase64Ciphertext() {
+        val padding = BluetoothRouteControl.paddingFor(BluetoothRouteControl.MAX_FIXTURE_BYTES)
+        // Uniform synthetic bytes exercise '/' in Base64 without any keys or user data.
+        val ciphertext = android.util.Base64.encodeToString(
+            ByteArray(padding + 1_024) { it.toByte() }, android.util.Base64.NO_WRAP,
+        )
+        val encoded = org.json.JSONObject().put("ciphertext", ciphertext).toString().encodeToByteArray()
+        assertTrue(encoded.size <= BluetoothRouteControl.MAX_FIXTURE_BYTES)
+        assertTrue(encoded.size >= BluetoothRouteControl.MAX_FIXTURE_BYTES * 95 / 100)
+        val frame = co.twinotify.core.bluetooth.BluetoothFrameCodec.encode(
+            co.twinotify.core.bluetooth.BluetoothFrame.Put(encoded),
+        )
+        val decoded = co.twinotify.core.bluetooth.BluetoothFrameCodec.decode(frame)
+            as co.twinotify.core.bluetooth.BluetoothFrame.Put
+        kotlin.test.assertContentEquals(encoded, decoded.envelope)
+        val lanFrame = co.twinotify.core.lan.LanFrameCodec.encode(co.twinotify.core.lan.LanFrame.Put(encoded))
+        val lanDecoded = co.twinotify.core.lan.LanFrameCodec.decode(lanFrame) as co.twinotify.core.lan.LanFrame.Put
+        kotlin.test.assertContentEquals(encoded, lanDecoded.envelope)
+        val escaped = org.json.JSONObject().put("edge", "</script>" + "\\/" + "\\\\/" + "\n" + "\"").toString().encodeToByteArray()
+        val escapedFrame = co.twinotify.core.bluetooth.BluetoothFrameCodec.encode(
+            co.twinotify.core.bluetooth.BluetoothFrame.Put(escaped),
+        )
+        kotlin.test.assertContentEquals(
+            escaped,
+            (co.twinotify.core.bluetooth.BluetoothFrameCodec.decode(escapedFrame) as co.twinotify.core.bluetooth.BluetoothFrame.Put).envelope,
+        )
+    }
+
+    @Test
     fun fixturePaddingStaysUnderTheProtocolEnvelopeMaximum() {
         assertEquals(1_048_576, BluetoothRouteControl.MAX_FIXTURE_BYTES)
         val padding = BluetoothRouteControl.paddingFor(BluetoothRouteControl.MAX_FIXTURE_BYTES)

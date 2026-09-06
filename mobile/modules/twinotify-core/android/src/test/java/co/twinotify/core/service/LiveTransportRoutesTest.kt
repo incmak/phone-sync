@@ -40,6 +40,20 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTransportRoutesTest {
     @Test
+    fun bluetoothCallControlRoundTripsHaveCustodyCounters() {
+        ProductObservationTracker.clear()
+        try {
+            ProductObservationTracker.recordCustody("bluetooth", "call.control.invoke")
+            ProductObservationTracker.recordCustody("bluetooth", "call.control.result")
+            val counts = ProductObservationTracker.snapshot().custodyCounts.getValue("bluetooth")
+            assertEquals(1L, counts["call_control_invoke"])
+            assertEquals(1L, counts["call_control_result"])
+        } finally {
+            ProductObservationTracker.clear()
+        }
+    }
+
+    @Test
     fun custodyObservationsUseTypedEventsAndIgnoreUnknownTypes() {
         ProductObservationTracker.clear()
 

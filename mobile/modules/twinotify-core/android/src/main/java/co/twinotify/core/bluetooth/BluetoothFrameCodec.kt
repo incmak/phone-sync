@@ -36,7 +36,7 @@ object BluetoothFrameCodec {
             is BluetoothFrame.Pong -> json.put("type", "bt.pong").put("token", frame.token)
             is BluetoothFrame.Close -> json.put("type", "bt.close").put("code", frame.code)
         }
-        val body = json.toString().encodeToByteArray()
+        val body = fields.encodeCompact(json)
         if (body.size > LanFrameLimits.MAX_FRAME_BYTES) fail(BluetoothFrameFailure.FRAME_TOO_LARGE)
         return prefixed(body)
     }

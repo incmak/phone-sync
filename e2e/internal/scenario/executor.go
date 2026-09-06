@@ -300,11 +300,7 @@ func parseCustodyPredicate(predicate string) (device, route, event string, want 
 		(head[2] != "lan" && head[2] != "bluetooth" && head[2] != "relay") {
 		return "", "", "", 0, false
 	}
-	allowed := map[string]bool{
-		"notif_post": true, "notif_update": true, "notif_cancel": true, "call_state": true,
-		"state_digest": true, "state_snapshot_begin": true, "state_snapshot_item": true,
-		"state_snapshot_end": true, "unpair": true, "peer_receipt": true,
-	}
+	allowed := productEventKeys
 	if !allowed[parts[1]] {
 		return "", "", "", 0, false
 	}
@@ -571,7 +567,7 @@ func (e *Executor) runPlan(ctx context.Context, plan ScenarioPlan) (result Scena
 				runErr = evidenceErr
 			}
 		}
-		if runErr == nil && isBluetoothRoutePlan(plan.Name) {
+		if runErr == nil && plan.Name == "bluetooth-direct-route" {
 			if evidenceErr := VerifyBluetoothPromotion(result.RouteTransitions); evidenceErr != nil {
 				runErr = evidenceErr
 			}

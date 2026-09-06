@@ -286,7 +286,9 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             latestSequence = event.sequence,
             state = if (event.state == "idle") "CANCELLED" else "ACTIVE",
             desiredPayloadJson = if (event.state == "idle") null else payloadJson,
-            materializedSequence = current?.materializedSequence ?: 0L,
+            // This is a locally observed (or locally recovered) call state.
+            // There is no platform mirror operation to apply on the source phone.
+            materializedSequence = event.sequence,
             sourceNotificationKey = null,
             mirrorLocalId = current?.mirrorLocalId,
             mirrorLocalTag = current?.mirrorLocalTag,

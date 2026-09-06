@@ -444,7 +444,11 @@ class NotificationMaterializer(
         return if (isSource) {
             when (state.state) {
                 "ACTIVE" -> NotificationPostOutcome.Applied // The listener already owns the source notification.
-                "CANCELLED" -> if (state.sourceNotificationKey?.let(port::cancelSource) == true) {
+                // Local call state describes a transition already observed by telephony.
+                // An ended call has no source notification key to cancel.
+                "CANCELLED" -> if (CallStateMaterializer.isCall(state.canonId) ||
+                    state.sourceNotificationKey?.let(port::cancelSource) == true
+                ) {
                     NotificationPostOutcome.Applied
                 } else {
                     NotificationPostOutcome.RetryableFailure

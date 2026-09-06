@@ -185,11 +185,13 @@ internal object BluetoothRouteControl {
 
     /**
      * Solves the base64 expansion backwards from the requested envelope size, then
-     * subtracts a fixed framing allowance. Undershooting is safe; overshooting
+     * subtracts a fixed framing allowance plus 2% for Android JSON escaping
+     * Base64 slashes in encrypted bytes. The final stored byte count is still
+     * checked against the requested bound. Undershooting is safe; overshooting
      * would be rejected by the protocol encoder as an oversize envelope.
      */
     internal fun paddingFor(targetBytes: Int): Int =
-        ((targetBytes - FIXTURE_FRAMING_ALLOWANCE_BYTES).toLong() * 3L / 4L).toInt().coerceIn(1, MAX_FIXTURE_BYTES)
+        ((targetBytes - FIXTURE_FRAMING_ALLOWANCE_BYTES).toLong() * 3L * 100L / (4L * 102L)).toInt().coerceIn(1, MAX_FIXTURE_BYTES)
 
     private suspend fun awaitPersistedEnvelopeBytes(context: Context, canonId: String, startedAt: Long): Long? {
         while (SystemClock.elapsedRealtime() - startedAt < MAX_AWAIT_MS) {

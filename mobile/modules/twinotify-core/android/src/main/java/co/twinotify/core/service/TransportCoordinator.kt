@@ -141,7 +141,7 @@ class TransportCoordinator(
 
     suspend fun run() {
         val relayRoute = relay
-        if (preferDirect && directRoutes.isNotEmpty() && relayRoute != null) {
+        if (preferDirect && directRoutes.isNotEmpty() && (relayRoute != null || directRoutes.any { it.kind == RouteKind.BLUETOOTH })) {
             runDirectPreferred(relayRoute)
         } else {
             runStaticPreference()
@@ -197,7 +197,7 @@ class TransportCoordinator(
      * authenticates. Relay is the owner of last resort; a lower-priority direct owner keeps
      * probing only the direct routes ranked above it. Each direct route has its own cooldown.
      */
-    private suspend fun runDirectPreferred(relayRoute: TransportRoute) {
+    private suspend fun runDirectPreferred(relayRoute: TransportRoute?) {
         val retries = directRoutes.associateWith { DirectRetryState(it.kind) }
         var openRelayFirst = false
         var relayFailures = 0
@@ -207,11 +207,21 @@ class TransportCoordinator(
                 if (direct != null) {
                     carryGrantedDirect(direct.route, direct.session, clock(), retries)
                     // Direct loss must never make relay wait behind a direct cooldown.
-                    openRelayFirst = true
+                    openRelayFirst = relayRoute != null
                     continue
                 }
             }
             openRelayFirst = false
+
+            if (relayRoute == null) {
+                publish(RouteKind.NONE, RoutePhase.RECONNECTING)
+                val wait = (retries.values.minOf { it.nextAttemptAt } - clock()).coerceAtLeast(idlePollMs)
+                lastBackoffMs = wait
+                if (waitForRetry(wait)) {
+                    retries.values.forEach { it.nextAttemptAt = clock() }
+                }
+                continue
+            }
 
             publish(RouteKind.NONE, RoutePhase.CONNECTING)
             val relaySession = openRoute(relayRoute)
@@ -228,7 +238,7 @@ class TransportCoordinator(
                 is CarryResult.Promoted -> {
                     handOff(relaySession, result)
                     carryGrantedDirect(result.route, result.session, result.authenticatedAt, retries)
-                    openRelayFirst = true
+                    openRelayFirst = relayRoute != null
                 }
                 is CarryResult.Ended -> {
                     result.failure?.let {
@@ -593,17 +603,22 @@ class TransportCoordinator(
     private suspend fun backOff(attempt: Int) {
         val wait = retryPolicy.delay(attempt - 1)
         lastBackoffMs = wait
+        waitForRetry(wait)
+    }
+
+    private suspend fun waitForRetry(wait: Long): Boolean {
         // An explicit retry skips the remaining wait without discarding the attempt
         // count, so a user can ask for one reconnection without disarming backoff.
-        withTimeoutOrNull(wait) {
+        return withTimeoutOrNull(wait) {
             try {
                 retryRequests.first()
+                true
             } catch (_: NoSuchElementException) {
                 // A flow that completes without emitting must still let the full
                 // backoff elapse, or the coordinator would spin instead of waiting.
                 awaitCancellation()
             }
-        }
+        } ?: false
     }
 
     private suspend fun publish(active: RouteKind, phase: RoutePhase) {

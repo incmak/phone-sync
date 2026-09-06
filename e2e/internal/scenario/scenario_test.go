@@ -106,7 +106,7 @@ func TestParseObservationRejectsMalformedCallSemanticState(t *testing.T) {
 }
 
 func validObservationPayloadForTest() map[string]any {
-	counts := map[string]any{"notif_post": 0.0, "notif_update": 0.0, "notif_cancel": 0.0, "call_state": 0.0, "state_digest": 0.0, "state_snapshot_begin": 0.0, "state_snapshot_item": 0.0, "state_snapshot_end": 0.0, "unpair": 0.0, "peer_receipt": 0.0}
+	counts := map[string]any{"call_control_invoke": 0.0, "call_control_result": 0.0, "notif_post": 0.0, "notif_update": 0.0, "notif_cancel": 0.0, "call_state": 0.0, "state_digest": 0.0, "state_snapshot_begin": 0.0, "state_snapshot_item": 0.0, "state_snapshot_end": 0.0, "unpair": 0.0, "peer_receipt": 0.0}
 	return map[string]any{
 		"offline_pairing": map[string]any{},
 		"health":          map[string]any{"service": "connected", "transport": "online", "callCaptureEnabled": false, "callCaptureHealthCode": "call_capture_disabled"},
@@ -399,7 +399,7 @@ func (f *fakeBridge) Post(_ context.Context, device, tag, text string) error {
 func completeCustodyCounts() map[string]map[string]int64 {
 	result := map[string]map[string]int64{"lan": {}, "bluetooth": {}, "relay": {}}
 	for route := range result {
-		for _, event := range []string{"notif_post", "notif_update", "notif_cancel", "call_state", "state_digest", "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair", "peer_receipt"} {
+		for _, event := range []string{"call_control_invoke", "call_control_result", "notif_post", "notif_update", "notif_cancel", "call_state", "state_digest", "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair", "peer_receipt"} {
 			result[route][event] = 0
 		}
 	}
@@ -1213,7 +1213,7 @@ type directSemanticBridge struct {
 
 func newDirectSemanticBridge(omit string) *directSemanticBridge {
 	counts := func() map[string]map[string]int64 {
-		keys := []string{"notif_post", "notif_update", "notif_cancel", "call_state", "state_digest", "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair", "peer_receipt"}
+		keys := []string{"call_control_invoke", "call_control_result", "notif_post", "notif_update", "notif_cancel", "call_state", "state_digest", "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair", "peer_receipt"}
 		result := map[string]map[string]int64{"lan": {}, "bluetooth": {}, "relay": {}}
 		for route := range result {
 			for _, key := range keys {
@@ -1388,6 +1388,8 @@ func (b *directSemanticBridge) Control(_ context.Context, device, name string, p
 		if b.omit != "dispatch-"+kind {
 			origin.CallControlDispatches[kind]++
 		}
+		b.recordCustody("B", "call_control_invoke")
+		b.recordCustody("A", "call_control_result")
 		fields := map[string]any{"kind": kind, "status": "sent"}
 		if b.omit == "tap-leak" {
 			fields["invocation_id"] = "22222222-2222-4222-8222-222222222222"

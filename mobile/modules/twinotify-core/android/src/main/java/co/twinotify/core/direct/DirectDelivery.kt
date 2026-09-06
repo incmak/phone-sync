@@ -13,6 +13,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -25,10 +26,10 @@ import kotlinx.coroutines.withContext
  * suspend under pressure rather than dropping anything.
  *
  * Ordering and bounds come from construction rather than from bookkeeping. The
- * inbound path reads, commits and acknowledges one command at a time on a single
- * coroutine, so a slow commit applies link backpressure to the peer and no envelope
- * is ever committed without being acknowledged in the same step. Each wire bounds its
- * own writer queue; the engine never buffers frames of its own.
+ * inbound processor commits and acknowledges one command at a time. A rendezvous
+ * reader may read one next bounded frame while that processor waits for a write,
+ * releasing duplex link credits without adding an unbounded queue. Slow commits
+ * still apply backpressure, and custody is acknowledged only after durable commit.
  *
  * Durable custody is recorded under [custodyRoute], which must name a direct route.
  * Relay custody has its own protocol adapter and never flows through here.
@@ -109,7 +110,7 @@ class DirectDelivery(
             }
         }
         try {
-            wire.incoming.collect { command ->
+            wire.incoming.buffer(capacity = 0).collect { command ->
                 when (command) {
                     is DirectCommand.Put -> {
                         val outcome = commitInbound(command)

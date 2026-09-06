@@ -15,6 +15,25 @@ internal enum class FrameJsonFailure { INVALID_UTF8, INVALID_JSON, DUPLICATE_KEY
  * problem into the owning codec's exception and never returns.
  */
 internal class FrameJson(private val fail: (FrameJsonFailure) -> Nothing) {
+    /** Android escapes every slash; omit that optional escape without touching literal backslashes. */
+    fun encodeCompact(json: JSONObject): ByteArray {
+        val raw = json.toString()
+        val compact = buildString(raw.length) {
+            var index = 0
+            while (index < raw.length) {
+                val char = raw[index++]
+                if (char == '\\' && index < raw.length) {
+                    val escaped = raw[index++]
+                    if (escaped != '/') append('\\')
+                    append(escaped)
+                } else {
+                    append(char)
+                }
+            }
+        }
+        return compact.encodeToByteArray()
+    }
+
     fun decodeUtf8(bytes: ByteArray): String = try {
         Charsets.UTF_8.newDecoder()
             .onMalformedInput(CodingErrorAction.REPORT)

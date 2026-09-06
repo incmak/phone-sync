@@ -205,6 +205,7 @@ internal data class ProductObservationSnapshot(
 internal object ProductObservationTracker {
     const val MAX_COUNTER = 1_000_000_000L
     val EVENT_KEYS = linkedSetOf(
+        "call_control_invoke", "call_control_result",
         "notif_post", "notif_update", "notif_cancel", "call_state", "state_digest",
         "state_snapshot_begin", "state_snapshot_item", "state_snapshot_end", "unpair",
         "peer_receipt",

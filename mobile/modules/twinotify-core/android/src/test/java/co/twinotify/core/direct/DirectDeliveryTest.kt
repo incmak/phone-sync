@@ -46,6 +46,31 @@ import kotlinx.coroutines.yield
 @OptIn(ExperimentalCoroutinesApi::class)
 class DirectDeliveryTest {
     @Test
+    fun blockedPongDoesNotPreventReadingTheNextFrameAndReleasingLinkCredits() = runTest {
+        val nextFrameRead = CompletableDeferred<Unit>()
+        val written = mutableListOf<DirectCommand>()
+        val wire = object : DirectWire {
+            override val peerDeviceId = "peer"
+            override val incoming = flow {
+                emit(DirectCommand.Ping(1))
+                // A credit-limited duplex stream must keep reading while its writer waits.
+                nextFrameRead.complete(Unit)
+                emit(DirectCommand.Put("{}".encodeToByteArray()))
+                awaitCancellation()
+            }
+            override suspend fun send(command: DirectCommand) {
+                if (command is DirectCommand.Pong) nextFrameRead.await()
+                written += command
+            }
+            override fun close() = Unit
+        }
+        backgroundScope.launch { delivery(wire).run().toList() }
+        runCurrent()
+        assertTrue(nextFrameRead.isCompleted, "reply write blocked the only socket reader")
+        assertEquals(listOf(DirectCommand.Pong(1), DirectCommand.Accepted(MSG_A, DIGEST_A)), written)
+    }
+
+    @Test
     fun sendsTheExactStoredEnvelopeForOneDueRow() = runTest {
         val wire = FakeWire()
         val delivery = delivery(wire)

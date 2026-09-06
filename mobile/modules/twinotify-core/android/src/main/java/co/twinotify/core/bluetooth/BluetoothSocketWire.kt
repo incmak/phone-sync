@@ -65,9 +65,10 @@ class BluetoothSocketWire(
     internal val socket: BluetoothStreamSocket,
     private val readTimeoutMillis: Long = DEFAULT_IO_TIMEOUT_MILLIS,
     private val writeTimeoutMillis: Long = DEFAULT_IO_TIMEOUT_MILLIS,
+    private val frameTimeoutMillis: Long = DEFAULT_FRAME_TIMEOUT_MILLIS,
 ) : DirectWire, BluetoothHandshakeChannel {
     init {
-        require(readTimeoutMillis > 0 && writeTimeoutMillis > 0)
+        require(readTimeoutMillis > 0 && writeTimeoutMillis > 0 && frameTimeoutMillis > 0)
     }
 
     private val closedFlag = AtomicBoolean(false)
@@ -133,28 +134,59 @@ class BluetoothSocketWire(
 
     /** Null means the peer ended the stream cleanly at a frame boundary, or we closed it ourselves. */
     private suspend fun readFrame(): BluetoothFrame? = try {
-        guarded(readTimeoutMillis) {
-            val prefix = readExactly(LanFrameLimits.PREFIX_BYTES)
+        transfer {
+            val prefix = readFrameBytes(LanFrameLimits.PREFIX_BYTES)
             if (prefix == null) {
                 null
             } else {
                 val length = BluetoothFrameCodec.bodyLength(prefix, LanFrameLimits.MAX_FRAME_BYTES, BluetoothFrameFailure.FRAME_TOO_LARGE)
-                val body = readExactly(length) ?: throw BluetoothFrameException(BluetoothFrameFailure.TRUNCATED)
+                val body = readFrameBytes(length) ?: throw BluetoothFrameException(BluetoothFrameFailure.TRUNCATED)
                 BluetoothFrameCodec.decode(prefix + body)
             }
         }.also { if (it == null) close() }
     } catch (_: EndedByLocalClose) {
-        // A stream error after our own close is the end of the session, not a fault.
         null
     }
 
+    /** Each successful read renews the idle deadline; [transfer] still caps the whole frame. */
+    private suspend fun readFrameBytes(size: Int): ByteArray? {
+        val bytes = ByteArray(size)
+        var offset = 0
+        while (offset < size) {
+            val count = guarded(readTimeoutMillis) {
+                socket.inputStream.read(bytes, offset, minOf(IO_CHUNK_BYTES, size - offset))
+            }
+            if (count < 0 && offset == 0) return null
+            if (count <= 0) throw BluetoothFrameException(BluetoothFrameFailure.TRUNCATED)
+            offset += count
+        }
+        return bytes
+    }
+
     private suspend fun write(bytes: ByteArray) = try {
-        guarded(writeTimeoutMillis) {
-            socket.outputStream.write(bytes)
-            socket.outputStream.flush()
+        transfer {
+            var offset = 0
+            while (offset < bytes.size) {
+                val count = minOf(IO_CHUNK_BYTES, bytes.size - offset)
+                guarded(writeTimeoutMillis) { socket.outputStream.write(bytes, offset, count) }
+                offset += count
+            }
+            guarded(writeTimeoutMillis) { socket.outputStream.flush() }
         }
     } catch (_: EndedByLocalClose) {
         throw BluetoothWireException(BluetoothWireFailure.CLOSED)
+    }
+
+    /** Slow progress is allowed, but a trickling peer cannot keep a frame open indefinitely. */
+    private suspend fun <T> transfer(block: suspend () -> T): T = try {
+        withTimeout(frameTimeoutMillis) { block() }
+    } catch (error: TimeoutCancellationException) {
+        close()
+        if (!currentCoroutineContext().isActive) throw error
+        throw BluetoothWireException(BluetoothWireFailure.TIMEOUT)
+    } catch (error: Throwable) {
+        close()
+        throw error
     }
 
     /**
@@ -212,6 +244,8 @@ class BluetoothSocketWire(
 
     companion object {
         const val DEFAULT_IO_TIMEOUT_MILLIS = 10_000L
+        const val DEFAULT_FRAME_TIMEOUT_MILLIS = 120_000L
+        private const val IO_CHUNK_BYTES = 16 * 1024
         private const val UNAUTHENTICATED_PEER = "unauthenticated"
     }
 }

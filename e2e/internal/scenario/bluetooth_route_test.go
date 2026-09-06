@@ -231,3 +231,85 @@ func runBluetoothRoute(t *testing.T, omit string) (scenario.ScenarioResult, erro
 	return scenario.NewExecutor(newDirectSemanticBridge(omit), 20*time.Millisecond).
 		RunResult(context.Background(), "bluetooth-direct-route")
 }
+
+func TestBluetoothCallingCarriesEveryControlWithoutRequiringLanPromotion(t *testing.T) {
+	plan, err := scenario.Plan("bluetooth-call-control-correctness")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Children) != 3 {
+		t.Fatalf("children=%d", len(plan.Children))
+	}
+	for i, suffix := range []string{"answer", "decline", "duplicate"} {
+		child := plan.Children[i]
+		if child.Name != "bluetooth-call-control-"+suffix {
+			t.Fatal(child.Name)
+		}
+		if err := scenario.ValidateExecutablePlan(child); err != nil {
+			t.Fatal(err)
+		}
+		actions := child.Actions()
+		if len(actions) < 6 || actions[0] != "A.route.fail:lan" || actions[3] != "B.route.fail:relay" {
+			t.Fatalf("isolation missing: %v", actions)
+		}
+	}
+	result, err := runDirectSemantic(t, "bluetooth-call-control-correctness", "")
+	if err != nil || result.Status != "passed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for _, child := range result.Children {
+		if child.Route.Route != "bluetooth" {
+			t.Fatalf("route=%+v", child.Route)
+		}
+		if child.After["B"].CustodyCounts["bluetooth"]["call_control_invoke"] < 1 {
+			t.Fatal("no Bluetooth control custody")
+		}
+	}
+}
+
+func TestBluetoothCallingRejectsMissingRouteCustodyReceiptAndDuplicateDispatch(t *testing.T) {
+	for _, omission := range []string{"bluetooth-route", "custody-call_control_invoke", "custody-call_control_result", "receipt", "duplicate-dispatch", "route-after-first"} {
+		t.Run(omission, func(t *testing.T) {
+			bridge := newDirectSemanticBridge(omission)
+			result, err := scenario.NewExecutor(bridge, 20*time.Millisecond).RunResult(context.Background(), "bluetooth-call-control-duplicate")
+			if err == nil || result.Status != "failed" {
+				t.Fatalf("accepted missing %s", omission)
+			}
+			for device, routes := range bridge.routeFaults {
+				for route, faulted := range routes {
+					if faulted {
+						t.Fatalf("left %s %s faulted", device, route)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestStandaloneBluetoothDeliversMaximumEnvelopeWithoutLanPromotion(t *testing.T) {
+	plan, err := scenario.Plan("bluetooth-standalone-delivery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scenario.ValidateExecutablePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range plan.Steps {
+		if strings.Contains(step.Action, "await-") {
+			t.Fatal("standalone waits must honor the host scenario deadline")
+		}
+		if strings.Contains(step.Action, "shell.post") {
+			t.Fatal("standalone fixtures must be fresh across repeated runs")
+		}
+		if step.Predicate == "A.route.lan" || step.Predicate == "B.route.lan" {
+			t.Fatal("standalone delivery requires LAN")
+		}
+	}
+	result, err := runDirectSemantic(t, "bluetooth-standalone-delivery", "promotion")
+	if err != nil || result.Status != "passed" || result.Route.Route != "bluetooth" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if result.After["A"].CustodyCounts["bluetooth"]["notif_post"] != 2 {
+		t.Fatal("missing fixture custody")
+	}
+}

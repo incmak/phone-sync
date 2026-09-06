@@ -23,6 +23,25 @@ import kotlin.test.assertTrue
 
 class NotificationMaterializerTest {
     @Test
+    fun locallyObservedEndedCallConvergesWithoutCancellingASourceNotification() = runBlocking {
+        val store = FakeStore(canonical(
+            sequence = 3, materialized = 2, origin = "local", state = "CANCELLED",
+            sourceKey = null, mirrorId = null, mirrorTag = null,
+        ).copy(canonId = "call:11111111-1111-4111-8111-111111111111"))
+        var cancellationCalls = 0
+        val port = object : AndroidNotificationPort by noOpPort() {
+            override fun cancelSource(notificationKey: String): Boolean {
+                cancellationCalls++
+                return false
+            }
+        }
+        val result = NotificationMaterializer(store, port, localDeviceId = "local").materializePending(nowMs = 2_000)
+        assertEquals(MaterializationSummary(applied = 1, pending = 0, skipped = 0), result)
+        assertEquals(3, store.state.materializedSequence)
+        assertEquals(0, cancellationCalls)
+    }
+
+    @Test
     fun completedInboundPostRecordsBestEffortHistoryContent() = runBlocking {
         val store = FakeStore(canonical(sequence = 2, materialized = 1))
         val recorded = mutableListOf<Triple<String, String, Long>>()

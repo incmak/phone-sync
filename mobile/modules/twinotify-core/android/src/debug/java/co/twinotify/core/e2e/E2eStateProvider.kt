@@ -261,7 +261,7 @@ class E2eStateProvider : ContentProvider() {
             val custody = tracked.custodyCounts.mapValues { (_, counts) -> counts.toMutableMap() }.toMutableMap()
             database.query(
                 "SELECT custodyRoute, eventType, COUNT(*) FROM outbound_message " +
-                    "WHERE custodyRoute IN ('LAN','RELAY') GROUP BY custodyRoute, eventType",
+                    "WHERE custodyRoute IN ('LAN','BLUETOOTH','RELAY') GROUP BY custodyRoute, eventType",
             ).use { cursor ->
                 while (cursor.moveToNext()) {
                     val route = cursor.getString(0).lowercase()
@@ -273,7 +273,7 @@ class E2eStateProvider : ContentProvider() {
                 }
             }
             val custodyJson = JSONObject()
-            for (route in listOf("lan", "relay")) {
+            for (route in custody.keys) {
                 val counts = JSONObject()
                 for (event in ALLOWED_EVENT_COUNT_KEYS) {
                     counts.put(event, custody.getValue(route).getValue(event))

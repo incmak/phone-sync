@@ -84,8 +84,8 @@ host fixtures are not physical acceptance.
 
 ## Direct Bluetooth route gate
 
-`bluetooth-direct-route` is the only scenario allowed to claim a Bluetooth
-route. It faults LAN and the relay on both phones through the app-internal
+`bluetooth-direct-route` verifies notification delivery and promotion on a Bluetooth
+route; `bluetooth-call-control-correctness` verifies incoming-call controls. It faults LAN and the relay on both phones through the app-internal
 route control, never an OS radio change, waits for the coordinator to grant
 Bluetooth, then delivers one small notification and one maximum-size fixture.
 Each delivery must show digest-backed custody on the `bluetooth` route plus an
@@ -129,11 +129,51 @@ E2E_BLUETOOTH_EVIDENCE_DIR='/private/path/bluetooth-route' \
 make e2e-bluetooth-route
 ```
 
-Status: host-verified against the deterministic fake bridge only. Emulator
-instances have no usable Bluetooth between them, so this scenario has never
-been executed on hardware. It cannot satisfy `PHY-BLUETOOTH-01`; the physical
+Status of the promotion gate: host-verified against the deterministic fake bridge.
+No physical two-phone evidence has been recorded for this gate. Modern emulator
+Bluetooth simulation is a separate regression surface, not hardware evidence. It cannot satisfy `PHY-BLUETOOTH-01`; the physical
 matrix in `docs/test-scenarios.md` and the record contract in
 `docs/evidence/bluetooth-route/README.md` remain pending a two-phone run.
+
+## Bluetooth as the sole calling route
+
+`bluetooth-standalone-delivery` verifies fresh small and near-limit notification
+fixtures through production capture, with Bluetooth as the only available route.
+It uses host-bounded authentication/receipt waits, retains the custody and
+terminal checks, and finishes without requiring LAN. The large fixture targets
+1 MiB but leaves room for framing and Android JSON escaping; exact 1 MiB wire
+coverage is provided separately by `BluetoothRadioLinkTest`.
+
+`bluetooth-call-control-correctness` runs answer/hang-up, decline, and duplicate
+control tests with LAN and relay faulted on both peers. Each child verifies
+Bluetooth before delivery, call-state receipts, Bluetooth custody for both
+`call.control.invoke` and `call.control.result`, and exact single dispatch at
+the origin. The executor restores the route faults on both success and failure.
+It does not require Wi-Fi promotion to finish.
+
+Use two already-paired, Bluetooth-associated debug targets:
+
+```sh
+cd e2e
+go run ./cmd/twinotify-e2e \
+  -scenario bluetooth-call-control-correctness \
+  -serial-a '<serial-a>' -serial-b '<serial-b>' \
+  -timeout 60s -scenario-evidence-dir '/private/path/bluetooth-calls'
+```
+
+The route carries the existing incoming-call capabilities. Answer, decline,
+and hang-up depend on the origin dialer exposing supported controls; this
+is not universal call automation or outgoing dialing. Call-control messages
+terminate at direct custody; call-state messages require peer receipts.
+Cellular audio stays on the origin phone. Android reserves call-audio capture
+for privileged apps; ordinary APK Bluetooth data transport is not an HFP
+headset implementation. See [Android audio input rules](https://developer.android.com/media/platform/sharing-audio-input).
+
+Modern [Android Emulator networking](https://developer.android.com/studio/run/emulator-networking-advanced)
+supports simulated Bluetooth. The opt-in `BluetoothRadioLinkTest` probes BLE
+discovery, L2CAP, the production signed handshake, and framed bytes on two
+simulated radios. It does not replace the CDM pairing flow, the product calling
+gate above, or the physical `PHY-BLUETOOTH-01` evidence matrix.
 
 ## Stock call control gate
 

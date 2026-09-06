@@ -82,7 +82,7 @@ func callControlPlan(name string) (ScenarioPlan, bool) {
 }
 
 func isCallControlPlan(name string) bool {
-	return strings.HasPrefix(name, "call-control-")
+	return strings.HasPrefix(name, "call-control-") || isBluetoothCallControlPlan(name)
 }
 
 // callControlKinds is the complete control vocabulary. A ringing incoming call

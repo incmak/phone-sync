@@ -35,7 +35,7 @@ object LanFrameCodec {
             is LanFrame.Pong -> json.put("type", "lan.pong").put("token", frame.token)
             is LanFrame.Close -> json.put("type", "lan.close").put("code", frame.code)
         }
-        val body = json.toString().encodeToByteArray()
+        val body = fields.encodeCompact(json)
         if (body.size > LanFrameLimits.MAX_FRAME_BYTES) fail(LanFrameFailure.FRAME_TOO_LARGE)
         return ByteBuffer.allocate(LanFrameLimits.PREFIX_BYTES + body.size).putInt(body.size).put(body).array()
     }

@@ -26,8 +26,8 @@ import kotlinx.coroutines.withTimeout
 import org.junit.runner.RunWith
 
 /**
- * Emulators expose no usable Bluetooth radio, so the wire is proven over loopback TCP
- * streams. Everything under test (deadlines, single collector, frame bounds, close
+ * The wire is tested deterministically over loopback TCP streams. The opt-in
+ * BluetoothRadioLinkTest separately exercises Android BLE/L2CAP on two devices. Everything under test (deadlines, single collector, frame bounds, close
  * semantics) lives above the stream boundary; only the thin BluetoothSocket adapter is
  * left to hardware.
  */
@@ -167,6 +167,58 @@ class BluetoothSocketWireTest {
             val error = withTimeout(5_000) { assertFailsWith<BluetoothFrameException> { b.readMessage() } }
             assertEquals(BluetoothFrameFailure.CONTROL_TOO_LARGE, error.failure)
             assertTrue(b.closed)
+        } finally {
+            pair.close()
+        }
+    }
+
+    @Test
+    fun progressingFrameMayTakeLongerThanTheIdleReadDeadline() = runBlocking {
+        val pair = loopback()
+        val wire = BluetoothSocketWire(pair.a, readTimeoutMillis = 300, writeTimeoutMillis = 1_000)
+        val envelope = ByteArray(4_096) { 'a'.code.toByte() }
+        val encoded = BluetoothFrameCodec.encode(BluetoothFrame.Put(envelope)) +
+            BluetoothFrameCodec.encode(BluetoothFrame.Close("test_complete"))
+        try {
+            val writer = async(Dispatchers.IO) {
+                var offset = 0
+                while (offset < encoded.size) {
+                    val count = minOf(512, encoded.size - offset)
+                    pair.b.outputStream.write(encoded, offset, count)
+                    pair.b.outputStream.flush()
+                    offset += count
+                    delay(100)
+                }
+            }
+            val commands = withTimeout(5_000) { wire.incoming.toList() }
+            writer.await()
+            assertEquals(listOf(DirectCommand.Put(envelope), DirectCommand.Close("test_complete")), commands)
+        } finally {
+            pair.close()
+        }
+    }
+
+    @Test
+    fun tricklingPeerCannotExtendTheTotalFrameDeadline() = runBlocking {
+        val pair = loopback()
+        val wire = BluetoothSocketWire(pair.a, readTimeoutMillis = 300, frameTimeoutMillis = 450)
+        val encoded = BluetoothFrameCodec.encode(BluetoothFrame.Put(ByteArray(4_096) { 'a'.code.toByte() }))
+        try {
+            val writer = launch(Dispatchers.IO) {
+                runCatching {
+                    for (chunk in encoded.toList().chunked(256)) {
+                        pair.b.outputStream.write(chunk.toByteArray())
+                        pair.b.outputStream.flush()
+                        delay(100)
+                    }
+                }
+            }
+            val error = withTimeout(3_000) {
+                assertFailsWith<BluetoothWireException> { wire.incoming.toList() }
+            }
+            assertEquals(BluetoothWireFailure.TIMEOUT, error.failure)
+            assertTrue(wire.closed)
+            writer.cancelAndJoin()
         } finally {
             pair.close()
         }

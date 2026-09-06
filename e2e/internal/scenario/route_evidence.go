@@ -528,7 +528,7 @@ func validateObservationShape(value map[string]any) error {
 		if !ok || len(routes) != len(CustodyRouteNames) {
 			return errors.New("custody_counts must contain lan, bluetooth and relay")
 		}
-		events := map[string]bool{"notif_post": true, "notif_update": true, "notif_cancel": true, "call_state": true, "state_digest": true, "state_snapshot_begin": true, "state_snapshot_item": true, "state_snapshot_end": true, "unpair": true, "peer_receipt": true}
+		events := productEventKeys
 		for _, route := range CustodyRouteNames {
 			counts, ok := routes[route].(map[string]any)
 			if !ok || len(counts) != len(events) {

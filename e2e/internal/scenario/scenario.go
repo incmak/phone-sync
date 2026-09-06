@@ -705,6 +705,7 @@ func parseNotificationActionObservations(payload []byte) (notificationActionObse
 }
 
 var productEventKeys = map[string]bool{
+	"call_control_invoke": true, "call_control_result": true,
 	"notif_post": true, "notif_update": true, "notif_cancel": true, "call_state": true,
 	"state_digest": true, "state_snapshot_begin": true, "state_snapshot_item": true,
 	"state_snapshot_end": true, "unpair": true, "peer_receipt": true,
