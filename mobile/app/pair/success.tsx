@@ -101,7 +101,7 @@ export default function PairSuccessScreen() {
           size="lg"
           fullWidth
           disabled={!verifiedComplete}
-          onPress={() => router.replace('/home')}
+          onPress={() => router.replace('/pair/bluetooth')}
         >
           Done
         </TwButton>
