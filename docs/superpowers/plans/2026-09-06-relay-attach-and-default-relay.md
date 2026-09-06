@@ -168,15 +168,21 @@ the behaviour have to land together.
 
 Remaining for this task, all of it production wiring rather than logic:
 
-- [ ] Production `RelayAttachRelayClient` backed by `PairProtocol.initiate` /
+- [x] Production `LiveRelayAttachRelayClient` backed by `PairProtocol.initiate` /
       `PairNotifyClient.awaitAuthenticatedFrame` / `PairProtocol.sendConfirmationSig`, using the
       **existing** identity from `CryptoStore.loadOrGenerate` and `DeviceIdentity.getOrCreate`.
-- [ ] `commit`: persist via `ServiceConfigStore.setRelayUrl` **and** the JS-side
-      `OnboardingState.setRelayUrl` (`home.tsx:53` reads the latter to choose `startSyncService`
-      over `startLanOnlySyncService`), then restart the transport generation. Must preserve
-      `lanBindingId`, `displayName`, and the Bluetooth association — do not route through
-      `storePeerPubkeys`.
-- [ ] `AsyncFunction("attachRelay")` in `TwinotifyCoreModule.kt`, plus its TS type.
+      Waits 90 s rather than the pairing screen's five minutes; `awaitPeerHello` takes the
+      identity so the client stays stateless.
+- [x] `commit`: persists via `ServiceConfigStore.setRelayUrl` and calls
+      `SyncService.notifyRelayConfigChanged`, which restarts the coordinator through the same
+      serialized owner a preference toggle uses. Does **not** route through `storePeerPubkeys`,
+      so `lanBindingId`, `displayName` and the Bluetooth association survive.
+- [x] `AsyncFunction("attachRelay")` in `TwinotifyCoreModule.kt`, plus the `RelayAttachOutcome`
+      TS union in both `types/twinotify.d.ts` and `modules/twinotify-core/src/`.
+
+- [ ] Still open: the JS-side `OnboardingState.setRelayUrl` write. `home.tsx:53` reads it to
+      choose `startSyncService` over `startLanOnlySyncService`, so the Task 5 caller must set it
+      when `attachRelay` resolves `attached`, or a later mirror toggle drops back to LAN-only.
 
 Accepted limitation, matching the existing pairing flow: the initiator commits its relay URL
 after sending the confirmation signature, without waiting for the responder's `/pair/complete`.
