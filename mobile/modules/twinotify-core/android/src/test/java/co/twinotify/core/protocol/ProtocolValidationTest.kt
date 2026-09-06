@@ -260,6 +260,48 @@ class ProtocolValidationTest {
         invalid.forEach { raw -> assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) } }
     }
 
+    @Test
+    fun relayAttach_roundTripsAsAStrictReceiptBackedControl() {
+        val attach = ProtocolJson.decodeInner(relayAttachJson())
+
+        assertEquals("relay.attach", attach.type)
+        assertEquals(null, attach.canonId)
+        assertEquals(null, attach.sequence)
+        assertEquals(RELAY_URL, JSONObject(attach.payloadJson).getString("relay_url"))
+        assertEquals(attach, ProtocolJson.decodeInner(ProtocolJson.encodeInner(attach)))
+    }
+
+    @Test
+    fun relayAttach_rejectsCleartextTransportSoAnAttachCannotDowngradeTheRelay() {
+        val cleartext = listOf(
+            relayAttachJson().replace(RELAY_URL, "http://relay.example.test"),
+            relayAttachJson().replace(RELAY_URL, "ws://relay.example.test"),
+            relayAttachJson().replace(RELAY_URL, "relay.example.test"),
+            relayAttachJson().replace(RELAY_URL, ""),
+        )
+
+        cleartext.forEach { raw -> assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) } }
+    }
+
+    @Test
+    fun relayAttach_rejectsInvalidShapeTokenAndLifetime() {
+        val invalid = listOf(
+            relayAttachJson().replace(",\"pair_token\":\"$PAIR_TOKEN\"", ""),
+            relayAttachJson().replace("\"relay_url\":\"$RELAY_URL\",", ""),
+            relayAttachJson().replace(PAIR_TOKEN, "tooshort"),
+            relayAttachJson().replace(PAIR_TOKEN, "t".repeat(129)),
+            relayAttachJson().replace(
+                "\"pair_token\":\"$PAIR_TOKEN\"",
+                "\"pair_token\":\"$PAIR_TOKEN\",\"peer_ip\":\"192.0.2.1\"",
+            ),
+            relayAttachJson().replace("\"expires_at\":301000", "\"expires_at\":300999"),
+            relayAttachJson().replace("\"created_at\":1000", "\"canon_id\":\"not-allowed\",\"created_at\":1000"),
+            relayAttachJson().replace("\"created_at\":1000", "\"sequence\":1,\"created_at\":1000"),
+        )
+
+        invalid.forEach { raw -> assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) } }
+    }
+
     private companion object {
         fun callStateJson() = """
             {"v":2,"msg_id":"22222222-2222-4222-8222-222222222222","origin_device":"dev-a","type":"call.state","canon_id":"call:11111111-1111-4111-8111-111111111111","sequence":1,"created_at":1000,"expires_at":2000,"payload":{"call_session_id":"11111111-1111-4111-8111-111111111111","state":"ringing","direction":"incoming"}}
@@ -317,6 +359,13 @@ class ProtocolValidationTest {
 
         fun peerProbeJson() = """
             {"v":2,"msg_id":"$PROBE_ID","origin_device":"dev-a","type":"peer.probe","created_at":1000,"expires_at":121000,"payload":{"probe_id":"$PROBE_ID","sent_at":1000,"request_direct":true}}
+        """.trimIndent()
+
+        const val RELAY_URL = "https://relay.example.test"
+        const val PAIR_TOKEN = "0123456789abcdef0123"
+
+        fun relayAttachJson() = """
+            {"v":2,"msg_id":"71111111-1111-4111-8111-111111111111","origin_device":"dev-a","type":"relay.attach","created_at":1000,"expires_at":301000,"payload":{"relay_url":"$RELAY_URL","pair_token":"$PAIR_TOKEN"}}
         """.trimIndent()
 
         const val validReceipt = """

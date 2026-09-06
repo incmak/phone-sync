@@ -241,6 +241,30 @@
       "expected_code": "invalid_frame"
     },
     {
+      "file": "v2-valid/relay-attach-inner.json",
+      "scope": "cross_layer",
+      "type": "relay_attach_inner",
+      "valid": true
+    },
+    {
+      "file": "v2-invalid/relay-attach-extra-field.json",
+      "scope": "cross_layer",
+      "type": "relay_attach_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/relay-attach-cleartext-url.json",
+      "scope": "cross_layer",
+      "type": "relay_attach_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/relay-attach-canon-id.json",
+      "scope": "cross_layer",
+      "type": "relay_attach_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
       "file": "v2-invalid/peer-probe-id-mismatch.json",
       "scope": "cross_layer",
       "type": "peer_probe_inner",

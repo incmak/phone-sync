@@ -7,7 +7,7 @@
     "v": { "const": 2 },
     "msg_id": { "type": "string", "format": "uuid" },
     "origin_device": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "notif.action.invoke", "notif.action.result", "call.state", "call.control.invoke", "call.control.result", "peer.receipt", "peer.probe", "lan.bootstrap", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
+    "type": { "type": "string", "enum": ["notif.post", "notif.update", "notif.cancel", "notif.action.invoke", "notif.action.result", "call.state", "call.control.invoke", "call.control.result", "peer.receipt", "peer.probe", "lan.bootstrap", "relay.attach", "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end", "unpair"] },
     "canon_id": { "type": "string", "minLength": 1, "maxLength": 1024 },
     "sequence": { "type": "integer", "minimum": 1 },
     "created_at": { "type": "integer", "minimum": 0 },
@@ -204,7 +204,7 @@
       }
     },
     {
-      "if": { "properties": { "type": { "enum": ["lan.bootstrap", "peer.probe"] } } },
+      "if": { "properties": { "type": { "enum": ["lan.bootstrap", "peer.probe", "relay.attach"] } } },
       "then": {
         "not": {
           "anyOf": [
@@ -242,6 +242,22 @@
               "probe_id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
               "sent_at": { "type": "integer", "minimum": 0 },
               "request_direct": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "relay.attach" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["relay_url", "pair_token"],
+            "properties": {
+              "relay_url": { "type": "string", "pattern": "^(https|wss)://", "minLength": 9, "maxLength": 512 },
+              "pair_token": { "type": "string", "minLength": 16, "maxLength": 128 }
             },
             "additionalProperties": false
           }

@@ -63,6 +63,7 @@ class ProtocolFixtureTest {
                 "notif_action_result",
                 "lan_bootstrap_inner",
                 "peer_probe_inner",
+                "relay_attach_inner",
                 "call_control_invoke",
                 "call_control_result",
                 -> {
@@ -119,6 +120,7 @@ class ProtocolFixtureTest {
                 "notif_action_result",
                 "lan_bootstrap_inner",
                 "peer_probe_inner",
+                "relay_attach_inner",
                 "call_control_invoke",
                 "call_control_result",
                 -> {
@@ -150,6 +152,8 @@ class ProtocolFixtureTest {
         error is IllegalArgumentException && error.message?.contains("lan.bootstrap") == true ->
             "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("peer.probe") == true ->
+            "invalid_frame"
+        error is IllegalArgumentException && error.message?.contains("relay.attach") == true ->
             "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("notification payload") == true ->
             "invalid_frame"

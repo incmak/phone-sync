@@ -23,6 +23,14 @@ object ProtocolJson {
     private const val CALL_CONTROL_RESULT_TTL_MS = 300_000L
     private const val LAN_BOOTSTRAP_TTL_MS = 600_000L
     private const val PEER_PROBE_TTL_MS = 120_000L
+
+    /**
+     * Matches the relay's own five-minute pair-token lifetime. The event carries that token, so
+     * outliving it would only offer the peer a handshake that is already refused.
+     */
+    private const val RELAY_ATTACH_TTL_MS = 300_000L
+    private const val RELAY_ATTACH_URL_MAX = 512
+    private val RELAY_ATTACH_PAIR_TOKEN_LENGTHS = 16..128
     private const val ENVELOPE_TYPE = "enc"
     private val receiptStatuses = setOf("applied", "expired", "rejected", "decrypt_failed")
     private val actionResultStatuses = setOf(
@@ -56,6 +64,7 @@ object ProtocolJson {
         "peer.receipt",
         "peer.probe",
         "lan.bootstrap",
+        "relay.attach",
         "state.digest",
         "state.snapshot.begin",
         "state.snapshot.item",
@@ -200,6 +209,15 @@ object ProtocolJson {
                 "lan.bootstrap expires_at must be created_at + $LAN_BOOTSTRAP_TTL_MS"
             }
         }
+        if (event.type == "relay.attach") {
+            require(event.canonId == null && event.sequence == null) {
+                "relay.attach must not carry canon_id or sequence"
+            }
+            validateRelayAttachPayload(payload)
+            require(event.expiresAt - event.createdAt == RELAY_ATTACH_TTL_MS) {
+                "relay.attach expires_at must be created_at + $RELAY_ATTACH_TTL_MS"
+            }
+        }
         if (event.type == "peer.probe") {
             require(event.canonId == null && event.sequence == null) {
                 "peer.probe must not carry canon_id or sequence"
@@ -297,6 +315,25 @@ object ProtocolJson {
             require(digest.matches(Regex("^[0-9a-f]{64}$"))) {
                 "lan.bootstrap payload $key must be lower-case SHA-256"
             }
+        }
+    }
+
+    private fun validateRelayAttachPayload(payload: JSONObject) {
+        requireOnlyKeys(payload, setOf("relay_url", "pair_token"), "relay.attach payload")
+        val relayUrl = requiredString(payload, "relay_url", "relay.attach payload")
+        // An attach names the server this pair will route through. The contract refuses anything
+        // but TLS so a peer can never talk the pair down to cleartext, and the loopback exception
+        // in RelayUrlPolicy stays a local debug affordance rather than something a peer can ask for.
+        require(relayUrl.startsWith("https://") || relayUrl.startsWith("wss://")) {
+            "relay.attach payload relay_url must be https or wss"
+        }
+        require(relayUrl.length in 9..RELAY_ATTACH_URL_MAX) {
+            "relay.attach payload relay_url must be 9..$RELAY_ATTACH_URL_MAX characters"
+        }
+        val pairToken = requiredString(payload, "pair_token", "relay.attach payload")
+        require(pairToken.length in RELAY_ATTACH_PAIR_TOKEN_LENGTHS) {
+            "relay.attach payload pair_token must be " +
+                "${RELAY_ATTACH_PAIR_TOKEN_LENGTHS.first}..${RELAY_ATTACH_PAIR_TOKEN_LENGTHS.last} characters"
         }
     }
 
