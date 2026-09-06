@@ -19,6 +19,7 @@ export const OnboardingState = {
     (await AsyncStorage.getItem(KEYS.pairingMode)) as PairingMode | null,
   setRelayUrl: (u: string) => AsyncStorage.setItem(KEYS.relayUrl, u),
   getRelayUrl: () => AsyncStorage.getItem(KEYS.relayUrl),
+  clearRelayUrl: () => AsyncStorage.multiRemove([KEYS.relayUrl]),
   markComplete: () => AsyncStorage.setItem(KEYS.complete, 'true'),
   isComplete: async (): Promise<boolean> =>
     (await AsyncStorage.getItem(KEYS.complete)) === 'true',

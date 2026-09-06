@@ -1143,6 +1143,44 @@ class TwinotifyCoreModule internal constructor(
             }
         }
 
+        /**
+         * Stops using the configured relay while keeping the pair and every direct route.
+         *
+         * This is not an unpair: the peer record, the LAN binding and the Bluetooth association
+         * all survive, and delivery falls back to direct-only. Revocation is attempted first so
+         * the relay forgets the pair, but a relay that cannot be reached must not trap the user
+         * on it, so the local endpoint is cleared either way and the caller is told which
+         * happened.
+         */
+        AsyncFunction("detachRelay") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
+                    val relayUrl = config.relayUrl
+                    if (relayUrl.isNullOrBlank()) {
+                        promise.resolve("no_relay")
+                        return@launch
+                    }
+                    val revoked = runCatching {
+                        val (_, sign) = CryptoStore.loadOrGenerate(ctx)
+                        co.twinotify.core.pairing.PairProtocol.revoke(
+                            relayUrl,
+                            JwtMinter.mint(DeviceIdentity.getOrCreate(ctx), sign.secretKey),
+                            debug = BuildConfig.DEBUG,
+                        )
+                    }.isSuccess
+                    co.twinotify.core.service.ServiceConfigStore.setLanOnlyEnabled(ctx)
+                    co.twinotify.core.service.SyncService.notifyRelayConfigChanged()
+                    promise.resolve(if (revoked) "detached" else "detached_unrevoked")
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (e: Throwable) {
+                    promise.reject("DETACH_RELAY", e.message ?: "err", e)
+                }
+            }
+        }
+
         AsyncFunction("storePeerPubkeys") { encB64: String, signB64: String, peerDeviceId: String, peerDisplayName: String, promise: Promise ->
             moduleScope.launch {
                 try {

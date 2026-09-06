@@ -136,6 +136,8 @@ const mockTwinotifyCore = {
   invokeMirrorAction: jest.fn(async () => ({ status: 'failed' })),
   canLaunchSourceApp: jest.fn(async () => false),
   openNotificationSourceApp: jest.fn(async () => false),
+  attachRelay: jest.fn(async () => 'attached'),
+  detachRelay: jest.fn(async () => 'detached'),
   unpair: jest.fn(),
 };
 

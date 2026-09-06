@@ -66,6 +66,8 @@ export type HistorySettings = {
 
 export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'LEGACY_ONLINE_ONLY' | 'OFFLINE_QUEUED';
 
+export type RelayDetachOutcome = 'detached' | 'detached_unrevoked' | 'no_relay';
+
 export type RelayAttachOutcome =
   | 'attached'
   | 'relay_url_invalid'
@@ -145,6 +147,8 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
    * peer_timeout, peer_identity_mismatch, store_failed.
    */
   attachRelay(relayUrl: string, displayName: string): Promise<RelayAttachOutcome>;
+  /** Stops using the relay while keeping the pair and every direct route. Not an unpair. */
+  detachRelay(): Promise<RelayDetachOutcome>;
   mintAuthJwt(): Promise<string>;
   encryptToPeer(plaintextB64: string): Promise<EncryptResult>;
   decryptFromPeer(ciphertextB64: string, nonceB64: string): Promise<string>;

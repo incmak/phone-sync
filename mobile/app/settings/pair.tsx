@@ -8,7 +8,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 
 import { useTheme, TwCard, TwFingerprint, TwButton, TwSpinner, TwRow, TwSwitch } from '../../components';
 import TwinotifyCoreModule, {
@@ -16,6 +16,13 @@ import TwinotifyCoreModule, {
   PairStatus,
 } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../../state/onboardingState';
+
+function peerDisplayNameOrFallback(status: PairStatus | null): string {
+  return status?.peerDisplayName?.trim() || 'your other phone';
+}
+
+const RELAY_EXPLANATION =
+  'Reaches your other phone when it is on a different network, such as mobile data. Contents stay encrypted end to end.';
 
 const BLUETOOTH_EXPLANATION =
   'Keeps encrypted sync working nearby when Wi-Fi is unavailable. Call audio is not routed.';
@@ -54,6 +61,8 @@ export default function PairDetailScreen() {
   const [unpairing, setUnpairing] = useState(false);
   const [bluetooth, setBluetooth] = useState<BluetoothRouteSettings | null>(null);
   const [bluetoothBusy, setBluetoothBusy] = useState(false);
+  const [relayUrl, setRelayUrl] = useState<string | null | undefined>(undefined);
+  const [relayBusy, setRelayBusy] = useState(false);
 
   useEffect(() => {
     TwinotifyCoreModule.getPairStatus()
@@ -231,6 +240,51 @@ export default function PairDetailScreen() {
     );
   }, [reloadBluetooth]);
 
+  const reloadRelay = useCallback(async () => {
+    try {
+      setRelayUrl(await OnboardingState.getRelayUrl());
+    } catch {
+      setRelayUrl(null);
+    }
+  }, []);
+
+  // Focus covers mount as well as returning from the setup screen, so one hook is enough.
+  useFocusEffect(useCallback(() => { void reloadRelay(); }, [reloadRelay]));
+
+  const handleRemoveRelay = useCallback(() => {
+    Alert.alert(
+      'Stop using this relay?',
+      `Notifications will only reach ${peerDisplayNameOrFallback(pairStatus)} over Wi-Fi or Bluetooth nearby. Your pair and fingerprint stay as they are.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setRelayBusy(true);
+              try {
+                const outcome = await TwinotifyCoreModule.detachRelay();
+                await OnboardingState.clearRelayUrl();
+                setRelayUrl(null);
+                if (outcome === 'detached_unrevoked') {
+                  Alert.alert(
+                    'Relay removed here',
+                    'This phone stopped using the relay, but the relay could not be reached to forget the pair. It will expire on its own.',
+                  );
+                }
+              } catch {
+                Alert.alert('Could not remove the relay', 'Nothing changed. Try again.');
+              } finally {
+                setRelayBusy(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  }, [pairStatus]);
+
   const handleEnableNearby = useCallback(() => {
     void OnboardingState.setPairingMode('nearby');
     router.push('/pair/nearby');
@@ -309,6 +363,51 @@ export default function PairDetailScreen() {
               Add a direct Wi-Fi path without replacing this relay pair.
             </Text>
           </Pressable>
+        )}
+
+        {pairStatus?.paired && relayUrl !== undefined && (
+          relayUrl ? (
+            <View style={styles.relayGroup}>
+              <TwRow
+                title="Relay server"
+                subtitle={`${relayUrl}. Carries notifications when the phones are on different networks, encrypted end to end.`}
+                accessibilityLabel={`Relay server, ${relayUrl}`}
+                style={styles.ledgerRow}
+              />
+              {!relayBusy && (
+                <TwRow
+                  title="Change relay"
+                  onPress={() => router.push('/settings/relay?mode=change')}
+                  style={styles.ledgerRow}
+                />
+              )}
+              <TwRow
+                title={relayBusy ? 'Removing relay' : 'Remove relay'}
+                subtitle={relayBusy ? 'Telling the relay to forget this pair.' : undefined}
+                onPress={relayBusy ? undefined : handleRemoveRelay}
+                style={styles.ledgerRow}
+              />
+            </View>
+          ) : (
+            // Same card as nearby Wi-Fi and Bluetooth: all three add a way for the phones to
+            // reach each other, so all three are offered the same way.
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Add a relay"
+              onPress={() => router.push('/settings/relay')}
+              style={({ pressed }) => [
+                styles.relayAction,
+                { backgroundColor: pressed ? theme.hover : theme.fill },
+              ]}
+            >
+              <Text style={[styles.nearbyTitle, { color: theme.ink, fontFamily: theme.fonts.uiSemi }]}>
+                Add a relay
+              </Text>
+              <Text style={[styles.nearbyBody, { color: theme.ink2, fontFamily: theme.fonts.ui }]}>
+                {RELAY_EXPLANATION}
+              </Text>
+            </Pressable>
+          )
         )}
 
         {pairStatus?.paired && bluetooth !== null && (
@@ -421,6 +520,15 @@ const styles = StyleSheet.create({
   nearbyAction: { minHeight: 72, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14, marginTop: 24, justifyContent: 'center' },
   nearbyTitle: { fontSize: 15, lineHeight: 21 },
   nearbyBody: { fontSize: 13, lineHeight: 19, marginTop: 3 },
+  relayGroup: { gap: 2, marginTop: 24 },
+  relayAction: {
+    minHeight: 72,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    marginTop: 24,
+    justifyContent: 'center',
+  },
   bluetoothGroup: { gap: 2, marginTop: 24 },
   bluetoothAction: {
     minHeight: 72,

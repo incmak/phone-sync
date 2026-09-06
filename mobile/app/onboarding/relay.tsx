@@ -114,7 +114,7 @@ export default function RelayScreen() {
             style={[
               theme.type.caption,
               styles.label,
-              { color: theme.ink4, fontFamily: theme.fonts.uiMedium },
+              { color: theme.ink3, fontFamily: theme.fonts.uiMedium },
             ]}
           >
             RELAY URL
@@ -143,7 +143,7 @@ export default function RelayScreen() {
             autoCorrect={false}
             keyboardType="url"
             placeholder="wss://relay.twinotify.nuvaynlabs.com/ws"
-            placeholderTextColor={theme.ink4}
+            placeholderTextColor={theme.ink3}
           />
 
           {testState === 'ok' && latency !== null && (

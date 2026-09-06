@@ -150,7 +150,8 @@ export default function SettingsScreen() {
     );
   }, [persistCallCapture]);
 
-  const relayDisplay = relayUrl ?? (pairStatus.paired ? 'No relay. Direct delivery only.' : 'Not configured');
+  const relayDisplay = relayUrl
+    ?? (pairStatus.paired ? 'Direct delivery only. Add a relay to reach different networks.' : 'Not configured');
   const version = Constants.expoConfig?.version ?? '1.0.0';
   const callUnsupported = syncStatus.callCaptureDisabledReason === 'call_telephony_unsupported';
   const callPermissionDenied = syncStatus.callCaptureDisabledReason === 'call_permission_denied';
@@ -246,7 +247,13 @@ export default function SettingsScreen() {
           {sectionHeader('Sync')}
           {relayUrl ? (
             <>
-              <TwRow title="Relay server" subtitle={relayDisplay} style={styles.ledgerRow} />
+              <TwRow
+                title="Relay server"
+                subtitle={relayDisplay}
+                onPress={() => router.push('/settings/pair')}
+                trailing={disclosure('settings-relay-disclosure')}
+                style={styles.ledgerRow}
+              />
               <TwRow
                 title="Prefer direct delivery"
                 subtitle={
@@ -275,6 +282,16 @@ export default function SettingsScreen() {
             <TwRow
               title="Delivery route"
               subtitle={relayUrl === undefined ? 'Loading delivery configuration' : relayDisplay}
+              onPress={
+                relayUrl === undefined || !pairStatus.paired
+                  ? undefined
+                  : () => router.push('/settings/pair')
+              }
+              trailing={
+                relayUrl !== undefined && pairStatus.paired
+                  ? disclosure('settings-relay-disclosure')
+                  : undefined
+              }
               style={styles.ledgerRow}
             />
           )}

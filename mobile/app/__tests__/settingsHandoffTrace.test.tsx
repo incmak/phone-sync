@@ -33,7 +33,8 @@ describe('Settings handoff ledger', () => {
     expect(labels.indexOf('Sync')).toBeLessThan(labels.indexOf('Privacy'));
     expect(labels.indexOf('Privacy')).toBeLessThan(labels.indexOf('About'));
     expect(screen.UNSAFE_queryAllByType(TwCard)).toHaveLength(0);
-    expect(screen.UNSAFE_queryAllByType(HandoffDisclosureMark)).toHaveLength(3);
+    // Pairing, relay, filters and history: every row that leads somewhere carries the mark.
+    expect(screen.UNSAFE_queryAllByType(HandoffDisclosureMark)).toHaveLength(4);
     expect(screen.queryByText('›')).toBeNull();
   });
 
@@ -53,9 +54,22 @@ describe('Settings handoff ledger', () => {
   it('keeps the direct Wi-Fi only branch truthful without an impossible preference control', async () => {
     const screen = await renderSettings();
 
-    await waitFor(() => expect(screen.getByText('No relay. Direct delivery only.')).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText('Direct delivery only. Add a relay to reach different networks.')).toBeTruthy());
     expect(screen.getByText('Delivery route')).toBeTruthy();
+    // There is no relay to prefer against, so the preference control stays absent.
     expect(screen.queryByRole('switch', { name: 'Prefer direct delivery' })).toBeNull();
+  });
+
+  it('sends the direct-only branch somewhere it can actually add a relay', async () => {
+    // The row used to be inert, which is how a nearby-paired user reached a dead end: no way to
+    // add a relay, and no hint that the paired-device screen is where it happens.
+    const screen = await renderSettings();
+
+    await waitFor(() => expect(screen.getByText('Delivery route')).toBeTruthy());
+    fireEvent.press(screen.getByText('Delivery route'));
+
+    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/pair');
   });
 
   it('keeps actions named with their subtitle and routes them to the original destination', async () => {

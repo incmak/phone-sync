@@ -5,6 +5,8 @@ export type SyncState =
   | 'LEGACY_ONLINE_ONLY'
   | 'OFFLINE_QUEUED';
 
+export type RelayDetachOutcome = 'detached' | 'detached_unrevoked' | 'no_relay';
+
 export type RelayAttachOutcome =
   | 'attached'
   | 'relay_url_invalid'
@@ -94,6 +96,8 @@ export interface TwinotifyCoreAPI {
    * peer_timeout, peer_identity_mismatch, store_failed.
    */
   attachRelay(relayUrl: string, displayName: string): Promise<RelayAttachOutcome>;
+  /** Stops using the relay while keeping the pair and every direct route. Not an unpair. */
+  detachRelay(): Promise<RelayDetachOutcome>;
   unpair(): Promise<void>;
   startSyncService(relayUrl: string): Promise<void>;
   startLanOnlySyncService(): Promise<void>;

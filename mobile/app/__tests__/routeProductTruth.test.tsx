@@ -31,7 +31,7 @@ describe('route product truth', () => {
 
   it('shows direct Wi-Fi only without an impossible route-order switch', async () => {
     const screen = render(<SettingsScreen />);
-    await waitFor(() => expect(screen.getByText('No relay. Direct delivery only.')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Direct delivery only. Add a relay to reach different networks.')).toBeTruthy());
 
     expect(screen.getByText('Delivery route')).toBeTruthy();
     expect(screen.queryByRole('switch', { name: 'Prefer direct delivery' })).toBeNull();
