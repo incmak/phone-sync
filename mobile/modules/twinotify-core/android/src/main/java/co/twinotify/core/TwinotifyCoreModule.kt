@@ -1092,6 +1092,57 @@ class TwinotifyCoreModule internal constructor(
             }
         }
 
+        /**
+         * Adds a relay to a pair that already exists, without unpairing or re-verifying a
+         * fingerprint. Resolves "attached", or a bounded rejection code the UI maps to copy.
+         *
+         * Deliberately does not go through storePeerPubkeys: that writes a fresh PeerRecord with
+         * lanBindingId defaulted to null, which would trade the working direct route for the relay
+         * instead of adding one alongside it.
+         */
+        AsyncFunction("attachRelay") { relayUrl: String, displayName: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    val outbox = co.twinotify.core.service.PeerControlOutbox(
+                        ctx,
+                        co.twinotify.core.storage.NotificationDb.get(ctx).reliableDeliveryDao(),
+                    )
+                    val coordinator = co.twinotify.core.pairing.RelayAttachCoordinator(
+                        loadIdentity = {
+                            val (box, sign) = CryptoStore.loadOrGenerate(ctx)
+                            co.twinotify.core.pairing.RelayAttachIdentity(
+                                deviceId = DeviceIdentity.getOrCreate(ctx),
+                                encPubkey = box.publicKey,
+                                signPubkey = sign.publicKey,
+                                signSecretKey = sign.secretKey,
+                                displayName = displayName.takeIf { it.isNotBlank() },
+                            )
+                        },
+                        loadPeer = { PeerStore.load(ctx) },
+                        relayClient = co.twinotify.core.pairing.LiveRelayAttachRelayClient(
+                            debug = BuildConfig.DEBUG,
+                        ),
+                        announce = { url, token -> outbox.enqueueRelayAttach(url, token) },
+                        commit = { url ->
+                            co.twinotify.core.service.ServiceConfigStore.setRelayUrl(ctx, url)
+                            co.twinotify.core.service.SyncService.notifyRelayConfigChanged()
+                        },
+                    )
+                    when (val result = coordinator.attach(relayUrl)) {
+                        is co.twinotify.core.pairing.RelayAttachResult.Attached ->
+                            promise.resolve("attached")
+                        is co.twinotify.core.pairing.RelayAttachResult.Rejected ->
+                            promise.resolve(result.code)
+                    }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (e: Throwable) {
+                    promise.reject("ATTACH_RELAY", e.message ?: "err", e)
+                }
+            }
+        }
+
         AsyncFunction("storePeerPubkeys") { encB64: String, signB64: String, peerDeviceId: String, peerDisplayName: String, promise: Promise ->
             moduleScope.launch {
                 try {

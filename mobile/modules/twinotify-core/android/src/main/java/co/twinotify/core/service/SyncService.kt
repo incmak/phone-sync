@@ -1043,6 +1043,17 @@ class SyncService : Service(), CallMirrorForegroundHost {
             service.routePreferenceRestarter.forceRestart()
         }
 
+        /**
+         * Called only after a relay endpoint is durable in ServiceConfigStore. Routes load once
+         * per transport generation, so a pair that has just gained its first relay keeps running
+         * direct-only until the coordinator is restarted through the same serialized owner a
+         * preference toggle uses.
+         */
+        fun notifyRelayConfigChanged() {
+            val service = activeInstance ?: return
+            service.routePreferenceRestarter.forceRestart()
+        }
+
         /** Existing sessions poll the durable outbox; a dead service is safely re-evaluated. */
         fun notifyActionOutboxChanged(context: android.content.Context) {
             if (activeInstance != null) return

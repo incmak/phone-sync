@@ -36,7 +36,14 @@ sealed interface RelayAttachResult {
 /** The relay calls an attach needs, isolated so the coordinator is testable without a network. */
 interface RelayAttachRelayClient {
     suspend fun initiate(relayUrl: String, pairToken: String, identity: RelayAttachIdentity)
-    suspend fun awaitPeerHello(relayUrl: String, pairToken: String): RelayAttachPeerHello
+
+    /** Takes the identity because the relay's notify channel is itself authenticated. */
+    suspend fun awaitPeerHello(
+        relayUrl: String,
+        pairToken: String,
+        identity: RelayAttachIdentity,
+    ): RelayAttachPeerHello
+
     suspend fun sendConfirmationSig(relayUrl: String, pairToken: String, sig: ByteArray)
 }
 
@@ -123,7 +130,7 @@ class RelayAttachCoordinator(
         }
 
         val hello = try {
-            relayClient.awaitPeerHello(canonical, pairToken)
+            relayClient.awaitPeerHello(canonical, pairToken, identity)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {

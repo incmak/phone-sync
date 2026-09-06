@@ -66,6 +66,16 @@ export type HistorySettings = {
 
 export type SyncState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'LEGACY_ONLINE_ONLY' | 'OFFLINE_QUEUED';
 
+export type RelayAttachOutcome =
+  | 'attached'
+  | 'relay_url_invalid'
+  | 'not_paired'
+  | 'no_direct_route'
+  | 'relay_unreachable'
+  | 'peer_timeout'
+  | 'peer_identity_mismatch'
+  | 'store_failed';
+
 export interface SyncStatus {
   state: SyncState;
   queuedCount: number;
@@ -129,6 +139,12 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
     confirmationSigB64: string,
   ): Promise<void>;
   storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string): Promise<void>;
+  /**
+   * Adds a relay to an existing pair over the current direct route. Resolves "attached", or a
+   * bounded rejection code: relay_url_invalid, not_paired, no_direct_route, relay_unreachable,
+   * peer_timeout, peer_identity_mismatch, store_failed.
+   */
+  attachRelay(relayUrl: string, displayName: string): Promise<RelayAttachOutcome>;
   mintAuthJwt(): Promise<string>;
   encryptToPeer(plaintextB64: string): Promise<EncryptResult>;
   decryptFromPeer(ciphertextB64: string, nonceB64: string): Promise<string>;

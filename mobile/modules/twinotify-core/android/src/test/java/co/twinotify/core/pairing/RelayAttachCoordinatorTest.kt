@@ -49,7 +49,11 @@ class RelayAttachCoordinatorTest {
             if (failOn == "initiate") error("relay refused init")
         }
 
-        override suspend fun awaitPeerHello(relayUrl: String, pairToken: String): RelayAttachPeerHello {
+        override suspend fun awaitPeerHello(
+            relayUrl: String,
+            pairToken: String,
+            identity: RelayAttachIdentity,
+        ): RelayAttachPeerHello {
             calls += "await"
             if (failOn == "await") error("peer never answered")
             return checkNotNull(hello)
