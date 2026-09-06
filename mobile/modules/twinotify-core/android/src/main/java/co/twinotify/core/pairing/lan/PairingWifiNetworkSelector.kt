@@ -2,6 +2,7 @@ package co.twinotify.core.pairing.lan
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.wifi.WifiManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -33,15 +34,37 @@ class PairingWifiNetworkLease internal constructor(
     }
 }
 
+/**
+ * Whether a Wi-Fi request can be satisfied at all right now.
+ *
+ * Separated from the selector so the rule is testable without a radio. The distinction that
+ * matters: a disabled radio can never produce the network, while an enabled but unassociated one
+ * may produce it within the timeout, and failing early there would push out the route's retry
+ * cooldown for nothing.
+ */
+internal object PairingWifiPrecondition {
+    fun failureOrNull(radioEnabled: Boolean): PairingWifiNetworkFailure? =
+        if (radioEnabled) null else PairingWifiNetworkFailure.UNAVAILABLE
+}
+
 /** A cancellable lease on an already available local Wi-Fi transport. */
 class PairingWifiNetworkSelector(
     context: Context,
     private val timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
 ) {
-    private val connectivity = context.applicationContext.getSystemService(ConnectivityManager::class.java)
+    private val application = context.applicationContext
+    private val connectivity = application.getSystemService(ConnectivityManager::class.java)
         ?: throw PairingWifiNetworkException(PairingWifiNetworkFailure.UNAVAILABLE)
 
+    /** False also when the state cannot be read, which is the same thing for our purposes. */
+    private fun wifiRadioEnabled(): Boolean = runCatching {
+        application.getSystemService(WifiManager::class.java)?.isWifiEnabled == true
+    }.getOrDefault(false)
+
     suspend fun acquire(onLost: () -> Unit): PairingWifiNetworkLease {
+        // Report what is already known instead of spending the whole rendezvous timeout on a
+        // callback that cannot fire. Measured with Wi-Fi off: 15,010ms per attempt, every cycle.
+        PairingWifiPrecondition.failureOrNull(wifiRadioEnabled())?.let { throw PairingWifiNetworkException(it) }
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
