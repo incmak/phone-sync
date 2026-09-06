@@ -482,6 +482,29 @@ class TransportCoordinatorTest {
     }
 
     @Test
+    fun withNothingQueuedTheDirectPreferenceIsTakenLiterallyAndTheRelayIsNeverTouched() = runTest {
+        // Nothing is waiting, so there is no one to keep waiting. Establishing the direct route
+        // properly costs nobody anything, and two phones on one Wi-Fi never reach the relay.
+        val lan = FakeRoute(RouteKind.LAN)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(FakeStore(rows = emptyList()), clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            queuedCount = { 0 },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        assertEquals(RouteKind.LAN, coordinator.health.value.active)
+        assertEquals(0, relay.opens, "an idle pair should never open the relay just to promote away from it")
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun aRelayBackoffNeverOutlastsADueDirectAttempt() = runTest {
         // Seen on hardware: the relay was in a 40s backoff while the Bluetooth rendezvous boundary
         // passed, so the phone woke 10s late and only met its peer by luck. A relay that cannot be
