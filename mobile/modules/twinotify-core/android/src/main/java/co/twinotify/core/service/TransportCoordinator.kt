@@ -115,6 +115,11 @@ class TransportCoordinator(
     private val directAttemptFloorMs: Long = 15_000L,
     private val onEstablishedFailure: (Throwable) -> Unit = {},
     /**
+     * Whether the peer has been heard from lately by any route. False turns Bluetooth from an
+     * optimisation into the only lifeline, which is what puts it on the shared rendezvous grid.
+     */
+    private val peerReachable: () -> Boolean = { true },
+    /**
      * Carries delivery on the relay before spending a direct route's rendezvous budget.
      *
      * A direct open is allowed to take its whole ceiling, because a LAN rendezvous needs both
@@ -550,10 +555,28 @@ class TransportCoordinator(
     }
 
     private fun recordDirectFailure(retry: DirectRetryState) {
+        val now = clock()
+        if (retry.kind == RouteKind.BLUETOOTH && !peerReachableOrUnknown()) {
+            // Two phones with no channel between them cannot agree on a retry time by talking, so
+            // they agree by arithmetic: both round the wall clock to the same boundary and open
+            // their attempt windows together. Independent backoff curves drift apart and an
+            // offline peer then goes unreached indefinitely, which is the failure this prevents.
+            val at = nextRendezvousAt(now, BLUETOOTH_RENDEZVOUS_PERIOD_MS)
+            retry.nextAttemptAt = at
+            recordDirectBackoff(retry.kind, at - now)
+            return
+        }
         val wait = lanRetryPolicy.delay(retry.failures)
         retry.failures += 1
-        retry.nextAttemptAt = clock() + wait
+        retry.nextAttemptAt = now + wait
         recordDirectBackoff(retry.kind, wait)
+    }
+
+    private fun peerReachableOrUnknown(): Boolean = try {
+        peerReachable()
+    } catch (_: Throwable) {
+        // A failing signal must not strand the pair on the grid's battery cost.
+        true
     }
 
     private fun recordDirectBackoff(kind: RouteKind, wait: Long) {
@@ -680,6 +703,25 @@ class TransportCoordinator(
          * How long to wait before the one forgiven relay retry after a network change. Short
          * because the interface has just come up: the previous failure described the old network.
          */
+        /**
+         * The shared Bluetooth rendezvous period. Both phones attempt on multiples of this, so a
+         * clock difference smaller than the period cannot stop them meeting. Short enough that a
+         * phone losing internet beside its peer recovers within a minute; the cost is BLE work on
+         * every boundary, which is why it only applies while the peer is unreachable.
+         */
+        const val BLUETOOTH_RENDEZVOUS_PERIOD_MS = 60_000L
+
+        /**
+         * The next boundary strictly after [now]. Pure and clock-derived, so two phones that share
+         * no channel still choose the same instant.
+         *
+         * Always the next boundary, never "now", and that is what makes it self-correcting. Two
+         * phones straddling a boundary pick instants one period apart and miss once; each then
+         * reschedules from its own failed attempt, which lands both on the same later boundary.
+         * A tolerance that let a late phone attempt immediately would keep them off-grid instead.
+         */
+        fun nextRendezvousAt(now: Long, periodMs: Long): Long = ((now / periodMs) + 1) * periodMs
+
         const val NETWORK_CHANGE_RETRY_MS = 1_000L
 
         /**

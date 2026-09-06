@@ -390,6 +390,8 @@ internal class LiveServiceTransportLoop(
     private val retryRequests: Flow<Unit> = emptyFlow(),
     private val directAttemptRequests: Flow<Unit> = emptyFlow(),
     private val relayProbeScheduler: RelayProbeScheduler = RelayProbeScheduler {},
+    /** Whether the peer has been heard from lately. False puts Bluetooth on the shared grid. */
+    private val peerReachable: () -> Boolean = { true },
     private val onAuthenticatedRoute: suspend (RouteKind) -> Unit = {},
     private val onEstablishedFailure: (Throwable) -> Unit = {},
     private val publishHealth: suspend (RouteHealth) -> Unit,
@@ -413,6 +415,7 @@ internal class LiveServiceTransportLoop(
             relayProbeScheduler = relayProbeScheduler,
             onEstablishedFailure = onEstablishedFailure,
             startWithRelay = startWithRelay,
+            peerReachable = peerReachable,
             trace = trace,
         )
         coroutineScope {
@@ -1651,6 +1654,12 @@ class SyncService : Service(), CallMirrorForegroundHost {
                         snapshot.pendingLocal,
                         snapshot.totalActiveBytes,
                     )
+                },
+                peerReachable = {
+                    peerControls.peerEvidence(
+                        SyncServiceStatus.routeStatus.value.routeGeneration,
+                        System.currentTimeMillis().coerceAtLeast(0L),
+                    ) in setOf(PeerEvidence.DIRECT, PeerEvidence.RECENT)
                 },
                 trace = { android.util.Log.w("Twinotify", it) },
             ).run(preferLan, startWithRelay = relayFirstOnNextGeneration.also {

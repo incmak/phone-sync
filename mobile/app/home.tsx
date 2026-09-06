@@ -31,6 +31,7 @@ export default function HomeScreen() {
   const metrics = useMetrics();
   const recentActivity = useRecentActivity(5);
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
+  const [bluetoothReady, setBluetoothReady] = useState(false);
   const [relayUrl, setRelayUrl] = useState<string | null>(null);
   const nativeMirrorOn = enabled ?? serviceIsRunning(state);
   const [previousNativeMirrorOn, setPreviousNativeMirrorOn] = useState(nativeMirrorOn);
@@ -43,6 +44,9 @@ export default function HomeScreen() {
 
   useEffect(() => {
     TwinotifyCoreModule.getPairStatus().then(setPairStatus).catch(() => {});
+    TwinotifyCoreModule.getBluetoothRouteSettings()
+      .then((settings) => setBluetoothReady(settings.associated && settings.enabled))
+      .catch(() => setBluetoothReady(false));
     OnboardingState.getRelayUrl().then(setRelayUrl).catch(() => {});
   }, []);
 
@@ -69,7 +73,7 @@ export default function HomeScreen() {
     }
   }, []);
 
-  const route = presentRoute(routeStatus, pairStatus.paired, mirrorOn);
+  const route = presentRoute(routeStatus, pairStatus.paired, mirrorOn, bluetoothReady);
   const peerName = pairStatus.paired ? (pairStatus.peerDisplayName?.trim() || 'Unknown device') : 'Not paired';
   const gutter = width <= 360 ? 16 : 24;
   const connectionWidth = Math.max(232, width - gutter * 2);

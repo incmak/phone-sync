@@ -42,7 +42,13 @@ function evidenceLine(status: RouteStatus): DeliveryPresentation['peerLine'] {
  * infers "offline" from relay state: a healthy direct route reports Direct on
  * Wi-Fi even with no relay connection at all.
  */
-export function presentRoute(status: RouteStatus, paired: boolean, enabled: boolean = true): DeliveryPresentation {
+export function presentRoute(
+  status: RouteStatus,
+  paired: boolean,
+  enabled: boolean = true,
+  /** Whether a Bluetooth association exists, so proximity is a real option to offer. */
+  bluetoothReady: boolean = false,
+): DeliveryPresentation {
   const queuedCount = count(status.pending_local_count ?? status.queued_count);
   const awaitingPeer = count(status.awaiting_peer_count);
   const heldByRelay = count(status.held_by_relay_count);
@@ -130,10 +136,14 @@ export function presentRoute(status: RouteStatus, paired: boolean, enabled: bool
   // Durable work with no usable route is the state worth acting on, so it
   // outranks a bare reconnecting message and carries the one retry control.
   if (queuedCount > 0) {
+    const waiting = `${itemName(queuedCount, contentKind)} will send when a connection is available.`;
     return {
       state: 'queued',
       label: 'Queued on this phone',
-      explanation: `${itemName(queuedCount, contentKind)} will send when a connection is available.`,
+      // Naming the action only when it exists. With an association, holding the phones together
+      // delivers over Bluetooth with no internet on either side, and that is the one thing the
+      // person holding the phone can actually do about this state.
+      explanation: bluetoothReady ? `${waiting} Hold the phones near each other to send now.` : waiting,
       action: 'retry',
       queuedCount,
       peerLine: 'Not confirmed online',

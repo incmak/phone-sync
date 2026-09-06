@@ -120,6 +120,18 @@ describe('presentRoute delivery truth table', () => {
     }), true).explanation).toBe('2 notifications are stored securely and waiting for your other phone.');
   });
 
+  it('offers the one action that works with no internet, when Bluetooth is set up', () => {
+    const queued = status({ queued_count: 2, pending_local_count: 2, delivery_reason: 'no_route' });
+
+    const withBluetooth = presentRoute(queued, true, true, true);
+    const without = presentRoute(queued, true, true, false);
+
+    expect(withBluetooth.explanation).toContain('near each other');
+    // Without the association there is nothing proximity would achieve, so it must not be offered.
+    expect(without.explanation).not.toContain('near each other');
+    expect(without.explanation).toBe('2 notifications will send when a connection is available.');
+  });
+
   it('never calls relay-held work queued on this phone', () => {
     const presentation = presentRoute(status({
       route: 'relay', phase: 'authenticated', held_by_relay_count: 1, awaiting_peer_count: 1,

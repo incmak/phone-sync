@@ -450,6 +450,85 @@ class TransportCoordinatorTest {
     }
 
     @Test
+    fun rendezvousBoundariesAreDerivedFromTheClockSoBothPhonesLandOnTheSameOne() {
+        // The whole point: two phones that share no channel still choose the same instant, because
+        // they both round the wall clock the same way. Skew inside a period cannot separate them.
+        val period = TransportCoordinator.BLUETOOTH_RENDEZVOUS_PERIOD_MS
+
+        for (base in listOf(0L, 1L, 26_999L, 27_000L, 59_999L, 1_000_000L, 1_019_999L)) {
+            for (skew in listOf(0L, 1L, 500L, 5_000L, 26_999L, 59_999L)) {
+                val phoneA = TransportCoordinator.nextRendezvousAt(base, period)
+                val phoneB = TransportCoordinator.nextRendezvousAt(base + skew, period)
+
+                assertEquals(0L, phoneA % period, "instants must sit on the shared grid")
+                assertTrue(phoneA > base, "an instant in the past would attempt immediately")
+                // Same boundary, or one apart. One apart costs a single missed rendezvous and
+                // then converges, because each phone reschedules from its own failed attempt.
+                assertTrue(
+                    kotlin.math.abs(phoneA - phoneB) <= period,
+                    "base=$base skew=$skew put the phones ${kotlin.math.abs(phoneA - phoneB)}ms apart",
+                )
+            }
+        }
+
+        // The convergence itself: two phones that missed each other by a period both reschedule
+        // from their own attempt instants and land on one boundary.
+        val missedA = TransportCoordinator.nextRendezvousAt(59_999, period)
+        val missedB = TransportCoordinator.nextRendezvousAt(60_001, period)
+        assertTrue(missedA != missedB, "the straddling pair should miss exactly once")
+        // The earlier phone's attempt fails after its 27s window and it reschedules onto the very
+        // boundary the later phone was already waiting for, so the pair is aligned from here on.
+        assertEquals(missedB, TransportCoordinator.nextRendezvousAt(missedA + 27_000, period))
+    }
+
+    @Test
+    fun anUnreachablePeerPutsBluetoothOnTheSharedGridInsteadOfDriftingApart() = runTest {
+        // Without this, each phone backs off 15s, 30s, 60s, 120s, 300s independently, so two 27s
+        // attempt windows meet only by luck and an offline peer can go unreached indefinitely.
+        val bluetooth = FakeRoute(RouteKind.BLUETOOTH, failOpen = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(FakeStore(rows = emptyList()), clock = { testScheduler.currentTime }),
+            lan = null,
+            relay = null,
+            bluetooth = bluetooth,
+            clock = { testScheduler.currentTime },
+            peerReachable = { false },
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        val period = TransportCoordinator.BLUETOOTH_RENDEZVOUS_PERIOD_MS
+        assertTrue(
+            coordinator.lastBluetoothBackoffMs <= period,
+            "expected a wait inside one rendezvous period, got ${coordinator.lastBluetoothBackoffMs}",
+        )
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun areachablePeerKeepsTheOrdinaryBluetoothCooldown() = runTest {
+        // When the peer is answering elsewhere, Bluetooth is an optimisation rather than a
+        // lifeline, so it stays lazy and cheap instead of scanning on every boundary.
+        val bluetooth = FakeRoute(RouteKind.BLUETOOTH, failOpen = true)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(FakeStore(rows = emptyList()), clock = { testScheduler.currentTime }),
+            lan = null,
+            relay = relay,
+            bluetooth = bluetooth,
+            clock = { testScheduler.currentTime },
+            peerReachable = { true },
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        assertEquals(15_000L, coordinator.lastBluetoothBackoffMs)
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun aRestartWithoutTheHintLeavesDeliveryWaitingForTheWholeDirectCeiling() = runTest {
         // The bug, in virtual time. Observed on hardware: taking one phone from Wi-Fi to mobile
         // data left it about 30s on "Queued" before the relay took over, because a network change
