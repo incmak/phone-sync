@@ -36,6 +36,43 @@ class PeerControlOutboxTest {
     }
 
     @Test
+    fun relayAttachSealsAFiveMinuteReceiptBackedEnvelopeCarryingTheRelayAndToken() = runTest {
+        val row = outbox.enqueueRelayAttach(
+            relayUrl = "https://relay.example.test",
+            pairToken = "0123456789abcdef0123",
+        )
+
+        assertEquals("relay.attach", row.eventType)
+        assertTrue(row.requiresPeerReceipt)
+        val (event, requiresReceipt) = events.single()
+        assertTrue(requiresReceipt)
+        // Matches the relay's own pair-token lifetime: the event carries that token, so
+        // outliving it would only offer the peer a handshake already refused.
+        assertEquals(301_000L, event.expiresAt)
+        assertNull(event.canonId)
+        assertNull(event.sequence)
+        val payload = JSONObject(event.payloadJson)
+        assertEquals("https://relay.example.test", payload.getString("relay_url"))
+        assertEquals("0123456789abcdef0123", payload.getString("pair_token"))
+        // Encoding through the shared validator is what keeps a malformed attach off the wire.
+        ProtocolJson.encodeInner(event)
+    }
+
+    @Test
+    fun relayAttachRefusesToSealACleartextRelay() = runTest {
+        listOf("http://relay.example.test", "ws://relay.example.test").forEach { url ->
+            var threw = false
+            try {
+                outbox.enqueueRelayAttach(relayUrl = url, pairToken = "0123456789abcdef0123")
+            } catch (expected: IllegalArgumentException) {
+                threw = true
+            }
+            assertTrue(threw, url)
+        }
+        assertTrue(store.inserted.isEmpty())
+    }
+
+    @Test
     fun bootstrapUsesTenMinuteReceiptBackedEnvelopeAndReusesGeneration() = runTest {
         val payload = LanBootstrapPayload(
             tlsSpkiSha256 = "1".repeat(64),

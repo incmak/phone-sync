@@ -178,6 +178,35 @@ class PeerControlOutbox(
             row
         }
 
+    /**
+     * Seals the event that hands the peer a relay to join. Unlike a bootstrap it is not tied to a
+     * transport generation and is never deduplicated: each attach carries its own single-use pair
+     * token, so a second attempt is a genuinely new offer rather than a repeat of the last one.
+     */
+    suspend fun enqueueRelayAttach(relayUrl: String, pairToken: String): OutboundMessage =
+        ensureLock.withLock {
+            val createdAt = validNow()
+            val event = InnerEventV2(
+                msgId = newId(),
+                originDevice = originDevice(),
+                type = "relay.attach",
+                canonId = null,
+                sequence = null,
+                createdAt = createdAt,
+                expiresAt = Math.addExact(createdAt, RELAY_ATTACH_TTL_MS),
+                payloadJson = JSONObject()
+                    .put("relay_url", relayUrl)
+                    .put("pair_token", pairToken)
+                    .toString(),
+            )
+            // Validating before sealing is what keeps a cleartext or malformed relay off the wire.
+            ProtocolJson.encodeInner(event)
+            val row = sealer.seal(event, requiresPeerReceipt = true)
+            requireReceiptBackedRow(row, event)
+            store.insert(row)
+            row
+        }
+
     suspend fun ensureProbe(generation: Int, requestDirect: Boolean): OutboundMessage? =
         ensureLock.withLock {
             require(generation >= 0) { "transport generation must be non-negative" }
@@ -286,6 +315,7 @@ class PeerControlOutbox(
 
     private companion object {
         const val BOOTSTRAP_TTL_MS = 600_000L
+        const val RELAY_ATTACH_TTL_MS = 300_000L
         const val PROBE_TTL_MS = 120_000L
         const val PROBE_INTERVAL_MS = 60_000L
         const val EVIDENCE_FRESH_MS = 150_000L
