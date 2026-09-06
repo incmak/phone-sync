@@ -482,6 +482,48 @@ class TransportCoordinatorTest {
     }
 
     @Test
+    fun aRelayBackoffNeverOutlastsADueDirectAttempt() = runTest {
+        // Seen on hardware: the relay was in a 40s backoff while the Bluetooth rendezvous boundary
+        // passed, so the phone woke 10s late and only met its peer by luck. A relay that cannot be
+        // reached must not hold the loop past the moment a direct route is due.
+        val bluetooth = FakeRoute(
+            RouteKind.BLUETOOTH,
+            failOpen = true,
+            clock = { testScheduler.currentTime },
+        )
+        val relay = FakeRoute(RouteKind.RELAY, failOpen = true, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(FakeStore(rows = emptyList()), clock = { testScheduler.currentTime }),
+            lan = null,
+            relay = relay,
+            bluetooth = bluetooth,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+            peerReachable = { false },
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        // Drive far enough that the relay's curve (5s, 10s, 20s, 40s, 60s) would otherwise dwarf
+        // the one-minute rendezvous period.
+        repeat(12) {
+            advanceTimeBy(30_000)
+            runCurrent()
+        }
+
+        val period = TransportCoordinator.BLUETOOTH_RENDEZVOUS_PERIOD_MS
+        // Arriving is not enough; arriving on time is the whole point. A peer only holds its
+        // window open for the connector's ceiling, so a late attempt meets nobody.
+        val late = bluetooth.openedAt.drop(1).map { it % period }.filter { it > 5_000 }
+        assertTrue(
+            late.isEmpty(),
+            "Bluetooth attempts drifted past their boundary by ${late}ms, so the peer had gone",
+        )
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun anUnreachablePeerPutsBluetoothOnTheSharedGridInsteadOfDriftingApart() = runTest {
         // Without this, each phone backs off 15s, 30s, 60s, 120s, 300s independently, so two 27s
         // attempt windows meet only by luck and an offline peer can go unreached indefinitely.
@@ -614,7 +656,10 @@ class TransportCoordinatorTest {
         val relay = FakeRoute(RouteKind.RELAY, selfDraining = true, failOpen = true)
         val coordinator = TransportCoordinator(
             outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
-            lan = FakeRoute(RouteKind.LAN, failOpen = true, openDelayMillis = 15_000),
+            // Fails instantly so it earns a real cooldown. A direct route that has never been
+            // tried is due, and the relay backoff is deliberately bounded by that, which would
+            // mask the curve this test is about.
+            lan = FakeRoute(RouteKind.LAN, failOpen = true),
             relay = relay,
             clock = { testScheduler.currentTime },
             relayProbeScheduler = FakeRelayProbeScheduler(),
@@ -1428,8 +1473,11 @@ class TransportCoordinatorTest {
         private val log: MutableList<String>? = null,
         /** Models a rendezvous ceiling: a real LAN open can take its whole budget to fail. */
         private val openDelayMillis: Long = 0,
+        /** When set, every open records the instant it started, so lateness is measurable. */
+        private val clock: (() -> Long)? = null,
     ) : TransportRoute {
         var opens = 0
+        val openedAt = mutableListOf<Long>()
         /** Flipped by fixtures to model a route becoming reachable later. */
         var available = true
         private var failuresRemaining = openFailuresRemaining
@@ -1437,6 +1485,7 @@ class TransportCoordinatorTest {
 
         override suspend fun open(): AuthenticatedRouteSession {
             opens += 1
+            clock?.let { openedAt += it() }
             if (openDelayMillis > 0) kotlinx.coroutines.delay(openDelayMillis)
             if (failOpen || !available || failuresRemaining-- > 0 || sessions.size >= successfulOpens) {
                 throw IllegalStateException("route_unavailable")

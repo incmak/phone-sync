@@ -262,7 +262,7 @@ class TransportCoordinator(
                     continue
                 }
                 relayFailures += 1
-                backOff(relayFailures)
+                backOffWithoutStarvingDirect(relayFailures, retries)
                 continue
             }
             regraspsRemaining = 0
@@ -286,7 +286,7 @@ class TransportCoordinator(
                     )
                     relayFailures += 1
                     publish(RouteKind.NONE, RoutePhase.RECONNECTING)
-                    backOff(relayFailures)
+                    backOffWithoutStarvingDirect(relayFailures, retries)
                 }
             }
         }
@@ -666,6 +666,28 @@ class TransportCoordinator(
             }
             publish(session.kind, RoutePhase.AUTHENTICATED)
         }
+    }
+
+    /**
+     * A relay backoff that never sleeps past a direct route's due time.
+     *
+     * The relay's curve grows to a minute, and the Bluetooth rendezvous only lasts as long as the
+     * connector's ceiling. Seen on hardware: the loop sat in a 40s relay backoff while the
+     * rendezvous boundary passed, woke 10s late, and met its peer only because that peer's window
+     * happened to still be open. An unreachable relay must not decide when a direct route tries.
+     */
+    private suspend fun backOffWithoutStarvingDirect(
+        attempt: Int,
+        retries: Map<TransportRoute, DirectRetryState>,
+    ) {
+        val curve = retryPolicy.delay(attempt - 1)
+        val untilDirect = retries.values.minOfOrNull { it.nextAttemptAt }
+            ?.let { (it - clock()).coerceAtLeast(0L) }
+            ?: Long.MAX_VALUE
+        val wait = minOf(curve, untilDirect).coerceAtLeast(idlePollMs)
+        lastBackoffMs = wait
+        trace("backoff:${wait}ms:attempt$attempt")
+        waitForRetry(wait)
     }
 
     private suspend fun backOff(attempt: Int) {
