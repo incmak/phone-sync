@@ -413,6 +413,7 @@ internal class LiveServiceTransportLoop(
             relayProbeScheduler = relayProbeScheduler,
             onEstablishedFailure = onEstablishedFailure,
             startWithRelay = startWithRelay,
+            trace = trace,
         )
         coroutineScope {
             var authenticatedRoute = RouteKind.NONE
@@ -1456,6 +1457,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
         if (defaultNetworkObserver != null) return
         defaultNetworkObserver = observeDefaultNetworkChanges(applicationContext) {
             relayFirstOnNextGeneration = true
+            android.util.Log.w("Twinotify", "network_changed")
             routePreferenceRestarter.forceRestart()
         }
     }
@@ -1650,6 +1652,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
                         snapshot.totalActiveBytes,
                     )
                 },
+                trace = { android.util.Log.w("Twinotify", it) },
             ).run(preferLan, startWithRelay = relayFirstOnNextGeneration.also {
                 relayFirstOnNextGeneration = false
             })

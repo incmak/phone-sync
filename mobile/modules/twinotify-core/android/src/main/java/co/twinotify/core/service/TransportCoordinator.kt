@@ -125,6 +125,8 @@ class TransportCoordinator(
      * moment it authenticates; it simply stops blocking delivery while it tries.
      */
     private val startWithRelay: Boolean = false,
+    /** Bounded route timeline. Carries route kinds and waits only, never an endpoint or content. */
+    private val trace: (String) -> Unit = {},
 ) {
     /** Direct routes in preference order. LAN outranks Bluetooth. */
     private val directRoutes: List<TransportRoute> = listOfNotNull(lan, bluetooth).also { routes ->
@@ -151,6 +153,7 @@ class TransportCoordinator(
         private set
 
     suspend fun run() {
+        trace("coordinator_start:relayFirst=$startWithRelay:direct=${directRoutes.map { it.kind }}")
         val relayRoute = relay
         if (preferDirect && directRoutes.isNotEmpty() && (relayRoute != null || directRoutes.any { it.kind == RouteKind.BLUETOOTH })) {
             runDirectPreferred(relayRoute)
@@ -211,6 +214,11 @@ class TransportCoordinator(
     private suspend fun runDirectPreferred(relayRoute: TransportRoute?) {
         val retries = directRoutes.associateWith { DirectRetryState(it.kind) }
         var openRelayFirst = startWithRelay && relayRoute != null
+        // Forgiven relay failures. The network has just changed, so failures here describe the
+        // switch settling rather than the relay, and the exponential curve is the wrong answer.
+        // Measured on hardware: DNS can still be unresolvable milliseconds after the switch, so
+        // the failures arrive instantly and the curve turns a settling network into a 47s stall.
+        var regraspsRemaining = if (startWithRelay) NETWORK_CHANGE_REGRASPS else 0
         var relayFailures = 0
         while (currentCoroutineContext().isActive) {
             if (!openRelayFirst) {
@@ -237,11 +245,22 @@ class TransportCoordinator(
             publish(RouteKind.NONE, RoutePhase.CONNECTING)
             val relaySession = openRoute(relayRoute)
             if (relaySession == null) {
-                relayFailures += 1
                 publish(RouteKind.NONE, RoutePhase.RECONNECTING)
+                if (regraspsRemaining > 0) {
+                    regraspsRemaining -= 1
+                    lastBackoffMs = NETWORK_CHANGE_RETRY_MS
+                    trace("relay_regrasp:${NETWORK_CHANGE_RETRY_MS}ms")
+                    waitForRetry(NETWORK_CHANGE_RETRY_MS)
+                    // Go straight back to the relay. Falling through the direct path here would
+                    // spend a rendezvous ceiling before the retry this grace exists to make fast.
+                    openRelayFirst = true
+                    continue
+                }
+                relayFailures += 1
                 backOff(relayFailures)
                 continue
             }
+            regraspsRemaining = 0
             relayFailures = 0
             publish(RouteKind.RELAY, RoutePhase.AUTHENTICATED)
 
@@ -362,12 +381,27 @@ class TransportCoordinator(
         cancellation?.let { throw it }
     }
 
-    private suspend fun openRoute(route: TransportRoute): AuthenticatedRouteSession? = try {
-        route.open()
-    } catch (error: CancellationException) {
-        throw error
-    } catch (_: Throwable) {
-        null
+    private suspend fun openRoute(route: TransportRoute): AuthenticatedRouteSession? {
+        val startedAt = clock()
+        return try {
+            route.open().also { trace("open_ok:${route.kind}:${clock() - startedAt}ms") }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            // Class name and a bounded code only; a relay failure message can carry the endpoint.
+            trace("open_failed:${route.kind}:${clock() - startedAt}ms:${error.javaClass.simpleName}:${boundedCause(error)}")
+            null
+        }
+    }
+
+    /**
+     * Only a message that is already one of our own bounded codes is carried through. Platform
+     * messages are dropped rather than truncated, because a connect failure spells out the
+     * endpoint it failed to reach and that does not belong in a log.
+     */
+    private fun boundedCause(error: Throwable): String {
+        val message = error.message ?: return "none"
+        return if (message.matches(Regex("^[a-z][a-z0-9_]{0,47}$"))) message else "unspecified"
     }
 
     private suspend fun carryOwned(session: AuthenticatedRouteSession) {
@@ -614,6 +648,7 @@ class TransportCoordinator(
     private suspend fun backOff(attempt: Int) {
         val wait = retryPolicy.delay(attempt - 1)
         lastBackoffMs = wait
+        trace("backoff:${wait}ms:attempt$attempt")
         waitForRetry(wait)
     }
 
@@ -641,6 +676,18 @@ class TransportCoordinator(
     }
 
     companion object {
+        /**
+         * How long to wait before the one forgiven relay retry after a network change. Short
+         * because the interface has just come up: the previous failure described the old network.
+         */
+        const val NETWORK_CHANGE_RETRY_MS = 1_000L
+
+        /**
+         * How many relay failures a network change forgives before the ordinary curve resumes.
+         * Bounded so a relay that is genuinely down still backs off, and spent over about five
+         * seconds, which is what a switching interface needs to produce working DNS and a route.
+         */
+        const val NETWORK_CHANGE_REGRASPS = 5
         private const val COORDINATOR_STOPPED = "coordinator_stopped"
         private const val ESTABLISHED_ROUTE_FAILURE = "established_route_failure"
         private const val ROUTE_PROMOTED_TO_LAN = "route_promoted_to_lan"

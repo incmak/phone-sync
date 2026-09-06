@@ -63,11 +63,65 @@ fun interface RelaySocketConnector {
     ): RelaySocket
 }
 
+/**
+ * Times each phase of a relay connect. A relay that is slow to reach after a network change is
+ * indistinguishable from one that is down unless you can see which phase is spending the time.
+ * Durations and address counts only: never a host, a header or a token.
+ */
+private class RelayConnectTrace : okhttp3.EventListener() {
+    private var callStartedAt = 0L
+    private var phaseStartedAt = 0L
+    private fun now() = System.currentTimeMillis()
+    private fun since(mark: Long) = now() - mark
+    private fun log(message: String) = android.util.Log.w("Twinotify", "relay_connect:$message")
+
+    override fun callStart(call: okhttp3.Call) {
+        callStartedAt = now()
+        phaseStartedAt = callStartedAt
+    }
+    override fun dnsStart(call: okhttp3.Call, domainName: String) { phaseStartedAt = now() }
+    override fun dnsEnd(call: okhttp3.Call, domainName: String, inetAddressList: List<java.net.InetAddress>) {
+        log("dns:${since(phaseStartedAt)}ms:${inetAddressList.size}addr")
+    }
+    override fun connectStart(
+        call: okhttp3.Call,
+        inetSocketAddress: java.net.InetSocketAddress,
+        proxy: java.net.Proxy,
+    ) { phaseStartedAt = now() }
+    override fun connectEnd(
+        call: okhttp3.Call,
+        inetSocketAddress: java.net.InetSocketAddress,
+        proxy: java.net.Proxy,
+        protocol: okhttp3.Protocol?,
+    ) { log("tcp_ok:${since(phaseStartedAt)}ms") }
+    override fun connectFailed(
+        call: okhttp3.Call,
+        inetSocketAddress: java.net.InetSocketAddress,
+        proxy: java.net.Proxy,
+        protocol: okhttp3.Protocol?,
+        ioe: java.io.IOException,
+    ) { log("tcp_failed:${since(phaseStartedAt)}ms:${ioe.javaClass.simpleName}") }
+    override fun secureConnectStart(call: okhttp3.Call) { phaseStartedAt = now() }
+    override fun secureConnectEnd(call: okhttp3.Call, handshake: okhttp3.Handshake?) {
+        log("tls:${since(phaseStartedAt)}ms")
+    }
+    override fun callEnd(call: okhttp3.Call) { log("total_ok:${since(callStartedAt)}ms") }
+    override fun callFailed(call: okhttp3.Call, ioe: java.io.IOException) {
+        log("total_failed:${since(callStartedAt)}ms:${ioe.javaClass.simpleName}")
+    }
+}
+
 private class OkHttpRelaySocketConnector(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .pingInterval(30, TimeUnit.SECONDS)
+        // Measured, after 5s was tried and had to be reverted: a connect right after a network
+        // switch routinely needs more than five seconds, because the first SYN is lost while the
+        // radio comes up and the retransmit schedule is 1s, 3s, 7s. Ten seconds spans that;
+        // five failed every single attempt on a real cellular link. The coordinator's one-shot
+        // post-network-change retry is what shortens the stall, not a tighter timeout.
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .eventListener(RelayConnectTrace())
         .build(),
 ) : RelaySocketConnector {
     override fun connect(

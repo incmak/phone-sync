@@ -502,6 +502,60 @@ class TransportCoordinatorTest {
     }
 
     @Test
+    fun theFirstRelayFailureAfterANetworkChangeRetriesQuicklyInsteadOfBackingOff() = runTest {
+        // A relay open that fails on a just-switched network says nothing about the relay, so the
+        // standard 5s-and-doubling curve is the wrong response to it. Measured on hardware: the
+        // first attempt after a switch often burns the connect timeout and then succeeds.
+        val store = FakeStore(rows = listOf(row("a")))
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true, openDelayMillis = 15_000)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true, openFailuresRemaining = 1)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+            startWithRelay = true,
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        assertEquals(RouteKind.NONE, coordinator.health.value.active)
+
+        advanceTimeBy(TransportCoordinator.NETWORK_CHANGE_RETRY_MS + 100)
+        runCurrent()
+
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun theGraceIsBoundedSoARelayThatIsGenuinelyDownStillBacksOff() = runTest {
+        val store = FakeStore(rows = listOf(row("a")))
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true, failOpen = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = FakeRoute(RouteKind.LAN, failOpen = true, openDelayMillis = 15_000),
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+            startWithRelay = true,
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        repeat(TransportCoordinator.NETWORK_CHANGE_REGRASPS + 1) {
+            advanceTimeBy(TransportCoordinator.NETWORK_CHANGE_RETRY_MS + 100)
+            runCurrent()
+        }
+
+        // Once the forgiven failures are spent the exponential curve takes over, so a relay that
+        // is genuinely down is not hammered every second forever.
+        assertTrue(coordinator.lastBackoffMs >= 5_000, "expected the normal curve, got ${coordinator.lastBackoffMs}")
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun startingOnRelayStillPromotesToDirectAsSoonAsItAuthenticates() = runTest {
         // Starting on relay must not cost the direct preference: LAN still wins, it just stops
         // blocking delivery while it tries.
