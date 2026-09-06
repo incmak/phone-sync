@@ -398,7 +398,7 @@ internal class LiveServiceTransportLoop(
     private val healthState = MutableStateFlow(RouteHealth())
     val health: StateFlow<RouteHealth> = healthState.asStateFlow()
 
-    suspend fun run(preferLan: Boolean) {
+    suspend fun run(preferLan: Boolean, startWithRelay: Boolean = false) {
         val routes = loadRoutes()
         val coordinator = TransportCoordinator(
             outbox = outbox,
@@ -412,6 +412,7 @@ internal class LiveServiceTransportLoop(
             directAttemptRequests = directAttemptRequests,
             relayProbeScheduler = relayProbeScheduler,
             onEstablishedFailure = onEstablishedFailure,
+            startWithRelay = startWithRelay,
         )
         coroutineScope {
             var authenticatedRoute = RouteKind.NONE
@@ -1442,9 +1443,19 @@ class SyncService : Service(), CallMirrorForegroundHost {
         shutdownCompleted.complete(Unit)
     }
 
+    /**
+     * Set when the restart was caused by the default network changing under us. The peer has
+     * usually just left the LAN, so the next generation carries delivery on the relay while the
+     * direct route spends its rendezvous budget, rather than queueing behind a doomed attempt.
+     * Read once and cleared, so an ordinary start still prefers direct.
+     */
+    @Volatile
+    private var relayFirstOnNextGeneration = false
+
     private fun ensureDefaultNetworkObserver() {
         if (defaultNetworkObserver != null) return
         defaultNetworkObserver = observeDefaultNetworkChanges(applicationContext) {
+            relayFirstOnNextGeneration = true
             routePreferenceRestarter.forceRestart()
         }
     }
@@ -1639,7 +1650,9 @@ class SyncService : Service(), CallMirrorForegroundHost {
                         snapshot.totalActiveBytes,
                     )
                 },
-            ).run(preferLan)
+            ).run(preferLan, startWithRelay = relayFirstOnNextGeneration.also {
+                relayFirstOnNextGeneration = false
+            })
         }
     }
 

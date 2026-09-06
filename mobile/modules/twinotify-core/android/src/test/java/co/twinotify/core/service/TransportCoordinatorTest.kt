@@ -450,6 +450,109 @@ class TransportCoordinatorTest {
     }
 
     @Test
+    fun aRestartWithoutTheHintLeavesDeliveryWaitingForTheWholeDirectCeiling() = runTest {
+        // The bug, in virtual time. Observed on hardware: taking one phone from Wi-Fi to mobile
+        // data left it about 30s on "Queued" before the relay took over, because a network change
+        // restarts the generation and the fresh coordinator spends the LAN route's whole 15s
+        // rendezvous ceiling on a peer that has just left the LAN.
+        val store = FakeStore(rows = listOf(row("a")))
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true, openDelayMillis = 15_000)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        assertEquals(RouteKind.NONE, coordinator.health.value.active, "delivery blocked on the doomed direct attempt")
+
+        advanceTimeBy(15_001)
+        runCurrent()
+
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun aNetworkChangeStartsOnRelayInsteadOfBurningTheDirectBudgetFirst() = runTest {
+        val store = FakeStore(rows = listOf(row("a")))
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true, openDelayMillis = 15_000)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+            startWithRelay = true,
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        // Same doomed LAN route, but delivery is carried from the first moment instead of after
+        // the ceiling, which is the whole difference the user feels.
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun startingOnRelayStillPromotesToDirectAsSoonAsItAuthenticates() = runTest {
+        // Starting on relay must not cost the direct preference: LAN still wins, it just stops
+        // blocking delivery while it tries.
+        val store = FakeStore(rows = listOf(row("a")))
+        val lan = FakeRoute(RouteKind.LAN, openFailuresRemaining = 1)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+            startWithRelay = true,
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+        assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+
+        advanceTimeBy(15_001)
+        runCurrent()
+
+        assertEquals(RouteKind.LAN, coordinator.health.value.active)
+        assertEquals(listOf("route_promoted_to_lan"), relay.session().closeCodes)
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun anOrdinaryStartStillTriesDirectBeforeTheRelay() = runTest {
+        // The default is unchanged, so a cold start on the peer's own Wi-Fi never touches the
+        // relay just to promote away from it a second later.
+        val store = FakeStore(rows = listOf(row("a")))
+        val lan = FakeRoute(RouteKind.LAN)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(store, clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        assertEquals(RouteKind.LAN, coordinator.health.value.active)
+        assertEquals(0, relay.opens)
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun relayPromotesToAuthenticatedLanCandidate() = runTest {
         val store = FakeStore(rows = listOf(row("a")))
         val lan = FakeRoute(RouteKind.LAN, openFailuresRemaining = 1)
@@ -1190,6 +1293,8 @@ class TransportCoordinatorTest {
         private val sessionFactory: (() -> FakeSession)? = null,
         openFailuresRemaining: Int = 0,
         private val log: MutableList<String>? = null,
+        /** Models a rendezvous ceiling: a real LAN open can take its whole budget to fail. */
+        private val openDelayMillis: Long = 0,
     ) : TransportRoute {
         var opens = 0
         /** Flipped by fixtures to model a route becoming reachable later. */
@@ -1199,6 +1304,7 @@ class TransportCoordinatorTest {
 
         override suspend fun open(): AuthenticatedRouteSession {
             opens += 1
+            if (openDelayMillis > 0) kotlinx.coroutines.delay(openDelayMillis)
             if (failOpen || !available || failuresRemaining-- > 0 || sessions.size >= successfulOpens) {
                 throw IllegalStateException("route_unavailable")
             }

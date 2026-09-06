@@ -114,6 +114,17 @@ class TransportCoordinator(
     private val relayProbeIntervalMs: Long = 60_000L,
     private val directAttemptFloorMs: Long = 15_000L,
     private val onEstablishedFailure: (Throwable) -> Unit = {},
+    /**
+     * Carries delivery on the relay before spending a direct route's rendezvous budget.
+     *
+     * A direct open is allowed to take its whole ceiling, because a LAN rendezvous needs both
+     * phones inside the same window. That is the right budget when nothing else can deliver, and
+     * the wrong one right after the network changed under us: the peer has usually just left the
+     * LAN, so the attempt is doomed and delivery queues for its full duration. Starting on the
+     * relay costs the direct route nothing, because it is still probed and still promoted the
+     * moment it authenticates; it simply stops blocking delivery while it tries.
+     */
+    private val startWithRelay: Boolean = false,
 ) {
     /** Direct routes in preference order. LAN outranks Bluetooth. */
     private val directRoutes: List<TransportRoute> = listOfNotNull(lan, bluetooth).also { routes ->
@@ -199,7 +210,7 @@ class TransportCoordinator(
      */
     private suspend fun runDirectPreferred(relayRoute: TransportRoute?) {
         val retries = directRoutes.associateWith { DirectRetryState(it.kind) }
-        var openRelayFirst = false
+        var openRelayFirst = startWithRelay && relayRoute != null
         var relayFailures = 0
         while (currentCoroutineContext().isActive) {
             if (!openRelayFirst) {
