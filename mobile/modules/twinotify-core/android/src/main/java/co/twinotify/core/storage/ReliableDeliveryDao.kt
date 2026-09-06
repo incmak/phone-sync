@@ -2209,7 +2209,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             "state.snapshot.item",
             "state.snapshot.end",
         )
-        val RECEIPT_BACKED_CONTROL_TYPES = setOf("lan.bootstrap", "peer.probe")
+        val RECEIPT_BACKED_CONTROL_TYPES = setOf("lan.bootstrap", "peer.probe", "relay.attach")
         val ACTION_RESULT_STATUSES = setOf(
             "dispatched",
             "outcome_unknown",

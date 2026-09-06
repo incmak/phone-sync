@@ -636,6 +636,11 @@ class InboundDispatcher internal constructor(
     private val receiptBackedControlJournal: ReceiptBackedControlJournal? = null,
     private val appliedReceiptFactory: AppliedControlReceiptFactory? = null,
     private val lanBootstrapProcessor: LanBootstrapProcessor? = null,
+    /**
+     * Runs the relay handshake a peer's `relay.attach` offered. Null leaves the offer validated
+     * and receipted but unapplied, which is the right behaviour for a build with no responder.
+     */
+    private val relayAttachProcessor: co.twinotify.core.pairing.RelayAttachProcessor? = null,
     private val peerControlOutbox: PeerControlOutbox? = null,
     private val transportGeneration: () -> Int = { SyncServiceStatus.routeStatus.value.routeGeneration },
     private val requestDirectAttempt: () -> Unit = {},
@@ -649,6 +654,7 @@ class InboundDispatcher internal constructor(
         onAuthenticatedEvent: (String) -> Unit = {},
         materializationRequester: MaterializationRequester,
         peerControlOutbox: PeerControlOutbox? = null,
+        relayAttachProcessor: co.twinotify.core.pairing.RelayAttachProcessor? = null,
         transportGeneration: () -> Int = { SyncServiceStatus.routeStatus.value.routeGeneration },
         requestDirectAttempt: () -> Unit = {},
         requestRouteReload: () -> Unit = {},
@@ -659,6 +665,7 @@ class InboundDispatcher internal constructor(
         authenticatedV2Opener = null,
         directControlJournal = null,
         materializationRequester = materializationRequester,
+        relayAttachProcessor = relayAttachProcessor,
         peerControlOutbox = peerControlOutbox,
         transportGeneration = transportGeneration,
         requestDirectAttempt = requestDirectAttempt,
@@ -870,6 +877,7 @@ class InboundDispatcher internal constructor(
         if (inner.type in RECEIPT_BACKED_CONTROL_TYPES) {
             var bindingChanged = false
             var requestDirect = false
+            var relayAttachOffer: co.twinotify.core.pairing.RelayAttachOffer? = null
             val result = dispatchAuthenticatedReceiptBackedControl(
                 inner = inner,
                 envelopeSha256 = opened.envelopeSha256,
@@ -900,12 +908,29 @@ class InboundDispatcher internal constructor(
                         requestDirect = inner.payloadObject().getBoolean("request_direct")
                         ReceiptBackedControlResult.Applied
                     }
+                    "relay.attach" -> {
+                        // Only parse and hold the offer here. This lambda runs inside the Room
+                        // write transaction, and the handshake it implies blocks until the peer
+                        // signs; running it here would hold the transaction open for that whole
+                        // time and stall every other delivery. It is applied after the commit.
+                        //
+                        // The URL needs no check here: decodeInner already refused any relay_url
+                        // that is not https or wss before this event was authenticated.
+                        val payload = inner.payloadObject()
+                        val offer = co.twinotify.core.pairing.RelayAttachOffer(
+                            relayUrl = payload.getString("relay_url"),
+                            pairToken = payload.getString("pair_token"),
+                        )
+                        relayAttachOffer = offer
+                        ReceiptBackedControlResult.Applied
+                    }
                     else -> error("receipt-backed control allowlist drift")
                 }
             }
             if (result is InboundDispatchResult.Accepted) {
                 if (bindingChanged) requestRouteReload()
                 if (requestDirect) requestDirectAttempt()
+                relayAttachOffer?.let { offer -> relayAttachProcessor?.process(offer) }
             } else if (result is InboundDispatchResult.Rejected && result.code == "lan_binding_conflict") {
                 SyncServiceStatus.setDeliveryConditions(
                     DeliveryConditions(bindingConflict = true),
@@ -1430,4 +1455,4 @@ private val DIRECT_ACK_CONTROL_TYPES = setOf(
     "state.snapshot.end",
 )
 
-private val RECEIPT_BACKED_CONTROL_TYPES = setOf("lan.bootstrap", "peer.probe")
+private val RECEIPT_BACKED_CONTROL_TYPES = setOf("lan.bootstrap", "peer.probe", "relay.attach")

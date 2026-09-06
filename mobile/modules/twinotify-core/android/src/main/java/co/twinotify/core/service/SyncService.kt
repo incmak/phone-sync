@@ -1172,6 +1172,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
                 requestPendingMaterialization(MaterializationTrigger.ROUTINE)
             },
             peerControlOutbox = peerControls,
+            relayAttachProcessor = buildRelayAttachProcessor(),
             requestDirectAttempt = { directAttemptRequests.tryEmit(Unit) },
             requestRouteReload = routePreferenceRestarter::forceRestart,
         )
@@ -1641,6 +1642,41 @@ class SyncService : Service(), CallMirrorForegroundHost {
             ).run(preferLan)
         }
     }
+
+    /**
+     * The responder half of a relay attach. It joins the relay the trusted peer offered, using the
+     * initiator identity this phone already stores rather than anything the relay supplies, and
+     * persists nothing until the relay has accepted the completed pair.
+     */
+    private fun buildRelayAttachProcessor(): co.twinotify.core.pairing.RelayAttachProcessor =
+        co.twinotify.core.pairing.DefaultRelayAttachProcessor(
+            loadIdentity = {
+                val (box, sign) = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(applicationContext)
+                co.twinotify.core.pairing.RelayAttachIdentity(
+                    deviceId = DeviceIdentity.getOrCreate(applicationContext),
+                    encPubkey = box.publicKey,
+                    signPubkey = sign.publicKey,
+                    signSecretKey = sign.secretKey,
+                    displayName = null,
+                )
+            },
+            loadPeer = { PeerStore.load(applicationContext) },
+            client = co.twinotify.core.pairing.LiveRelayAttachResponderClient(
+                debug = co.twinotify.core.BuildConfig.DEBUG,
+            ),
+            verifyConfirmation = { transcript, signature, initiatorSignPubkey ->
+                // Also length-checks the signature and key before touching libsodium.
+                co.twinotify.core.pairing.lan.LanPairingCrypto.verifyTranscript(
+                    transcript,
+                    signature,
+                    initiatorSignPubkey,
+                )
+            },
+            commit = { url ->
+                ServiceConfigStore.setRelayUrl(applicationContext, url)
+                notifyRelayConfigChanged()
+            },
+        )
 
     private suspend fun restartTransportFromPersistedConfig(preferLan: Boolean) {
         if (shuttingDown) return

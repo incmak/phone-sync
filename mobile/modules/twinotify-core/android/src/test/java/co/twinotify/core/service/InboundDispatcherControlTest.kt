@@ -33,6 +33,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertIs
+import kotlin.test.assertIsNot
 import kotlin.test.assertTrue
 
 class InboundDispatcherControlTest {
@@ -1042,6 +1043,100 @@ class InboundDispatcherControlTest {
         createdAt = 1_000,
         expiresAt = 601_000,
         payloadJson = """{"protocol_version":1,"tls_spki_sha256":"${"1".repeat(64)}","binding_context_sha256":"${"2".repeat(64)}"}""",
+    )
+
+    @Test
+    fun relayAttachCommitsItsReceiptThenRunsTheHandshakeOutsideTheJournal() = runTest {
+        val attach = relayAttachEvent()
+        val plaintextByMsgId = mapOf(attach.msgId to ProtocolJson.encodeInner(attach).encodeToByteArray())
+        val authenticator = EnvelopeAuthenticator(PayloadDecryptor { envelope ->
+            requireNotNull(plaintextByMsgId[envelope.msgId])
+        }, "peer-device", clock = { 2_000 })
+        val context = object : ContextWrapper(null) {
+            override fun getApplicationContext(): Context = this
+        }
+        val order = mutableListOf<String>()
+        val offers = mutableListOf<co.twinotify.core.pairing.RelayAttachOffer>()
+        var nextReceipt = 90
+        val dispatcher = InboundDispatcher(
+            ctx = context,
+            snapshotCoordinator = SnapshotCoordinator(NoAccessSnapshotStore),
+            onAuthenticatedEvent = {},
+            authenticatedV2Opener = authenticator::open,
+            directControlJournal = null,
+            materializationRequester = MaterializationRequester { },
+            receiptBackedControlJournal = ReceiptBackedControlJournal { inbound, receipt, process ->
+                assertSame(ReceiptBackedControlResult.Applied, process())
+                order += "journal:${inbound.eventType}"
+                DirectControlCommitResult.Committed
+            },
+            appliedReceiptFactory = AppliedControlReceiptFactory { ackedMsgId, digest ->
+                outboundPeerReceipt((nextReceipt++).canonicalUuid()).copy(
+                    envelopeSha256 = digest,
+                    envelopeJson = ackedMsgId,
+                )
+            },
+            relayAttachProcessor = co.twinotify.core.pairing.RelayAttachProcessor { offer ->
+                order += "handshake"
+                offers += offer
+                co.twinotify.core.pairing.RelayAttachApplyResult.Applied
+            },
+            transportGeneration = { 9 },
+        )
+
+        assertIs<InboundDispatchResult.Accepted>(dispatcher.dispatch(envelopeFor(attach)))
+
+        // The relay handshake blocks for as long as the peer takes to sign. Running it inside the
+        // journal would hold the Room write transaction open for that whole time, so the receipt
+        // must commit first and the handshake must follow it.
+        assertEquals(listOf("journal:relay.attach", "handshake"), order)
+        assertEquals("https://relay.example.test", offers.single().relayUrl)
+        assertEquals("0123456789abcdef0123", offers.single().pairToken)
+    }
+
+    @Test
+    fun aCleartextRelayAttachIsRefusedAtAuthenticationAndNeverReachesTheHandshake() = runTest {
+        // A hostile peer would not build its plaintext through ProtocolJson, so this test forges
+        // the decrypted bytes directly. decodeInner is the boundary that has to refuse it: the
+        // dispatcher deliberately carries no second URL check that could drift from the contract.
+        val shell = relayAttachEvent()
+        val forged = """{"v":2,"msg_id":"${shell.msgId}","origin_device":"peer-device","type":"relay.attach","created_at":1000,"expires_at":301000,"payload":{"relay_url":"http://relay.example.test","pair_token":"0123456789abcdef0123"}}"""
+        val authenticator = EnvelopeAuthenticator(PayloadDecryptor { forged.encodeToByteArray() }, "peer-device", clock = { 2_000 })
+        val context = object : ContextWrapper(null) {
+            override fun getApplicationContext(): Context = this
+        }
+        var handshakes = 0
+        val dispatcher = InboundDispatcher(
+            ctx = context,
+            snapshotCoordinator = SnapshotCoordinator(NoAccessSnapshotStore),
+            onAuthenticatedEvent = {},
+            authenticatedV2Opener = authenticator::open,
+            directControlJournal = null,
+            materializationRequester = MaterializationRequester { },
+            relayAttachProcessor = co.twinotify.core.pairing.RelayAttachProcessor {
+                handshakes += 1
+                co.twinotify.core.pairing.RelayAttachApplyResult.Applied
+            },
+            transportGeneration = { 9 },
+        )
+
+        val outcome = runCatching { dispatcher.dispatch(envelopeFor(shell)) }
+
+        assertEquals(0, handshakes)
+        outcome.getOrNull()?.let { assertIsNot<InboundDispatchResult.Accepted>(it) }
+    }
+
+    private fun relayAttachEvent(
+        payload: String = """{"relay_url":"https://relay.example.test","pair_token":"0123456789abcdef0123"}""",
+    ) = InnerEventV2(
+        msgId = 80.canonicalUuid(),
+        originDevice = "peer-device",
+        type = "relay.attach",
+        canonId = null,
+        sequence = null,
+        createdAt = 1_000,
+        expiresAt = 301_000,
+        payloadJson = payload,
     )
 
     private fun peerProbeEvent() = InnerEventV2(

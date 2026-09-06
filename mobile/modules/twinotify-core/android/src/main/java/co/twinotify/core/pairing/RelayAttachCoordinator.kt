@@ -26,6 +26,17 @@ data class RelayAttachPeerHello(
     override fun hashCode(): Int = System.identityHashCode(this)
 }
 
+/** One rejection vocabulary for both halves of an attach, so the UI maps a single list. */
+object RelayAttachCodes {
+    const val RELAY_URL_INVALID = "relay_url_invalid"
+    const val NOT_PAIRED = "not_paired"
+    const val NO_DIRECT_ROUTE = "no_direct_route"
+    const val RELAY_UNREACHABLE = "relay_unreachable"
+    const val PEER_TIMEOUT = "peer_timeout"
+    const val PEER_IDENTITY_MISMATCH = "peer_identity_mismatch"
+    const val STORE_FAILED = "store_failed"
+}
+
 sealed interface RelayAttachResult {
     data object Attached : RelayAttachResult
 
@@ -90,7 +101,7 @@ class RelayAttachCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            return RelayAttachResult.Rejected(RELAY_URL_INVALID)
+            return RelayAttachResult.Rejected(RelayAttachCodes.RELAY_URL_INVALID)
         }
 
         val peer = try {
@@ -98,15 +109,15 @@ class RelayAttachCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            return RelayAttachResult.Rejected(STORE_FAILED)
-        } ?: return RelayAttachResult.Rejected(NOT_PAIRED)
+            return RelayAttachResult.Rejected(RelayAttachCodes.STORE_FAILED)
+        } ?: return RelayAttachResult.Rejected(RelayAttachCodes.NOT_PAIRED)
 
         val identity = try {
             loadIdentity()
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            return RelayAttachResult.Rejected(STORE_FAILED)
+            return RelayAttachResult.Rejected(RelayAttachCodes.STORE_FAILED)
         }
 
         val pairToken = newToken()
@@ -116,7 +127,7 @@ class RelayAttachCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            return RelayAttachResult.Rejected(RELAY_UNREACHABLE)
+            return RelayAttachResult.Rejected(RelayAttachCodes.RELAY_UNREACHABLE)
         }
 
         // The peer cannot answer a handshake it has not been told about, so the announcement has
@@ -126,7 +137,7 @@ class RelayAttachCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            return RelayAttachResult.Rejected(NO_DIRECT_ROUTE)
+            return RelayAttachResult.Rejected(RelayAttachCodes.NO_DIRECT_ROUTE)
         }
 
         val hello = try {
@@ -134,10 +145,10 @@ class RelayAttachCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            return RelayAttachResult.Rejected(PEER_TIMEOUT)
+            return RelayAttachResult.Rejected(RelayAttachCodes.PEER_TIMEOUT)
         }
 
-        if (!isAlreadyTrusted(hello, peer)) return RelayAttachResult.Rejected(PEER_IDENTITY_MISMATCH)
+        if (!isAlreadyTrusted(hello, peer)) return RelayAttachResult.Rejected(RelayAttachCodes.PEER_IDENTITY_MISMATCH)
 
         val signature = signConfirmation(
             pairToken,
@@ -153,7 +164,7 @@ class RelayAttachCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            return RelayAttachResult.Rejected(RELAY_UNREACHABLE)
+            return RelayAttachResult.Rejected(RelayAttachCodes.RELAY_UNREACHABLE)
         }
 
         return try {
@@ -162,7 +173,7 @@ class RelayAttachCoordinator(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
-            RelayAttachResult.Rejected(STORE_FAILED)
+            RelayAttachResult.Rejected(RelayAttachCodes.STORE_FAILED)
         }
     }
 
@@ -175,13 +186,4 @@ class RelayAttachCoordinator(
             hello.encPubkey.contentEquals(peer.encPubkey) &&
             hello.signPubkey.contentEquals(peer.signPubkey)
 
-    companion object {
-        const val RELAY_URL_INVALID = "relay_url_invalid"
-        const val NOT_PAIRED = "not_paired"
-        const val NO_DIRECT_ROUTE = "no_direct_route"
-        const val RELAY_UNREACHABLE = "relay_unreachable"
-        const val PEER_TIMEOUT = "peer_timeout"
-        const val PEER_IDENTITY_MISMATCH = "peer_identity_mismatch"
-        const val STORE_FAILED = "store_failed"
-    }
 }
