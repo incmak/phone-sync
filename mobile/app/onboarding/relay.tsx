@@ -4,17 +4,27 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import Constants from 'expo-constants';
 import { useTheme, TwButton } from '../../components';
 import { OnboardingState } from '../../state/onboardingState';
 
-const DEFAULT_RELAY = '';
 const TIMEOUT_MS = 10_000;
+
+/**
+ * The relay a build ships with, so the common case is Test-then-Continue rather than typing a
+ * URL. It stays a plain editable value: a custom relay overwrites it, and Continue is gated on
+ * a successful /health test either way, so a stale default can never be adopted silently.
+ */
+function defaultRelayUrl(): string {
+  const configured = Constants.expoConfig?.extra?.defaultRelayUrl;
+  return typeof configured === 'string' ? configured : '';
+}
 
 type TestState = 'idle' | 'testing' | 'ok' | 'error';
 
 export default function RelayScreen() {
   const theme = useTheme();
-  const [url, setUrl] = useState(DEFAULT_RELAY);
+  const [url, setUrl] = useState(defaultRelayUrl);
   const [testState, setTestState] = useState<TestState>('idle');
   const [latency, setLatency] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>('');

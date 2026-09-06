@@ -64,7 +64,8 @@
       "router": {},
       "eas": {
         "projectId": "eb10d340-9784-4257-80b2-1e4d3a36e74e"
-      }
+      },
+      "defaultRelayUrl": "https://relay.twinotify.nuvaynlabs.com"
     },
     "owner": "incmak"
   }
