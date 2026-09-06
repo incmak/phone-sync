@@ -239,24 +239,35 @@ under `mobile/app/settings/`, tests alongside.
 Today the relay row is inert (`settings/index.tsx:277`) and `settings/pair.tsx:309` offers only
 the reverse direction, "Add a direct Wi-Fi path without replacing this relay pair."
 
-- [ ] Make the relay row actionable in all three states: none configured (Add), configured
-      (Change), configured (Remove).
-- [ ] Add: relay URL field pre-filled per Task 1, `/health` test gate, then `attachRelay`.
-- [ ] Change: attach the new relay first, and only revoke at the old one after the new one is
-      confirmed, so a failed change never leaves the pair with no relay.
-- [ ] Remove: `PairProtocol.revoke` (`PairProtocol.kt:39`) at the current relay, clear the relay
-      URL from both stores, restart into LAN-only. Direct bindings and the pair itself survive;
-      this is not an unpair.
-- [ ] Copy must state plainly that contents stay end-to-end encrypted and the relay sees routing
-      metadata only.
-- [ ] Fix `onboarding/connect.tsx:74` so the promise it makes is now true in both directions.
-- [ ] Tests: each of the three flows; a failed change leaves the old relay in place; removal
-      keeps the pair and the direct route.
+- [x] Relay management lives on the paired-device screen beside nearby Wi-Fi and Bluetooth, since
+      all three are the same kind of action. It reuses that screen's existing shape: an offer is
+      a card, a configured route is a row group.
+- [x] Add: relay address pre-filled per Task 1, `/health` test gate, then `attachRelay`. The
+      caller writes `OnboardingState.setRelayUrl` on success, closing the Task 3 loose end.
+- [x] Change: opens the same screen in change mode. The new relay is attached before anything is
+      revoked, so a failed change leaves the old relay in place.
+- [x] Remove: `detachRelay` revokes at the relay, clears the endpoint and restarts direct-only.
+      Not an unpair: peer record, LAN binding, Bluetooth association and fingerprint all survive.
+      A relay that cannot be reached clears locally anyway and the copy says so.
+- [x] Copy states plainly that contents stay end to end encrypted, and every failure promises
+      nothing changed.
+- [x] `onboarding/connect.tsx` promise is now true in both directions, and the Settings row leads
+      to management instead of stating a dead end.
+- [x] Tests: all three flows, the confirm step, the unrevoked case, the test gate withdrawing on
+      edit, cleartext refusal, each bounded failure code, and a contrast floor.
+      `app/settings/__tests__/relayManagement.test.tsx` (11) plus an added
+      `settingsHandoffTrace` case.
 
-**USER DECISION:** the layout and copy for this screen. Per repo convention, UI is the user's to
-drive — present a proposal and get approval before building it.
+**USER DECISIONS — settled 2026-09-06.** Placement: the paired-device screen. Default relay
+presentation: a plain pre-filled field, matching onboarding, so both screens read the same.
 
----
+**Two defects found during the design re-check, both fixed:**
+- `ink4` measures 3.22:1 on the light background, below the 4.5:1 that small text needs. The
+  field label and placeholder moved to `ink3` (5.24:1 light, 7.11:1 dark), here and in
+  `onboarding/relay.tsx`, which had the same shortfall already. A regression test measures it.
+- A `TwRow` whose `onPress` is dropped while busy renders as a plain view: identical to look at,
+  but it answers nothing. Removal now names its own progress and the change row is hidden while
+  it runs, rather than sitting there inert.
 
 ### Task 6: Verification
 
