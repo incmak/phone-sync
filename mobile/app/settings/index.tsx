@@ -18,6 +18,8 @@ import {
 } from '../../components';
 import { HandoffDisclosureMark } from '../../components/HandoffTrace';
 import { useSyncStatus } from '../../hooks/useSyncStatus';
+import { useRouteStatus } from '../../hooks/useRouteStatus';
+import { describeRouteOrder } from '../../state/routeOrder';
 import TwinotifyCoreModule, { PairStatus, SyncState } from '../../modules/twinotify-core/src/TwinotifyCoreModule';
 import { OnboardingState } from '../../state/onboardingState';
 
@@ -46,6 +48,7 @@ function callCaptureHealthMessage(code: string | null | undefined): string | nul
 export default function SettingsScreen() {
   const theme = useTheme();
   const syncStatus = useSyncStatus();
+  const routeStatus = useRouteStatus();
   const { state } = syncStatus;
   const { width } = useWindowDimensions();
   const horizontalGutter = width <= 360 ? 16 : 22;
@@ -53,6 +56,7 @@ export default function SettingsScreen() {
   const [pairStatus, setPairStatus] = useState<PairStatus>({ paired: false });
   const [relayUrl, setRelayUrl] = useState<string | null | undefined>(undefined);
   const [preferLan, setPreferLan] = useState<boolean | null>(null);
+  const [bluetoothReady, setBluetoothReady] = useState(false);
   const [callCaptureEnabled, setCallCaptureEnabled] = useState<boolean | null>(null);
   const [callControlsEnabled, setCallControlsEnabled] = useState(false);
   const [callPermissionCanAskAgain, setCallPermissionCanAskAgain] = useState(true);
@@ -67,6 +71,9 @@ export default function SettingsScreen() {
     TwinotifyCoreModule.getPreferLan()
       .then(setPreferLan)
       .catch(() => {});
+    TwinotifyCoreModule.getBluetoothRouteSettings()
+      .then((settings) => setBluetoothReady(settings.associated && settings.enabled))
+      .catch(() => setBluetoothReady(false));
     Promise.all([
       TwinotifyCoreModule.getCallCaptureEnabled(),
       TwinotifyCoreModule.getCallControlsEnabled(),
@@ -150,6 +157,12 @@ export default function SettingsScreen() {
     );
   }, [persistCallCapture]);
 
+  const routeOrder = describeRouteOrder({
+    preferDirect: preferLan ?? true,
+    bluetoothReady,
+    hasRelay: Boolean(relayUrl),
+    active: routeStatus.route,
+  });
   const relayDisplay = relayUrl
     ?? (pairStatus.paired ? 'Direct delivery only. Add a relay to reach different networks.' : 'Not configured');
   const version = Constants.expoConfig?.version ?? '1.0.0';
@@ -255,6 +268,12 @@ export default function SettingsScreen() {
                 style={styles.ledgerRow}
               />
               <TwRow
+                title="Delivery order"
+                subtitle={routeOrder.summary}
+                accessibilityLabel={`Delivery order, ${routeOrder.summary}`}
+                style={styles.ledgerRow}
+              />
+              <TwRow
                 title="Prefer direct delivery"
                 subtitle={
                   preferLan === null
@@ -279,6 +298,7 @@ export default function SettingsScreen() {
               />
             </>
           ) : (
+            <>
             <TwRow
               title="Delivery route"
               subtitle={relayUrl === undefined ? 'Loading delivery configuration' : relayDisplay}
@@ -294,6 +314,15 @@ export default function SettingsScreen() {
               }
               style={styles.ledgerRow}
             />
+            {relayUrl === undefined ? null : (
+              <TwRow
+                title="Delivery order"
+                subtitle={routeOrder.summary}
+                accessibilityLabel={`Delivery order, ${routeOrder.summary}`}
+                style={styles.ledgerRow}
+              />
+            )}
+            </>
           )}
         </View>
 

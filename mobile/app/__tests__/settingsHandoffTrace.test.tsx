@@ -61,6 +61,20 @@ describe('Settings handoff ledger', () => {
     expect(screen.queryByRole('switch', { name: 'Prefer direct delivery' })).toBeNull();
   });
 
+  it('shows the delivery order as something to read, never something to edit', async () => {
+    const screen = await renderSettings({ relayUrl: 'https://relay.example.test' });
+
+    expect(await screen.findByText('Delivery order')).toBeTruthy();
+    // This fixture has the direct preference off, so the description has to lead with the relay.
+    // The row exists to make that switch's consequence visible, not to restate a fixed order.
+    expect(screen.getByText('Relay, then Direct Wi-Fi. Nothing is carrying yet.')).toBeTruthy();
+    // Bluetooth is absent because this pair never associated one.
+    expect(screen.queryByText(/Bluetooth, then/)).toBeNull();
+    // Reading, not editing: the order follows from the preference switch below it, and giving it
+    // its own control would let someone pick a silently worse order with no feedback.
+    expect(screen.queryByRole('button', { name: /Delivery order/ })).toBeNull();
+  });
+
   it('sends the direct-only branch somewhere it can actually add a relay', async () => {
     // The row used to be inert, which is how a nearby-paired user reached a dead end: no way to
     // add a relay, and no hint that the paired-device screen is where it happens.
