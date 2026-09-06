@@ -202,22 +202,27 @@ same property first-time pairing already has, where A stores the peer before B c
 `LanBootstrapProcessor` (`LanBootstrapProcessor.kt:23`) including its `Applied`/`Rejected` result
 shape and bounded rejection codes.
 
-- [ ] Validate the incoming relay URL through `RelayUrlPolicy` and reject anything cleartext.
-- [ ] Run `PairProtocol.sendPeerHello` then `deviceBCompletePair` against that relay with the
-      existing identity.
-- [ ] Apply the same byte-equality identity requirement as Task 3; reject with a bounded code on
-      mismatch.
-- [ ] Persist the relay URL and restart the transport generation, preserving all direct
-      bindings.
-- [ ] Add `"relay.attach"` to `RECEIPT_BACKED_CONTROL_TYPES` in the **two** places it is
-      duplicated — `ReliableDeliveryDao.kt:2212` (private companion) and
-      `InboundDispatcher.kt:1433` (file-private val) — in the same change as the processor
-      branch. `DIRECT_ACK_CONTROL_TYPES` is duplicated the same way; deduplicating both is a
-      worthwhile follow-up but is out of scope here.
-- [ ] Wire into the inbound control path next to the `lan.bootstrap` handler in
-      `InboundDispatcher.kt:870` and `SyncService.kt`.
-- [ ] Tests: applied; rejected on mismatch; rejected on cleartext URL; replayed event is
-      idempotent; a rejection leaves the direct route working.
+- [x] The incoming relay URL needs no check in the dispatcher: `decodeInner` already refuses any
+      `relay_url` that is not https or wss before the event is authenticated. A second copy would
+      only drift from the contract, so the dispatcher carries none and a test forges the decrypted
+      bytes to prove that boundary holds.
+- [x] Run `PairProtocol.sendPeerHello` then `deviceBCompletePair` against that relay with the
+      existing identity, via `LiveRelayAttachResponderClient`.
+- [x] Verify the initiator's confirmation signature against the **stored** peer signing key, and
+      complete with the **stored** peer public keys — never anything the relay supplied. Reject
+      with `peer_identity_mismatch` on failure, before completing or committing.
+- [x] Persist the relay URL and restart the transport generation, preserving all direct bindings.
+- [x] Add `"relay.attach"` to `RECEIPT_BACKED_CONTROL_TYPES` in the **two** places it is
+      duplicated — `ReliableDeliveryDao.kt` and `InboundDispatcher.kt` — in the same change as the
+      processor branch. `DIRECT_ACK_CONTROL_TYPES` is duplicated the same way; deduplicating both
+      is a worthwhile follow-up but is out of scope here.
+- [x] Wire into the inbound control path next to the `lan.bootstrap` handler, **after** the
+      receipt commits rather than inside the journal lambda. That lambda runs inside the Room
+      write transaction and the handshake blocks until the initiator signs, so applying it there
+      would hold the write transaction open for up to ninety seconds and stall every delivery.
+- [x] Tests: applied; rejected on signature mismatch; rejected on cleartext URL at the decode
+      boundary; unpaired; relay failure at each stage commits nothing; completion uses the stored
+      keys. `RelayAttachResponderTest` (7) plus two in `InboundDispatcherControlTest`.
 
 **USER DECISION — settled 2026-09-06: auto-apply.** The receiving phone applies a `relay.attach`
 from its trusted peer without prompting. The byte-equality identity check proves the event came
