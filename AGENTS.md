@@ -67,44 +67,14 @@ TWINOTIFY_DOMAIN=relay.example.com docker compose -f docker-compose.prod.yml up 
 
 Docker build context is the **repo root** with `dockerfile: relay/Dockerfile` (the image inlines the proto copy instead of running make). Changing the context breaks the build.
 
-## Architecture
+## Architecture boundaries
 
-### Protocol: v1 and v2 coexist
+- The relay is untrusted; tenant/pair authorization occurs inside the same transaction as mailbox mutation.
+- Persist before `relay.accepted`; ack requires the exact envelope digest. Accepted ciphertext is never evicted to make room.
+- Preserve the negotiated v2 protocol floor, pair-scoped store calls, JWT signature verification, and 2×TTL JTI retention.
+- JS uses the native bridge for crypto and transport. Build mobile screens from the existing tokens and Tw primitives.
 
-`proto/` holds both generations. **v1** (`packet.schema.json`, `envelope-encrypted.schema.json` with `v:1`) is online-only passthrough: the relay forwards to a live peer or fails. **v2** (`inner-event-v2.schema.json`, `peer-receipt.schema.json`, `relay-control.schema.json`) adds an authenticated inner packet (`msg_id`, `canon_id`, `sequence`, `expires_at` inside the ciphertext), a durable relay mailbox, and end-to-end peer receipts.
-
-Current state: **the relay and Android both implement v1 + v2**. Android advertises `[2,1]` with `relay.hello`, sends durable v2 envelopes with `relay.put`, authenticates inner events, stores inbound/outbound state in Room version 12 under a route-neutral custody column (`custodyAcceptedAt`/`custodyRoute`), materializes desired notification/call state, and emits peer receipts. The deprecated DataStore replay guard and legacy outbound queue remain only for v1 compatibility/migration; do not route new reliable-delivery work through them.
-
-Frames (`relay/internal/server/relay_frame.go`): in — `relay.hello`, `relay.put`, `relay.ack`; out — `relay.accepted`, `relay.deliver`, `relay.rejected`, `relay.expired`, `relay.capabilities`, `relay.legacy_forwarded`. Once both devices advertise `[2,1]` the relay records a protocol floor of 2 per pair and refuses v1 frames for it, so a downgrade cannot be forced.
-
-### Relay internals
-
-`cmd/relay/main.go` opens Bolt, builds `server.NewWithConfig(bolt, Config)`, starts a maintenance ticker (pending-pair sweep, mailbox/status expiry, JTI GC) and an HTTP server with explicit timeouts. Routes live in one place — `server.routes()` in `internal/server/server.go`.
-
-- `internal/store/pair_store.go` — pending + confirmed pairs, per-device capability records, protocol floor, revocation.
-- `internal/store/mailbox_store.go` — the durable mailbox. Every operation has a `…ForPair` variant and authorizes `(pairID, deviceID)` inside the same Bolt transaction as the mutation. Pair-scoping is the mechanism that stops a revoked or rebound pair generation from reading or acking another generation's data; do not add an unscoped path.
-- `internal/server/client_hub.go` — live sockets. Connection replacement cancels the old registration's context rather than closing a producer-visible channel, so a producer can never send on a closed channel.
-- `internal/server/durable_handoff.go` + `transferHandoffFrames` — moves mailbox records from durable state into a socket's writer queue at one linearization point.
-
-Mailbox invariants worth knowing before touching that code: persistence commits **before** `relay.accepted`; delivery is a read from Bolt, not a transfer of ownership; `relay.ack` must carry the exact `envelope_sha256`; a duplicate `(recipient, msg_id)` with a matching digest is idempotent and replays the original `accepted_at`, while a mismatched digest is rejected as `id_conflict`; retention is 24h from acceptance with a metadata-only expiry tombstone kept another 24h; per-recipient caps (2,000 items / 128 MiB) return explicit backpressure and never evict accepted ciphertext.
-
-`Server` carries nil-in-production function fields (`relayHelloBeforeActivate`, `webSocketBeforeRegister`, `revokeAfterCommit`, …). These are deterministic test seams for the concurrency tests — keep them nil-checked and keep using them instead of sleeps.
-
-### Auth and pairing
-
-`/ws` and `/pair/revoke` sit behind `authMiddleware`: Ed25519 (`EdDSA`) JWT, `sub` = device ID, parsed unverified to select the stored `sign_pubkey`, then verified against it. `jti` is single-use via `JTICache` with **2×TTL retention** — 1×TTL leaves a replay window between GC and `exp`. The middleware puts `device_id` + `pair_id` in the request context; handlers read both and pass them into pair-scoped store calls.
-
-Unauthenticated pairing endpoints are IP-rate-limited and body-size-bounded (`http_limits.go`): `POST /pair/init` (A) → `POST /pair/hello` (B) → `POST /pair/send_sig` (A) → `POST /pair/complete` (B), with `GET /pair/notify` letting a waiting device pick up state that landed before it subscribed (resumable and idempotent — replayed from persisted pending state, not memory). Pair tokens expire after 5 minutes.
-
-Two-sided confirmation is only partly cryptographic: A's signature is enforced at the relay, B's consent is UX-gated by the fingerprint screen. That is a known, documented gap.
-
-### Mobile
-
-Expo Router file routes under `mobile/app/` (`onboarding/`, `pair/`, `settings/`, `home.tsx`, `filter.tsx`); `app/index.tsx` routes to onboarding or home off AsyncStorage flags in `state/onboardingState.ts`. Design system is `components/tokens.ts` (oklch computed to hex via culori at module load), `components/Theme.tsx`, and `components/primitives/Tw*.tsx` — build screens from those primitives rather than raw styled Views.
-
-Native surface: `TwinotifyCoreModule.kt` exposes ~30 `AsyncFunction`s (identity, keys, pairing handshake, encrypt/decrypt, service start/stop, status, denylist, metrics), typed in `modules/twinotify-core/src/`, wrapped by `hooks/useTwinotifyCore.ts`. JS never touches crypto or the WebSocket directly.
-
-Kotlin flow: `TwinotifyNotificationListener` captures → filters → `OutboundQueue` (Room) → `SyncService` (foreground service, type `remoteMessaging`) → relay WS. Inbound: `InboundDispatcher` → `MirrorPoster` / `MirrorDismisser`. Crypto is libsodium `crypto_box_easy`, with Android Keystore wrapping the libsodium keys via AES-GCM (Keystore cannot hold X25519 for libsodium directly).
+For protocol, mailbox, pairing, or native-mobile changes, read the relevant section of [the architecture reference](docs/agent-guidance/architecture.md). It preserves packet semantics, retention/cap limits, auth details, and native ownership.
 
 ## Invariants that break things silently
 
@@ -125,15 +95,14 @@ Kotlin flow: `TwinotifyNotificationListener` captures → filters → `OutboundQ
 
 - `docs/superpowers/specs/2026-04-20-phone-sync-design.md` — overall system/crypto/threat model (v10).
 - `docs/superpowers/specs/2026-08-09-reliable-delivery-foundation-design.md` — the v2 protocol, data models, ordering, verification strategy, and release gate. Read this before touching mailbox, receipt, or sequencing code.
-- `docs/superpowers/plans/2026-08-09-reliable-delivery-{protocol-relay,android,verification}.md` — task-by-task plans, executed in that order. All three are complete. `docs/superpowers/plans/2026-08-20-direct-lan-delivery.md` records that Tasks 1-9 implementation and host automation are complete; its named hardware evidence remains a pending physical two-phone run. It supersedes the earlier `2026-08-18-direct-lan-transport.md`. `advisor-plans/README.md` tracks Plans 001-030. Plan 004 is externally blocked on owner-controlled EAS project, signing, token, certificate, and attestation inputs. Plan 015 source is complete and only `PHY-CALL-01` physical proof is deferred. Local APKs are QA artifacts, not protected release candidates.
+- [Delivery status and plan history](docs/agent-guidance/delivery-status.md) — consult when resuming planned or release work. Local APKs are QA artifacts, not protected release candidates.
 - `MEMORY.md` — long-form session handoff, but **last updated 2026-04-21**: it predates the reliable-delivery work and describes Phase 4 as in progress. Trust `git log` and the code over it.
 - `docs/test-scenarios.md` — manual two-phone smoke scenarios. `docs/design/SCREEN_INVENTORY.md` — UI surface reference.
 
 ## Working conventions
 
-- **Plan, then execute.** Work lands as numbered tasks from a plan doc in `docs/superpowers/plans/`, reviewed before implementation. `.superpowers/sdd/` (gitignored) holds per-task briefs, reports, and review diffs from that workflow.
-- **TDD, failing test observed first.** Go changes run with `-race` before every commit.
+- Establish the requested outcome, then implement and verify routine scoped work. Review new protocol, crypto, schema, or substantial product decisions before implementation unless the user has already approved them. Use numbered plans for work that benefits from them; do not require a plan-review pause for an authorized repair.
+- Use a failing regression test when it clarifies changed behavior. Documentation/configuration edits need relevant validation, not ceremonial TDD. Go code changes run with `-race` before every commit.
 - **Conventional commits with a scope:** `feat(relay):`, `fix(mobile/pair):`, `test(relay):`, `docs:`, `chore:`. Small and bisectable.
 - **Report honestly when something cannot be verified** here (Kotlin compilation, instrumented tests, physical-device behaviour) rather than implying a pass.
-- Pause and ask on UI/visual decisions — those are the user's to drive.
-
+- Preserve the user's visual direction. Proceed with the visible correction needed for an explicitly requested UI repair; ask when an unresolved product/design choice would materially change the result.
