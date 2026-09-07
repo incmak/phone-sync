@@ -93,11 +93,22 @@ export interface SyncStatus {
 }
 
 export interface PairStatus {
+  peerLinkId?: string;
+  peerCount?: number;
   paired: boolean;
   peerDeviceId?: string;
   peerEncPubkey?: string;
   peerSignPubkey?: string;
   peerDisplayName?: string;
+}
+
+export interface PeerLinkStatus extends PairStatus {
+  peerLinkId: string;
+  lifecycle: 'ACTIVE' | 'REMOVING';
+  hasRelay: boolean;
+  hasLan: boolean;
+  preferLan: boolean;
+  routeStatus: RouteStatus;
 }
 
 export interface PeerHelloPayload {
@@ -115,11 +126,14 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   onPeerUnpair: () => void;
   onOfflinePairingStatus: OfflinePairingStatusEvent;
   onRouteStatus: RouteStatusEvent;
+  onPeerRoutes: (evt: { peers: Record<string, RouteStatus> }) => void;
 }> {
   getDeviceId(): Promise<string>;
   getPublicKeys(): Promise<KeyPair>;
   getDeviceDisplayName(): Promise<string>;
   startOfflinePairing(displayName: string): Promise<string>;
+  startOfflinePairingForPeer(displayName: string, peerLinkId: string): Promise<string>;
+  joinOfflinePairingForPeer(qrJson: string, displayName: string, peerLinkId: string): Promise<void>;
   joinOfflinePairing(qrJson: string, displayName: string): Promise<void>;
   confirmOfflinePairing(sessionId: string): Promise<void>;
   cancelOfflinePairing(sessionId: string): Promise<void>;
@@ -129,6 +143,7 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   sendPeerHello(relayUrl: string, pairToken: string, displayName: string): Promise<void>;
   awaitPeerHello(relayUrl: string, pairToken: string): Promise<string>; // raw JSON text
   sendConfirmationSig(relayUrl: string, pairToken: string, sigB64: string): Promise<void>;
+  awaitPairComplete(relayUrl: string, pairToken: string): Promise<string>;
   computeFingerprint(encPubkeyB64: string, signPubkeyB64: string): Promise<string>;
   deviceASignConfirmation(pairToken: string, bEncB64: string, bSignB64: string): Promise<string>;
   // Backward-compat: waits for pair.sig on role=B, returns base64 sig
@@ -139,8 +154,8 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
     initiatorEncPubkeyB64: string,
     initiatorSignPubkeyB64: string,
     confirmationSigB64: string,
-  ): Promise<void>;
-  storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string): Promise<void>;
+  ): Promise<string>;
+  storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string, relayUrl: string, relayPairId: string): Promise<string>;
   /**
    * Adds a relay to an existing pair over the current direct route. Resolves "attached", or a
    * bounded rejection code: relay_url_invalid, not_paired, no_direct_route, relay_unreachable,
@@ -193,6 +208,16 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   /** Reconnect now instead of waiting out the current backoff. */
   retryRoute(): Promise<void>;
   getPairStatus(): Promise<PairStatus>;
+  getPeerStatus(peerLinkId: string): Promise<PairStatus>;
+  getPeerLinks(): Promise<PeerLinkStatus[]>;
+  removePeer(peerLinkId: string): Promise<{ completed: boolean }>;
+  getPeerConfiguration(peerLinkId: string): Promise<{ relayUrl: string | null; preferLan: boolean }>;
+  attachRelayToPeer(relayUrl: string, displayName: string, peerLinkId: string): Promise<RelayAttachOutcome>;
+  detachRelayFromPeer(peerLinkId: string): Promise<RelayDetachOutcome>;
+  startBluetoothAssociationForPeer(peerLinkId: string): Promise<{ associated: boolean }>;
+  getBluetoothRouteSettingsForPeer(peerLinkId: string): Promise<BluetoothRouteSettings>;
+  setBluetoothRouteEnabledForPeer(enabled: boolean, peerLinkId: string): Promise<boolean>;
+  removeBluetoothAssociationForPeer(peerLinkId: string): Promise<void>;
   // Permission helpers
   isNotificationListenerGranted(): Promise<boolean>;
   openListenerSettings(): Promise<void>;
@@ -200,6 +225,9 @@ declare class TwinotifyCoreModuleType extends NativeModule<{
   openAppSettings(): Promise<void>;
   // User-controlled app denylist
   getFilterableApps(): Promise<FilterableApp[]>;
+  getRepeatProtectionSettings(): Promise<{ enabled: boolean; blockedCount: number }>;
+  setRepeatProtectionEnabled(enabled: boolean): Promise<void>;
+  restoreRepeatBlockedNotifications(): Promise<void>;
   getUserDenylist(): Promise<string[]>;
   addToDenylist(pkg: string): Promise<void>;
   removeFromDenylist(pkg: string): Promise<void>;

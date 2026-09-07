@@ -318,10 +318,19 @@ class TwinotifyCoreModule internal constructor(
     private fun requireContext(): Context =
         appContext.reactContext ?: error("no react context — module not initialised")
 
+    private fun peerStatusMap(peer: PeerRecord?): Map<String, Any?> = if (peer == null) mapOf("paired" to false) else mapOf(
+        "paired" to (peer.lifecycle == "ACTIVE"),
+        "peerLinkId" to peer.peerLinkId,
+        "peerDeviceId" to peer.deviceId,
+        "peerEncPubkey" to Base64.getEncoder().encodeToString(peer.encPubkey),
+        "peerSignPubkey" to Base64.getEncoder().encodeToString(peer.signPubkey),
+        "peerDisplayName" to (peer.displayName ?: ""),
+    )
+
     override fun definition() = ModuleDefinition {
         Name("TwinotifyCore")
 
-        Events("onSyncStatus", "onPeerUnpair", "onOfflinePairingStatus", "onRouteStatus")
+        Events("onSyncStatus", "onPeerUnpair", "onOfflinePairingStatus", "onRouteStatus", "onPeerRoutes")
 
         OnCreate {
             try {
@@ -331,6 +340,7 @@ class TwinotifyCoreModule internal constructor(
             } catch (e: Throwable) {
                 android.util.Log.e("Twinotify", "denylist load failed (non-tamper): ${e.message}", e)
             }
+            moduleScope.launch { co.twinotify.core.pairing.PeerRemovalManager.resume(requireContext()) }
             moduleScope.launch {
                 co.twinotify.core.service.SyncServiceStatus.health.collect { health ->
                     sendEvent("onSyncStatus", health.toEventMap())
@@ -341,6 +351,11 @@ class TwinotifyCoreModule internal constructor(
                     // toPublicMap carries the route and phase only; no endpoint,
                     // address, SSID, or peer identifier crosses the bridge.
                     sendEvent("onRouteStatus", route.toPublicMap())
+                }
+            }
+            moduleScope.launch {
+                co.twinotify.core.service.SyncServiceStatus.peerRoutes.collect { peers ->
+                    sendEvent("onPeerRoutes", mapOf("peers" to peers.mapValues { it.value.toPublicMap() }))
                 }
             }
             moduleScope.launch {
@@ -358,6 +373,7 @@ class TwinotifyCoreModule internal constructor(
                     co.twinotify.core.service.RecoveryTrigger.APP_FOREGROUND,
                 )
                 co.twinotify.core.service.SyncService.onAppForeground(ctx)
+                co.twinotify.core.service.RepeatProtection.resume(ctx)
             }
         }
 
@@ -546,12 +562,12 @@ class TwinotifyCoreModule internal constructor(
                                             },
                                             decideServiceStart = {
                                                 val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
-                                                val peer = PeerStore.load(ctx)
+                                                val peers = PeerStore.list(ctx)
                                                 co.twinotify.core.service.ServiceStartPolicy.decide(
                                                     intentAction = null,
                                                     persisted = config,
-                                                    paired = peer != null,
-                                                    lanBound = peer?.lanBindingId != null,
+                                                    paired = peers.isNotEmpty(),
+                                                    lanBound = peers.any { it.lanBindingId != null },
                                                 )
                                             },
                                             beginAdmission =
@@ -765,6 +781,37 @@ class TwinotifyCoreModule internal constructor(
             }
         }
 
+        AsyncFunction("startBluetoothAssociationForPeer") { peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    checkNotNull(PeerStore.load(ctx, peerLinkId)) { "bluetooth_peer_not_confirmed" }
+                    val activity = checkNotNull(appContext.currentActivity) { "bluetooth_activity_unavailable" }
+                    val provisional = co.twinotify.core.bluetooth.BluetoothAssociationFlow.run(ctx, activity)
+                    if (provisional != null) co.twinotify.core.bluetooth.BluetoothAssociationCompletion.complete(ctx, provisional, peerLinkId)
+                    promise.resolve(mapOf("associated" to (provisional != null)))
+                } catch (e: Throwable) { promise.reject("BLUETOOTH_ASSOCIATION", e.message ?: "bluetooth_association_failed", e) }
+            }
+        }
+        AsyncFunction("getBluetoothRouteSettingsForPeer") { peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try { promise.resolve(bluetoothRouteSettings(requireContext(), peerLinkId).toMap()) }
+                catch (e: Throwable) { promise.reject("BLUETOOTH_ROUTE_SETTINGS", e.message ?: "err", e) }
+            }
+        }
+        AsyncFunction("setBluetoothRouteEnabledForPeer") { enabled: Boolean, peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try { promise.resolve(setBluetoothRouteEnabled(requireContext(), enabled, peerLinkId)) }
+                catch (e: Throwable) { promise.reject("SET_BLUETOOTH_ROUTE", e.message ?: "err", e) }
+            }
+        }
+        AsyncFunction("removeBluetoothAssociationForPeer") { peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try { removeBluetoothAssociation(requireContext(), peerLinkId); promise.resolve(null) }
+                catch (e: Throwable) { promise.reject("REMOVE_BLUETOOTH_ASSOCIATION", e.message ?: "err", e) }
+            }
+        }
+
         AsyncFunction("getBluetoothRouteSettings") { promise: Promise ->
             moduleScope.launch {
                 settleTwinotifyPromise(
@@ -863,21 +910,37 @@ class TwinotifyCoreModule internal constructor(
             } catch (e: Throwable) { promise.reject("SYNC_STATUS", e.message ?: "err", e) }
         }
 
+        AsyncFunction("getPeerLinks") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val peers = PeerStore.list(requireContext(), includeRemoving = true)
+                    promise.resolve(peers.map { peer ->
+                        peerStatusMap(peer) + mapOf(
+                            "lifecycle" to peer.lifecycle,
+                            "hasRelay" to !peer.relayUrl.isNullOrBlank(),
+                            "hasLan" to (peer.lanBindingId != null),
+                            "preferLan" to peer.preferLan,
+                            "routeStatus" to (co.twinotify.core.service.SyncServiceStatus.peerRoutes.value[peer.peerLinkId]
+                                ?.toPublicMap() ?: co.twinotify.core.service.SyncRouteStatus().toPublicMap()),
+                        )
+                    })
+                } catch (e: Throwable) { promise.reject("PEER_LINKS", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("getPeerStatus") { peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try { promise.resolve(peerStatusMap(PeerStore.load(requireContext(), peerLinkId))) }
+                catch (e: Throwable) { promise.reject("PAIR_STATUS", e.message ?: "err", e) }
+            }
+        }
+
         AsyncFunction("getPairStatus") { promise: Promise ->
             moduleScope.launch {
                 try {
-                    val peer = co.twinotify.core.storage.PeerStore.load(requireContext())
-                    if (peer == null) {
-                        promise.resolve(mapOf("paired" to false))
-                    } else {
-                        promise.resolve(mapOf(
-                            "paired" to true,
-                            "peerDeviceId" to peer.deviceId,
-                            "peerEncPubkey" to Base64.getEncoder().encodeToString(peer.encPubkey),
-                            "peerSignPubkey" to Base64.getEncoder().encodeToString(peer.signPubkey),
-                            "peerDisplayName" to (peer.displayName ?: ""),
-                        ))
-                    }
+                    val peers = PeerStore.list(requireContext())
+                    promise.resolve(if (peers.size <= 1) peerStatusMap(peers.singleOrNull()) + mapOf("peerCount" to peers.size)
+                        else mapOf("paired" to true, "peerCount" to peers.size))
                 } catch (e: Throwable) { promise.reject("PAIR_STATUS", e.message ?: "err", e) }
             }
         }
@@ -901,6 +964,21 @@ class TwinotifyCoreModule internal constructor(
                 } catch (error: Throwable) {
                     rejectOfflinePairingOnMain(promise, error)
                 }
+            }
+        }
+
+        AsyncFunction("startOfflinePairingForPeer") { displayName: String, peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try { resolveOnMain(promise, offlinePairing.start(displayName, peerLinkId)) }
+                catch (error: Throwable) { rejectOfflinePairingOnMain(promise, error) }
+            }
+        }
+        AsyncFunction("joinOfflinePairingForPeer") { qrJson: String, displayName: String, peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    offlinePairing.join(qrJson, displayName, peerLinkId)
+                    resolveOnMain(promise, null)
+                } catch (error: Throwable) { rejectOfflinePairingOnMain(promise, error) }
             }
         }
 
@@ -970,6 +1048,7 @@ class TwinotifyCoreModule internal constructor(
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
+                    PeerStore.prepareAdditionalPair(ctx)
                     val (box, sign) = CryptoStore.loadOrGenerate(ctx)
                     val deviceId = DeviceIdentity.getOrCreate(ctx)
                     val token = PairPayload.newToken()
@@ -988,6 +1067,7 @@ class TwinotifyCoreModule internal constructor(
             moduleScope.launch {
                 try {
                     val ctx = requireContext()
+                    PeerStore.prepareAdditionalPair(ctx)
                     val deviceId = co.twinotify.core.storage.DeviceIdentity.getOrCreate(ctx)
                     val (box, sign) = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(ctx)
                     co.twinotify.core.pairing.PairProtocol.sendPeerHello(
@@ -1025,6 +1105,21 @@ class TwinotifyCoreModule internal constructor(
                     )
                     promise.resolve(null)
                 } catch (e: Throwable) { promise.reject("SEND_SIG", e.message ?: "err", e) }
+            }
+        }
+
+        AsyncFunction("awaitPairComplete") { relayUrl: String, pairToken: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    val frame = co.twinotify.core.pairing.PairNotifyClient.awaitAuthenticatedFrame(
+                        relayUrl, pairToken, role = "A", expectedType = "pair.complete",
+                        deviceId = DeviceIdentity.getOrCreate(ctx),
+                        signSecretKey = CryptoStore.loadOrGenerate(ctx).second.secretKey,
+                        debug = BuildConfig.DEBUG,
+                    )
+                    promise.resolve(PairProtocol.requirePairId(org.json.JSONObject(frame).getString("pair_id")))
+                } catch (e: Throwable) { promise.reject("PAIR_COMPLETE_WAIT", e.message ?: "err", e) }
             }
         }
 
@@ -1075,7 +1170,7 @@ class TwinotifyCoreModule internal constructor(
                     val (box, sign) = CryptoStore.loadOrGenerate(ctx)
                     val deviceId = DeviceIdentity.getOrCreate(ctx)
                     val sig = Base64.getDecoder().decode(sigB64)
-                    PairProtocol.deviceBCompletePair(
+                    val pairId = PairProtocol.deviceBCompletePair(
                         relayUrl,
                         pairToken,
                         deviceId,
@@ -1087,7 +1182,7 @@ class TwinotifyCoreModule internal constructor(
                         sig,
                         debug = BuildConfig.DEBUG,
                     )
-                    promise.resolve(null)
+                    promise.resolve(pairId)
                 } catch (e: Throwable) { promise.reject("COMPLETE_PAIR", e.message ?: "err", e) }
             }
         }
@@ -1102,93 +1197,51 @@ class TwinotifyCoreModule internal constructor(
          */
         AsyncFunction("attachRelay") { relayUrl: String, displayName: String, promise: Promise ->
             moduleScope.launch {
-                try {
-                    val ctx = requireContext()
-                    val outbox = co.twinotify.core.service.PeerControlOutbox(
-                        ctx,
-                        co.twinotify.core.storage.NotificationDb.get(ctx).reliableDeliveryDao(),
-                    )
-                    val coordinator = co.twinotify.core.pairing.RelayAttachCoordinator(
-                        loadIdentity = {
-                            val (box, sign) = CryptoStore.loadOrGenerate(ctx)
-                            co.twinotify.core.pairing.RelayAttachIdentity(
-                                deviceId = DeviceIdentity.getOrCreate(ctx),
-                                encPubkey = box.publicKey,
-                                signPubkey = sign.publicKey,
-                                signSecretKey = sign.secretKey,
-                                displayName = displayName.takeIf { it.isNotBlank() },
-                            )
-                        },
-                        loadPeer = { PeerStore.load(ctx) },
-                        relayClient = co.twinotify.core.pairing.LiveRelayAttachRelayClient(
-                            debug = BuildConfig.DEBUG,
-                        ),
-                        announce = { url, token -> outbox.enqueueRelayAttach(url, token) },
-                        commit = { url ->
-                            co.twinotify.core.service.ServiceConfigStore.setRelayUrl(ctx, url)
-                            co.twinotify.core.service.SyncService.notifyRelayConfigChanged()
-                        },
-                    )
-                    when (val result = coordinator.attach(relayUrl)) {
-                        is co.twinotify.core.pairing.RelayAttachResult.Attached ->
-                            promise.resolve("attached")
-                        is co.twinotify.core.pairing.RelayAttachResult.Rejected ->
-                            promise.resolve(result.code)
-                    }
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (e: Throwable) {
-                    promise.reject("ATTACH_RELAY", e.message ?: "err", e)
-                }
+                try { promise.resolve(attachRelayForSelection(requireContext(), relayUrl, displayName, null)) }
+                catch (e: Throwable) { promise.reject("ATTACH_RELAY", e.message ?: "err", e) }
             }
         }
-
-        /**
-         * Stops using the configured relay while keeping the pair and every direct route.
-         *
-         * This is not an unpair: the peer record, the LAN binding and the Bluetooth association
-         * all survive, and delivery falls back to direct-only. Revocation is attempted first so
-         * the relay forgets the pair, but a relay that cannot be reached must not trap the user
-         * on it, so the local endpoint is cleared either way and the caller is told which
-         * happened.
-         */
+        AsyncFunction("attachRelayToPeer") { relayUrl: String, displayName: String, peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try { promise.resolve(attachRelayForSelection(requireContext(), relayUrl, displayName, peerLinkId)) }
+                catch (e: Throwable) { promise.reject("ATTACH_RELAY", e.message ?: "err", e) }
+            }
+        }
         AsyncFunction("detachRelay") { promise: Promise ->
             moduleScope.launch {
+                try { promise.resolve(detachRelayForSelection(requireContext(), null)) }
+                catch (e: Throwable) { promise.reject("DETACH_RELAY", e.message ?: "err", e) }
+            }
+        }
+        AsyncFunction("detachRelayFromPeer") { peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try { promise.resolve(detachRelayForSelection(requireContext(), peerLinkId)) }
+                catch (e: Throwable) { promise.reject("DETACH_RELAY", e.message ?: "err", e) }
+            }
+        }
+        AsyncFunction("getPeerConfiguration") { peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
                 try {
-                    val ctx = requireContext()
-                    val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
-                    val relayUrl = config.relayUrl
-                    if (relayUrl.isNullOrBlank()) {
-                        promise.resolve("no_relay")
-                        return@launch
-                    }
-                    val revoked = runCatching {
-                        val (_, sign) = CryptoStore.loadOrGenerate(ctx)
-                        co.twinotify.core.pairing.PairProtocol.revoke(
-                            relayUrl,
-                            JwtMinter.mint(DeviceIdentity.getOrCreate(ctx), sign.secretKey),
-                            debug = BuildConfig.DEBUG,
-                        )
-                    }.isSuccess
-                    co.twinotify.core.service.ServiceConfigStore.setLanOnlyEnabled(ctx)
-                    co.twinotify.core.service.SyncService.notifyRelayConfigChanged()
-                    promise.resolve(if (revoked) "detached" else "detached_unrevoked")
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (e: Throwable) {
-                    promise.reject("DETACH_RELAY", e.message ?: "err", e)
-                }
+                    val peer = checkNotNull(PeerStore.load(requireContext(), peerLinkId)) { "peer_removed" }
+                    promise.resolve(mapOf("relayUrl" to peer.relayUrl, "preferLan" to peer.preferLan))
+                } catch (e: Throwable) { promise.reject("PEER_CONFIG", e.message ?: "err", e) }
             }
         }
 
-        AsyncFunction("storePeerPubkeys") { encB64: String, signB64: String, peerDeviceId: String, peerDisplayName: String, promise: Promise ->
+        AsyncFunction("storePeerPubkeys") { encB64: String, signB64: String, peerDeviceId: String, peerDisplayName: String, relayUrl: String, relayPairId: String, promise: Promise ->
             moduleScope.launch {
                 try {
                     val ctx  = requireContext()
                     val enc  = Base64.getDecoder().decode(encB64)
                     val sign = Base64.getDecoder().decode(signB64)
                     val name = peerDisplayName.takeIf { it.isNotBlank() }
-                    PeerStore.save(
+                    val pairId = PairProtocol.requirePairId(relayPairId)
+                    val local = DeviceIdentity.getOrCreate(ctx)
+                    val signing = CryptoStore.loadOrGenerate(ctx).second
+                    check(PairProtocol.sessionPairId(relayUrl,
+                        JwtMinter.mint(local, signing.secretKey, pairId = pairId), local, peerDeviceId,
+                        debug = BuildConfig.DEBUG) == pairId) { "pair_session_mismatch" }
+                    val stored = PeerStore.save(
                         ctx,
                         PeerRecord(
                             peerDeviceId,
@@ -1196,10 +1249,12 @@ class TwinotifyCoreModule internal constructor(
                             sign,
                             name,
                             relayRevocationRequired = true,
+                            relayUrl = relayUrl,
+                            relayPairId = pairId,
                         ),
                     )
                     co.twinotify.core.listener.CaptureCoordinator.get(ctx).resumeDeferred()
-                    promise.resolve(null)
+                    promise.resolve(stored.peerLinkId)
                 } catch (e: Throwable) { promise.reject("PEER_STORE", e.message ?: "err", e) }
             }
         }
@@ -1246,6 +1301,16 @@ class TwinotifyCoreModule internal constructor(
             }
         }
 
+        AsyncFunction("removePeer") { peerLinkId: String, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    offlinePairing.quiesceAndAwait()
+                    val completed = co.twinotify.core.pairing.PeerRemovalManager.removeLocal(requireContext(), peerLinkId)
+                    promise.resolve(mapOf("completed" to completed))
+                } catch (e: Throwable) { promise.reject("REMOVE_PEER", e.message ?: "err", e) }
+            }
+        }
+
         AsyncFunction("unpair") { promise: Promise ->
             moduleScope.launch {
                 try {
@@ -1280,6 +1345,42 @@ class TwinotifyCoreModule internal constructor(
                     promise.resolve(apps)
                 } catch (e: Throwable) {
                     promise.reject("FILTER_APPS", e.message ?: "err", e)
+                }
+            }
+        }
+
+        AsyncFunction("getRepeatProtectionSettings") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    val ctx = requireContext()
+                    promise.resolve(mapOf(
+                        "enabled" to co.twinotify.core.service.RepeatProtection.enabled(ctx),
+                        "blockedCount" to co.twinotify.core.service.RepeatProtection.blockedCount(ctx),
+                    ))
+                } catch (e: Exception) {
+                    promise.reject("REPEAT_PROTECTION", "repeat_protection_unavailable", e)
+                }
+            }
+        }
+
+        AsyncFunction("setRepeatProtectionEnabled") { enabled: Boolean, promise: Promise ->
+            moduleScope.launch {
+                try {
+                    co.twinotify.core.service.RepeatProtection.setEnabled(requireContext(), enabled)
+                    promise.resolve(null)
+                } catch (e: Exception) {
+                    promise.reject("REPEAT_PROTECTION", "repeat_protection_update_failed", e)
+                }
+            }
+        }
+
+        AsyncFunction("restoreRepeatBlockedNotifications") { promise: Promise ->
+            moduleScope.launch {
+                try {
+                    co.twinotify.core.service.RepeatProtection.restoreBlocked(requireContext())
+                    promise.resolve(null)
+                } catch (e: Exception) {
+                    promise.reject("REPEAT_PROTECTION", "repeat_protection_restore_failed", e)
                 }
             }
         }
@@ -1530,22 +1631,56 @@ class TwinotifyCoreModule internal constructor(
         }
     }
 
-    private suspend fun bluetoothRouteSettings(ctx: Context): BluetoothRouteSettings {
-        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx)
-        val peer = PeerStore.load(ctx)
+    private suspend fun attachRelayForSelection(ctx: Context, url: String, displayName: String, peerLinkId: String?): String {
+        val peer = checkNotNull(PeerStore.load(ctx, peerLinkId)) { "not_paired" }
+        val db = co.twinotify.core.storage.NotificationDb.get(ctx)
+        check(db.peerLinkDao().pendingRevocations().isEmpty()) { "relay_cleanup_pending" }
+        val outbox = co.twinotify.core.service.PeerControlOutbox(ctx, db.reliableDeliveryDao(), peer.peerLinkId)
+        val coordinator = co.twinotify.core.pairing.RelayAttachCoordinator(
+            loadIdentity = {
+                val (box, sign) = CryptoStore.loadOrGenerate(ctx)
+                co.twinotify.core.pairing.RelayAttachIdentity(DeviceIdentity.getOrCreate(ctx), box.publicKey,
+                    sign.publicKey, sign.secretKey, displayName.takeIf { it.isNotBlank() })
+            },
+            loadPeer = { PeerStore.load(ctx, peer.peerLinkId) },
+            relayClient = co.twinotify.core.pairing.LiveRelayAttachRelayClient(debug = BuildConfig.DEBUG),
+            announce = { relayUrl, token -> outbox.enqueueRelayAttach(relayUrl, token) },
+            commit = { relayUrl, pairId ->
+                PeerStore.attachRelay(ctx, peer.peerLinkId, relayUrl, pairId)
+                co.twinotify.core.service.SyncService.notifyRelayConfigChanged()
+            },
+        )
+        return when (val result = coordinator.attach(url)) {
+            is co.twinotify.core.pairing.RelayAttachResult.Attached -> "attached"
+            is co.twinotify.core.pairing.RelayAttachResult.Rejected -> result.code
+        }
+    }
+
+    private suspend fun detachRelayForSelection(ctx: Context, peerLinkId: String?): String {
+        val peer = PeerStore.load(ctx, peerLinkId) ?: return "no_relay"
+        val dao = co.twinotify.core.storage.NotificationDb.get(ctx).peerLinkDao()
+        val pending = dao.detachRelay(peer.peerLinkId, DeviceIdentity.getOrCreate(ctx)) ?: return "no_relay"
+        co.twinotify.core.service.SyncService.notifyRelayConfigChanged()
+        co.twinotify.core.pairing.PeerRemovalManager.retryDetachedRelays(ctx)
+        return if (dao.pendingRevocations().none { it.revocationId == pending.revocationId }) "detached" else "detached_unrevoked"
+    }
+
+    private suspend fun bluetoothRouteSettings(ctx: Context, peerLinkId: String? = null): BluetoothRouteSettings {
+        val peer = PeerStore.load(ctx, peerLinkId) ?: return BluetoothRouteSettings(false, false)
+        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx, peer.peerLinkId)
         val associated = peer != null &&
             store.loadValidated(peer, co.twinotify.core.bluetooth.BluetoothAssociations.currentIds(ctx)) != null
         return BluetoothRouteSettings(associated = associated, enabled = associated && store.routeEnabled())
     }
 
-    private suspend fun setBluetoothRouteEnabled(ctx: Context, enabled: Boolean): Boolean {
-        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx)
+    private suspend fun setBluetoothRouteEnabled(ctx: Context, enabled: Boolean, peerLinkId: String? = null): Boolean {
+        val peer = PeerStore.load(ctx, peerLinkId) ?: return false
+        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx, peer.peerLinkId)
         if (!enabled) {
             store.setRouteEnabled(false)
             co.twinotify.core.service.SyncService.notifyBluetoothRouteChanged()
             return false
         }
-        val peer = PeerStore.load(ctx)
         val validated = peer != null &&
             store.loadValidated(peer, co.twinotify.core.bluetooth.BluetoothAssociations.currentIds(ctx)) != null
         val allowed = co.twinotify.core.bluetooth.BluetoothAssociationPolicy.canEnableRoute(
@@ -1559,15 +1694,16 @@ class TwinotifyCoreModule internal constructor(
         return store.routeEnabled()
     }
 
-    private suspend fun removeBluetoothAssociation(ctx: Context) {
-        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx)
-        val stored = store.storedAssociationId()
-        val provisional = co.twinotify.core.bluetooth.ProvisionalBluetoothAssociations.current()?.associationId
-        store.clear()
-        co.twinotify.core.bluetooth.ProvisionalBluetoothAssociations.clear()
-        setOfNotNull(stored, provisional).forEach { id ->
-            co.twinotify.core.bluetooth.BluetoothAssociations.disassociate(ctx, id)
+    private suspend fun removeBluetoothAssociation(ctx: Context, peerLinkId: String? = null) {
+        val peer = PeerStore.load(ctx, peerLinkId) ?: return
+        val store = co.twinotify.core.bluetooth.BluetoothBindingStore.forContext(ctx, peer.peerLinkId)
+        val stored = store.prepareRemoval(peer)
+        if (stored != null) {
+            val manager = checkNotNull(co.twinotify.core.bluetooth.BluetoothAssociations.companionDeviceManager(ctx))
+            if (manager.myAssociations.any { it.id == stored }) manager.disassociate(stored)
+            check(manager.myAssociations.none { it.id == stored }) { "bluetooth_disassociation_required" }
         }
+        store.clear()
         co.twinotify.core.service.SyncService.notifyBluetoothRouteChanged()
     }
 
@@ -1630,6 +1766,7 @@ internal data class OfflinePairingPublicStatus(
     val peerDisplayName: String?,
     val sas: String?,
     val completed: Boolean,
+    val peerLinkId: String? = null,
 ) {
     init {
         if (sessionId != null) requireCanonicalSessionId(sessionId)
@@ -1650,7 +1787,7 @@ internal data class OfflinePairingPublicStatus(
         "peerDisplayName" to peerDisplayName,
         "sas" to sas,
         "completed" to completed,
-    )
+    ).apply { if (peerLinkId != null) put("peerLinkId", peerLinkId) }
 }
 
 /** Factory seam retained for deterministic API-controller tests. */
@@ -1667,6 +1804,14 @@ internal interface OfflinePairingRuntimeFactory {
         displayName: String,
         statusSink: (OfflinePairingPublicStatus) -> Unit,
     ): OfflinePairingRuntime
+    fun startForPeer(scope: CoroutineScope, displayName: String, peerLinkId: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit): OfflinePairingRuntime =
+        throw IllegalStateException("selected_peer_pairing_unavailable")
+
+    fun joinForPeer(scope: CoroutineScope, qr: LanPairingQr, displayName: String, peerLinkId: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit): OfflinePairingRuntime =
+        throw IllegalStateException("selected_peer_pairing_unavailable")
+
 }
 
 internal interface OfflinePairingRuntime {
@@ -1695,11 +1840,12 @@ internal class OfflinePairingApiController(
     private var cancellingRuntime: OfflinePairingRuntime? = null
     private var status = idleStatus()
 
-    fun start(displayName: String): String = synchronized(monitor) {
+    fun start(displayName: String, peerLinkId: String? = null): String = synchronized(monitor) {
         ensureNoActiveSession()
         val normalizedName = requireDisplayName(displayName)
         val created = create(OfflinePairingApiRole.INITIATOR, OfflinePairingApiPhase.ADVERTISING) { sink ->
-            factory.start(scope, normalizedName, sink)
+            if (peerLinkId == null) factory.start(scope, normalizedName, sink)
+            else factory.startForPeer(scope, normalizedName, peerLinkId, sink)
         }
         val rawQr = created.qrJson ?: failCreated(created, OfflinePairingApiError.PAIR_RUNTIME_UNAVAILABLE)
         val decoded = decodeQr(rawQr)
@@ -1709,12 +1855,13 @@ internal class OfflinePairingApiController(
         rawQr
     }
 
-    fun join(qrJson: String, displayName: String) = synchronized(monitor) {
+    fun join(qrJson: String, displayName: String, peerLinkId: String? = null) = synchronized(monitor) {
         ensureNoActiveSession()
         val qr = decodeQr(qrJson)
         val normalizedName = requireDisplayName(displayName)
         create(OfflinePairingApiRole.JOINER, OfflinePairingApiPhase.RESOLVING, qr.displayName) { sink ->
-            factory.join(scope, qr, normalizedName, sink)
+            if (peerLinkId == null) factory.join(scope, qr, normalizedName, sink)
+            else factory.joinForPeer(scope, qr, normalizedName, peerLinkId, sink)
         }
         Unit
     }

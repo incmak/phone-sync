@@ -148,7 +148,9 @@ object MirrorPoster {
         val localTag = co.twinotify.core.service.NotificationStateReducer.stableMirrorTag(post.canon_id)
         val notificationManager = NotificationManagerCompat.from(ctx)
         if (notificationManager.areNotificationsEnabled()) {
-            notificationManager.notify(localTag, localId, buildNotification(ctx, post, localId, localTag))
+            RepeatProtection.present(ctx, post, "legacy:${post.ts}", localTag, localId, legacy = true) {
+                notificationManager.notify(localTag, localId, buildNotification(ctx, post, localId, localTag))
+            }
         }
 
         val dao = NotificationDb.get(ctx).notificationMapDao()
@@ -164,7 +166,7 @@ object MirrorPoster {
 
     private fun extractOrigin(canonId: String): String = canonId.substringBefore(':')
 
-    private fun stableLocalId(canonId: String): Int {
+    internal fun stableLocalId(canonId: String): Int {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
             .digest(canonId.toByteArray(Charsets.UTF_8))
         val raw = ((digest[0].toInt() and 0xff) shl 24) or

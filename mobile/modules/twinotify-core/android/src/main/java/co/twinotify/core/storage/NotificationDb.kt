@@ -287,6 +287,54 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
     }
 }
 
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("""CREATE TABLE IF NOT EXISTS peer_link (
+            peerLinkId TEXT NOT NULL PRIMARY KEY, deviceId TEXT NOT NULL,
+            encPubkey BLOB NOT NULL, signPubkey BLOB NOT NULL, displayName TEXT,
+            relayUrl TEXT, relayPairId TEXT, preferLan INTEGER NOT NULL,
+            lanBindingId TEXT, relayRevocationRequired INTEGER NOT NULL,
+            lifecycle TEXT NOT NULL, createdAt INTEGER NOT NULL)""")
+        db.execSQL("CREATE UNIQUE INDEX index_peer_link_deviceId ON peer_link(deviceId)")
+        db.execSQL("CREATE UNIQUE INDEX index_peer_link_relayPairId ON peer_link(relayPairId)")
+        db.execSQL("""CREATE TABLE IF NOT EXISTS pending_relay_revocation (
+            revocationId TEXT NOT NULL PRIMARY KEY, peerLinkId TEXT NOT NULL, localDeviceId TEXT NOT NULL,
+            relayUrl TEXT NOT NULL, relayPairId TEXT, createdAt INTEGER NOT NULL)""")
+        db.execSQL("CREATE INDEX index_pending_relay_revocation_peerLinkId ON pending_relay_revocation(peerLinkId)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS peer_import_state (id INTEGER NOT NULL PRIMARY KEY, localDeviceId TEXT NOT NULL)")
+        db.execSQL("ALTER TABLE outbound_message ADD COLUMN peerLinkId TEXT NOT NULL DEFAULT 'legacy'")
+        db.execSQL("ALTER TABLE canonical_notification_state ADD COLUMN peerLinkId TEXT")
+        db.execSQL("ALTER TABLE action_invocation ADD COLUMN peerLinkId TEXT NOT NULL DEFAULT 'legacy'")
+        db.execSQL("ALTER TABLE inbound_message RENAME TO inbound_message_v11")
+        db.execSQL("""CREATE TABLE inbound_message (
+            msgId TEXT NOT NULL, originDevice TEXT NOT NULL, envelopeSha256 TEXT NOT NULL,
+            eventType TEXT NOT NULL, canonId TEXT, sequence INTEGER, outcome TEXT NOT NULL,
+            committedAt INTEGER NOT NULL, appliedAt INTEGER, receiptMsgId TEXT, relayAckState TEXT NOT NULL,
+            peerLinkId TEXT NOT NULL DEFAULT 'legacy', PRIMARY KEY(peerLinkId,msgId))""")
+        db.execSQL("INSERT INTO inbound_message SELECT *, 'legacy' FROM inbound_message_v11")
+        db.execSQL("DROP TABLE inbound_message_v11")
+        db.execSQL("CREATE INDEX index_inbound_message_outcome ON inbound_message(outcome)")
+        db.execSQL("CREATE INDEX index_inbound_message_canonId ON inbound_message(canonId)")
+        db.execSQL("ALTER TABLE snapshot_stage RENAME TO snapshot_stage_v11")
+        db.execSQL("""CREATE TABLE snapshot_stage (
+            snapshotId TEXT NOT NULL, canonId TEXT NOT NULL, sequence INTEGER NOT NULL,
+            payloadJson TEXT NOT NULL, receivedAt INTEGER NOT NULL,
+            peerLinkId TEXT NOT NULL DEFAULT 'legacy', PRIMARY KEY(peerLinkId,snapshotId,canonId))""")
+        db.execSQL("INSERT INTO snapshot_stage SELECT *, 'legacy' FROM snapshot_stage_v11")
+        db.execSQL("DROP TABLE snapshot_stage_v11")
+        db.execSQL("ALTER TABLE action_execution RENAME TO action_execution_v11")
+        db.execSQL("""CREATE TABLE action_execution (
+            invocationId TEXT NOT NULL, canonId TEXT NOT NULL, actionId TEXT NOT NULL, state TEXT NOT NULL,
+            resultStatus TEXT, claimedAt INTEGER NOT NULL, completedAt INTEGER,
+            peerLinkId TEXT NOT NULL DEFAULT 'legacy', PRIMARY KEY(peerLinkId,invocationId))""")
+        db.execSQL("INSERT INTO action_execution SELECT *, 'legacy' FROM action_execution_v11")
+        db.execSQL("DROP TABLE action_execution_v11")
+        db.execSQL("CREATE INDEX index_action_execution_state ON action_execution(state)")
+        db.execSQL("CREATE INDEX index_action_execution_claimedAt ON action_execution(claimedAt)")
+        db.execSQL("CREATE INDEX index_action_execution_completedAt ON action_execution(completedAt)")
+    }
+}
+
 object NotificationDb {
     @Volatile private var instance: NotificationDbImpl? = null
 
@@ -311,6 +359,7 @@ object NotificationDb {
             MIGRATION_8_9,
             MIGRATION_9_10,
             MIGRATION_10_11,
+            MIGRATION_11_12,
         ).build().also { instance = it }
     }
 }
@@ -335,10 +384,14 @@ object NotificationDb {
         ActionInvocation::class,
         ActionExecution::class,
         NotificationDetailCache::class,
+        PeerLink::class,
+        PendingRelayRevocation::class,
+        PeerImportState::class,
     ],
-    version = 11,
+    version = 12,
 )
 abstract class NotificationDbImpl : RoomDatabase() {
+    abstract fun peerLinkDao(): PeerLinkDao
     abstract fun notificationMapDao(): NotificationMapDao
     abstract fun outboundEventDao(): OutboundEventDao
     abstract fun reliableDeliveryDao(): ReliableDeliveryDao

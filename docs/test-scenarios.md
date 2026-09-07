@@ -5,6 +5,19 @@
 > satisfy the `PHY-*` protocol at the end of this document and pass
 > `make release-audit RELEASE_EVIDENCE_DIR=<private-directory>`.
 
+## Repeat protection — Android receiver
+
+Repeat protection is on by default in Settings. It is local to each receiving Android phone and keys by the source device plus notification identity, not by app. Typed call-state mirrors are unaffected.
+
+1. Mirror a notification that updates its text every few seconds (for example, a VPN speed display). On the third distinct update within 15 seconds, its mirror disappears for one minute. The source notification and other notifications from the same app remain visible.
+2. Stop updating during that minute. The latest notification should return at expiry without requiring another source update. Cancel it on the source during the snooze instead: it must stay gone.
+3. Repeat with updates continuing throughout the minute, with no gap over 15 seconds. The mirror stays blocked and one **Repeating notification turned off** notice appears. Continuing updates must not create more notices. Restart the receiver: the block must remain.
+4. Tap **Undo** in the notice. The latest active notification returns, and that identity is exempt from repeat protection. If the notice was dismissed, use **Settings → Re-enable blocked notifications**. Other notifications remain independently protected.
+5. Turn **Repeat protection** off while a notification is snoozed or blocked. Active hidden mirrors return and rapid updates are no longer suppressed. Turn it back on to start fresh detection (including for previous exemptions).
+6. Reconnect the listener during a snooze or block. Confirm that its missing local mirror does not produce a cancellation on the source phone. Retried delivery of the same revision and action-status refreshes must not count toward the three-update threshold.
+
+The process timer targets one minute; Android may defer the fallback alarm while the app is suspended. Delayed recovery must not block a burst that has already stopped. This feature controls local notification presentation; encrypted delivery and receipts continue normally.
+
 ## Phase 1 — Smoke Test
 
 _(Phase 1 smoke test procedure documented separately.)_

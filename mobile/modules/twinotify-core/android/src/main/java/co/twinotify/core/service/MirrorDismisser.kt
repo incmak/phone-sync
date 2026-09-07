@@ -25,6 +25,7 @@ object MirrorDismisser {
         NotificationListenerBridge.cancelSource(notificationKey)
 
     suspend fun dismiss(ctx: Context, canonId: String) {
+        RepeatProtection.cancelled(ctx, canonId)
         val dao = NotificationDb.get(ctx).notificationMapDao()
         val local = dao.lookupLocalByCanonId(canonId) ?: return
         // Tombstone BEFORE cancel — prevents the listener's onNotificationRemoved from

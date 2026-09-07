@@ -31,6 +31,28 @@ class BluetoothBindingStoreTest {
         return BluetoothBindingStore(PreferenceDataStoreFactory.create(scope = storeScope) { file })
     }
 
+    @Test
+    fun perLinkImportAndRemovalPreserveTheOtherAssociation() = runTest {
+        val file = File(temporaryFolder.root, "shared.preferences_pb")
+        val data = PreferenceDataStoreFactory.create(scope = storeScope) { file }
+        val legacy = BluetoothBindingStore(data)
+        legacy.save(BluetoothBinding(41, PEER_ID, PEER_DIGEST))
+        legacy.setRouteEnabled(true)
+        val first = BluetoothBindingStore(data, "first")
+        val second = BluetoothBindingStore(data, "second")
+        val firstPeer = PeerRecord(PEER_ID, ByteArray(32), PEER_KEY, peerLinkId = "first")
+        val secondPeer = PeerRecord("other", ByteArray(32), OTHER_KEY, peerLinkId = "second")
+        assertNull(second.loadValidated(secondPeer, setOf(41)))
+        assertEquals(41, assertNotNull(first.loadValidated(firstPeer, setOf(41))).associationId)
+        assertTrue(first.routeEnabled())
+        second.save(BluetoothBinding(42, "other", BluetoothBinding.signingKeyDigest(OTHER_KEY)))
+        second.setRouteEnabled(true)
+        first.clear()
+        assertNull(first.loadValidated(firstPeer, setOf(41, 42)))
+        assertEquals(42, assertNotNull(second.loadValidated(secondPeer, setOf(41, 42))).associationId)
+        assertTrue(second.routeEnabled())
+    }
+
     @After
     fun tearDown() {
         storeScope.cancel()

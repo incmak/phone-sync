@@ -44,8 +44,9 @@ func (p ScenarioPlan) Actions() []string {
 
 var plans = map[string][]Step{
 	"post": {
-		{Action: "A.shell.post:n1", Predicate: "A.outbox.nonzero"},
-		{Predicate: "B.mirror.active:n1"},
+		{Action: "A.shell.post:n1", Predicate: "A.tracked.sequence:1"},
+		{Predicate: "B.tracked.sequence:1"},
+		{Predicate: "A.peer-receipt.delta:1"},
 		{Predicate: "A.outbox.zero"},
 	},
 	"update": {
@@ -362,7 +363,7 @@ func ParseObservation(payload []byte) (Observation, error) {
 		return Observation{}, fmt.Errorf("decode E2E state: %w", err)
 	}
 	allowedRoot := map[string]bool{
-		"device_id_hash": true, "paired_peer_hash": true,
+		"device_id_hash": true, "paired_peer_hash": true, "peer_links": true,
 		"offline_pairing": true, "health": true, "route": true, "route_evidence": true,
 		"outbox_bytes": true, "active_outbox": true, "active_inbound": true,
 		"pending_materialization": true, "canonical": true, "activity": true,
@@ -394,6 +395,28 @@ func ParseObservation(payload []byte) (Observation, error) {
 		var value string
 		if err := json.Unmarshal(raw, &value); err != nil || !validHash(value) {
 			return Observation{}, fmt.Errorf("E2E state malformed %s", key)
+		}
+	}
+	if links, ok := root["peer_links"]; ok {
+		var peers []map[string]json.RawMessage
+		if json.Unmarshal(links, &peers) != nil || peers == nil || len(peers) > 2 {
+			return Observation{}, errors.New("E2E state malformed peer_links")
+		}
+		seen := map[string]bool{}
+		for _, peer := range peers {
+			for key := range peer {
+				if key != "peer_link_id" && key != "device_id_hash" && key != "lifecycle" && key != "route" {
+					return Observation{}, errors.New("E2E state unknown peer field")
+				}
+			}
+			var link, deviceHash, lifecycle string
+			if json.Unmarshal(peer["peer_link_id"], &link) != nil ||
+				!regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).MatchString(link) ||
+				json.Unmarshal(peer["device_id_hash"], &deviceHash) != nil || !validHash(deviceHash) || seen[deviceHash] ||
+				json.Unmarshal(peer["lifecycle"], &lifecycle) != nil || (lifecycle != "ACTIVE" && lifecycle != "REMOVING") {
+				return Observation{}, errors.New("E2E state malformed peer link")
+			}
+			seen[deviceHash] = true
 		}
 	}
 	var raw struct {
@@ -579,6 +602,8 @@ type canonicalObservation struct {
 	SemanticState      string  `json:"-"`
 	MirrorIdentityHash string  `json:"mirror_identity_hash,omitempty"`
 	ActionSetHash      string  `json:"action_set_hash,omitempty"`
+	FixtureTagHash     string  `json:"fixture_tag_hash,omitempty"`
+	Delivered          *bool   `json:"delivered,omitempty"`
 }
 
 var canonicalHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -592,6 +617,7 @@ func parseCanonicalObservation(payload json.RawMessage) (canonicalObservation, e
 		"canon_id_hash": true, "state": true, "sequence": true,
 		"materialized_sequence": true, "semantic_state": true,
 		"mirror_identity_hash": true, "action_set_hash": true,
+		"fixture_tag_hash": true, "delivered": true,
 	}
 	for key := range fields {
 		if !allowed[key] {
@@ -612,6 +638,7 @@ func parseCanonicalObservation(payload json.RawMessage) (canonicalObservation, e
 		return canonicalObservation{}, errors.New("E2E state malformed canonical observation")
 	}
 	if (item.MirrorIdentityHash != "" && !canonicalHashPattern.MatchString(item.MirrorIdentityHash)) ||
+		(item.FixtureTagHash != "" && !canonicalHashPattern.MatchString(item.FixtureTagHash)) ||
 		(item.ActionSetHash != "" && !canonicalHashPattern.MatchString(item.ActionSetHash)) {
 		return canonicalObservation{}, errors.New("E2E state malformed canonical action hashes")
 	}

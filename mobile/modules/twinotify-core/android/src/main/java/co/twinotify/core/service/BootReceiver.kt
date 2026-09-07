@@ -21,6 +21,7 @@ class BootReceiver : BroadcastReceiver() {
         scope.launch {
             try {
                 TransportRecoveryAuthority.recover(ctx.applicationContext, trigger)
+                RepeatProtection.recoverSafely(ctx.applicationContext)
             } finally {
                 pendingResult.finish()
             }

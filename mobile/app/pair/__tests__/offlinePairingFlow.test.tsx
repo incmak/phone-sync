@@ -126,6 +126,24 @@ describe('offline pairing UI behavior', () => {
     log.mockRestore();
   });
 
+  test('holds a failed relay scan until explicit retry instead of looping on camera frames', async () => {
+    global.__SET_SEARCH_PARAMS__({ mode: 'relay' });
+    global.__TWINOTIFY_CORE__.sendPeerHello.mockRejectedValue(new Error('pair/session HTTP 404'));
+    const data = JSON.stringify({ relay_url: 'https://relay.example.test', device_id: 'mac',
+      enc_pubkey: 'enc', sign_pubkey: 'sign', pair_token: 'token' });
+    renderScreen(<ScanScreen />);
+    const camera = await screen.findByTestId('camera-view');
+    fireEvent(camera, 'barcodeScanned', { data });
+    expect(await screen.findByText('This relay needs an update before you can add another device. Your existing connection is unchanged.')).toBeTruthy();
+    for (let i = 0; i < 20; i++) fireEvent(camera, 'barcodeScanned', { data });
+    expect(global.__TWINOTIFY_CORE__.sendPeerHello).toHaveBeenCalledTimes(1);
+    expect(global.__TEST_ROUTER__.push).not.toHaveBeenCalled();
+    fireEvent.press(screen.getByRole('button', { name: 'Try again' }));
+    fireEvent(camera, 'barcodeScanned', { data });
+    await waitFor(() => expect(global.__TWINOTIFY_CORE__.sendPeerHello).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('button', { name: 'Go back' })).toBeTruthy();
+  });
+
   test('passes only the scanned text to native nearby validation', async () => {
     const scannedText = JSON.stringify({ fixture: 'native-validates-this' });
     global.__SET_SEARCH_PARAMS__({ mode: 'nearby' });

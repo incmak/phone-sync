@@ -126,7 +126,11 @@ object PairProtocol {
         bSignSecret: ByteArray,
         confirmationSig: ByteArray,
         debug: Boolean = false,
-    ) {
+    ): String {
+        val confirmationMessage = token.toByteArray() + aEncPub + aSignPub + bEncPub + bSignPub
+        require(confirmationSig.size == Sign.BYTES && aSignPub.size == Sign.PUBLICKEYBYTES &&
+            sodium.crypto_sign_verify_detached(confirmationSig, confirmationMessage,
+                confirmationMessage.size.toLong(), aSignPub) == 0) { "invalid_initiator_confirmation" }
         val responderSig = signDetached(
             PairConfirmation.responderMessage(
                 token,
@@ -147,8 +151,31 @@ object PairProtocol {
             "responder_confirmation_sig" to Base64.getEncoder().encodeToString(responderSig),
         )).toString().toRequestBody(JSON)
         val resp = http.newCall(Request.Builder().url(PairingRelayEndpoint.http(relayUrl, "pair", "complete", debug = debug)).post(body).build()).execute()
-        check(resp.isSuccessful) { "complete HTTP ${resp.code}" }
-        resp.close()
+        return resp.use {
+            check(it.isSuccessful) { "complete HTTP ${it.code}" }
+            requirePairId(JSONObject(checkNotNull(it.body).string()).getString("pair_id"))
+        }
+    }
+
+    internal fun requirePairId(value: String): String {
+        require(java.util.UUID.fromString(value).toString() == value.lowercase()) { "invalid_pair_id" }
+        return value
+    }
+
+    /** Resolve legacy membership before another pair makes implicit selection ambiguous. */
+    fun sessionPairId(relayUrl: String, bearerJwt: String, deviceId: String, peerDeviceId: String,
+        debug: Boolean = false): String {
+        val request = Request.Builder()
+            .url(PairingRelayEndpoint.http(relayUrl, "pair", "session", debug = debug))
+            .header("Authorization", "Bearer $bearerJwt").get().build()
+        return http.newCall(request).execute().use {
+            check(it.isSuccessful) { "pair/session HTTP ${it.code}" }
+            val body = JSONObject(checkNotNull(it.body).string())
+            check(body.getString("device_id") == deviceId && body.getString("peer_device_id") == peerDeviceId) {
+                "pair_session_identity_mismatch"
+            }
+            requirePairId(body.getString("pair_id"))
+        }
     }
 
     private fun signDetached(message: ByteArray, secretKey: ByteArray): ByteArray {

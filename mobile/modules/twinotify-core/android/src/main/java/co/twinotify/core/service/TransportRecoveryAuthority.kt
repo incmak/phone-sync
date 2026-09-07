@@ -161,7 +161,8 @@ internal object TransportRecoveryAuthority {
     ): RecoveryExecution = mutex.withLock {
         val appContext = context.applicationContext
         val config = ServiceConfigStore.read(appContext)
-        val peer = PeerStore.load(appContext)
+        co.twinotify.core.pairing.PeerRemovalManager.resumeInBackground(appContext)
+        val peers = PeerStore.list(appContext)
         val listenerPermission = notificationListenerAccessAvailable(appContext)
         val postPermission = effectivePostAvailability(appContext)
         val serviceActive = SyncService.isActive()
@@ -176,8 +177,8 @@ internal object TransportRecoveryAuthority {
         val decision = RecoveryPolicy.decide(
             RecoveryInputs(
                 persisted = config,
-                paired = peer != null,
-                lanBound = peer?.lanBindingId != null,
+                paired = peers.isNotEmpty(),
+                lanBound = peers.any { it.lanBindingId != null },
                 listenerPermission = listenerPermission,
                 postPermission = postPermission,
                 serviceActive = serviceActive,

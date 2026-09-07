@@ -498,9 +498,9 @@ class InboundDispatcherControlTest {
         assertTrue(callBranch.contains("dispatchDesiredStateAfterCommit(stateMutex, materializationRequester)"))
 
         val serviceSource = File(sourceRoot, "SyncService.kt").readText()
-        val onCreate = serviceSource.substringAfter("override fun onCreate()").substringBefore("override fun onStartCommand")
-        assertTrue(onCreate.contains("materializationRequester = MaterializationRequester"))
-        assertTrue(onCreate.contains("requestPendingMaterialization(MaterializationTrigger.ROUTINE)"))
+        val peerRuntime = serviceSource.substringAfter("private suspend fun runPeerTransport(").substringBefore("private fun buildRelayAttachProcessor")
+        assertTrue(peerRuntime.contains("materializationRequester = MaterializationRequester"))
+        assertTrue(peerRuntime.contains("requestPendingMaterialization(MaterializationTrigger.ROUTINE)"))
         assertTrue(serviceSource.contains("ProcessNotificationActionRegistry.registry.clear()"))
         assertTrue(dispatcherSource.contains("if (inner.type == \"notif.action.invoke\")"))
         assertTrue(dispatcherSource.indexOf("if (inner.type == \"notif.action.invoke\")") <

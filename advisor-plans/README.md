@@ -72,6 +72,7 @@ APKs are QA artifacts, not protected release candidates.
 | 028 | Close or fail closed on high mobile dependency advisories | P1 | M | 024 | DONE: compatible refresh and fail-closed gate landed; Plan 029 completed the approved Expo 57 migration; fresh full-tree audit reports 0 high/critical advisories |
 | 029 | Upgrade the Expo toolchain to close upstream advisories | P1 | L | 028 | DONE: Expo 57 graph has 0 high/critical advisories; host/mobile/native gates and review green; physical two-phone smoke remains pending |
 | 030 | Make root agent guidance match the live repository | P1 | S | none | DONE: root guidance contract, mutation self-tests, host gate, and independent truth review recorded in `.omo/evidence/plan-030/`; physical and protected-release truth preserved |
+| 031 | [Native macOS receiver and three-device delivery](031-macos-receiver-three-device.md) | P1 | XL | none | IN PROGRESS: contract and Swift foundation work; product/device gates open |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a one-line reason, or
 REJECTED with a one-line rationale.

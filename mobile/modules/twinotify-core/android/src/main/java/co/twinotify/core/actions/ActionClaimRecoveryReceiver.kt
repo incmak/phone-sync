@@ -58,15 +58,18 @@ internal object ActionClaimRecoveryRuntime {
     suspend fun recover(context: Context): ActionClaimRecoverySummary {
         val app = context.applicationContext
         val dao = NotificationDb.get(app).reliableDeliveryDao()
-        val encoder = ActionControlEncoder(app)
-        val callEncoder = CallControlEncoder(app)
-        return ActionClaimRecovery(
-            store = DaoActionClaimRecoveryStore(dao),
-            resultEncoder = ActionResultRowEncoder(encoder::encodeResult),
-            callResultEncoder = CallControlResultRowEncoder(callEncoder::encodeResult),
-            scheduler = PersistentActionClaimWakeScheduler(app),
-            signalTransport = { SyncService.notifyActionOutboxChanged(app) },
-        ).recover()
+        val results = co.twinotify.core.storage.PeerStore.list(app).map { peer ->
+            val encoder = ActionControlEncoder(app, peer.peerLinkId)
+            val callEncoder = CallControlEncoder(app, peer.peerLinkId)
+            ActionClaimRecovery(
+                store = DaoActionClaimRecoveryStore(dao, peer.peerLinkId),
+                resultEncoder = ActionResultRowEncoder(encoder::encodeResult),
+                callResultEncoder = CallControlResultRowEncoder(callEncoder::encodeResult),
+                scheduler = PersistentActionClaimWakeScheduler(app),
+                signalTransport = { SyncService.notifyActionOutboxChanged(app) },
+            ).recover()
+        }
+        return ActionClaimRecoverySummary(results.sumOf { it.finalized }, results.mapNotNull { it.nextDueAt }.minOrNull())
     }
 
     private fun persistAlarm(context: Context, dueAt: Long) {

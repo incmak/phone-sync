@@ -67,7 +67,7 @@ internal fun outboundUiActivity(
  * The application capture boundary. Preparation is independent of the listener lifecycle; the
  * final canonical-state and outbox mutation is one Room transaction in [ReliableDeliveryDao].
  */
-class DurableCapturePersister(context: Context) : CapturePersister {
+class DurableCapturePersister(context: Context, private val selectedPeerLinkId: String? = null) : CapturePersister {
     private val appContext = context.applicationContext
     private val dao = NotificationDb.get(appContext).reliableDeliveryDao()
     private val actionDescriptorFactory = ActionDescriptorFactory()
@@ -79,11 +79,16 @@ class DurableCapturePersister(context: Context) : CapturePersister {
     )
     private val history = HistoryRepository(appContext)
 
-    override suspend fun persist(command: CaptureCommand): CapturePersistResult {
-        val peer = PeerStore.load(appContext)
-            ?: throw CaptureNotPairedException("capture deferred until a peer is paired")
+    override suspend fun persist(command: CaptureCommand): CapturePersistResult =
+        co.twinotify.core.service.ProcessMaterializationPassCoordinator.serialize { persistLocked(command) }
+
+    private suspend fun persistLocked(command: CaptureCommand): CapturePersistResult {
         val originDevice = DeviceIdentity.getOrCreate(appContext)
         val current = dao.canonical(command.canonId)
+        val peers = PeerStore.list(appContext).filter {
+            current == null || current.originDevice == originDevice || it.deviceId == current.originDevice
+        }
+        if (peers.isEmpty()) throw CaptureNotPairedException("capture deferred until its recipient is paired")
         val eventType = when (command) {
             is PostCommand -> if (current?.state == "ACTIVE") "notif.update" else "notif.post"
             is RemoveCommand -> "notif.cancel"
@@ -135,26 +140,12 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             expiresAt = expiresAt,
             payloadJson = payloadJson,
         )
-        val innerJson = captureValidated { ProtocolJson.encodeInner(inner) }
-        val (box, _) = CryptoStore.loadOrGenerate(appContext)
-        val nonce = NonceSource.next(appContext)
-        val ciphertext = Encrypter.encrypt(
-            plain = innerJson.toByteArray(Charsets.UTF_8),
-            nonce = nonce,
-            peerPubkey = peer.encPubkey,
-            ownSecret = box.secretKey,
-        )
-        val envelope = EncryptedEnvelope(
-            version = ProtocolJson.VERSION,
-            msgId = msgId,
-            originDevice = originDevice,
-            createdAt = now,
-            nonceB64 = Base64.encodeToString(nonce, Base64.NO_WRAP),
-            ciphertextB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP),
-        )
-        val envelopeJson = captureValidated { ProtocolJson.encodeEnvelope(envelope) }
+        val rows = peers.mapIndexed { index, peer ->
+            sealOutbound(inner.copy(msgId = if (index == 0) msgId else UUID.randomUUID().toString()), peer, requiresReceipt = true)
+        }
         val desired = CanonicalNotificationState(
             canonId = command.canonId,
+            peerLinkId = current?.peerLinkId,
             // A peer mirror may be cancelled by the local user without transferring canonical
             // ownership, so the source owner remains stable on both devices.
             originDevice = current?.originDevice ?: originDevice,
@@ -168,30 +159,11 @@ class DurableCapturePersister(context: Context) : CapturePersister {
                 ?: current?.sourceNotificationKey,
             mirrorLocalId = current?.mirrorLocalId,
             mirrorLocalTag = current?.mirrorLocalTag,
-            peerCancelPending = current?.peerCancelPending ?: false,
+            peerCancelPending = false,
             updatedAt = now,
         )
-        val row = OutboundMessage(
-            msgId = msgId,
-            canonId = command.canonId,
-            sequence = sequence,
-            eventType = eventType,
-            protocolVersion = ProtocolJson.VERSION,
-            envelopeJson = envelopeJson,
-            envelopeSha256 = sha256(envelopeJson),
-            byteSize = envelopeJson.toByteArray(Charsets.UTF_8).size.toLong(),
-            createdAt = now,
-            expiresAt = expiresAt,
-            custodyAcceptedAt = null,
-            custodyRoute = null,
-            attempts = 0,
-            nextAttemptAt = now,
-            state = "NEW",
-            lastError = null,
-            requiresPeerReceipt = true,
-        )
-        val uiActivity = outboundUiActivity(command, current?.desiredPayloadJson, msgId, now)
-        when (val result = dao.commitCapturedState(desired, row, uiActivity)) {
+        val activities = rows.map { outboundUiActivity(command, current?.desiredPayloadJson, it.msgId, now) }
+        when (val result = dao.commitCapturedFanout(desired, rows, activities)) {
             is OutboundStateCommitResult.Committed -> {
                 if (command is PostCommand) {
                     runCatching { history.record("outbound:$msgId", payloadJson, now) }
@@ -225,8 +197,8 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         event: CallStateEvent,
         expectedLocalOrigin: String?,
     ): CallStatePersistResult {
-        val peer = PeerStore.load(appContext)
-            ?: throw CaptureNotPairedException("call capture deferred until a peer is paired")
+        val peers = PeerStore.list(appContext)
+        if (peers.isEmpty()) throw CaptureNotPairedException("call capture deferred until a peer is paired")
         val originDevice = DeviceIdentity.getOrCreate(appContext)
         val canonId = "call:${event.callSessionId}"
         val current = dao.canonical(canonId)
@@ -243,43 +215,9 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             expiresAt = now + RETENTION_MS,
             payloadJson = payloadJson,
         )
-        val (box, _) = CryptoStore.loadOrGenerate(appContext)
-        val nonce = NonceSource.next(appContext)
-        val ciphertext = Encrypter.encrypt(
-            plain = ProtocolJson.encodeInner(inner).toByteArray(Charsets.UTF_8),
-            nonce = nonce,
-            peerPubkey = peer.encPubkey,
-            ownSecret = box.secretKey,
-        )
-        val envelopeJson = ProtocolJson.encodeEnvelope(
-            EncryptedEnvelope(
-                version = ProtocolJson.VERSION,
-                msgId = msgId,
-                originDevice = originDevice,
-                createdAt = now,
-                nonceB64 = Base64.encodeToString(nonce, Base64.NO_WRAP),
-                ciphertextB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP),
-            ),
-        )
-        val row = OutboundMessage(
-            msgId = msgId,
-            canonId = canonId,
-            sequence = event.sequence,
-            eventType = "call.state",
-            protocolVersion = ProtocolJson.VERSION,
-            envelopeJson = envelopeJson,
-            envelopeSha256 = sha256(envelopeJson),
-            byteSize = envelopeJson.toByteArray(Charsets.UTF_8).size.toLong(),
-            createdAt = now,
-            expiresAt = now + RETENTION_MS,
-            custodyAcceptedAt = null,
-            custodyRoute = null,
-            attempts = 0,
-            nextAttemptAt = now,
-            state = "NEW",
-            lastError = null,
-            requiresPeerReceipt = true,
-        )
+        val rows = peers.mapIndexed { index, peer ->
+            sealOutbound(inner.copy(msgId = if (index == 0) msgId else UUID.randomUUID().toString()), peer, requiresReceipt = true)
+        }
         val desired = CanonicalNotificationState(
             canonId = canonId,
             originDevice = expectedLocalOrigin ?: current?.originDevice ?: originDevice,
@@ -292,7 +230,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             sourceNotificationKey = null,
             mirrorLocalId = current?.mirrorLocalId,
             mirrorLocalTag = current?.mirrorLocalTag,
-            peerCancelPending = current?.peerCancelPending ?: false,
+            peerCancelPending = false,
             updatedAt = now,
         )
         if (expectedLocalOrigin == null) {
@@ -307,7 +245,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
                 route = null,
                 occurredAt = now,
             )
-            return when (val result = dao.commitCapturedState(desired, row, uiActivity)) {
+            return when (val result = dao.commitCapturedFanout(desired, rows, rows.map { uiActivity.copy(eventId = "outbound:${it.msgId}", msgId = it.msgId) })) {
                 is OutboundStateCommitResult.Committed -> {
                     callCapabilityCommitter.afterCommit(
                         canonId,
@@ -332,7 +270,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
             route = null,
             occurredAt = now,
         )
-        return when (val result = dao.commitRecoveredCallState(desired, row, expectedLocalOrigin, uiActivity)) {
+        return when (val result = dao.commitRecoveredCallFanout(desired, rows, expectedLocalOrigin, rows.map { uiActivity.copy(eventId = "outbound:${it.msgId}", msgId = it.msgId) })) {
             is CallRecoveryCommitResult.Committed -> {
                 callCapabilityCommitter.afterCommit(
                     canonId,
@@ -358,7 +296,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         timestamp: Long,
         msgId: String,
     ): String {
-        val peer = PeerStore.load(appContext)
+        val peer = PeerStore.load(appContext, selectedPeerLinkId)
             ?: throw CaptureNotPairedException("unpair capture requires a paired peer")
         val createdAt = timestamp.coerceAtLeast(0L).coerceAtLeast(System.currentTimeMillis())
         val expiresAt = createdAt + RETENTION_MS
@@ -392,6 +330,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         )
         dao.insertOutbound(
             OutboundMessage(
+                peerLinkId = peer.peerLinkId,
                 msgId = msgId,
                 canonId = null,
                 sequence = null,
@@ -474,7 +413,7 @@ class DurableCapturePersister(context: Context) : CapturePersister {
         sequence: Long?,
         payloadJson: String,
     ) {
-        val peer = PeerStore.load(appContext)
+        val peer = PeerStore.load(appContext, selectedPeerLinkId)
             ?: throw CaptureNotPairedException("control event deferred until a peer is paired")
         val createdAt = System.currentTimeMillis().coerceAtLeast(0L)
         val expiresAt = createdAt + RETENTION_MS
@@ -498,8 +437,8 @@ class DurableCapturePersister(context: Context) : CapturePersister {
                 ciphertextB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP),
             ),
         )
-        dao.insertOutbound(
-            OutboundMessage(
+        val row = OutboundMessage(
+                peerLinkId = peer.peerLinkId,
                 msgId = msgId,
                 canonId = canonId,
                 sequence = sequence,
@@ -520,7 +459,35 @@ class DurableCapturePersister(context: Context) : CapturePersister {
                 // validates them atomically; retaining each control until a peer receipt would
                 // create a receipt recursion with no user-visible notification state.
                 requiresPeerReceipt = false,
-            ),
+            )
+        // Retry admission with the exact sealed envelope; the background snapshot worker is
+        // separate from receipt processing and the coordinator-owned outbox drainer.
+        while (true) {
+            try {
+                dao.insertOutbound(row)
+                return
+            } catch (_: co.twinotify.core.storage.OutboundCapacityException) {
+                kotlinx.coroutines.delay(250L)
+            }
+        }
+    }
+
+    private suspend fun sealOutbound(inner: InnerEventV2, peer: co.twinotify.core.storage.PeerRecord, requiresReceipt: Boolean): OutboundMessage {
+        val (box, _) = CryptoStore.loadOrGenerate(appContext)
+        val nonce = NonceSource.next(appContext)
+        val ciphertext = Encrypter.encrypt(captureValidated { ProtocolJson.encodeInner(inner) }.toByteArray(Charsets.UTF_8), nonce, peer.encPubkey, box.secretKey)
+        val envelope = captureValidated { ProtocolJson.encodeEnvelope(EncryptedEnvelope(
+            version = ProtocolJson.VERSION, msgId = inner.msgId, originDevice = inner.originDevice,
+            createdAt = inner.createdAt, nonceB64 = Base64.encodeToString(nonce, Base64.NO_WRAP),
+            ciphertextB64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP),
+        )) }
+        return OutboundMessage(
+            msgId = inner.msgId, canonId = inner.canonId, sequence = inner.sequence, eventType = inner.type,
+            protocolVersion = ProtocolJson.VERSION, envelopeJson = envelope, envelopeSha256 = sha256(envelope),
+            byteSize = envelope.toByteArray(Charsets.UTF_8).size.toLong(), createdAt = inner.createdAt,
+            expiresAt = inner.expiresAt, custodyAcceptedAt = null, custodyRoute = null, attempts = 0,
+            nextAttemptAt = inner.createdAt, state = "NEW", lastError = null, requiresPeerReceipt = requiresReceipt,
+            peerLinkId = peer.peerLinkId,
         )
     }
 

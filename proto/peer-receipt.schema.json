@@ -9,5 +9,11 @@
     "status": { "type": "string", "enum": ["applied", "expired", "rejected", "decrypt_failed"] },
     "reason": { "type": "string", "maxLength": 128 }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "enum": ["rejected", "decrypt_failed"] } } },
+      "then": { "required": ["reason"], "properties": { "reason": { "minLength": 1 } } }
+    }
+  ],
   "additionalProperties": false
 }

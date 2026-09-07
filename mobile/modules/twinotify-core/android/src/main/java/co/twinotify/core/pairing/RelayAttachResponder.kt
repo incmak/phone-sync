@@ -33,7 +33,7 @@ interface RelayAttachResponderClient {
         initiatorEncPubkey: ByteArray,
         initiatorSignPubkey: ByteArray,
         confirmationSig: ByteArray,
-    )
+    ): String
 }
 
 /**
@@ -60,7 +60,7 @@ class DefaultRelayAttachProcessor(
         initiatorSignPubkey: ByteArray,
     ) -> Boolean,
     /** Persists the relay and restarts the transport generation. Runs only on success. */
-    private val commit: suspend (relayUrl: String) -> Unit,
+    private val commit: suspend (relayUrl: String, pairId: String) -> Unit,
 ) : RelayAttachProcessor {
 
     override suspend fun process(offer: RelayAttachOffer): RelayAttachApplyResult {
@@ -122,7 +122,7 @@ class DefaultRelayAttachProcessor(
         }
         if (!trusted) return RelayAttachApplyResult.Rejected(RelayAttachCodes.PEER_IDENTITY_MISMATCH)
 
-        try {
+        val pairId = try {
             client.complete(
                 canonical,
                 offer.pairToken,
@@ -138,7 +138,7 @@ class DefaultRelayAttachProcessor(
         }
 
         return try {
-            commit(canonical)
+            commit(canonical, pairId)
             RelayAttachApplyResult.Applied
         } catch (error: CancellationException) {
             throw error

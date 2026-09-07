@@ -217,6 +217,34 @@ func TestParseObservationAcceptsSanitizedPairHashes(t *testing.T) {
 	}
 }
 
+func TestParseObservationAcceptsBoundedPeerMetadataAndPlatformEvidence(t *testing.T) {
+	payload := validObservationPayloadForTest()
+	peer := map[string]any{"peer_link_id": "11111111-1111-4111-8111-111111111111", "device_id_hash": strings.Repeat("b", 64), "lifecycle": "ACTIVE", "route": nil}
+	payload["peer_links"] = []any{peer}
+	row := map[string]any{"canon_id_hash": strings.Repeat("c", 64), "sequence": 1, "materialized_sequence": 1, "state": "ACTIVE", "delivered": true, "fixture_tag_hash": strings.Repeat("d", 64)}
+	payload["canonical"] = []any{row}
+	encoded, _ := json.Marshal(payload)
+	if _, err := scenario.ParseObservation(encoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(){
+		func() { peer["device_id_hash"] = "raw device" },
+		func() { peer["lifecycle"] = "UNKNOWN" },
+		func() { row["fixture_tag_hash"] = "raw title" },
+		func() { row["delivered"] = "yes" },
+	} {
+		peer["device_id_hash"] = strings.Repeat("b", 64)
+		peer["lifecycle"] = "ACTIVE"
+		row["fixture_tag_hash"] = strings.Repeat("d", 64)
+		row["delivered"] = true
+		change()
+		encoded, _ = json.Marshal(payload)
+		if _, err := scenario.ParseObservation(encoded); err == nil {
+			t.Fatal("accepted malformed peer/platform evidence")
+		}
+	}
+}
+
 func cloneJSONMap(t *testing.T, value map[string]any) map[string]any {
 	t.Helper()
 	payload, err := json.Marshal(value)
@@ -255,11 +283,16 @@ type blockingTerminalSnapshotBridge struct {
 	*fakeBridge
 	snapshots int
 	blocked   map[string]bool
+	blockFrom int
 }
 
 func (b *blockingTerminalSnapshotBridge) Snapshot(ctx context.Context, device string) (scenario.Observation, error) {
 	b.snapshots++
-	if b.snapshots >= 10 {
+	threshold := b.blockFrom
+	if threshold == 0 {
+		threshold = 12
+	}
+	if b.snapshots >= threshold {
 		b.blocked[device] = true
 		<-ctx.Done()
 		return scenario.Observation{}, ctx.Err()
@@ -317,7 +350,7 @@ func (f *faultFailureBridge) Control(ctx context.Context, device, name string, p
 
 func (f *terminalSnapshotFailureBridge) Snapshot(ctx context.Context, device string) (scenario.Observation, error) {
 	f.snapshots++
-	if f.snapshots >= 10 && device == "B" {
+	if f.snapshots >= 12 && device == "B" {
 		return scenario.Observation{}, errors.New("terminal snapshot unavailable")
 	}
 	return f.fakeBridge.Snapshot(ctx, device)
@@ -1089,6 +1122,19 @@ func TestBlockingTerminalSnapshotsAreBoundedAndAttemptBothDevices(t *testing.T) 
 	}
 	if !bridge.blocked["A"] || !bridge.blocked["B"] {
 		t.Fatalf("terminal evidence did not attempt both devices: %+v", bridge.blocked)
+	}
+}
+
+func TestPredicateSnapshotInheritsStepDeadline(t *testing.T) {
+	base := &fakeBridge{states: map[string]scenario.Observation{"A": {}, "B": {}}}
+	bridge := &blockingTerminalSnapshotBridge{fakeBridge: base, blocked: map[string]bool{}, blockFrom: 4}
+	started := time.Now()
+	result, err := scenario.NewExecutor(bridge, 20*time.Millisecond).RunResult(context.Background(), "post")
+	if err == nil || result.Status != "failed" || result.ErrorCode != "missing_sequence_transition" {
+		t.Fatalf("status=%s code=%s err=%v", result.Status, result.ErrorCode, err)
+	}
+	if time.Since(started) > 250*time.Millisecond {
+		t.Fatal("predicate snapshot exceeded its deadline")
 	}
 }
 

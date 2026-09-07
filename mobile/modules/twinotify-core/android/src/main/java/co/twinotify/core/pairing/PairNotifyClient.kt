@@ -65,6 +65,8 @@ object PairNotifyClient {
         } catch (e: TimeoutCancellationException) {
             ws.cancel()
             throw RuntimeException("pair_notify($expectedType) timeout after ${timeoutMs}ms", e)
+        } finally {
+            ws.cancel()
         }
     }
 
@@ -139,6 +141,8 @@ object PairNotifyClient {
         } catch (e: TimeoutCancellationException) {
             ws.cancel()
             throw RuntimeException("pair_notify($expectedType) timeout after ${timeoutMs}ms", e)
+        } finally {
+            ws.cancel()
         }
     }
 

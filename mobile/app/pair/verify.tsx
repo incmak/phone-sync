@@ -53,7 +53,7 @@ export default function VerifyNearbyScreen() {
 
   const applyStatus = useCallback((next: OfflinePairingStatus) => {
     setStatus(next);
-    if (next.completed && next.phase === 'complete') router.replace('/pair/success');
+    if (next.completed && next.phase === 'complete') router.replace(next.peerLinkId ? { pathname: '/pair/success', params: { peerLinkId: next.peerLinkId } } : '/pair/success');
     if (next.errorCode) router.replace('/pair/nearby');
   }, []);
 

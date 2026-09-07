@@ -89,7 +89,7 @@ class MirrorCallControlInvoker(
         }
         val invocation = ActionInvocation(
             target.controlId, target.canonId, target.kind.wire, target.callSequence, null,
-            "PENDING", row.createdAt, row.expiresAt, row.createdAt,
+            "PENDING", row.createdAt, row.expiresAt, row.createdAt, peerLinkId = row.peerLinkId,
         )
         val committed = try {
             commit.commit(invocation, row)
@@ -116,7 +116,11 @@ class MirrorCallControlInvoker(
                     val state = dao.canonical(canonId) ?: return@MirrorCallControlTargetLoader null
                     resolveMirrorCallControlTarget(identity, canonId, state)
                 },
-                encode = CallControlInvokeRowEncoder(CallControlEncoder(app)::encodeInvoke),
+                encode = CallControlInvokeRowEncoder { input ->
+                    val state = checkNotNull(dao.canonical(input.canonId)) { "mirror_removed" }
+                    check(state.state == "ACTIVE" && state.latestSequence == input.callSequence) { "mirror_changed" }
+                    CallControlEncoder(app, checkNotNull(state.peerLinkId)).encodeInvoke(input)
+                },
                 commit = MirrorCallControlCommitter(dao::commitCallControlInvocationAndOutbound),
                 signalTransport = { SyncService.notifyActionOutboxChanged(app) },
                 scheduleExpiry = PersistentActionInvocationExpiryScheduler(app),

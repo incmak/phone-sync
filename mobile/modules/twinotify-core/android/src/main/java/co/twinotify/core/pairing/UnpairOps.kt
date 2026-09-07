@@ -35,6 +35,7 @@ object UnpairOps {
         withContext(NonCancellable) {
             PeerStore.clear(ctx)
             AppFilterStore.clear(ctx)
+            co.twinotify.core.service.RepeatProtection.clear(ctx)
             val db = NotificationDb.get(ctx)
             db.notificationMapDao().clearAll()
             db.notificationMapDao().sweepExpired(Long.MAX_VALUE)

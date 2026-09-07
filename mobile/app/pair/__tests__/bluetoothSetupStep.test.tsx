@@ -34,6 +34,18 @@ describe('Bluetooth setup step', () => {
     await waitFor(() => expect(global.__TEST_ROUTER__.replace).toHaveBeenCalledWith('/pair/bluetooth'));
   });
 
+  it('sets up Bluetooth for the newly paired link when another peer already exists', async () => {
+    global.__SET_SEARCH_PARAMS__({ peerLinkId: 'second-link' });
+    const core = global.__TWINOTIFY_CORE__;
+    core.getBluetoothRouteSettingsForPeer.mockResolvedValue({ associated: false, enabled: false });
+    const screen = render(<PairBluetoothScreen />);
+    await waitFor(() => expect(core.getBluetoothRouteSettingsForPeer).toHaveBeenCalledWith('second-link'));
+    fireEvent.press(screen.getByRole('button', { name: 'Set up Bluetooth' }));
+    await waitFor(() => expect(core.startBluetoothAssociationForPeer).toHaveBeenCalledWith('second-link'));
+    expect(core.startBluetoothAssociation).not.toHaveBeenCalled();
+    expect(core.getBluetoothRouteSettings).not.toHaveBeenCalled();
+  });
+
   it('explains that both phones must do it at the same time', async () => {
     const screen = render(<PairBluetoothScreen />);
 

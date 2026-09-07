@@ -188,6 +188,7 @@ class NotificationStateReducerTest {
             current,
             incoming,
             authenticatedPeerId = "dev-peer-canceller",
+            localDeviceId = "dev-peer",
         )
         val cancelled = assertIs<Reduction.Apply>(
             NotificationStateReducer.reduce(
@@ -210,7 +211,7 @@ class NotificationStateReducerTest {
         val incoming = event(type = "notif.cancel", sequence = 5, origin = "spoof")
         assertEquals(
             null,
-            NotificationStateReducer.authorizePeerCancel(current, incoming, "dev-peer-canceller"),
+            NotificationStateReducer.authorizePeerCancel(current, incoming, "dev-peer-canceller", "dev-local"),
         )
     }
 
@@ -222,6 +223,7 @@ class NotificationStateReducerTest {
             current = null,
             event = incoming,
             authenticatedPeerId = "dev-peer",
+            localDeviceId = "dev-local",
         )
         val cancelled = assertIs<Reduction.Apply>(
             NotificationStateReducer.reduce(
@@ -248,8 +250,17 @@ class NotificationStateReducerTest {
                 current = null,
                 event = incoming,
                 authenticatedPeerId = "dev-peer",
+            localDeviceId = "dev-local",
             ),
         )
+    }
+
+    @Test
+    fun aPeerCannotCancelAnotherPeersMirror() {
+        val current = state(sequence = 4, state = "ACTIVE", materialized = 4)
+        val incoming = event(type = "notif.cancel", sequence = 5, origin = "third-device")
+        assertEquals(null, NotificationStateReducer.authorizePeerCancel(current, incoming,
+            authenticatedPeerId = "third-device", localDeviceId = "dev-local"))
     }
 
     private fun event(

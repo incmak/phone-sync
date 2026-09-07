@@ -134,7 +134,7 @@ func TestPendingMetadataAfterForPairRejectsOrderRecordCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := b.Update(func(tx *bbolt.Tx) error {
-		order := tx.Bucket([]byte(bucketMailboxOrder))
+		order := mailboxScope(tx, "pair-corrupt-cursor").Bucket([]byte(bucketMailboxOrder))
 		if err := order.Delete(orderKey("dev-b", 1, record.MsgID)); err != nil {
 			return err
 		}
@@ -169,7 +169,7 @@ func TestPendingMetadataAfterForPairRejectsDecodedIdentityCorruption(t *testing.
 				t.Fatal(err)
 			}
 			if err := b.Update(func(tx *bbolt.Tx) error {
-				items := tx.Bucket([]byte(bucketMailboxItems))
+				items := mailboxScope(tx, "pair-corrupt-identity").Bucket([]byte(bucketMailboxItems))
 				raw := items.Get(itemKey("dev-b", record.MsgID))
 				var corrupt MailboxRecord
 				if err := json.Unmarshal(raw, &corrupt); err != nil {
@@ -334,7 +334,7 @@ func TestEnsureAcceptanceSequencesPersistsAcrossReopenAndIsIdempotent(t *testing
 func TestEnsureAcceptanceSequencesRejectsLegacyCorruptionWithoutMutation(t *testing.T) {
 	for name, corrupt := range map[string]func(*bbolt.Tx, string) error{
 		"wrong sender": func(tx *bbolt.Tx, msgID string) error {
-			items := tx.Bucket([]byte(bucketMailboxItems))
+			items := mailboxScope(tx, "legacy-corrupt-pair").Bucket([]byte(bucketMailboxItems))
 			var rec MailboxRecord
 			if err := json.Unmarshal(items.Get(itemKey("legacy-b", msgID)), &rec); err != nil {
 				return err
@@ -347,7 +347,7 @@ func TestEnsureAcceptanceSequencesRejectsLegacyCorruptionWithoutMutation(t *test
 			return items.Put(itemKey("legacy-b", msgID), encoded)
 		},
 		"mixed sequence": func(tx *bbolt.Tx, msgID string) error {
-			items := tx.Bucket([]byte(bucketMailboxItems))
+			items := mailboxScope(tx, "legacy-corrupt-pair").Bucket([]byte(bucketMailboxItems))
 			var rec MailboxRecord
 			if err := json.Unmarshal(items.Get(itemKey("legacy-b", msgID)), &rec); err != nil {
 				return err
@@ -360,7 +360,7 @@ func TestEnsureAcceptanceSequencesRejectsLegacyCorruptionWithoutMutation(t *test
 			return items.Put(itemKey("legacy-b", msgID), encoded)
 		},
 		"order timestamp": func(tx *bbolt.Tx, msgID string) error {
-			order := tx.Bucket([]byte(bucketMailboxOrder))
+			order := mailboxScope(tx, "legacy-corrupt-pair").Bucket([]byte(bucketMailboxOrder))
 			if err := order.Delete(orderKey("legacy-b", 4000, msgID)); err != nil {
 				return err
 			}
@@ -478,7 +478,11 @@ func TestEnsureAcceptanceSequencesEmptyMailboxIsExactNoOp(t *testing.T) {
 
 func seedLegacyMailboxRecords(t *testing.T, b *Bolt, sender, recipient string, msgIDs []string, acceptedAt int64) {
 	t.Helper()
-	if err := b.Update(func(tx *bbolt.Tx) error {
+	if err := b.Update(func(rawTx *bbolt.Tx) error {
+		tx, err := mailboxSessionScope(rawTx, "", recipient)
+		if err != nil {
+			return err
+		}
 		items, order, stats, _, err := mailboxBuckets(tx)
 		if err != nil {
 			return err
@@ -1868,22 +1872,22 @@ func snapshotMailboxBuckets(t *testing.T, b *Bolt) map[string]map[string]string 
 	t.Helper()
 	snapshot := make(map[string]map[string]string)
 	if err := b.View(func(tx *bbolt.Tx) error {
-		for _, name := range []string{
-			bucketMailboxItems, bucketMailboxOrder, bucketMailboxStats, bucketMailboxStatus,
-			bucketMailboxStatusByRecipient, bucketMailboxExpiryPending, bucketMailboxExpiryCursor,
-			bucketMailboxMeta, bucketMailboxSequence, bucketMailboxItemExpiry, bucketMailboxStatusExpiry,
-		} {
-			entries := make(map[string]string)
-			bucket := tx.Bucket([]byte(name))
-			if bucket != nil {
-				if err := bucket.ForEach(func(key, value []byte) error {
-					entries[string(key)] = string(value)
-					return nil
-				}); err != nil {
-					return err
+		ids, err := mailboxScopeIDs(tx)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			names := append(append([]string{}, mailboxScopedBuckets...), bucketMailboxStats)
+			for _, name := range names {
+				entries := make(map[string]string)
+				bucket := mailboxScope(tx, id).Bucket([]byte(name))
+				if bucket != nil {
+					if err := bucket.ForEach(func(key, value []byte) error { entries[string(key)] = string(value); return nil }); err != nil {
+						return err
+					}
 				}
+				snapshot[id+"/"+name] = entries
 			}
-			snapshot[name] = entries
 		}
 		return nil
 	}); err != nil {

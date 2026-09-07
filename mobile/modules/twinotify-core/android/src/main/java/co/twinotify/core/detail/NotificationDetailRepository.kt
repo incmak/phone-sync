@@ -163,8 +163,7 @@ class NotificationDetailRepository(
                         dao.actionInvocationsForNotification(canonId, sequence)
                 },
                 originLabel = NotificationOriginLabel { originDevice ->
-                    PeerStore.load(app)
-                        ?.takeIf { it.deviceId == originDevice }
+                    PeerStore.forDevice(app, originDevice)
                         ?.displayName
                         ?.takeIf(String::isNotBlank)
                         ?: "Paired device"

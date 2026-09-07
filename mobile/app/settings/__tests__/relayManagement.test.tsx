@@ -81,7 +81,7 @@ describe('relay management on the paired device screen', () => {
 
     fireEvent.press(screen.getByLabelText('Add a relay'));
 
-    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/relay');
+    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith({ pathname: '/settings/relay', params: {} });
   });
 
   it('shows the configured relay with change and remove, not the add card', async () => {
@@ -92,7 +92,7 @@ describe('relay management on the paired device screen', () => {
     expect(screen.getByText(`${DEFAULT_RELAY}. Carries notifications when the phones are on different networks, encrypted end to end.`)).toBeTruthy();
 
     fireEvent.press(screen.getByText('Change relay'));
-    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/relay?mode=change');
+    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith({ pathname: '/settings/relay', params: { mode: 'change' } });
   });
 
   it('removing a relay confirms first, keeps the pair, and drops back to the add card', async () => {

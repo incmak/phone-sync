@@ -114,6 +114,7 @@ class MirrorActionInvoker(
             createdAt = row.createdAt,
             expiresAt = row.expiresAt,
             updatedAt = row.createdAt,
+            peerLinkId = row.peerLinkId,
         )
         val result = try {
             commit.commit(invocation, row)
@@ -157,7 +158,11 @@ class MirrorActionInvoker(
                         ProcessMirrorAdvertisedActions.lookup(identity),
                     )
                 },
-                encode = ActionInvokeRowEncoder(ActionControlEncoder(app)::encodeInvoke),
+                encode = ActionInvokeRowEncoder { input ->
+                    val state = checkNotNull(dao.canonical(input.canonId)) { "mirror_removed" }
+                    check(state.state == "ACTIVE" && state.latestSequence == input.notificationSequence) { "mirror_changed" }
+                    ActionControlEncoder(app, checkNotNull(state.peerLinkId)).encodeInvoke(input)
+                },
                 commit = MirrorActionCommitter(dao::commitActionInvocationAndOutbound),
                 signalTransport = { SyncService.notifyActionOutboxChanged(app) },
                 scheduleExpiry = PersistentActionInvocationExpiryScheduler(app),

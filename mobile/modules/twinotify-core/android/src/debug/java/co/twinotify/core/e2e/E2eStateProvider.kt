@@ -34,7 +34,7 @@ class E2eStateProvider : ContentProvider() {
         fun stateUri(context: Context): Uri = "content://${context.packageName}.e2e/state".toUri()
 
         fun offlinePairingEvidenceJson(context: Context): JSONObject = runBlocking(Dispatchers.IO) {
-            val peer = PeerStore.load(context)
+            val peer = PeerStore.list(context).singleOrNull()
             val deviceId = DeviceIdentity.getOrCreate(context)
             val keys = CryptoStore.loadOrGenerate(context)
             val binding = peer?.takeIf { it.lanBindingId != null }?.let { LanPairStore.loadValidated(context, it) }
@@ -56,7 +56,7 @@ class E2eStateProvider : ContentProvider() {
             val db = NotificationDb.get(context)
             val database = db.openHelper.readableDatabase
             val deviceId = DeviceIdentity.getOrCreate(context)
-            val peer = PeerStore.load(context)
+            val peer = PeerStore.list(context).singleOrNull()
             val offline = E2eOfflinePairingControl.publicStatus(context)
             val health = SyncServiceStatus.health.value
             val route = SyncServiceStatus.routeStatus.value
@@ -68,6 +68,14 @@ class E2eStateProvider : ContentProvider() {
             val root = JSONObject()
                 .put("device_id_hash", sha256Hex(deviceId))
                 .put("paired_peer_hash", peer?.let { sha256Hex(it.deviceId) } ?: JSONObject.NULL)
+                .put("peer_links", JSONArray().apply {
+                    PeerStore.list(context, includeRemoving = true).forEach { link ->
+                        put(JSONObject().put("peer_link_id", link.peerLinkId)
+                            .put("device_id_hash", sha256Hex(link.deviceId))
+                            .put("lifecycle", link.lifecycle)
+                            .put("route", SyncServiceStatus.peerRoutes.value[link.peerLinkId]?.let { JSONObject(it.toPublicMap()) } ?: JSONObject.NULL))
+                    }
+                })
                 .put("offline_pairing", offline)
                 .put("health", JSONObject(health.toEventMap()))
                 .put("route", JSONObject(route.toPublicMap()))
@@ -90,7 +98,7 @@ class E2eStateProvider : ContentProvider() {
                 .put("active_inbound", scalar(database, "SELECT COUNT(*) FROM inbound_message WHERE outcome='PENDING_PLATFORM'"))
                 .put("pending_materialization", scalar(database, "SELECT COUNT(*) FROM canonical_notification_state WHERE latestSequence > materializedSequence"))
                 .put("product_observations", productObservations(context, database, activeOutbox, outboxBytes))
-            root.put("canonical", canonical(database))
+            root.put("canonical", canonical(context, database))
             root.put("call_controls_enabled", SyncService.callControlCaptureAttached())
             root.put("canonical_call_controls", canonicalCallControls(database))
             root.put("call_control_dispatches", CallControlFixture.dispatches())
@@ -110,10 +118,13 @@ class E2eStateProvider : ContentProvider() {
         private fun scalarLong(database: androidx.sqlite.db.SupportSQLiteDatabase, sql: String): Long =
             database.query(sql).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
 
-        private fun canonical(database: androidx.sqlite.db.SupportSQLiteDatabase): JSONArray {
+        private fun canonical(context: Context, database: androidx.sqlite.db.SupportSQLiteDatabase): JSONArray {
+            val delivered = context.getSystemService(android.app.NotificationManager::class.java)?.activeNotifications.orEmpty()
+                .mapTo(hashSetOf()) { it.tag to it.id }
+            val sources = co.twinotify.core.listener.NotificationListenerBridge.activeSources()
             val result = JSONArray()
             database.query(
-                "SELECT canonId, latestSequence, state, materializedSequence, desiredPayloadJson, mirrorLocalTag, mirrorLocalId " +
+                "SELECT canonId, latestSequence, state, materializedSequence, desiredPayloadJson, mirrorLocalTag, mirrorLocalId, sourceNotificationKey " +
                     "FROM canonical_notification_state ORDER BY updatedAt LIMIT 200",
             ).use { cursor ->
                 while (cursor.moveToNext()) {
@@ -123,6 +134,8 @@ class E2eStateProvider : ContentProvider() {
                         .put("sequence", cursor.getLong(1))
                         .put("state", cursor.getString(2))
                         .put("materialized_sequence", cursor.getLong(3))
+                        .put("delivered", if (!cursor.isNull(5) && !cursor.isNull(6))
+                            (cursor.getString(5) to cursor.getInt(6)) in delivered else cursor.getString(7) in sources)
                     callSemanticState(canonId, cursor.getString(2), cursor.getString(4))?.let {
                         row.put("semantic_state", it)
                     }
@@ -130,6 +143,8 @@ class E2eStateProvider : ContentProvider() {
                         if (!cursor.isNull(6)) row.put("mirror_identity_hash", sha256Hex("$tag:${cursor.getInt(6)}"))
                     }
                     cursor.getString(4)?.let { payload ->
+                        val title = runCatching { JSONObject(payload).optString("title") }.getOrDefault("")
+                        if (title.matches(Regex("twinotify-e2e-[a-f0-9-]{36}"))) row.put("fixture_tag_hash", sha256Hex(title))
                         runCatching { JSONObject(payload).optJSONArray("actions")?.toString() }.getOrNull()?.let {
                             row.put("action_set_hash", sha256Hex(it))
                         }
@@ -285,7 +300,7 @@ class E2eStateProvider : ContentProvider() {
                 "SELECT COUNT(*) FROM activity_event WHERE eventType='peer.receipt'",
             ).coerceIn(0L, ProductObservationTracker.MAX_COUNTER)
             return JSONObject()
-                .put("paired", PeerStore.load(context) != null)
+                .put("paired", PeerStore.list(context).isNotEmpty())
                 .put("custody_counts", custodyJson)
                 .put("peer_receipt_count", maxOf(tracked.peerReceiptCount, persistedReceipts))
                 .put("snapshot_digest_count", tracked.snapshotDigestCount)

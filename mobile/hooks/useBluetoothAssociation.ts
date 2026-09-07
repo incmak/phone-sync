@@ -34,7 +34,7 @@ export function bluetoothFailureCopy(code: string): [string, string] {
  * cannot drift. Association needs a confirmed pair and both phones inside the picker at once, so
  * every failure path says what happened and promises nothing changed.
  */
-export function useBluetoothAssociation(onAssociated?: () => void | Promise<void>) {
+export function useBluetoothAssociation(onAssociated?: () => void | Promise<void>, peerLinkId?: string) {
   const [busy, setBusy] = useState(false);
 
   // Set after the callback exists, so turning Bluetooth on can resume the setup the user already
@@ -85,7 +85,8 @@ export function useBluetoothAssociation(onAssociated?: () => void | Promise<void
       }
       // The picker can be cancelled; the durable settings stay authoritative either way, so a
       // cancelled association returns quietly.
-      await TwinotifyCoreModule.startBluetoothAssociation();
+      if (peerLinkId) await TwinotifyCoreModule.startBluetoothAssociationForPeer(peerLinkId);
+      else await TwinotifyCoreModule.startBluetoothAssociation();
       await onAssociated?.();
     } catch (error) {
       // Bounded native failure codes arrive as the rejection message.
@@ -106,7 +107,7 @@ export function useBluetoothAssociation(onAssociated?: () => void | Promise<void
     } finally {
       setBusy(false);
     }
-  }, [busy, onAssociated, turnOnBluetoothAndRetry]);
+  }, [busy, onAssociated, peerLinkId, turnOnBluetoothAndRetry]);
 
   useEffect(() => {
     associateRef.current = associate;

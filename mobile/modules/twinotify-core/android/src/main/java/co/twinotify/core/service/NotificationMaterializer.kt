@@ -55,7 +55,7 @@ internal fun materializationTriggerForPostAvailability(
 }
 
 /** Every entry point shares this boundary so platform effects cannot overlap before Room fences. */
-private object ProcessMaterializationPassCoordinator {
+internal object ProcessMaterializationPassCoordinator {
     private val mutex = Mutex()
 
     suspend fun <T> serialize(block: suspend () -> T): T = mutex.withLock { block() }
@@ -273,6 +273,9 @@ fun interface ReceiptFactory {
     ): OutboundMessage?
 
     suspend fun createRejected(ackedMsgId: String, envelopeSha256: String, reason: String): OutboundMessage? = null
+
+    suspend fun createRejected(inbound: InboundMessage, reason: String): OutboundMessage? =
+        createRejected(inbound.msgId, inbound.envelopeSha256, reason)
 }
 
 /** Applies persisted desired state after a platform crash window. */
@@ -411,7 +414,7 @@ class NotificationMaterializer(
             val older = dao.pendingSupersededInboundPreflight(state.canonId, state.latestSequence)
             val prepared = try {
                 when (val result = prepareSupersessionRejections(older) { row, reason ->
-                    factory.createRejected(row.msgId, row.envelopeSha256, reason)
+                    factory.createRejected(row, reason)
                 }) {
                     is SupersessionPreparation.Prepared -> result
                     SupersessionPreparation.Unavailable -> {
@@ -447,7 +450,7 @@ class NotificationMaterializer(
                 // Local call state describes a transition already observed by telephony.
                 // An ended call has no source notification key to cancel.
                 "CANCELLED" -> if (CallStateMaterializer.isCall(state.canonId) ||
-                    state.sourceNotificationKey?.let(port::cancelSource) == true
+                    port.cancelSource(state)
                 ) {
                     NotificationPostOutcome.Applied
                 } else {
@@ -484,13 +487,16 @@ class NotificationMaterializer(
 }
 
 /** Creates an authenticated v2 peer receipt after a platform operation succeeds. */
-class DurableReceiptFactory(private val context: Context) : ReceiptFactory {
+class DurableReceiptFactory(
+    private val context: Context,
+    private val peerLinkId: String? = null,
+) : ReceiptFactory {
     override suspend fun create(
         state: CanonicalNotificationState,
         pendingInbound: List<InboundMessage>,
     ): OutboundMessage? {
         val inbound = pendingInbound.firstOrNull() ?: return null
-        return createApplied(inbound.msgId, inbound.envelopeSha256)
+        return createReceipt(inbound.msgId, inbound.envelopeSha256, "applied", null, inbound.peerLinkId)
     }
 
     suspend fun createApplied(ackedMsgId: String, envelopeSha256: String): OutboundMessage? =
@@ -505,13 +511,17 @@ class DurableReceiptFactory(private val context: Context) : ReceiptFactory {
         reason: String,
     ): OutboundMessage? = createReceipt(ackedMsgId, envelopeSha256, "rejected", reason)
 
+    override suspend fun createRejected(inbound: InboundMessage, reason: String): OutboundMessage? =
+        createReceipt(inbound.msgId, inbound.envelopeSha256, "rejected", reason, inbound.peerLinkId)
+
     private suspend fun createReceipt(
         ackedMsgId: String,
         envelopeSha256: String,
         status: String,
         reason: String?,
+        selectedPeerLinkId: String? = peerLinkId,
     ): OutboundMessage? {
-        val peer = PeerStore.load(context) ?: return null
+        val peer = PeerStore.load(context, selectedPeerLinkId) ?: return null
         val originDevice = DeviceIdentity.getOrCreate(context)
         val createdAt = System.currentTimeMillis().coerceAtLeast(0L)
         val expiresAt = createdAt + RETENTION_MS
@@ -568,6 +578,7 @@ class DurableReceiptFactory(private val context: Context) : ReceiptFactory {
             state = "NEW",
             lastError = null,
             requiresPeerReceipt = false,
+            peerLinkId = peer.peerLinkId,
         )
     }
 

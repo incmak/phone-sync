@@ -168,6 +168,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
                 .onFailure { android.util.Log.w(TAG, "retention_sweep_unavailable") }
         }
         coordinator.resumeDeferred()
+        co.twinotify.core.service.RepeatProtection.resume(applicationContext)
         val active = runCatching { activeNotifications.orEmpty() }.getOrDefault(emptyArray())
         active.forEach(::capturePosted)
         requestCaptureReconciliation()
@@ -225,7 +226,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
                     sbn,
                     canonId,
                     ownPkg = false,
-                    durablePeerCancelConsumed = false,
+                    durablePeerCancelConsumed = reliableDao.consumePeerCancel(canonId) > 0,
                     reason,
                     ts,
                 )
@@ -241,6 +242,7 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         reason: Int,
         timestamp: Long,
     ) {
+        if (ownPkg && co.twinotify.core.service.RepeatProtection.consumeRemoval(applicationContext, canonId, reason)) return
         val canonInPending = PendingPeerCancel.consume(canonId)
         val command = RemoveCommand(canonId, sbn.key, "user_swipe", timestamp)
         when (val result = submitRemovalWithObservation(
@@ -279,6 +281,11 @@ class TwinotifyNotificationListener : NotificationListenerService() {
         }
     }
 
+    internal fun requestSourceReconciliation() {
+        coordinator.markExternalReconciliation()
+        requestCaptureReconciliation()
+    }
+
     private fun requestCaptureReconciliation() {
         if (!NotificationListenerBridge.isAttached() || !coordinator.reconciliationNeeded()) return
         val lease = reconciliationRequestGate.claimInitialPass() ?: return
@@ -310,7 +317,9 @@ class TwinotifyNotificationListener : NotificationListenerService() {
                     originDevice = originDevice,
                     snapshots = listenerSnapshot.sourceSnapshots,
                     states = reliableDao.activeOriginStates(originDevice),
-                    peerMirrorStates = reliableDao.activePeerMirrorStates(originDevice),
+                    peerMirrorStates = reliableDao.activePeerMirrorStates(originDevice).filterNot {
+                        co.twinotify.core.service.RepeatProtection.isHidden(applicationContext, it.canonId)
+                    },
                     liveMirrorIdentities = listenerSnapshot.liveMirrorIdentities,
                     removedAt = System.currentTimeMillis(),
                 )

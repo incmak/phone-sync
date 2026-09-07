@@ -436,7 +436,7 @@ class NotificationMaterializerTest {
             payloadJson = "{}",
         )
         val authorized = requireNotNull(
-            NotificationStateReducer.authorizePeerCancel(active, incoming, "dev-peer"),
+            NotificationStateReducer.authorizePeerCancel(active, incoming, "dev-peer", "dev-owner"),
         )
         val cancelled = assertIs<Reduction.Apply>(
             NotificationStateReducer.reduce(

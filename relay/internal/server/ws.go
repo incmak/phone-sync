@@ -488,8 +488,8 @@ func (s *Server) handleRelayHelloForPair(
 		}
 	}
 
-	handoff := s.handoffs.acquire(deviceID)
-	defer s.handoffs.release(deviceID, handoff)
+	handoff := s.handoffs.acquire(hubSessionKey(deviceID, pairID))
+	defer s.handoffs.release(hubSessionKey(deviceID, pairID), handoff)
 	if s.relayHelloBeforeSequenceMigration != nil {
 		s.relayHelloBeforeSequenceMigration()
 	}
@@ -595,7 +595,7 @@ func relayCapabilitiesSnapshot(self, peer store.DeviceCapabilities, floor int) R
 	}
 	if len(self.Features) > 0 {
 		selfFeatures := append([]string(nil), self.Features...)
-		peerFeatures := append([]string(nil), peer.Features...)
+		peerFeatures := append([]string{}, peer.Features...)
 		frame.SelfFeatures = &selfFeatures
 		frame.PeerFeatures = &peerFeatures
 	}
@@ -722,8 +722,8 @@ func (s *Server) handleRelayPutForPairWithInboundRelease(
 		return
 	}
 	digest := sha256.Sum256(put.Envelope)
-	handoff := s.handoffs.acquire(peerID)
-	defer s.handoffs.release(peerID, handoff)
+	handoff := s.handoffs.acquire(hubSessionKey(peerID, pairID))
+	defer s.handoffs.release(hubSessionKey(peerID, pairID), handoff)
 	handoff.commitMu.Lock()
 	if s.relayPutBeforeStore != nil {
 		s.relayPutBeforeStore(deviceID, pairID, envelope.MsgID)

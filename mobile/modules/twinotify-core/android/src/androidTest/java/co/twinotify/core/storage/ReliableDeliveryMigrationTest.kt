@@ -354,6 +354,34 @@ class ReliableDeliveryMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate11To12_preservesWireBytesSequencesAndCustodyForStartupImport() {
+        val name = "reliable-delivery-migration-v12-test"
+        helper.createDatabase(name, 11).apply {
+            execSQL("""INSERT INTO outbound_message(msgId,canonId,sequence,eventType,protocolVersion,envelopeJson,envelopeSha256,
+                byteSize,createdAt,expiresAt,custodyAcceptedAt,custodyRoute,attempts,nextAttemptAt,state,lastError,requiresPeerReceipt,relayCustodyState)
+                VALUES('msg','canon',7,'notif.update',2,' { "wire": "unchanged" } ','digest',25,10,99999,1234,'RELAY',3,30,'ACCEPTED',NULL,1,'ACCEPTED')""")
+            execSQL("""INSERT INTO inbound_message(msgId,originDevice,envelopeSha256,eventType,canonId,sequence,outcome,committedAt,appliedAt,receiptMsgId,relayAckState)
+                VALUES('incoming','peer','digest-in','notif.post','canon',7,'PENDING_PLATFORM',20,NULL,NULL,'NONE')""")
+            execSQL("INSERT INTO origin_sequence VALUES('canon',8)")
+            execSQL("INSERT INTO snapshot_stage VALUES('snapshot','canon',7,'payload',50)")
+            close()
+        }
+        val db = helper.runMigrationsAndValidate(name, 12, true, MIGRATION_11_12)
+        db.query("SELECT envelopeJson,sequence,custodyAcceptedAt,relayCustodyState,peerLinkId FROM outbound_message").use {
+            assertTrue(it.moveToFirst())
+            assertEquals(" { \"wire\": \"unchanged\" } ", it.getString(0))
+            assertEquals(7L, it.getLong(1))
+            assertEquals(1234L, it.getLong(2))
+            assertEquals("ACCEPTED", it.getString(3))
+            assertEquals(LEGACY_PEER_LINK_ID, it.getString(4))
+        }
+        db.query("SELECT nextSequence FROM origin_sequence").use { assertTrue(it.moveToFirst()); assertEquals(8L, it.getLong(0)) }
+        db.query("SELECT outcome,peerLinkId FROM inbound_message").use { assertTrue(it.moveToFirst()); assertEquals("PENDING_PLATFORM",it.getString(0)); assertEquals(LEGACY_PEER_LINK_ID,it.getString(1)) }
+        db.query("SELECT payloadJson,peerLinkId FROM snapshot_stage").use { assertTrue(it.moveToFirst()); assertEquals("payload",it.getString(0)); assertEquals(LEGACY_PEER_LINK_ID,it.getString(1)) }
+        db.close()
+    }
+
     private companion object {
         const val TEST_DB = "reliable-delivery-migration-test"
         const val TEST_DB_V4 = "reliable-delivery-migration-v4-test"

@@ -154,6 +154,7 @@ export type OfflinePairingErrorCode =
 
 /** Secret-free native status. Raw QR/session material never belongs here. */
 export interface OfflinePairingStatus {
+  peerLinkId?: string;
   role: OfflinePairingRole | null;
   phase: OfflinePairingPhase;
   sessionId: string | null;

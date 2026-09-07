@@ -56,6 +56,8 @@ interface RelayAttachRelayClient {
     ): RelayAttachPeerHello
 
     suspend fun sendConfirmationSig(relayUrl: String, pairToken: String, sig: ByteArray)
+
+    suspend fun awaitComplete(relayUrl: String, pairToken: String, identity: RelayAttachIdentity): String
 }
 
 /**
@@ -89,7 +91,7 @@ class RelayAttachCoordinator(
         aSignSecret: ByteArray,
     ) -> ByteArray = PairProtocol::deviceASignConfirmation,
     /** Persists the relay and restarts the transport generation. Runs only on success. */
-    private val commit: suspend (relayUrl: String) -> Unit,
+    private val commit: suspend (relayUrl: String, pairId: String) -> Unit,
     private val newToken: () -> String = { PairPayload.newToken() },
 ) {
     suspend fun attach(relayUrl: String): RelayAttachResult {
@@ -167,8 +169,15 @@ class RelayAttachCoordinator(
             return RelayAttachResult.Rejected(RelayAttachCodes.RELAY_UNREACHABLE)
         }
 
+        val pairId = try {
+            relayClient.awaitComplete(canonical, pairToken, identity)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            return RelayAttachResult.Rejected(RelayAttachCodes.PEER_TIMEOUT)
+        }
         return try {
-            commit(canonical)
+            commit(canonical, pairId)
             RelayAttachResult.Attached
         } catch (error: CancellationException) {
             throw error

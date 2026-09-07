@@ -1,0 +1,16 @@
+name: macos
+on:
+  push:
+    paths: ['macos/**', 'proto/**', 'mobile/assets/brand/icon.png', 'Makefile', '.github/workflows/macos.yml']
+  pull_request:
+    paths: ['macos/**', 'proto/**', 'mobile/assets/brand/icon.png', 'Makefile', '.github/workflows/macos.yml']
+permissions:
+  contents: read
+jobs:
+  native-macos:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: make macos-verify
+      - run: macos/scripts/bundle.sh

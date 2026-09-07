@@ -123,11 +123,8 @@ func (h *ClientHub) Register(deviceID string, out chan []byte) *wsClient {
 	return h.RegisterPair(deviceID, "", out)
 }
 
-// RegisterPair replaces only an unbound or same-generation registration. A
-// different non-empty generation is returned already stopped and is never
-// installed, so a delayed revoked request cannot evict a rebound connection.
-// The current generation remains authoritative until its exact disconnect or
-// unregister; a legitimate later generation retries after that lifecycle ends.
+// RegisterPair replaces only the same (device, pair generation) session.
+// Different active peer links have independent lifecycles and queues.
 func (h *ClientHub) RegisterPair(deviceID, pairID string, out chan []byte) *wsClient {
 	client, _ := h.registerPair(deviceID, pairID, out)
 	return client
@@ -144,14 +141,11 @@ func (h *ClientHub) registerPair(deviceID, pairID string, out chan []byte) (*wsC
 		c.stop()
 		return c, false
 	}
-	if prev, ok := h.clients[deviceID]; ok {
-		if prev.pairID != "" && pairID != "" && prev.pairID != pairID {
-			c.stop()
-			return c, false
-		}
+	key := hubSessionKey(deviceID, pairID)
+	if prev := h.clients[key]; prev != nil {
 		prev.stop()
 	}
-	h.clients[deviceID] = c
+	h.clients[key] = c
 	h.active[c] = struct{}{}
 	return c, true
 }
@@ -201,8 +195,8 @@ func (h *ClientHub) Drain(code int, reason string) <-chan struct{} {
 func (h *ClientHub) Unregister(c *wsClient) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if cur, ok := h.clients[c.deviceID]; ok && cur == c {
-		delete(h.clients, c.deviceID)
+	if cur, ok := h.clients[hubSessionKey(c.deviceID, c.pairID)]; ok && cur == c {
+		delete(h.clients, hubSessionKey(c.deviceID, c.pairID))
 	}
 	delete(h.active, c)
 	c.stop()
@@ -252,7 +246,7 @@ func (h *ClientHub) signalCapacityChangedLocked() {
 func (h *ClientHub) waitForHandshakeCapacity(c *wsClient, items int, bytes uint64) bool {
 	for {
 		h.mu.Lock()
-		current, ok := h.clients[c.deviceID]
+		current, ok := h.clients[hubSessionKey(c.deviceID, c.pairID)]
 		if !ok || current != c || c.protocol != protocolV2Handshake {
 			h.mu.Unlock()
 			return false
@@ -305,7 +299,7 @@ func (h *ClientHub) waitForHandshakeActivity(c *wsClient, wake <-chan struct{}) 
 func (h *ClientHub) advanceHandshakeCursor(c *wsClient, sequence uint64) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	current, ok := h.clients[c.deviceID]
+	current, ok := h.clients[hubSessionKey(c.deviceID, c.pairID)]
 	if !ok || current != c || c.protocol != protocolV2Handshake {
 		return false
 	}
@@ -321,7 +315,7 @@ func (h *ClientHub) advanceHandshakeCursor(c *wsClient, sequence uint64) bool {
 func (h *ClientHub) tryActivateCaughtUpV2(c *wsClient) (activated, waitForSlot bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	current, ok := h.clients[c.deviceID]
+	current, ok := h.clients[hubSessionKey(c.deviceID, c.pairID)]
 	if !ok || current != c || c.protocol != protocolV2Handshake {
 		return false, false
 	}
@@ -358,9 +352,9 @@ func (h *ClientHub) StopPair(deviceID, pairID string) {
 func (h *ClientHub) stopPair(deviceID, pairID string, unregister bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if c := h.clients[deviceID]; c != nil && clientMatchesPair(c, pairID) {
+	if c, ok := h.clientForLocked(deviceID, pairID); ok {
 		if unregister {
-			delete(h.clients, deviceID)
+			delete(h.clients, hubSessionKey(c.deviceID, c.pairID))
 		}
 		c.stop()
 	}
@@ -425,7 +419,7 @@ func (h *ClientHub) SendFeatureCapabilitiesForPair(
 	expectedFeatures := append([]string(nil), selfFeatures...)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c, ok := h.clients[deviceID]
+	c, ok := h.clientForLocked(deviceID, pairID)
 	if !ok || !clientMatchesPair(c, pairID) {
 		return
 	}
@@ -467,7 +461,7 @@ func (h *ClientHub) TransferV2BatchForPair(deviceID, pairID string, notification
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c, ok := h.clients[deviceID]
+	c, ok := h.clientForLocked(deviceID, pairID)
 	if !ok || !clientMatchesPair(c, pairID) {
 		return false
 	}
@@ -547,7 +541,7 @@ func (h *ClientHub) TransferHandshakeV2Batch(c *wsClient, notifications []queued
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	current, ok := h.clients[c.deviceID]
+	current, ok := h.clients[hubSessionKey(c.deviceID, c.pairID)]
 	if !ok || current != c || c.protocol != protocolV2Handshake {
 		return false
 	}
@@ -574,7 +568,7 @@ func (h *ClientHub) TransferHandshakeV2Batch(c *wsClient, notifications []queued
 func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) bool {
 	for {
 		h.mu.Lock()
-		current, ok := h.clients[c.deviceID]
+		current, ok := h.clients[hubSessionKey(c.deviceID, c.pairID)]
 		if !ok || current != c || c.protocol != protocolV2Handshake {
 			h.mu.Unlock()
 			return false
@@ -648,7 +642,7 @@ func (h *ClientHub) FlushOrActivateV2(c *wsClient, drainedIDs []string) bool {
 func (h *ClientHub) send(deviceID, pairID string, frame []byte, accepts func(*wsClient) bool) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c, ok := h.clients[deviceID]
+	c, ok := h.clientForLocked(deviceID, pairID)
 	if !ok || !clientMatchesPair(c, pairID) || !accepts(c) {
 		return false
 	}
@@ -775,7 +769,7 @@ func (h *ClientHub) SetProtocolCapabilitiesAndFeatures(
 ) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	current, ok := h.clients[c.deviceID]
+	current, ok := h.clients[hubSessionKey(c.deviceID, c.pairID)]
 	if !ok || current != c {
 		return false
 	}
@@ -792,7 +786,7 @@ func (h *ClientHub) SetProtocolCapabilitiesAndFeatures(
 func (h *ClientHub) ProtocolFor(deviceID string) (connectionProtocol, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c, ok := h.clients[deviceID]
+	c, ok := h.clientForLocked(deviceID, "")
 	if !ok {
 		return protocolUnknown, false
 	}
@@ -811,7 +805,7 @@ func (h *ClientHub) ConnectionFor(deviceID string) (connectionProtocol, []int, b
 func (h *ClientHub) ConnectionForPair(deviceID, pairID string) (connectionProtocol, []int, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c, ok := h.clients[deviceID]
+	c, ok := h.clientForLocked(deviceID, pairID)
 	if !ok || !clientMatchesPair(c, pairID) {
 		return protocolUnknown, nil, false
 	}
@@ -834,4 +828,28 @@ func supportsProtocol(protocols []int, protocol int) bool {
 		}
 	}
 	return false
+}
+
+// Missing selectors retain the single-session compatibility path only.
+func hubSessionKey(deviceID, pairID string) string {
+	if pairID == "" {
+		return deviceID
+	}
+	return deviceID + "\x00" + pairID
+}
+func (h *ClientHub) clientForLocked(deviceID, pairID string) (*wsClient, bool) {
+	if pairID != "" {
+		c, ok := h.clients[hubSessionKey(deviceID, pairID)]
+		return c, ok
+	}
+	var found *wsClient
+	for _, c := range h.clients {
+		if c.deviceID == deviceID {
+			if found != nil {
+				return nil, false
+			}
+			found = c
+		}
+	}
+	return found, found != nil
 }

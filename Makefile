@@ -1,4 +1,4 @@
-.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify e2e-emulator e2e-emulator-run e2e-lan-delivery e2e-lan-product e2e-bluetooth-route e2e-call-control e2e-notification-actions e2e-offline-pairing verify-notification-action-evidence release-audit clean
+.PHONY: sync-proto proto-test relay-test relay-ci-test relay-verify relay-build deployment-test mobile-verify host-verify verify macos-verify e2e-emulator e2e-emulator-run e2e-lan-delivery e2e-lan-product e2e-bluetooth-route e2e-call-control e2e-notification-actions e2e-offline-pairing verify-notification-action-evidence release-audit clean
 
 sync-proto:
 	mkdir -p relay/internal/server/schemas relay/internal/server/fixtures
@@ -117,6 +117,16 @@ e2e-offline-pairing:
 verify-notification-action-evidence:
 	@test -n "$(ACTION_EVIDENCE_DIR)" || { echo "ACTION_EVIDENCE_DIR is required" >&2; exit 2; }
 	./scripts/verify-notification-action-evidence.sh "$(ACTION_EVIDENCE_DIR)"
+
+macos-verify:
+	@test "$$(uname -s)" = Darwin || { echo "macos-verify requires macOS" >&2; exit 2; }
+	python3 macos/scripts/sync-schemas.py
+	swift test --package-path macos --disable-automatic-resolution
+	bash -n macos/scripts/bundle.sh
+
+ifeq ($(shell uname -s),Darwin)
+verify: macos-verify
+endif
 
 verify: proto-test relay-verify mobile-verify
 	./scripts/verify-generated-clean.sh

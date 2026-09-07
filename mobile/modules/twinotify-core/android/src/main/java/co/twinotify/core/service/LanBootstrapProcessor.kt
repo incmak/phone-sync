@@ -41,6 +41,7 @@ internal fun interface LocalLanBootstrapSource {
 /** Builds only our public bootstrap announcement; the derived secret never leaves native memory. */
 internal class DefaultLocalLanBootstrapSource(
     private val context: Context,
+    private val peerLinkId: String? = null,
 ) : LocalLanBootstrapSource {
     override suspend fun create(): LocalLanBootstrapResult {
         var localSecret: ByteArray? = null
@@ -49,7 +50,7 @@ internal class DefaultLocalLanBootstrapSource(
         var ownPin: ByteArray? = null
         var existingSecret: ByteArray? = null
         return try {
-            val peer = PeerStore.load(context) ?: return LocalLanBootstrapResult.Failed(CRYPTO_UNAVAILABLE)
+            val peer = PeerStore.load(context, peerLinkId) ?: return LocalLanBootstrapResult.Failed(CRYPTO_UNAVAILABLE)
             val localDevice = DeviceIdentity.getOrCreate(context)
             val (box, sign) = CryptoStore.loadOrGenerate(context)
             val secretCopy = box.secretKey.copyOf()
@@ -124,10 +125,11 @@ internal class DefaultLanBootstrapProcessor(
         context: Context,
         controls: PeerControlOutbox,
         generation: () -> Int,
+        peerLinkId: String? = null,
     ) : this(
         loadIdentities = {
             val localDevice = DeviceIdentity.getOrCreate(context)
-            val peer = PeerStore.load(context)
+            val peer = PeerStore.load(context, peerLinkId)
                 ?: throw IllegalStateException("LAN bootstrap requires a paired peer")
             val (box, sign) = CryptoStore.loadOrGenerate(context)
             LanBootstrapIdentityState(

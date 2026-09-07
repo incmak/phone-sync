@@ -21,11 +21,12 @@ interface ActionClaimRecoveryStore {
 
 class DaoActionClaimRecoveryStore(
     private val dao: ReliableDeliveryDao,
+    private val peerLinkId: String? = null,
 ) : ActionClaimRecoveryStore {
     override suspend fun dueClaims(cutoffClaimedAt: Long): List<ActionExecution> =
-        dao.dueActionExecutionClaims(cutoffClaimedAt)
+        dao.dueActionExecutionClaims(cutoffClaimedAt, peerLinkId)
 
-    override suspend fun earliestClaimedAt(): Long? = dao.earliestActionExecutionClaimedAt()
+    override suspend fun earliestClaimedAt(): Long? = dao.earliestActionExecutionClaimedAt(peerLinkId)
 
     override suspend fun completeOutcomeUnknown(
         execution: ActionExecution,

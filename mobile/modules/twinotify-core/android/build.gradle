@@ -16,7 +16,7 @@ android {
     testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
   }
   sourceSets {
-    androidTest.assets.srcDirs += files("$projectDir/schemas")
+    androidTest.assets.srcDirs += files("$projectDir/schemas", "${rootProject.projectDir}/../../proto/crypto")
     test.resources.srcDir("${rootProject.projectDir}/../../proto/fixtures")
   }
   lint {

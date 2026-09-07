@@ -100,7 +100,7 @@ func TestBlockedWriterReplacementKeepsExactConnectionByteOwnership(t *testing.T)
 	defer oldConnection.Close()
 	waitForRevokePairRegistration(t, server, deviceID, "pair-test-1")
 	server.clientHub.mu.Lock()
-	oldClient := server.clientHub.clients[deviceID]
+	oldClient := server.clientHub.clients[hubSessionKey(deviceID, "pair-test-1")]
 	server.clientHub.mu.Unlock()
 	if !server.clientHub.Send(deviceID, frame) {
 		t.Fatal("queue old maximum frame")
@@ -112,7 +112,7 @@ func TestBlockedWriterReplacementKeepsExactConnectionByteOwnership(t *testing.T)
 	replacementDeadline := time.Now().Add(time.Second)
 	for {
 		server.clientHub.mu.Lock()
-		current := server.clientHub.clients[deviceID]
+		current := server.clientHub.clients[hubSessionKey(deviceID, "pair-test-1")]
 		server.clientHub.mu.Unlock()
 		if current != nil && current != oldClient {
 			break

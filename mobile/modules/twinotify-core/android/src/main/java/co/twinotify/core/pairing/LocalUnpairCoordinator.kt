@@ -181,51 +181,15 @@ internal object ProductionLocalUnpairEntryPoint {
     }
 
     private suspend fun execute(context: Context): LocalUnpairResult {
-        val peer = PeerStore.load(context) ?: return LocalUnpairResult(
-            msgId = null,
-            custody = LocalUnpairCustodyOutcome.NO_PEER,
-        )
-        val config = ServiceConfigStore.read(context)
-        val revocationDecision = UnpairRevocationPolicy.decide(
-            peerPresent = true,
-            relayRevocationRequired = peer.relayRevocationRequired,
-            lanBindingId = peer.lanBindingId,
-            relayUrl = config.relayUrl,
-        )
-        return LocalUnpairCoordinator(
-            prepare = { SyncService.prepareLocalUnpair(context) },
-            persistUnpair = { msgId ->
-                DurableCapturePersister(context).persistUnpair(
-                    reason = "local_user",
-                    originDevice = DeviceIdentity.getOrCreate(context),
-                    timestamp = System.currentTimeMillis(),
-                    msgId = msgId,
-                )
-            },
-            revokePeer = {
-                UnpairRevocationExecutor.execute(
-                    decision = revocationDecision,
-                    markRevocationIntent = {
-                        ServiceConfigStore.setRevocationRequestedAt(context).revocationRequestedAt != null
-                    },
-                    revoke = { relayUrl, markerPresent ->
-                        val (_, sign) = CryptoStore.loadOrGenerate(context)
-                        PairProtocol.revoke(
-                            relayUrl,
-                            JwtMinter.mint(DeviceIdentity.getOrCreate(context), sign.secretKey),
-                            debug = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
-                            revocationMarkerPresent = markerPresent,
-                        )
-                    },
-                )
-            },
-            wipeLocal = {
-                UnpairOps.wipeAll(context)
-                SyncServiceStatus.notifyPeerUnpaired()
-            },
-            onCustodyOutcome = LocalUnpairStatus::record,
-        ).execute()
+        val peers = PeerStore.list(context, includeRemoving = true)
+        check(peers.size <= 1) { "peer_selection_required" }
+        val peer = peers.singleOrNull() ?: return LocalUnpairResult(null, LocalUnpairCustodyOutcome.NO_PEER)
+        PeerRemovalManager.removeLocal(context, peer.peerLinkId)
+        val custody = LocalUnpairCustodyOutcome.entries.firstOrNull { it.statusCode == LocalUnpairStatus.lastOutcome.value }
+            ?: LocalUnpairCustodyOutcome.UNAVAILABLE
+        return LocalUnpairResult(null, custody)
     }
+
 }
 
 internal class LocalUnpairRequest(

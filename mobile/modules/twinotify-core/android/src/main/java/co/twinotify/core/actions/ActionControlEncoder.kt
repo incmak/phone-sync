@@ -37,8 +37,8 @@ class ActionControlEncoder(
     private val newId: () -> String = { UUID.randomUUID().toString() },
     private val originDevice: suspend () -> String = { "local-device" },
 ) {
-    constructor(context: Context) : this(
-        seal = DurableActionControlSealer(context.applicationContext),
+    constructor(context: Context, peerLinkId: String? = null) : this(
+        seal = DurableActionControlSealer(context.applicationContext, peerLinkId),
         originDevice = { DeviceIdentity.getOrCreate(context.applicationContext) },
     )
 
@@ -98,8 +98,8 @@ class ActionControlEncoder(
     }
 }
 
-private class DurableActionControlSealer(private val context: Context) : ActionControlSealer {
-    private val delegate = DurablePeerControlSealer(context)
+private class DurableActionControlSealer(private val context: Context, peerLinkId: String?) : ActionControlSealer {
+    private val delegate = DurablePeerControlSealer(context, peerLinkId)
 
     override suspend fun seal(event: InnerEventV2): OutboundMessage =
         delegate.seal(event, requiresPeerReceipt = false)

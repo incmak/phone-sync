@@ -33,6 +33,7 @@ class ProtocolFixtureTest {
         var validCount = 0
         for (index in 0 until entries.length()) {
             val entry = entries.getJSONObject(index)
+            validateScope(entry)
             if (!entry.optBoolean("valid", false)) continue
             validCount += 1
             val raw = ProtocolFixtures.readPath(entry.getString("file"))
@@ -58,6 +59,7 @@ class ProtocolFixtureTest {
                     assertEquals("call.state", event.type)
                     assertJsonEquivalent(JSONObject(raw), JSONObject(ProtocolJson.encodeInner(event)))
                 }
+                "notif_cancel_inner",
                 "peer_receipt_inner",
                 "notif_action_invoke",
                 "notif_action_result",
@@ -87,6 +89,7 @@ class ProtocolFixtureTest {
         var invalidCount = 0
         for (index in 0 until entries.length()) {
             val entry = entries.getJSONObject(index)
+            validateScope(entry)
             if (entry.optBoolean("valid", false)) continue
             invalidCount += 1
             val type = entry.getString("type")
@@ -116,6 +119,7 @@ class ProtocolFixtureTest {
                     val error = assertFailsWith<IllegalArgumentException> { ProtocolJson.decodeInner(raw) }
                     assertEquals(expectedCode, observedFixtureCode(error))
                 }
+                "peer_receipt_inner",
                 "notif_action_invoke",
                 "notif_action_result",
                 "lan_bootstrap_inner",
@@ -137,11 +141,20 @@ class ProtocolFixtureTest {
         assertTrue(invalidCount > 0, "manifest must contain invalid fixtures")
     }
 
+    private fun validateScope(entry: JSONObject) {
+        val type = entry.getString("type")
+        val expectedScope = if (type == "relay_control") "server" else "cross_layer"
+        assertEquals(expectedScope, entry.getString("scope"), "fixture scope for $type")
+    }
+
     /** Converts the concrete parser/authenticator failure into the shared stable category. */
     private fun observedFixtureCode(error: Throwable): String = when {
         error is EnvelopeMismatchException && error.message == "outer and inner msg_id differ" ->
             "outer_inner_id_mismatch"
         error is IllegalArgumentException && error.message == "invalid SHA-256 digest" -> "invalid_frame"
+        error is IllegalArgumentException &&
+            (error.message?.contains("peer.receipt") == true || error.message?.contains("peer receipt") == true) ->
+            "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("call.state") == true ->
             "invalid_frame"
         error is IllegalArgumentException && error.message?.contains("notif.action") == true ->

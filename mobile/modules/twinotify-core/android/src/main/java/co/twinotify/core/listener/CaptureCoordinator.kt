@@ -285,6 +285,11 @@ class CaptureCoordinator(
         if (reconciliationNeeded) 1 else 0
     }
 
+    internal fun markExternalReconciliation() = synchronized(laneLock) {
+        reconciliationNeeded = true
+        reconciliationGeneration += 1
+    }
+
     internal fun reconciliationNeeded(): Boolean = synchronized(laneLock) { reconciliationNeeded }
 
     /** Snapshot lease captured before platform/Room recovery begins. */

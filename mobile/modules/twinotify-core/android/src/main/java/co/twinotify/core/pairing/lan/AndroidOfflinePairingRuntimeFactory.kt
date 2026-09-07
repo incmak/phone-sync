@@ -28,8 +28,15 @@ internal class AndroidOfflinePairingRuntimeFactory(
         scope: CoroutineScope,
         displayName: String,
         statusSink: (OfflinePairingPublicStatus) -> Unit,
-    ): OfflinePairingRuntime {
-        val initialized = initialize(displayName)
+    ): OfflinePairingRuntime = startForSelection(scope, displayName, statusSink, null)
+
+    override fun startForPeer(scope: CoroutineScope, displayName: String, peerLinkId: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit): OfflinePairingRuntime =
+        startForSelection(scope, displayName, statusSink, peerLinkId)
+
+    private fun startForSelection(scope: CoroutineScope, displayName: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit, peerLinkId: String?): OfflinePairingRuntime {
+        val initialized = initialize(displayName, peerLinkId)
         val qr = LanPairingQr(
             version = 1,
             sessionId = UUID.randomUUID().toString(),
@@ -50,8 +57,15 @@ internal class AndroidOfflinePairingRuntimeFactory(
         qr: LanPairingQr,
         displayName: String,
         statusSink: (OfflinePairingPublicStatus) -> Unit,
-    ): OfflinePairingRuntime {
-        val initialized = initialize(displayName)
+    ): OfflinePairingRuntime = joinForSelection(scope, qr, displayName, statusSink, null)
+
+    override fun joinForPeer(scope: CoroutineScope, qr: LanPairingQr, displayName: String, peerLinkId: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit): OfflinePairingRuntime =
+        joinForSelection(scope, qr, displayName, statusSink, peerLinkId)
+
+    private fun joinForSelection(scope: CoroutineScope, qr: LanPairingQr, displayName: String,
+        statusSink: (OfflinePairingPublicStatus) -> Unit, peerLinkId: String?): OfflinePairingRuntime {
+        val initialized = initialize(displayName, peerLinkId)
         return runtime(scope, OfflinePairingRole.JOINER, qr, initialized, null, statusSink)
     }
 
@@ -64,26 +78,32 @@ internal class AndroidOfflinePairingRuntimeFactory(
         statusSink: (OfflinePairingPublicStatus) -> Unit,
     ): OfflinePairingRuntime {
         val commitFence = OfflinePairingCommitFence()
+        val committer = AndroidOfflinePairingCommitter(initialized.context, initialized.existingPeer, commitFence)
         return OfflinePairingRuntimeAdapter(
             scope = scope,
             pairingRole = role,
             qr = qr,
             localIdentity = initialized.identity,
-            committer = AndroidOfflinePairingCommitter(initialized.context, initialized.existingPeer, commitFence),
+            committer = committer,
             transport = AndroidOfflinePairingSessionTransport(initialized.context),
             nonce = randomBytes(32),
             qrJson = qrJson,
-            statusSink = statusSink,
+            statusSink = { statusSink(it.copy(peerLinkId = if (it.completed) committer.committedPeerLinkId else null)) },
             commitFence = commitFence,
         )
     }
 
     /** Recovery is deliberately before the peer snapshot used by the ceremony. */
-    private fun initialize(displayName: String): Initialization = runBlocking(Dispatchers.IO) {
+    private fun initialize(displayName: String, peerLinkId: String?): Initialization = runBlocking(Dispatchers.IO) {
         withTimeout(INITIALIZATION_TIMEOUT_MILLIS) {
             val context = contextProvider().applicationContext
-            LanPairStore.recover(context, PeerStore.load(context))
-            val peer = PeerStore.load(context)
+            val peers = PeerStore.list(context)
+            if (peers.isEmpty()) LanPairStore.recover(context, null)
+            else peers.forEach { LanPairStore.recover(context, it) }
+            val peer = if (peerLinkId == null) {
+                PeerStore.prepareAdditionalPair(context)
+                null
+            } else checkNotNull(PeerStore.load(context, peerLinkId)) { "peer_removed" }
             val (box, sign) = CryptoStore.loadOrGenerate(context)
             val tls = LanIdentityStore.loadOrCreate()
             Initialization(
@@ -133,6 +153,8 @@ internal class AndroidOfflinePairingCommitter(
     private val beforeStoreCommit: () -> Unit = {},
 ) : OfflinePairingCommitter {
     private val initialPeer = existingPeer?.copyRecord()
+    @Volatile var committedPeerLinkId: String? = null
+        private set
 
     override fun existingPeer(): OfflinePairingExistingPeer? = initialPeer?.let {
         OfflinePairingExistingPeer(it.deviceId, it.encPubkey, it.signPubkey)
@@ -155,7 +177,14 @@ internal class AndroidOfflinePairingCommitter(
             )
             commitFence.commit {
                 beforeStoreCommit()
+                if (initialPeer != null) {
+                    val current = PeerStore.load(context, initialPeer.peerLinkId)
+                    check(current != null && current.samePublicIdentity(initialPeer)) { "peer_removed" }
+                } else {
+                    check(PeerStore.forDevice(context, value.peerDeviceId) == null) { "peer_already_paired" }
+                }
                 LanPairStore.commit(context, LanPairStore.prepare(context, peer, binding))
+                committedPeerLinkId = checkNotNull(PeerStore.forDevice(context, value.peerDeviceId)).peerLinkId
                 true
             } ?: false
         }
@@ -214,4 +243,9 @@ private fun PeerRecord.copyRecord() = PeerRecord(
     displayName,
     lanBindingId,
     relayRevocationRequired,
+    peerLinkId,
+    relayUrl,
+    relayPairId,
+    preferLan,
+    lifecycle,
 )

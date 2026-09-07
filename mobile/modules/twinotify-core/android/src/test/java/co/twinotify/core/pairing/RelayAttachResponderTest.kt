@@ -74,11 +74,12 @@ class RelayAttachResponderTest {
             initiatorEncPubkey: ByteArray,
             initiatorSignPubkey: ByteArray,
             confirmationSig: ByteArray,
-        ) {
+        ): String {
             calls += "complete"
             completedWithPeerEnc = initiatorEncPubkey
             completedWithPeerSign = initiatorSignPubkey
             if (failOn == "complete") error("relay refused complete")
+            return "pair-id"
         }
     }
 
@@ -93,7 +94,7 @@ class RelayAttachResponderTest {
         loadPeer = { peerRecord },
         client = client,
         verifyConfirmation = { _, _, signingKey -> verified += signingKey; signatureValid },
-        commit = { url -> committed += url },
+        commit = { url, pairId -> check(pairId == "pair-id"); committed += url },
     )
 
     private fun offer(relayUrl: String = "https://relay.example.test") =

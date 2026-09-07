@@ -60,8 +60,9 @@ export default function FingerprintScreen() {
         pairToken, peerEncB64, peerSignB64,
       );
       await TwinotifyCoreModule.sendConfirmationSig(relayUrl, pairToken, sigB64);
-      await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId, peerDisplayName);
-      router.replace('/pair/success');
+      const pairId = await TwinotifyCoreModule.awaitPairComplete(relayUrl, pairToken);
+      const peerLinkId = await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId, peerDisplayName, relayUrl, pairId);
+      router.replace({ pathname: '/pair/success', params: { peerLinkId } });
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Signing or relay push failed.');
       setWorking(false);
@@ -73,15 +74,15 @@ export default function FingerprintScreen() {
       setWorking(true);
       setErrorMsg(null);
       const sigB64 = await TwinotifyCoreModule.awaitPairSig(relayUrl, pairToken);
-      await TwinotifyCoreModule.deviceBCompletePairing(
+      const pairId = await TwinotifyCoreModule.deviceBCompletePairing(
         relayUrl,
         pairToken,
         peerEncB64,
         peerSignB64,
         sigB64,
       );
-      await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId, peerDisplayName);
-      router.replace('/pair/success');
+      const peerLinkId = await TwinotifyCoreModule.storePeerPubkeys(peerEncB64, peerSignB64, peerDeviceId, peerDisplayName, relayUrl, pairId);
+      router.replace({ pathname: '/pair/success', params: { peerLinkId } });
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Pair completion failed.');
       router.replace('/pair/fail');

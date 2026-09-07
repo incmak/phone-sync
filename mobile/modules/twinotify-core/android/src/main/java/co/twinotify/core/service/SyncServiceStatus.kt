@@ -331,6 +331,16 @@ internal fun SyncRouteStatus.toSyncState(protocolFloor: Int = 2): SyncState = wh
     RoutePhase.IDLE -> SyncState.DISCONNECTED
 }
 
+data class PeerRouteHealth(
+    val status: SyncRouteStatus = SyncRouteStatus(),
+    val protocolFloor: Int = 2,
+    val lastErrorCode: String? = null,
+) {
+    fun toPublicMap(): Map<String, Any?> = status.toPublicMap() + mapOf(
+        "protocolFloor" to protocolFloor, "lastErrorCode" to lastErrorCode,
+    )
+}
+
 object SyncServiceStatus {
     private val _state = MutableStateFlow(SyncState.DISCONNECTED)
     val state: StateFlow<SyncState> = _state
@@ -352,6 +362,11 @@ object SyncServiceStatus {
         ),
     )
     val health: StateFlow<SyncHealth> = _health
+    private val _peerRoutes = MutableStateFlow<Map<String, PeerRouteHealth>>(emptyMap())
+    val peerRoutes: StateFlow<Map<String, PeerRouteHealth>> = _peerRoutes
+    private val peerConditions = mutableMapOf<String, DeliveryConditions>()
+    private val peerQueues = mutableMapOf<String, DeliveryQueueSnapshot>()
+    private val peerEvidence = mutableMapOf<String, PeerEvidence>()
     private val _routeStatus = MutableStateFlow(SyncRouteStatus())
     val routeStatus: StateFlow<SyncRouteStatus> = _routeStatus
     private val _routeRetryRequested = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
@@ -369,6 +384,96 @@ object SyncServiceStatus {
 
     private val _peerUnpaired = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     val peerUnpaired: SharedFlow<Unit> = _peerUnpaired
+
+    @Synchronized
+    fun initializePeers(links: List<String>, generation: Int) {
+        if (generation != routeGeneration.get()) return
+        peerConditions.clear()
+        peerQueues.clear()
+        peerEvidence.clear()
+        _peerRoutes.value = links.associateWith {
+            PeerRouteHealth(status = SyncRouteStatus(phase = RoutePhase.CONNECTING, routeGeneration = generation))
+        }
+    }
+
+    @Synchronized
+    fun setPeerRouteSnapshot(link: String, status: SyncRouteStatus, snapshot: DeliveryQueueSnapshot,
+        evidence: PeerEvidence, generation: Int) {
+        if (generation != routeGeneration.get() || link !in _peerRoutes.value) return
+        requireValidSnapshot(snapshot)
+        peerQueues[link] = snapshot
+        peerEvidence[link] = evidence
+        val resolved = DeliveryStatusModel.resolve(status.copy(routeGeneration = generation), snapshot,
+            peerConditions[link] ?: DeliveryConditions(), evidence)
+        val old = _peerRoutes.value.getValue(link)
+        _peerRoutes.value = _peerRoutes.value + (link to old.copy(status = resolved,
+            lastErrorCode = if (resolved.phase == RoutePhase.AUTHENTICATED) null else old.lastErrorCode))
+        publishPeerAggregate()
+    }
+
+    @Synchronized
+    fun setPeerQueueSnapshot(link: String, snapshot: DeliveryQueueSnapshot, generation: Int) {
+        val old = _peerRoutes.value[link] ?: return
+        setPeerRouteSnapshot(link, old.status, snapshot, peerEvidence[link] ?: PeerEvidence.UNKNOWN, generation)
+    }
+
+    @Synchronized
+    fun setPeerConditions(link: String, conditions: DeliveryConditions, generation: Int) {
+        if (generation != routeGeneration.get()) return
+        val old = _peerRoutes.value[link] ?: return
+        peerConditions[link] = conditions
+        setPeerRouteSnapshot(link, old.status, peerQueues[link] ?: emptyQueueSnapshot(),
+            peerEvidence[link] ?: PeerEvidence.UNKNOWN, generation)
+    }
+
+    @Synchronized
+    fun setPeerRouteEvidence(link: String, evidence: PeerEvidence, generation: Int) {
+        val old = _peerRoutes.value[link] ?: return
+        setPeerRouteSnapshot(link, old.status, peerQueues[link] ?: emptyQueueSnapshot(), evidence, generation)
+    }
+
+    @Synchronized
+    fun setPeerProtocolFloor(link: String, floor: Int, generation: Int) {
+        if (generation != routeGeneration.get()) return
+        val old = _peerRoutes.value[link] ?: return
+        _peerRoutes.value = _peerRoutes.value + (link to old.copy(protocolFloor = floor))
+        publishPeerAggregate()
+    }
+
+    @Synchronized
+    fun setPeerError(link: String, code: String?, generation: Int) {
+        if (generation != routeGeneration.get()) return
+        val old = _peerRoutes.value[link] ?: return
+        _peerRoutes.value = _peerRoutes.value + (link to old.copy(lastErrorCode = code))
+    }
+
+    @Synchronized
+    fun removePeer(link: String) {
+        _peerRoutes.value = _peerRoutes.value - link
+        peerConditions.remove(link)
+        peerQueues.remove(link)
+        peerEvidence.remove(link)
+        publishPeerAggregate()
+    }
+
+    private fun publishPeerAggregate() {
+        val peers = _peerRoutes.value.values
+        if (peers.isEmpty()) {
+            clearRouteStatus()
+            setState(SyncState.DISCONNECTED)
+            return
+        }
+        // The overview reflects the least connected link; a healthy peer cannot hide another's outage.
+        val least = peers.minBy { if (it.status.phase == RoutePhase.AUTHENTICATED) 1 else 0 }
+        val snapshots = peerQueues.values
+        val combined = DeliveryQueueSnapshot(snapshots.sumOf { it.pendingLocal }, snapshots.sumOf { it.awaitingPeer },
+            snapshots.sumOf { it.heldByRelay }, snapshots.sumOf { it.internalActive }, snapshots.sumOf { it.totalActive },
+            snapshots.sumOf { it.totalActiveBytes }, if (snapshots.any { it.userContentKind == UserContentKind.SYNC_UPDATES })
+                UserContentKind.SYNC_UPDATES else UserContentKind.NOTIFICATIONS)
+        setRouteSnapshot(least.status, combined, least.status.peerEvidence)
+        setProtocolFloor(peers.minOf { it.protocolFloor })
+        setState(least.status.toSyncState(peers.minOf { it.protocolFloor }))
+    }
 
     @Synchronized
     fun setRouteStatus(status: SyncRouteStatus, generation: Int = routeGeneration.get()) {
@@ -393,6 +498,10 @@ object SyncServiceStatus {
     @Synchronized
     fun beginRouteGeneration(): Int {
         val next = routeGeneration.incrementAndGet()
+        _peerRoutes.value = emptyMap()
+        peerConditions.clear()
+        peerQueues.clear()
+        peerEvidence.clear()
         deliveryConditions = DeliveryConditions()
         relayEvidence = PeerEvidence.UNKNOWN
         _routeStatus.value = DeliveryStatusModel.resolve(
@@ -407,6 +516,10 @@ object SyncServiceStatus {
     /** A stopped service has no route. Leaving the last one would show a stale claim. */
     @Synchronized
     fun clearRouteStatus() {
+        _peerRoutes.value = emptyMap()
+        peerConditions.clear()
+        peerQueues.clear()
+        peerEvidence.clear()
         queueSnapshot = emptyQueueSnapshot()
         deliveryConditions = DeliveryConditions()
         relayEvidence = PeerEvidence.UNKNOWN

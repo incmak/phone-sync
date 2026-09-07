@@ -1,0 +1,5 @@
+.build/
+.build-e2e/
+.swiftpm/
+dist/
+Sources/TwinotifyKit/GeneratedSchemas.swift

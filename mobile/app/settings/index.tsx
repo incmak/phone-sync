@@ -16,6 +16,7 @@ import {
   TwRow,
   TwSwitch,
 } from '../../components';
+import { RepeatProtectionSettings } from '../../components/RepeatProtectionSettings';
 import { HandoffDisclosureMark } from '../../components/HandoffTrace';
 import { useSyncStatus } from '../../hooks/useSyncStatus';
 import { useRouteStatus } from '../../hooks/useRouteStatus';
@@ -101,7 +102,7 @@ export default function SettingsScreen() {
   const peerShort = pairStatus.peerDeviceId
     ? pairStatus.peerDeviceId.slice(0, 8)
     : 'Not paired';
-  const peerStatusStr = pairStatus.paired ? `${peerShort} · ${connectionLabel(state)}` : 'Not paired';
+  const peerStatusStr = (pairStatus.peerCount ?? 0) > 1 ? `${pairStatus.peerCount} devices` : pairStatus.paired ? `${peerShort} · ${connectionLabel(state)}` : 'Not paired';
   const handlePreferLanChange = useCallback(async (next: boolean) => {
     setPreferLan(next);
     try {
@@ -248,10 +249,10 @@ export default function SettingsScreen() {
         <View style={styles.group}>
           {sectionHeader('Pairing')}
           <TwRow
-            title="Paired device"
+            title="Paired devices"
             subtitle={peerStatusStr}
-            onPress={pairStatus.paired ? () => router.push('/settings/pair') : undefined}
-            trailing={pairStatus.paired ? disclosure('settings-pair-disclosure') : undefined}
+            onPress={() => router.push('/settings/peers')}
+            trailing={disclosure('settings-pair-disclosure')}
             style={styles.ledgerRow}
           />
         </View>
@@ -263,7 +264,7 @@ export default function SettingsScreen() {
               <TwRow
                 title="Relay server"
                 subtitle={relayDisplay}
-                onPress={() => router.push('/settings/pair')}
+                onPress={() => router.push('/settings/peers')}
                 trailing={disclosure('settings-relay-disclosure')}
                 style={styles.ledgerRow}
               />
@@ -305,7 +306,7 @@ export default function SettingsScreen() {
               onPress={
                 relayUrl === undefined || !pairStatus.paired
                   ? undefined
-                  : () => router.push('/settings/pair')
+                  : () => router.push('/settings/peers')
               }
               trailing={
                 relayUrl !== undefined && pairStatus.paired
@@ -380,6 +381,7 @@ export default function SettingsScreen() {
               style={styles.ledgerRow}
             />
           ) : null}
+          <RepeatProtectionSettings />
           <TwRow
             title="App filter"
             subtitle="Control which apps are mirrored"

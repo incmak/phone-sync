@@ -540,7 +540,7 @@ func TestPairCapabilityUpdateRollsBackOnCorruptProtocolFloor(t *testing.T) {
 	if err := ps.UpdateCapabilities("a", []int{2, 1}, "after"); err == nil {
 		t.Fatal("UpdateCapabilities accepted corrupt protocol floor")
 	}
-	raw, err := ps.bolt.Get(bucketCapabilities, "a")
+	raw, err := ps.bolt.Get(bucketCapabilities, string(capabilityKey("pair-1", "a")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +753,7 @@ func TestRevokeByDeviceRollsBackPairDeletionWhenMailboxPurgeFails(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := b.Update(func(tx *bbolt.Tx) error {
-		items, err := tx.CreateBucketIfNotExists([]byte(bucketMailboxItems))
+		items, err := mailboxScope(tx, pair.PairID).CreateBucketIfNotExists([]byte(bucketMailboxItems))
 		if err != nil {
 			return err
 		}
@@ -792,7 +792,7 @@ func TestRevokeRequiredBeforeConfirmCanRebindDevices(t *testing.T) {
 	if err := ps.Confirm(original); err != nil {
 		t.Fatal(err)
 	}
-	candidate := ConfirmedPair{PairID: "candidate", DeviceA: "dev-a", DeviceB: "dev-c"}
+	candidate := ConfirmedPair{PairID: "candidate", DeviceA: "dev-a", DeviceB: "dev-b"}
 	if err := ps.Confirm(candidate); !errors.Is(err, ErrPairConflict) {
 		t.Fatalf("Confirm live device binding error = %v, want ErrPairConflict", err)
 	}

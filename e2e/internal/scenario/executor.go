@@ -1034,6 +1034,9 @@ func (e *Executor) observeDeliveryRoute(ctx context.Context, a action) (string, 
 }
 
 func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) error {
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, e.stepTimeout)
+	defer cancel()
 	var matchedA Observation
 	e.callControlStableSamples = 0
 	// Devices are sampled every 200 ms. Stability predicates need several
@@ -1067,6 +1070,9 @@ func (e *Executor) waitPredicate(ctx context.Context, name, predicate string) er
 	if err == nil && isBluetoothRoutePlan(name) &&
 		(predicate == "A.route.bluetooth" || predicate == "A.route.lan") {
 		e.recordRouteTransition(matchedA)
+	}
+	if errors.Is(err, context.DeadlineExceeded) && parent.Err() == nil {
+		return oracleFailure(oracleCode(predicate))
 	}
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		return oracleFailure(oracleCode(predicate))

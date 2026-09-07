@@ -1,11 +1,12 @@
 package co.twinotify.core.crypto
 
 import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.byteArrayPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import kotlinx.coroutines.flow.first
 import java.nio.ByteBuffer
 import java.security.SecureRandom
 
@@ -26,38 +27,35 @@ object NonceSource {
     private val KEY_PREFIX = byteArrayPreferencesKey("prefix")
     private val KEY_COUNTER = longPreferencesKey("counter")
 
-    suspend fun next(ctx: Context): ByteArray {
-        var prefix = ctx.nonceDs.data.first()[KEY_PREFIX]
-        if (prefix == null) {
-            prefix = ByteArray(16).also { SecureRandom().nextBytes(it) }
-            ctx.nonceDs.edit { e ->
-                e[KEY_PREFIX] = prefix
-                e[KEY_COUNTER] = 0L
-            }
+    suspend fun next(ctx: Context): ByteArray = next(ctx.nonceDs)
+
+    internal suspend fun next(store: DataStore<Preferences>): ByteArray {
+        var allocated: ByteArray? = null
+        store.edit { prefs ->
+            val savedPrefix = prefs[KEY_PREFIX]
+            val savedCounter = prefs[KEY_COUNTER]
+            check((savedPrefix == null) == (savedCounter == null)) { "nonce_storage_inconsistent" }
+            val prefix = savedPrefix ?: ByteArray(16).also { SecureRandom().nextBytes(it) }
+            check(prefix.size == 16) { "nonce_prefix_invalid" }
+            val previous = savedCounter ?: 0L
+            check(previous >= 0L && previous < Long.MAX_VALUE) { "nonce_counter_exhausted" }
+            val next = previous + 1L
+            prefs[KEY_PREFIX] = prefix
+            prefs[KEY_COUNTER] = next
+            allocated = encode(prefix, next)
         }
-        // Atomically bump counter
-        var counter = 0L
-        ctx.nonceDs.edit { e ->
-            counter = (e[KEY_COUNTER] ?: 0L) + 1
-            e[KEY_COUNTER] = counter
-        }
+        return checkNotNull(allocated)
+    }
+
+    /** Shared wire layout, also exercised by the cross-platform known-answer test. */
+    internal fun encode(prefix: ByteArray, counter: Long): ByteArray {
         val nonce = ByteArray(24)
         System.arraycopy(prefix, 0, nonce, 0, 16)
         ByteBuffer.wrap(nonce, 16, 8).putLong(counter)
         return nonce
     }
 
-    /**
-     * Regenerates the nonce prefix + resets counter to 0.
-     *
-     * CRITICAL: only call this as part of the unpair sequence (see UnpairOps.wipeAll). Regenerating
-     * mid-session with the same peer keys corrupts forward progress — a counter reset + reused random
-     * prefix = nonce reuse = catastrophic (XSalsa20-Poly1305 leaks plaintext XOR, breaks MAC).
-     *
-     * UnpairOps.wipeAll sequences this with PeerStore.clear() and CryptoStore.rotate() so the peer
-     * keys are gone BEFORE we reset — any in-flight encrypt would fail at PeerStore.load() long
-     * before reaching NonceSource.next(), preventing the reuse window.
-     */
+    /** Full identity reset only. Ordinary peer removal must preserve this allocator, even for the last peer. */
     suspend fun regenerate(ctx: Context) {
         ctx.nonceDs.edit { it.clear() }
     }

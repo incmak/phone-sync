@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ScrollView, View, Text } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import Svg, { Circle, Path } from 'react-native-svg';
 import { useTheme, TwButton } from '../../components';
 import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
@@ -9,6 +9,7 @@ import { OnboardingState } from '../../state/onboardingState';
 
 export default function PairSuccessScreen() {
   const theme = useTheme();
+  const { peerLinkId } = useLocalSearchParams<{ peerLinkId?: string }>();
   const [peerName, setPeerName] = useState<string>('');
   const [verifiedComplete, setVerifiedComplete] = useState(false);
 
@@ -16,7 +17,10 @@ export default function PairSuccessScreen() {
     (async () => {
       try {
         const offline = await TwinotifyCoreModule.getOfflinePairingStatus();
-        const ps = await TwinotifyCoreModule.getPairStatus();
+        const ps = peerLinkId
+          ? (await TwinotifyCoreModule.getPeerLinks()).find((peer) => peer.peerLinkId === peerLinkId)
+          : await TwinotifyCoreModule.getPairStatus();
+        if (!ps) return;
         const pairingMode = await OnboardingState.getPairingMode();
         const complete = pairingMode === 'nearby'
           ? offline.completed && offline.phase === 'complete'
@@ -43,7 +47,7 @@ export default function PairSuccessScreen() {
         setVerifiedComplete(false);
       }
     })();
-  }, []);
+  }, [peerLinkId]);
 
   return (
     <SafeAreaView
@@ -101,7 +105,7 @@ export default function PairSuccessScreen() {
           size="lg"
           fullWidth
           disabled={!verifiedComplete}
-          onPress={() => router.replace('/pair/bluetooth')}
+          onPress={() => router.replace(peerLinkId ? { pathname: '/pair/bluetooth', params: { peerLinkId } } : '/pair/bluetooth')}
         >
           Done
         </TwButton>

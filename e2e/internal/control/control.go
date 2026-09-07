@@ -547,6 +547,11 @@ func (c *Controller) Pair(ctx context.Context, options PairOptions) error {
 	}); err != nil {
 		return c.withSnapshots(ctx, "PAIR_COMPLETE", err)
 	}
+	if err = c.executeOnly(ctx, c.a, "AWAIT_PAIR_COMPLETE", map[string]string{
+		"relay_url": payload.RelayURL, "pair_token": payload.PairToken,
+	}); err != nil {
+		return c.withSnapshots(ctx, "AWAIT_PAIR_COMPLETE", err)
+	}
 	if err = c.waitForReciprocalPeers(ctx, payload.DeviceID, peerHello.DeviceID); err != nil {
 		return c.withSnapshots(ctx, "reciprocal status", err)
 	}
@@ -661,7 +666,11 @@ func (c *Controller) waitForHealthy(ctx context.Context) error {
 
 func (c *Controller) execute(ctx context.Context, client *Client, name string, params map[string]string) (Result, error) {
 	id := fmt.Sprintf("e2e-%s-%d", strings.ToLower(name), atomic.AddUint64(&c.seq, 1))
-	return client.Execute(ctx, Command{RequestID: id, Name: name, Params: params})
+	result, err := client.Execute(ctx, Command{RequestID: id, Name: name, Params: params})
+	if err == nil && result.Code != "ok" {
+		err = fmt.Errorf("%s returned %s", name, result.Code)
+	}
+	return result, err
 }
 
 func (c *Controller) executeOnly(ctx context.Context, client *Client, name string, params map[string]string) error {

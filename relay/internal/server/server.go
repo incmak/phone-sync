@@ -277,5 +277,6 @@ func (s *Server) routes() {
 	s.router.With(s.observePairMutation(pairStageComplete), s.rejectDuringShutdown, s.pairIPRateLimit).Post("/pair/complete", s.handlePairComplete)
 	s.router.With(s.rejectDuringShutdown, s.pairIPRateLimit).Get("/pair/notify", s.handlePairNotify)
 	s.router.With(s.rejectDuringShutdown, s.authMiddleware).Post("/pair/revoke", s.handlePairRevoke)
+	s.router.With(s.rejectDuringShutdown, s.authMiddleware).Get("/pair/session", s.handlePairSession)
 	s.router.With(s.rejectDuringShutdown, requireWebSocketUpgrade, s.authMiddleware).Get("/ws", s.handleWebSocket)
 }

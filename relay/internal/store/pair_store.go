@@ -43,7 +43,7 @@ var pendingCountKey = []byte("pending_count")
 var pairIndexSchemaVersionKey = []byte("pair_index_schema_v2")
 var pairIndexConfigKey = []byte("pair_index_config_v2")
 
-const pairIndexSchemaVersion = 2
+const pairIndexSchemaVersion = 3
 
 type PendingPairLimits struct {
 	MaxPending int
@@ -394,9 +394,8 @@ func (ps *PairStore) ConfirmPending(pairToken string, candidate ConfirmedPair, c
 		if confirmed != nil && confirmed.Get([]byte(candidate.PairID)) != nil {
 			return ErrPairConflict
 		}
-		byDevice := tx.Bucket([]byte(bucketByDevice))
-		if byDevice != nil && (byDevice.Get([]byte(candidate.DeviceA)) != nil || byDevice.Get([]byte(candidate.DeviceB)) != nil) {
-			return ErrPairConflict
+		if err := admitPairMembershipsTx(tx, candidate); err != nil {
+			return err
 		}
 
 		encodedPair, err := json.Marshal(candidate)
@@ -410,18 +409,6 @@ func (ps *PairStore) ConfirmPending(pairToken string, candidate ConfirmedPair, c
 			}
 		}
 		if err := confirmed.Put([]byte(candidate.PairID), encodedPair); err != nil {
-			return err
-		}
-		if byDevice == nil {
-			byDevice, err = tx.CreateBucket([]byte(bucketByDevice))
-			if err != nil {
-				return err
-			}
-		}
-		if err := byDevice.Put([]byte(candidate.DeviceA), []byte(candidate.PairID)); err != nil {
-			return err
-		}
-		if err := byDevice.Put([]byte(candidate.DeviceB), []byte(candidate.PairID)); err != nil {
 			return err
 		}
 
@@ -467,10 +454,6 @@ func (ps *PairStore) Confirm(cp ConfirmedPair) error {
 		if err != nil {
 			return err
 		}
-		byDevice, err := tx.CreateBucketIfNotExists([]byte(bucketByDevice))
-		if err != nil {
-			return err
-		}
 		pairID := []byte(cp.PairID)
 		if raw := confirmed.Get(pairID); raw != nil {
 			stored, err := decodeConfirmedPair(raw)
@@ -481,18 +464,10 @@ func (ps *PairStore) Confirm(cp ConfirmedPair) error {
 				return ErrPairConflict
 			}
 		}
-		for _, deviceID := range []string{cp.DeviceA, cp.DeviceB} {
-			if existingPairID := byDevice.Get([]byte(deviceID)); existingPairID != nil && !bytes.Equal(existingPairID, pairID) {
-				return ErrPairConflict
-			}
-		}
-		if err := confirmed.Put(pairID, b); err != nil {
+		if err := admitPairMembershipsTx(tx, cp); err != nil {
 			return err
 		}
-		if err := byDevice.Put([]byte(cp.DeviceA), pairID); err != nil {
-			return err
-		}
-		return byDevice.Put([]byte(cp.DeviceB), pairID)
+		return confirmed.Put(pairID, b)
 	})
 }
 
@@ -513,32 +488,25 @@ func (ps *PairStore) revoke(deviceID, expectedPairID string) (*ConfirmedPair, er
 		if err != nil {
 			return err
 		}
-		byDevice := tx.Bucket([]byte(bucketByDevice))
-		for _, pairedDevice := range []string{pair.DeviceA, pair.DeviceB} {
-			if indexedPairID := byDevice.Get([]byte(pairedDevice)); !bytes.Equal(indexedPairID, pairID) {
-				return ErrPairConflict
-			}
-		}
-
-		if err := purgePairTx(tx, pair.DeviceA, pair.DeviceB); err != nil {
+		if err := purgePairTx(mailboxScope(tx, string(pairID)), pair.DeviceA, pair.DeviceB); err != nil {
 			return err
 		}
-		confirmed := tx.Bucket([]byte(bucketConfirmed))
-		if err := confirmed.Delete(pairID); err != nil {
-			return err
-		}
-		if err := byDevice.Delete([]byte(pair.DeviceA)); err != nil {
-			return err
-		}
-		if err := byDevice.Delete([]byte(pair.DeviceB)); err != nil {
-			return err
-		}
-		if capabilities := tx.Bucket([]byte(bucketCapabilities)); capabilities != nil {
-			if err := capabilities.Delete([]byte(pair.DeviceA)); err != nil {
+		if root := tx.Bucket([]byte(bucketMailboxPairs)); root != nil && root.Bucket(pairID) != nil {
+			if err := root.DeleteBucket(pairID); err != nil {
 				return err
 			}
-			if err := capabilities.Delete([]byte(pair.DeviceB)); err != nil {
+		}
+		if err := tx.Bucket([]byte(bucketConfirmed)).Delete(pairID); err != nil {
+			return err
+		}
+		for _, device := range []string{pair.DeviceA, pair.DeviceB} {
+			if err := removeMembershipTx(tx, device, string(pairID)); err != nil {
 				return err
+			}
+			if caps := tx.Bucket([]byte(bucketCapabilities)); caps != nil {
+				if err := caps.Delete(capabilityKey(string(pairID), device)); err != nil {
+					return err
+				}
 			}
 		}
 		if floors := tx.Bucket([]byte(bucketProtocolFloor)); floors != nil {
@@ -657,11 +625,34 @@ type persistedPairIndexConfig struct {
 func initializePairStoreIndexesTx(tx *bbolt.Tx, limits PendingPairLimits) error {
 	meta := tx.Bucket([]byte(bucketPairMeta))
 	if meta == nil || meta.Get(pairIndexSchemaVersionKey) == nil {
+		if err := migratePairMembershipsTx(tx); err != nil {
+			return err
+		}
 		if err := rebuildPairStoreIndexesTx(tx, limits); err != nil {
 			return err
 		}
+	} else if bytes.Equal(meta.Get(pairIndexSchemaVersionKey), []byte{2}) {
+		if err := validatePairStoreIndexesVersionTx(tx, limits, 2); err != nil {
+			return err
+		}
+		if err := migratePairMembershipsTx(tx); err != nil {
+			return err
+		}
+		config, err := encodePairIndexConfig(limits)
+		if err != nil {
+			return err
+		}
+		if err := meta.Put(pairIndexConfigKey, config); err != nil {
+			return err
+		}
+		if err := meta.Put(pairIndexSchemaVersionKey, []byte{pairIndexSchemaVersion}); err != nil {
+			return err
+		}
 	}
-	return validatePairStoreIndexesTx(tx, limits)
+	if err := validatePairStoreIndexesTx(tx, limits); err != nil {
+		return err
+	}
+	return validateMembershipsTx(tx)
 }
 
 func rebuildPairStoreIndexesTx(tx *bbolt.Tx, limits PendingPairLimits) error {
@@ -728,23 +719,30 @@ func rebuildPairStoreIndexesTx(tx *bbolt.Tx, limits PendingPairLimits) error {
 }
 
 func encodePairIndexConfig(limits PendingPairLimits) ([]byte, error) {
+	return encodePairIndexConfigVersion(limits, pairIndexSchemaVersion)
+}
+func encodePairIndexConfigVersion(limits PendingPairLimits, version int) ([]byte, error) {
 	return json.Marshal(persistedPairIndexConfig{
-		Schema: pairIndexSchemaVersion, MaxPending: limits.MaxPending,
+		Schema: version, MaxPending: limits.MaxPending,
 		TTLNanos: int64(limits.TTL), SweepBatch: limits.SweepBatch,
 	})
 }
 
 func validatePairStoreIndexesTx(tx *bbolt.Tx, limits PendingPairLimits) error {
+	return validatePairStoreIndexesVersionTx(tx, limits, pairIndexSchemaVersion)
+}
+
+func validatePairStoreIndexesVersionTx(tx *bbolt.Tx, limits PendingPairLimits, version byte) error {
 	corrupt := func(format string, args ...any) error {
 		return fmt.Errorf("%w: %s", ErrPairStoreCorrupt, fmt.Sprintf(format, args...))
 	}
 	meta := tx.Bucket([]byte(bucketPairMeta))
-	if meta == nil || !bytes.Equal(meta.Get(pairIndexSchemaVersionKey), []byte{pairIndexSchemaVersion}) ||
+	if meta == nil || !bytes.Equal(meta.Get(pairIndexSchemaVersionKey), []byte{version}) ||
 		!bytes.Equal(meta.Get(retainedTokenIndexVersionKey), []byte{1}) ||
 		!bytes.Equal(meta.Get(pendingLimitIndexVersionKey), []byte{1}) {
 		return corrupt("missing or invalid schema markers")
 	}
-	wantConfig, err := encodePairIndexConfig(limits)
+	wantConfig, err := encodePairIndexConfigVersion(limits, int(version))
 	if err != nil {
 		return err
 	}
@@ -929,9 +927,13 @@ func (ps *PairStore) SignPubkeyFor(deviceID string) ([]byte, error) {
 }
 
 func (ps *PairStore) SessionFor(deviceID string) (PairSession, error) {
+	return ps.SessionForPair(deviceID, "")
+}
+
+func (ps *PairStore) SessionForPair(deviceID, expectedPairID string) (PairSession, error) {
 	var session PairSession
 	err := ps.bolt.View(func(tx *bbolt.Tx) error {
-		pairID, pair, err := confirmedPairForDeviceTx(tx, deviceID)
+		pairID, pair, err := confirmedPairForSessionTx(tx, deviceID, expectedPairID)
 		if err != nil {
 			return err
 		}
@@ -1016,7 +1018,7 @@ func (ps *PairStore) UpdateCapabilitiesForPair(deviceID, expectedPairID string, 
 		if err != nil {
 			return err
 		}
-		if err := capabilities.Put([]byte(deviceID), encoded); err != nil {
+		if err := capabilities.Put(capabilityKey(string(pairID), deviceID), encoded); err != nil {
 			return err
 		}
 
@@ -1031,7 +1033,7 @@ func (ps *PairStore) UpdateCapabilitiesForPair(deviceID, expectedPairID string, 
 		if floor >= 2 {
 			return nil
 		}
-		peerCapabilities, err := decodeCapabilities(capabilities.Get([]byte(peerID)))
+		peerCapabilities, err := decodeCapabilities(capabilities.Get(capabilityKey(string(pairID), peerID)))
 		if err != nil {
 			return err
 		}
@@ -1060,11 +1062,11 @@ func (ps *PairStore) CapabilitiesForPair(deviceID, expectedPairID string) (self 
 		}
 		capabilities := tx.Bucket([]byte(bucketCapabilities))
 		if capabilities != nil {
-			self, lookupErr = decodeCapabilities(capabilities.Get([]byte(deviceID)))
+			self, lookupErr = decodeCapabilities(capabilities.Get(capabilityKey(string(pairID), deviceID)))
 			if lookupErr != nil {
 				return lookupErr
 			}
-			peer, lookupErr = decodeCapabilities(capabilities.Get([]byte(peerID)))
+			peer, lookupErr = decodeCapabilities(capabilities.Get(capabilityKey(string(pairID), peerID)))
 			if lookupErr != nil {
 				return lookupErr
 			}
@@ -1137,42 +1139,42 @@ func sameConfirmedPair(stored, candidate ConfirmedPair) bool {
 		bytes.Equal(stored.BSignPubkey, candidate.BSignPubkey) && stored.BDisplayName == candidate.BDisplayName
 }
 
-func confirmedPairForDeviceTx(tx *bbolt.Tx, deviceID string) ([]byte, ConfirmedPair, error) {
-	byDevice := tx.Bucket([]byte(bucketByDevice))
-	if byDevice == nil {
-		return nil, ConfirmedPair{}, ErrNotFound
+func confirmedPairForDeviceTx(tx bucketTransaction, deviceID string) ([]byte, ConfirmedPair, error) {
+	return confirmedPairForSessionTx(tx, deviceID, "")
+}
+
+func confirmedPairForSessionTx(tx bucketTransaction, deviceID, expectedPairID string) ([]byte, ConfirmedPair, error) {
+	ids, err := membershipsTx(tx, deviceID)
+	if err != nil {
+		return nil, ConfirmedPair{}, err
 	}
-	pairID := byDevice.Get([]byte(deviceID))
-	if pairID == nil {
+	if expectedPairID == "" {
+		if len(ids) == 0 {
+			return nil, ConfirmedPair{}, ErrNotFound
+		}
+		if len(ids) != 1 {
+			return nil, ConfirmedPair{}, ErrPairConflict
+		}
+		expectedPairID = ids[0]
+	}
+	found := false
+	for _, id := range ids {
+		if id == expectedPairID {
+			found = true
+		}
+	}
+	if !found {
 		return nil, ConfirmedPair{}, ErrNotFound
 	}
 	confirmed := tx.Bucket([]byte(bucketConfirmed))
 	if confirmed == nil {
-		return nil, ConfirmedPair{}, ErrNotFound
+		return nil, ConfirmedPair{}, ErrPairStoreCorrupt
 	}
-	rawPair := confirmed.Get(pairID)
-	if rawPair == nil {
-		return nil, ConfirmedPair{}, ErrNotFound
+	pair, err := decodeConfirmedPair(confirmed.Get([]byte(expectedPairID)))
+	if err != nil || pair.PairID != expectedPairID || (pair.DeviceA != deviceID && pair.DeviceB != deviceID) {
+		return nil, ConfirmedPair{}, ErrPairStoreCorrupt
 	}
-	var pair ConfirmedPair
-	if err := json.Unmarshal(rawPair, &pair); err != nil {
-		return nil, ConfirmedPair{}, err
-	}
-	if pair.DeviceA != deviceID && pair.DeviceB != deviceID {
-		return nil, ConfirmedPair{}, ErrNotFound
-	}
-	return append([]byte(nil), pairID...), pair, nil
-}
-
-func confirmedPairForSessionTx(tx *bbolt.Tx, deviceID, expectedPairID string) ([]byte, ConfirmedPair, error) {
-	pairID, pair, err := confirmedPairForDeviceTx(tx, deviceID)
-	if err != nil {
-		return nil, ConfirmedPair{}, err
-	}
-	if expectedPairID != "" && !bytes.Equal(pairID, []byte(expectedPairID)) {
-		return nil, ConfirmedPair{}, ErrNotFound
-	}
-	return pairID, pair, nil
+	return []byte(expectedPairID), pair, nil
 }
 
 func decodeCapabilities(raw []byte) (DeviceCapabilities, error) {

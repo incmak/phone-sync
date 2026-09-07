@@ -8,7 +8,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 
 import { TwQR, useTheme } from '../../components';
 import TwinotifyCoreModule, {
@@ -125,6 +125,7 @@ function PairAction({
 
 export default function NearbyPairingScreen() {
   const theme = useTheme();
+  const { peerLinkId } = useLocalSearchParams<{ peerLinkId?: string }>();
   const [role, setRole] = useState<Role | null>(null);
   const [status, setStatus] = useState<OfflinePairingStatus | null>(null);
   const [qrValue, setQrValue] = useState<string | null>(null);
@@ -142,7 +143,7 @@ export default function NearbyPairingScreen() {
     setStatus(next);
     setErrorCode(next.errorCode === null ? null : String(next.errorCode));
     if (next.completed && next.phase === 'complete') {
-      router.replace('/pair/success');
+      router.replace(next.peerLinkId ? { pathname: '/pair/success', params: { peerLinkId: next.peerLinkId } } : '/pair/success');
     } else if (next.phase === 'verify_code' && next.sas && next.sessionId) {
       router.replace('/pair/verify');
     }
@@ -156,12 +157,14 @@ export default function NearbyPairingScreen() {
     await OnboardingState.setRole(requestedRole);
     await OnboardingState.setPairingMode('nearby');
     if (requestedRole === 'B') {
-      router.replace({ pathname: '/pair/scan', params: { mode: 'nearby' } });
+      router.replace({ pathname: '/pair/scan', params: { mode: 'nearby', ...(peerLinkId ? { peerLinkId } : {}) } });
       return;
     }
     try {
       const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
-      const nativeQr = await TwinotifyCoreModule.startOfflinePairing(displayName);
+      const nativeQr = peerLinkId
+        ? await TwinotifyCoreModule.startOfflinePairingForPeer(displayName, peerLinkId)
+        : await TwinotifyCoreModule.startOfflinePairing(displayName);
       setQrValue(nativeQr);
       applyStatus(await TwinotifyCoreModule.getOfflinePairingStatus());
     } catch (error: unknown) {
@@ -169,7 +172,7 @@ export default function NearbyPairingScreen() {
     } finally {
       setStarting(false);
     }
-  }, [applyStatus]);
+  }, [applyStatus, peerLinkId]);
 
   const restartForRole = useCallback(async (requestedRole: Role) => {
     const activeSessionId = activeSessionIdRef.current;

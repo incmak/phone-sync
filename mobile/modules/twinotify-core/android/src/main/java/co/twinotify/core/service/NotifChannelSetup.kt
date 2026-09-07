@@ -4,7 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.media.AudioAttributes
-import android.net.Uri
+import androidx.core.net.toUri
 import co.twinotify.core.R
 
 object NotifChannelSetup {
@@ -28,7 +28,7 @@ object NotifChannelSetup {
             ).apply {
                 description = "Notifications mirrored from your paired device."
                 setSound(
-                    Uri.parse("android.resource://${ctx.packageName}/${R.raw.twinotify_notification}"),
+                    "android.resource://${ctx.packageName}/${R.raw.twinotify_notification}".toUri(),
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_NOTIFICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)

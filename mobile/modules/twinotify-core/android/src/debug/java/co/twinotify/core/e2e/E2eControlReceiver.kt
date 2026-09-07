@@ -185,7 +185,7 @@ class E2eControlReceiver internal constructor(
         private val SAFE_HANDLE = Regex("[A-Za-z0-9._-]{1,128}")
         private val ALLOWED_COMMANDS = setOf(
             "PAIR_INIT", "PAIR_JOIN", "AWAIT_PEER_HELLO", "SIGN_CONFIRMATION",
-            "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "START_SYNC", "STOP_SYNC",
+            "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_CONFIRM", "PAIR_COMPLETE", "AWAIT_PAIR_COMPLETE", "REMOVE_PEER", "CANCEL_SOURCE_FIXTURE", "START_SYNC", "STOP_SYNC",
             "SET_NETWORK_EXPECTED", "RECONCILE", "CLEAR_ACTIVITY", "STATUS", "CALL_CAPTURE_ENABLE", "CALL_STATE",
             "CALL_CONTROLS_ENABLE", "CALL_CONTROL_SOURCE", "CALL_CONTROL_TAP", "CALL_CONTROL_AWAIT",
             "SET_LAN_AVAILABLE",
@@ -321,6 +321,7 @@ class E2eControlReceiver internal constructor(
         "PAIR_INIT" -> {
             val relayUrl = command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid", "relay_url required")
             val displayName = command.param("display_name").orEmpty()
+            PeerStore.prepareAdditionalPair(context)
             val (box, sign) = CryptoStore.loadOrGenerate(context)
             val deviceId = DeviceIdentity.getOrCreate(context)
             val token = PairPayload.newToken()
@@ -341,6 +342,7 @@ class E2eControlReceiver internal constructor(
         }
         "PAIR_JOIN" -> {
             val payload = PairPayload.fromJson(command.param("pair_payload") ?: return E2eCommandResult(requestId, "invalid", "pair_payload required"))
+            PeerStore.prepareAdditionalPair(context)
             val (box, sign) = CryptoStore.loadOrGenerate(context)
             PairProtocol.sendPeerHello(
                 payload.relayUrl,
@@ -351,14 +353,8 @@ class E2eControlReceiver internal constructor(
                 command.param("display_name").orEmpty(),
                 debug = true,
             )
-            PeerStore.save(
-                context,
-                PeerRecord(
-                    deviceId = payload.deviceId,
-                    encPubkey = payload.encPubkey,
-                    signPubkey = payload.signPubkey,
-                ),
-            )
+            E2eProvisionalPairing.put(payload.pairToken, "B", payload.relayUrl,
+                PeerRecord(payload.deviceId, payload.encPubkey, payload.signPubkey))
             E2eCommandResult(requestId, "ok")
         }
         "AWAIT_PEER_HELLO" -> {
@@ -373,15 +369,11 @@ class E2eControlReceiver internal constructor(
                 debug = true,
             )
             val hello = JSONObject(frame)
-            PeerStore.save(
-                context,
-                PeerRecord(
-                    deviceId = hello.getString("device_id"),
-                    encPubkey = java.util.Base64.getDecoder().decode(hello.getString("enc_pubkey")),
-                    signPubkey = java.util.Base64.getDecoder().decode(hello.getString("sign_pubkey")),
-                    displayName = hello.optString("display_name").takeIf { it.isNotBlank() },
-                ),
-            )
+            E2eProvisionalPairing.put(pairToken, "A", relayUrl, PeerRecord(
+                hello.getString("device_id"),
+                java.util.Base64.getDecoder().decode(hello.getString("enc_pubkey")),
+                java.util.Base64.getDecoder().decode(hello.getString("sign_pubkey")),
+                hello.optString("display_name").takeIf { it.isNotBlank() }))
             E2eCommandResult(requestId, "ok", payload = JSONObject(frame))
         }
         "SIGN_CONFIRMATION" -> {
@@ -441,9 +433,9 @@ class E2eControlReceiver internal constructor(
         "PAIR_COMPLETE" -> {
             val relayUrl = command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid", "relay_url required")
             val token = command.param("pair_token") ?: return E2eCommandResult(requestId, "invalid", "pair_token required")
-            val peer = PeerStore.load(context) ?: return E2eCommandResult(requestId, "invalid", "peer identity required")
+            val peer = E2eProvisionalPairing.get(token, "B", relayUrl)
             val (box, sign) = CryptoStore.loadOrGenerate(context)
-            PairProtocol.deviceBCompletePair(
+            val pairId = PairProtocol.deviceBCompletePair(
                 relayUrl,
                 token,
                 DeviceIdentity.getOrCreate(context),
@@ -455,6 +447,42 @@ class E2eControlReceiver internal constructor(
                 java.util.Base64.getDecoder().decode(command.param("confirmation_sig") ?: ""),
                 debug = true,
             )
+            val stored = E2eProvisionalPairing.commit(context, token, "B", relayUrl, pairId)
+            E2eCommandResult(requestId, "ok", payload = JSONObject().put("peer_link_id", stored.peerLinkId))
+        }
+        "AWAIT_PAIR_COMPLETE" -> {
+            val relayUrl = command.param("relay_url") ?: return E2eCommandResult(requestId, "invalid")
+            val token = command.param("pair_token") ?: return E2eCommandResult(requestId, "invalid")
+            val frame = PairNotifyClient.awaitAuthenticatedFrame(relayUrl, token, role = "A", expectedType = "pair.complete",
+                deviceId = DeviceIdentity.getOrCreate(context), signSecretKey = CryptoStore.loadOrGenerate(context).second.secretKey,
+                timeoutMs = command.timeoutMs(), debug = true)
+            val stored = E2eProvisionalPairing.commit(context, token, "A", relayUrl, JSONObject(frame).getString("pair_id"))
+            E2eCommandResult(requestId, "ok", payload = JSONObject().put("peer_link_id", stored.peerLinkId))
+        }
+        "REMOVE_PEER" -> {
+            val link = command.param("peer_link_id") ?: return E2eCommandResult(requestId, "invalid")
+            val completed = co.twinotify.core.pairing.PeerRemovalManager.removeLocal(context, link)
+            E2eCommandResult(requestId, "ok", payload = JSONObject().put("completed", completed))
+        }
+        "CANCEL_SOURCE_FIXTURE" -> {
+            val tag = command.param("tag") ?: return E2eCommandResult(requestId, "invalid")
+            if (!tag.matches(Regex("twinotify-e2e-[a-f0-9-]{36}"))) return E2eCommandResult(requestId, "invalid")
+            val notification = co.twinotify.core.listener.NotificationListenerBridge.activeNotifications().singleOrNull {
+                it.packageName == "com.android.shell" && it.notification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString() == tag
+            } ?: return E2eCommandResult(requestId, "unavailable")
+            co.twinotify.core.listener.NotificationListenerBridge.cancelSource(notification.key)
+            // Listener cancellation has a deliberately non-emitting reason code.
+            // Reconcile only after Android confirms this synthetic source is gone.
+            var removed = false
+            for (attempt in 0 until 40) {
+                if (notification.key !in co.twinotify.core.listener.NotificationListenerBridge.activeSources()) {
+                    removed = true
+                    break
+                }
+                kotlinx.coroutines.delay(50)
+            }
+            if (!removed) return E2eCommandResult(requestId, "unavailable")
+            co.twinotify.core.listener.NotificationListenerBridge.requestSourceReconciliation()
             E2eCommandResult(requestId, "ok")
         }
         "START_SYNC" -> {
@@ -900,5 +928,33 @@ internal object E2eSessionToken {
         val temporary = File(context.filesDir, ".$TOKEN_FILE.tmp")
         temporary.writeText(value)
         check(temporary.renameTo(target)) { "unable to publish E2E token" }
+    }
+}
+
+/** Ephemeral ceremony inputs only; confirmed membership is committed by the production store. */
+private object E2eProvisionalPairing {
+    private data class Pending(val role: String, val url: String, val peer: PeerRecord, val createdAt: Long)
+    private val pending = linkedMapOf<String, Pending>()
+    @Synchronized fun put(token: String, role: String, url: String, peer: PeerRecord) {
+        pending.entries.removeAll { System.currentTimeMillis() - it.value.createdAt > 300_000L }
+        check(token in pending || pending.size < 2) { "pairing_capacity" }
+        pending[token] = Pending(role, url, peer, System.currentTimeMillis())
+    }
+    @Synchronized fun get(token: String, role: String, url: String): PeerRecord {
+        val value = checkNotNull(pending[token]) { "pairing_session_missing" }
+        check(value.role == role && value.url == url && System.currentTimeMillis() - value.createdAt <= 300_000L)
+        return value.peer
+    }
+    suspend fun commit(context: Context, token: String, role: String, url: String, pairId: String): PeerRecord {
+        val peer = get(token, role, url)
+        val local = DeviceIdentity.getOrCreate(context)
+        val signing = CryptoStore.loadOrGenerate(context).second.secretKey
+        val jwt = co.twinotify.core.auth.JwtMinter.mint(local, signing, pairId = pairId)
+        check(PairProtocol.sessionPairId(url, jwt, local, peer.deviceId, debug = true) == pairId)
+        val stored = PeerStore.save(context, PeerRecord(peer.deviceId, peer.encPubkey, peer.signPubkey,
+            peer.displayName, relayUrl = url, relayPairId = pairId, relayRevocationRequired = true))
+        synchronized(this) { pending.remove(token) }
+        co.twinotify.core.listener.CaptureCoordinator.get(context).resumeDeferred()
+        return stored
     }
 }

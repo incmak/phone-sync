@@ -131,7 +131,7 @@ describe('Home handoff trace', () => {
     fireEvent.press(screen.getByRole('button', { name: 'Open paired phone' }));
     fireEvent.press(screen.getByRole('button', { name: 'Choose mirrored apps' }));
     expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings');
-    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/pair');
+    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/peers');
     expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/filter');
   });
 

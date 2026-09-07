@@ -139,10 +139,10 @@ object BluetoothAssociations {
  * disassociates that exact provisional ID so an unverified association is never left enabled.
  */
 object BluetoothAssociationCompletion {
-    suspend fun complete(context: Context, provisional: ProvisionalBluetoothAssociation): BluetoothBinding {
+    suspend fun complete(context: Context, provisional: ProvisionalBluetoothAssociation, peerLinkId: String? = null): BluetoothBinding {
         val appContext = context.applicationContext
         try {
-            val peer = PeerStore.load(appContext)
+            val peer = PeerStore.load(appContext, peerLinkId)
                 ?: throw BluetoothAssociationException(BluetoothAssociationFailure.PEER_NOT_CONFIRMED)
             if (!BluetoothAssociationPolicy.permissionsGranted(appContext)) {
                 throw BluetoothAssociationException(BluetoothAssociationFailure.PERMISSION_DENIED)
@@ -187,7 +187,12 @@ object BluetoothAssociationCompletion {
                 peerDeviceId = peer.deviceId,
                 peerSigningKeySha256 = BluetoothBinding.signingKeyDigest(peer.signPubkey),
             )
-            BluetoothBindingStore.forContext(appContext).save(binding)
+            val store = BluetoothBindingStore.forContext(appContext, peer.peerLinkId)
+            store.save(binding)
+            if (PeerStore.load(appContext, peer.peerLinkId) == null) {
+                store.clear()
+                throw BluetoothAssociationException(BluetoothAssociationFailure.PEER_NOT_CONFIRMED)
+            }
             // Clearing closes the provisional, which stops the advertisement and the listener.
             ProvisionalBluetoothAssociations.clear()
             return binding
@@ -206,10 +211,15 @@ object BluetoothAssociationCompletion {
 
 /** Durable enablement plus every runtime permission: the input to the foreground-service type. */
 object BluetoothRouteGate {
-    suspend fun foregroundActive(context: Context): Boolean = BluetoothAssociationPolicy.foregroundRouteActive(
-        routeEnabled = BluetoothBindingStore.forContext(context).routeEnabled(),
-        permissionsGranted = BluetoothAssociationPolicy.permissionsGranted(context),
-    )
+    suspend fun foregroundActive(context: Context): Boolean {
+        if (!BluetoothAssociationPolicy.permissionsGranted(context)) return false
+        val associationIds = BluetoothAssociations.currentIds(context)
+        for (peer in PeerStore.list(context)) {
+            val store = BluetoothBindingStore.forContext(context, peer.peerLinkId)
+            if (store.loadValidated(peer, associationIds) != null && store.routeEnabled()) return true
+        }
+        return false
+    }
 }
 
 /**

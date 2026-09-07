@@ -56,7 +56,7 @@ type TestState = 'idle' | 'testing' | 'ok' | 'error';
 
 export default function RelaySetupScreen() {
   const theme = useTheme();
-  const params = useLocalSearchParams<{ mode?: string }>();
+  const params = useLocalSearchParams<{ mode?: string; peerLinkId?: string }>();
   const changing = params.mode === 'change';
 
   const [url, setUrl] = useState(defaultRelayUrl);
@@ -67,13 +67,13 @@ export default function RelaySetupScreen() {
   const [peerName, setPeerName] = useState('your other phone');
 
   useEffect(() => {
-    TwinotifyCoreModule.getPairStatus()
+    (params.peerLinkId ? TwinotifyCoreModule.getPeerStatus(params.peerLinkId) : TwinotifyCoreModule.getPairStatus())
       .then((status) => {
         const name = status.peerDisplayName?.trim();
         if (name) setPeerName(name);
       })
       .catch(() => {});
-  }, []);
+  }, [params.peerLinkId]);
 
   const handleTest = useCallback(async () => {
     const trimmed = url.trim();
@@ -115,11 +115,11 @@ export default function RelaySetupScreen() {
     const trimmed = url.trim();
     setSaving(true);
     try {
-      const outcome = await TwinotifyCoreModule.attachRelay(trimmed, '');
+      const outcome = await (params.peerLinkId ? TwinotifyCoreModule.attachRelayToPeer(trimmed, '', params.peerLinkId) : TwinotifyCoreModule.attachRelay(trimmed, ''));
       if (outcome === 'attached') {
         // Home reads this to choose the relay-capable service over the direct-only one, so the
         // native endpoint alone is not enough to keep the relay after the next mirror toggle.
-        await OnboardingState.setRelayUrl(trimmed);
+        if (!params.peerLinkId) await OnboardingState.setRelayUrl(trimmed);
         router.back();
         return;
       }
@@ -130,7 +130,7 @@ export default function RelaySetupScreen() {
     } finally {
       setSaving(false);
     }
-  }, [url]);
+  }, [url, params.peerLinkId]);
 
   const canSave = testState === 'ok' && !saving;
 

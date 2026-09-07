@@ -20,6 +20,11 @@ import co.twinotify.core.service.CallRejectionCommitResult
 import co.twinotify.core.service.ActionInvokeRejectionCommitResult
 import org.json.JSONObject
 
+internal const val MAX_OUTBOUND_MESSAGES = 2_000
+internal const val MAX_OUTBOUND_BYTES = 128L * 1024L * 1024L
+
+class OutboundCapacityException : IllegalStateException("outbound_capacity")
+
 internal fun isNotificationSnapshotCanonical(canonId: String): Boolean = !canonId.startsWith("call:")
 
 sealed interface SequenceReservationResult {
@@ -35,6 +40,8 @@ sealed interface InboundDesiredCommitResult {
     data class ReceiptConflict(val existingSha256: String) : InboundDesiredCommitResult
     data class MirrorIdentityCollision(val existingCanonId: String) : InboundDesiredCommitResult
 }
+
+data class SnapshotSessionKey(val peerLinkId: String, val snapshotId: String)
 
 data class SupersessionEntry(
     val inboundMsgId: String,
@@ -303,7 +310,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         require(row.outcome == "APPLIED" && row.appliedAt != null && row.relayAckState == "READY")
         require(status in allowedStatuses)
 
-        inbound(row.msgId)?.let { existing ->
+        inbound(row.msgId, row.peerLinkId)?.let { existing ->
             return if (existing.envelopeSha256 == row.envelopeSha256) {
                 ActionResultCommitResult.Duplicate
             } else {
@@ -315,7 +322,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         val invocation = actionInvocation(invocationId)
             ?: return ActionResultCommitResult.Committed(repost = null)
         if (
-            invocation.canonId != canonId || invocation.state != "PENDING" ||
+            invocation.peerLinkId != row.peerLinkId || invocation.canonId != canonId || invocation.state != "PENDING" ||
             (expectedActionId != null && invocation.actionId != expectedActionId)
         ) {
             return ActionResultCommitResult.Committed(repost = null)
@@ -364,26 +371,27 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     abstract suspend fun insertActionExecution(row: ActionExecution)
 
-    @Query("SELECT * FROM action_execution WHERE invocationId=:invocationId")
-    abstract suspend fun actionExecution(invocationId: String): ActionExecution?
+    @Query("SELECT * FROM action_execution WHERE invocationId=:invocationId AND peerLinkId=:peerLinkId")
+    abstract suspend fun actionExecution(invocationId: String, peerLinkId: String = LEGACY_PEER_LINK_ID): ActionExecution?
 
     @Query(
-        "SELECT * FROM action_execution WHERE state='CLAIMED' AND claimedAt <= :cutoffClaimedAt " +
+        "SELECT * FROM action_execution WHERE state='CLAIMED' AND claimedAt <= :cutoffClaimedAt AND (:peerLinkId IS NULL OR peerLinkId=:peerLinkId) " +
             "ORDER BY claimedAt, invocationId",
     )
-    abstract suspend fun dueActionExecutionClaims(cutoffClaimedAt: Long): List<ActionExecution>
+    abstract suspend fun dueActionExecutionClaims(cutoffClaimedAt: Long, peerLinkId: String? = null): List<ActionExecution>
 
-    @Query("SELECT MIN(claimedAt) FROM action_execution WHERE state='CLAIMED'")
-    abstract suspend fun earliestActionExecutionClaimedAt(): Long?
+    @Query("SELECT MIN(claimedAt) FROM action_execution WHERE state='CLAIMED' AND (:peerLinkId IS NULL OR peerLinkId=:peerLinkId)")
+    abstract suspend fun earliestActionExecutionClaimedAt(peerLinkId: String? = null): Long?
 
     @Query(
         "UPDATE action_execution SET state='COMPLETED', resultStatus=:status, completedAt=:now " +
-            "WHERE invocationId=:invocationId AND state='CLAIMED'",
+            "WHERE invocationId=:invocationId AND peerLinkId=:peerLinkId AND state='CLAIMED'",
     )
     abstract suspend fun completeActionExecutionClaim(
         invocationId: String,
         status: String,
         now: Long,
+        peerLinkId: String = LEGACY_PEER_LINK_ID,
     ): Int
 
     @Transaction
@@ -411,12 +419,17 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         require(row.outcome == "APPLIED" && row.appliedAt != null)
         require(row.relayAckState == "READY")
         require(execution.state == "CLAIMED")
+        if (row.peerLinkId != LEGACY_PEER_LINK_ID) {
+            check(deliveryPeerLink(row.peerLinkId)?.let { it.lifecycle == "ACTIVE" && it.deviceId == row.originDevice } == true) {
+                "peer_link_inactive"
+            }
+        }
 
-        val existingInbound = inbound(row.msgId)
+        val existingInbound = inbound(row.msgId, row.peerLinkId)
         if (existingInbound != null && existingInbound.envelopeSha256 != row.envelopeSha256) {
             return ActionClaimDecision.IdConflict
         }
-        val existingExecution = actionExecution(execution.invocationId)
+        val existingExecution = actionExecution(execution.invocationId, row.peerLinkId)
         if (existingExecution != null && (
                 existingExecution.canonId != execution.canonId ||
                     existingExecution.actionId != execution.actionId
@@ -427,7 +440,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
 
         if (existingExecution == null) {
             if (existingInbound == null) insertInbound(row)
-            insertActionExecution(execution.copy(claimedAt = now))
+            insertActionExecution(execution.copy(claimedAt = now, peerLinkId = row.peerLinkId))
             return ActionClaimDecision.Execute
         }
 
@@ -441,6 +454,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                     existingExecution.invocationId,
                     "outcome_unknown",
                     now,
+                    row.peerLinkId,
                 ) == 1,
             )
             return ActionClaimDecision.Replay("outcome_unknown")
@@ -471,6 +485,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         require(invoke.eventType == eventType)
         require(invoke.canonId == null && invoke.sequence == null)
         require(!invoke.requiresPeerReceipt)
+        require(invocation.peerLinkId == invoke.peerLinkId)
+        if (invoke.peerLinkId != LEGACY_PEER_LINK_ID) {
+            val target = canonical(invocation.canonId)
+            if (target == null || target.peerLinkId != invoke.peerLinkId || target.state != "ACTIVE" ||
+                target.latestSequence != invocation.notificationSequence) return ActionInvocationOutboxCommitResult.InvocationConflict
+        }
 
         val existingInvocation = actionInvocation(invocation.invocationId)
         if (existingInvocation != null) {
@@ -527,7 +547,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         require(result.canonId == null && result.sequence == null)
         require(!result.requiresPeerReceipt)
 
-        val execution = actionExecution(invocationId)
+        val execution = actionExecution(invocationId, result.peerLinkId)
             ?: return ActionCompletionOutboxCommitResult.MissingClaim
         if (execution.state == "COMPLETED") {
             return ActionCompletionOutboxCommitResult.AlreadyCompleted(requireNotNull(execution.resultStatus))
@@ -535,7 +555,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         if (outboundMessage(result.msgId) != null) {
             return ActionCompletionOutboxCommitResult.OutboundConflict
         }
-        check(completeActionExecutionClaim(invocationId, status, now) == 1)
+        check(completeActionExecutionClaim(invocationId, status, now, result.peerLinkId) == 1)
         insertOutbound(result)
         return ActionCompletionOutboxCommitResult.Committed
     }
@@ -569,7 +589,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         require(result.eventType == expectedEventType)
         require(result.canonId == null && result.sequence == null)
         require(!result.requiresPeerReceipt)
-        val execution = actionExecution(invocationId) ?: return false
+        val execution = actionExecution(invocationId, result.peerLinkId) ?: return false
         if (execution.state != "COMPLETED" || execution.resultStatus != status) return false
         val existing = outboundMessage(result.msgId)
         if (existing != null) return existing == result
@@ -611,13 +631,34 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     }
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
-    abstract suspend fun insertOutbound(row: OutboundMessage)
+    protected abstract suspend fun insertOutboundRaw(row: OutboundMessage)
+
+    @Query("SELECT * FROM peer_link WHERE peerLinkId=:link")
+    protected abstract suspend fun deliveryPeerLink(link: String): PeerLink?
+
+    @Query("SELECT peerLinkId FROM peer_link WHERE lifecycle='ACTIVE' ORDER BY peerLinkId")
+    protected abstract suspend fun activePeerLinkIds(): List<String>
+
+    /** Every writer shares atomic device-wide admission; no accepted row is evicted. */
+    @Transaction
+    open suspend fun insertOutbound(row: OutboundMessage) {
+        if (row.peerLinkId != LEGACY_PEER_LINK_ID) {
+            check(deliveryPeerLink(row.peerLinkId)?.lifecycle == "ACTIVE") { "peer_link_inactive" }
+        }
+        require(row.byteSize >= 0L)
+        if (activeOutboundCount() >= MAX_OUTBOUND_MESSAGES || row.byteSize > MAX_OUTBOUND_BYTES - activeOutboundBytes()) {
+            throw OutboundCapacityException()
+        }
+        insertOutboundRaw(row)
+    }
 
     @Query(
         "SELECT * FROM outbound_message WHERE state IN ('NEW','ACCEPTED') " +
+            "AND peerLinkId=:peerLinkId AND (peerLinkId='legacy' OR eventType='unpair' OR EXISTS " +
+            "(SELECT 1 FROM peer_link p WHERE p.peerLinkId=outbound_message.peerLinkId AND p.lifecycle='ACTIVE')) " +
             "AND nextAttemptAt <= :now ORDER BY createdAt, rowid LIMIT :limit",
     )
-    abstract suspend fun sendable(now: Long, limit: Int): List<OutboundMessage>
+    abstract suspend fun sendable(now: Long, limit: Int, peerLinkId: String = LEGACY_PEER_LINK_ID): List<OutboundMessage>
 
     @Query(
         "SELECT * FROM outbound_message WHERE protocolVersion=2 AND expiresAt <= :now AND " +
@@ -628,9 +669,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
 
     @Query(
         "UPDATE outbound_message SET attempts=attempts + 1, nextAttemptAt=:retryAt " +
-            "WHERE msgId=:msgId AND state IN ('NEW','ACCEPTED')",
+            "WHERE msgId=:msgId AND peerLinkId=:peerLinkId AND state IN ('NEW','ACCEPTED')",
     )
-    abstract suspend fun markSent(msgId: String, retryAt: Long): Int
+    abstract suspend fun markSent(msgId: String, retryAt: Long, peerLinkId: String = LEGACY_PEER_LINK_ID): Int
 
     @Query("DELETE FROM outbound_message WHERE msgId=:msgId")
     abstract suspend fun deleteOutbound(msgId: String): Int
@@ -639,11 +680,11 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     abstract suspend fun outboundMessage(msgId: String): OutboundMessage?
 
     @Query(
-        "SELECT * FROM outbound_message WHERE eventType=:eventType AND " +
+        "SELECT * FROM outbound_message WHERE peerLinkId=:peerLinkId AND eventType=:eventType AND " +
             "state NOT IN ('TERMINAL','EXPIRED') AND expiresAt > :now " +
             "ORDER BY createdAt DESC, rowid DESC LIMIT 1",
     )
-    abstract suspend fun activeOutboundControl(eventType: String, now: Long): OutboundMessage?
+    abstract suspend fun activeOutboundControl(eventType: String, now: Long, peerLinkId: String = LEGACY_PEER_LINK_ID): OutboundMessage?
 
     @Query("SELECT COUNT(*) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED')")
     abstract suspend fun activeOutboundCount(): Int
@@ -654,7 +695,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query(
         "SELECT " +
             "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
-            "AND state='NEW' AND custodyAcceptedAt IS NULL THEN 1 END) AS pendingLocal, " +
+            "AND state IN ('NEW','PENDING_PLATFORM') AND custodyAcceptedAt IS NULL THEN 1 END) AS pendingLocal, " +
             "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
             "AND state='ACCEPTED' AND custodyAcceptedAt IS NOT NULL THEN 1 END) AS awaitingPeer, " +
             "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
@@ -662,13 +703,13 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             "COUNT(CASE WHEN eventType NOT IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') THEN 1 END) AS internalActive, " +
             "COUNT(*) AS totalActive, COALESCE(SUM(byteSize), 0) AS totalActiveBytes, " +
             "COUNT(CASE WHEN eventType IN ('notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') THEN 1 END) AS nonNotificationUser " +
-            "FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED')",
+            "FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED') AND (:peerLinkId IS NULL OR peerLinkId=:peerLinkId)",
     )
-    protected abstract suspend fun deliveryQueueProjection(): DeliveryQueueProjection
+    protected abstract suspend fun deliveryQueueProjection(peerLinkId: String?): DeliveryQueueProjection
 
     @Transaction
-    open suspend fun deliveryQueueSnapshot(): DeliveryQueueSnapshot {
-        val value = deliveryQueueProjection()
+    open suspend fun deliveryQueueSnapshot(peerLinkId: String? = null): DeliveryQueueSnapshot {
+        val value = deliveryQueueProjection(peerLinkId)
         return DeliveryQueueSnapshot(
             pendingLocal = value.pendingLocal,
             awaitingPeer = value.awaitingPeer,
@@ -869,6 +910,55 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         return removed
     }
 
+    @Query("SELECT * FROM canonical_notification_state WHERE peerLinkId=:link")
+    abstract suspend fun mirrorStatesForPeer(link: String): List<CanonicalNotificationState>
+
+    @Query("UPDATE peer_link SET lifecycle='REMOVING' WHERE peerLinkId=:link")
+    protected abstract suspend fun markPeerRemoving(link: String): Int
+
+    @Transaction
+    open suspend fun beginPeerRemoval(link: String, control: OutboundMessage? = null) {
+        val peer = deliveryPeerLink(link) ?: return
+        if (peer.lifecycle == "REMOVING") return
+        if (control != null) {
+            require(control.peerLinkId == link && control.eventType == "unpair" && !control.requiresPeerReceipt)
+            insertOutbound(control)
+        }
+        check(markPeerRemoving(link) == 1)
+    }
+
+    @Query("DELETE FROM outbound_message WHERE peerLinkId=:link")
+    protected abstract suspend fun deletePeerOutbound(link: String)
+    @Query("DELETE FROM inbound_message WHERE peerLinkId=:link")
+    protected abstract suspend fun deletePeerInbound(link: String)
+    @Query("DELETE FROM snapshot_stage WHERE peerLinkId=:link")
+    protected abstract suspend fun deletePeerSnapshots(link: String)
+    @Query("DELETE FROM action_invocation WHERE peerLinkId=:link")
+    protected abstract suspend fun deletePeerInvocations(link: String)
+    @Query("DELETE FROM action_execution WHERE peerLinkId=:link")
+    protected abstract suspend fun deletePeerExecutions(link: String)
+    @Query("DELETE FROM materialization_retry WHERE canonId IN (SELECT canonId FROM canonical_notification_state WHERE peerLinkId=:link)")
+    protected abstract suspend fun deletePeerRetries(link: String)
+    @Query("DELETE FROM notification_detail_cache WHERE canonId IN (SELECT canonId FROM canonical_notification_state WHERE peerLinkId=:link)")
+    protected abstract suspend fun deletePeerDetails(link: String)
+    @Query("DELETE FROM canonical_notification_state WHERE peerLinkId=:link")
+    protected abstract suspend fun deletePeerMirrors(link: String)
+
+    /** Source state, origin counters, and every other peer's ciphertext survive removal. */
+    @Transaction
+    open suspend fun purgePeerDelivery(link: String) {
+        val peer = deliveryPeerLink(link) ?: return
+        check(peer.lifecycle == "REMOVING") { "peer_removal_not_started" }
+        deletePeerOutbound(link)
+        deletePeerInbound(link)
+        deletePeerSnapshots(link)
+        deletePeerInvocations(link)
+        deletePeerExecutions(link)
+        deletePeerRetries(link)
+        deletePeerDetails(link)
+        deletePeerMirrors(link)
+    }
+
     @Transaction
     open suspend fun clearReliableState() {
         clearOutboundMessages()
@@ -928,14 +1018,15 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     )
     protected abstract suspend fun markRelayCustodyAccepted(msgId: String): Int
 
-    @Query("SELECT msgId, envelopeSha256 FROM inbound_message WHERE relayAckState='READY' ORDER BY committedAt LIMIT :limit")
-    abstract suspend fun readyRelayAcks(limit: Int): List<co.twinotify.core.service.RelayAckRecord>
+    @Query("SELECT msgId, envelopeSha256 FROM inbound_message WHERE peerLinkId=:peerLinkId AND relayAckState='READY' ORDER BY committedAt LIMIT :limit")
+    abstract suspend fun readyRelayAcks(limit: Int, peerLinkId: String = LEGACY_PEER_LINK_ID): List<co.twinotify.core.service.RelayAckRecord>
 
-    @Query("UPDATE inbound_message SET relayAckState='SENT' WHERE msgId=:msgId AND envelopeSha256=:envelopeSha256 AND relayAckState='READY'")
-    abstract suspend fun markRelayAckSent(msgId: String, envelopeSha256: String): Int
+    @Query("UPDATE inbound_message SET relayAckState='SENT' WHERE msgId=:msgId AND peerLinkId=:peerLinkId AND envelopeSha256=:envelopeSha256 AND relayAckState='READY'")
+    abstract suspend fun markRelayAckSent(msgId: String, envelopeSha256: String, peerLinkId: String = LEGACY_PEER_LINK_ID): Int
 
     @Transaction
-    open suspend fun markLegacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult {
+    open suspend fun markLegacyForwarded(msgId: String, forwardedAt: Long, peerLinkId: String = LEGACY_PEER_LINK_ID): LegacyForwardResult {
+        if (outboundMessage(msgId)?.peerLinkId?.let { it != peerLinkId } == true) return LegacyForwardResult.Missing
         val row = outboundMessage(msgId) ?: return if (activityForMessage(msgId) != null) {
             LegacyForwardResult.AlreadyTerminal
         } else {
@@ -961,8 +1052,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         }
     }
 
-    @Query("SELECT * FROM inbound_message WHERE msgId=:msgId")
-    abstract suspend fun inbound(msgId: String): InboundMessage?
+    @Query("SELECT * FROM inbound_message WHERE msgId=:msgId AND peerLinkId=:peerLinkId")
+    abstract suspend fun inbound(msgId: String, peerLinkId: String = LEGACY_PEER_LINK_ID): InboundMessage?
 
     @Transaction
     open suspend fun commitDirectControl(
@@ -972,7 +1063,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         if (row.eventType !in DIRECT_ACK_CONTROL_TYPES) return DirectControlCommitResult.NotEligible
         require(row.canonId == null && row.sequence == null)
         require(row.outcome == "APPLIED" && row.appliedAt != null && row.relayAckState == "READY")
-        val existing = inbound(row.msgId)
+        val existing = inbound(row.msgId, row.peerLinkId)
         if (existing != null) {
             return if (existing.envelopeSha256 == row.envelopeSha256) {
                 DirectControlCommitResult.Duplicate
@@ -999,9 +1090,10 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         require(inbound.canonId == null && inbound.sequence == null)
         require(inbound.outcome == "APPLIED" && inbound.appliedAt != null && inbound.relayAckState == "NONE")
         require(inbound.receiptMsgId == receipt.msgId)
+        require(inbound.peerLinkId == receipt.peerLinkId)
         require(receipt.eventType == "peer.receipt" && !receipt.requiresPeerReceipt)
 
-        inbound(inbound.msgId)?.let { existing ->
+        inbound(inbound.msgId, inbound.peerLinkId)?.let { existing ->
             return if (existing.envelopeSha256 == inbound.envelopeSha256) {
                 DirectControlCommitResult.Duplicate
             } else {
@@ -1022,7 +1114,16 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     }
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
-    abstract suspend fun insertInbound(row: InboundMessage)
+    protected abstract suspend fun insertInboundRaw(row: InboundMessage)
+
+    @Transaction
+    open suspend fun insertInbound(row: InboundMessage) {
+        if (row.peerLinkId != LEGACY_PEER_LINK_ID) {
+            val peer = deliveryPeerLink(row.peerLinkId)
+            check(peer?.lifecycle == "ACTIVE" && peer.deviceId == row.originDevice) { "peer_link_inactive" }
+        }
+        insertInboundRaw(row)
+    }
 
     @Transaction
     open suspend fun commitActionInvokeRejection(row: InboundMessage): ActionInvokeRejectionCommitResult {
@@ -1046,7 +1147,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         require(row.eventType == expectedEventType)
         require(row.canonId == null && row.sequence == null)
         require(row.outcome == "REJECTED" && row.appliedAt != null && row.relayAckState == "READY")
-        val existing = inbound(row.msgId)
+        val existing = inbound(row.msgId, row.peerLinkId)
         if (existing != null) {
             return if (existing.envelopeSha256 == row.envelopeSha256) {
                 ActionInvokeRejectionCommitResult.Duplicate
@@ -1065,8 +1166,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     ): CallRejectionCommitResult {
         require(row.outcome == "REJECTED")
         require(row.receiptMsgId == receipt.msgId)
+        require(row.peerLinkId == receipt.peerLinkId)
         require(receipt.eventType == "peer.receipt" && !receipt.requiresPeerReceipt)
-        val existing = inbound(row.msgId)
+        val existing = inbound(row.msgId, row.peerLinkId)
         if (existing != null) {
             return if (existing.envelopeSha256 == row.envelopeSha256) {
                 CallRejectionCommitResult.Duplicate
@@ -1113,7 +1215,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
 
     @Query(
         "SELECT state.* FROM canonical_notification_state AS state " +
-            "WHERE state.latestSequence > state.materializedSequence AND (" +
+            "WHERE state.latestSequence > state.materializedSequence AND (state.peerLinkId IS NULL OR state.peerLinkId='legacy' OR " +
+            "EXISTS (SELECT 1 FROM peer_link p WHERE p.peerLinkId=state.peerLinkId AND p.lifecycle='ACTIVE')) AND (" +
             "NOT EXISTS (SELECT 1 FROM materialization_retry AS retry WHERE retry.canonId=state.canonId) OR " +
             "EXISTS (SELECT 1 FROM materialization_retry AS retry WHERE retry.canonId=state.canonId AND (" +
             "retry.sequence < state.latestSequence OR " +
@@ -1265,10 +1368,11 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     abstract suspend fun nextCaptureSequence(canonId: String): Long?
 
     @Transaction
-    open suspend fun nextCaptureSequenceForEvent(canonId: String): Long =
-        originSequence(canonId)?.nextSequence
-            ?: canonical(canonId)?.latestSequence?.plus(1L)
-            ?: 1L
+    open suspend fun nextCaptureSequenceForEvent(canonId: String): Long {
+        val latest = canonical(canonId)?.latestSequence ?: 0L
+        check(latest < Long.MAX_VALUE) { "origin_sequence_exhausted" }
+        return maxOf(originSequence(canonId)?.nextSequence ?: 1L, latest + 1L)
+    }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun putOriginSequence(row: OriginSequence)
@@ -1304,17 +1408,18 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("DELETE FROM outbound_message WHERE msgId=:msgId AND state='PENDING_PLATFORM' AND eventType='peer.receipt' AND requiresPeerReceipt=0")
     protected abstract suspend fun deletePrivateStagedReceipt(msgId: String): Int
 
-    @Query("UPDATE inbound_message SET outcome='REJECTED', appliedAt=:at, receiptMsgId=:receiptMsgId WHERE msgId=:msgId AND outcome='PENDING_PLATFORM'")
-    protected abstract suspend fun markInboundRejected(msgId: String, at: Long, receiptMsgId: String): Int
+    @Query("UPDATE inbound_message SET outcome='REJECTED', appliedAt=:at, receiptMsgId=:receiptMsgId WHERE msgId=:msgId AND peerLinkId=:peerLinkId AND outcome='PENDING_PLATFORM'")
+    protected abstract suspend fun markInboundRejected(msgId: String, at: Long, receiptMsgId: String, peerLinkId: String): Int
 
     @Query(
         "UPDATE inbound_message SET outcome='APPLIED', appliedAt=:appliedAt, receiptMsgId=:receiptMsgId " +
-            "WHERE msgId=:msgId AND outcome='PENDING_PLATFORM'",
+            "WHERE msgId=:msgId AND peerLinkId=:peerLinkId AND outcome='PENDING_PLATFORM'",
     )
     protected abstract suspend fun markInboundApplied(
         msgId: String,
         appliedAt: Long,
         receiptMsgId: String?,
+        peerLinkId: String,
     ): Int
 
     @Query("SELECT * FROM inbound_message WHERE receiptMsgId=:receiptMsgId LIMIT 1")
@@ -1325,18 +1430,18 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
 
     @Query(
         "UPDATE inbound_message SET receiptMsgId=:receiptMsgId " +
-            "WHERE msgId=:msgId AND outcome='PENDING_PLATFORM' AND receiptMsgId IS NULL",
+            "WHERE msgId=:msgId AND peerLinkId=:peerLinkId AND outcome='PENDING_PLATFORM' AND receiptMsgId IS NULL",
     )
-    protected abstract suspend fun linkMaterializationReceipt(msgId: String, receiptMsgId: String): Int
+    protected abstract suspend fun linkMaterializationReceipt(msgId: String, receiptMsgId: String, peerLinkId: String): Int
 
     @Query("UPDATE outbound_message SET state='NEW' WHERE msgId=:msgId AND state='PENDING_PLATFORM'")
     protected abstract suspend fun activateMaterializationReceipt(msgId: String): Int
 
     @Query(
-        "SELECT * FROM outbound_message WHERE canonId=:canonId AND state='NEW' " +
+        "SELECT * FROM outbound_message WHERE canonId=:canonId AND peerLinkId=:peerLinkId AND state='NEW' " +
             "AND eventType IN ('notif.post','notif.update','notif.cancel') ORDER BY createdAt",
     )
-    protected abstract suspend fun compactableState(canonId: String): List<OutboundMessage>
+    protected abstract suspend fun compactableState(canonId: String, peerLinkId: String): List<OutboundMessage>
 
     @Query("DELETE FROM outbound_message WHERE msgId IN (:msgIds)")
     protected abstract suspend fun deleteOutboundIds(msgIds: List<String>): Int
@@ -1347,11 +1452,11 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("SELECT * FROM activity_event WHERE msgId=:msgId LIMIT 1")
     protected abstract suspend fun activityForMessage(msgId: String): ActivityEvent?
 
-    @Query("SELECT * FROM snapshot_stage WHERE snapshotId=:snapshotId ORDER BY canonId")
-    protected abstract suspend fun stagedSnapshot(snapshotId: String): List<SnapshotStage>
+    @Query("SELECT * FROM snapshot_stage WHERE peerLinkId=:peerLinkId AND snapshotId=:snapshotId ORDER BY canonId")
+    protected abstract suspend fun stagedSnapshot(snapshotId: String, peerLinkId: String = LEGACY_PEER_LINK_ID): List<SnapshotStage>
 
-    @Query("SELECT DISTINCT snapshotId FROM snapshot_stage WHERE receivedAt < :cutoff")
-    protected abstract suspend fun expiredSnapshotIds(cutoff: Long): List<String>
+    @Query("SELECT DISTINCT peerLinkId, snapshotId FROM snapshot_stage WHERE receivedAt < :cutoff")
+    protected abstract suspend fun expiredSnapshotIds(cutoff: Long): List<SnapshotSessionKey>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun putSnapshotStages(rows: List<SnapshotStage>)
@@ -1361,18 +1466,18 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         originDevice: String,
     ): List<CanonicalNotificationState>
 
-    @Query("DELETE FROM snapshot_stage WHERE snapshotId=:snapshotId")
-    protected abstract suspend fun deleteSnapshot(snapshotId: String): Int
+    @Query("DELETE FROM snapshot_stage WHERE peerLinkId=:peerLinkId AND snapshotId=:snapshotId")
+    protected abstract suspend fun deleteSnapshot(snapshotId: String, peerLinkId: String = LEGACY_PEER_LINK_ID): Int
 
     /** Public read surface for the snapshot coordinator and deterministic tests. */
-    suspend fun snapshotRows(snapshotId: String): List<SnapshotStage> = stagedSnapshot(snapshotId)
+    suspend fun snapshotRows(snapshotId: String, peerLinkId: String = LEGACY_PEER_LINK_ID): List<SnapshotStage> = stagedSnapshot(snapshotId, peerLinkId)
 
     /** Removes complete snapshot staging sessions, never individual rows. */
     @Transaction
     open suspend fun expireSnapshotStages(cutoff: Long): Int {
         require(cutoff >= 0) { "snapshot expiry cutoff must be non-negative" }
         val ids = expiredSnapshotIds(cutoff)
-        ids.forEach { deleteSnapshot(it) }
+        ids.forEach { deleteSnapshot(it.snapshotId, it.peerLinkId) }
         return ids.size
     }
 
@@ -1383,13 +1488,65 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         return SequenceReservationResult.Reserved(sequence)
     }
 
+    @Query("DELETE FROM outbound_message WHERE canonId=:canonId AND sequence < :sequence AND state='PENDING_PLATFORM' AND requiresPeerReceipt=1 AND eventType='notif.cancel'")
+    protected abstract suspend fun discardSupersededSourceCancels(canonId: String, sequence: Long)
+
+    @Query("UPDATE outbound_message SET state='NEW' WHERE canonId=:canonId AND sequence=:sequence AND state='PENDING_PLATFORM' AND requiresPeerReceipt=1 AND eventType='notif.cancel'")
+    protected abstract suspend fun activateSourceCancels(canonId: String, sequence: Long)
+
+    /** Origin owns sequencing and encryption; a mirror dismissal is only a request. */
+    @Transaction
+    open suspend fun commitOriginCancelRequest(
+        request: InboundMessage,
+        requestSequence: Long,
+        expectedCurrentSequence: Long,
+        localDeviceId: String,
+        desired: CanonicalNotificationState,
+        fanout: List<OutboundMessage>,
+        supersession: SupersessionBundle = SupersessionBundle(emptyList()),
+    ): InboundDesiredCommitResult {
+        inbound(request.msgId, request.peerLinkId)?.let {
+            return if (it.envelopeSha256 == request.envelopeSha256) {
+                InboundDesiredCommitResult.Duplicate(it.outcome, it.receiptMsgId)
+            } else InboundDesiredCommitResult.IdConflict(it.envelopeSha256)
+        }
+        val current = checkNotNull(canonical(desired.canonId)) { "source_missing" }
+        check(current.originDevice == localDeviceId && current.peerLinkId == null) { "not_source_owner" }
+        val sender = checkNotNull(deliveryPeerLink(request.peerLinkId)) { "peer_removed" }
+        check(sender.lifecycle == "ACTIVE" && sender.deviceId == request.originDevice) { "cancel_sender_mismatch" }
+        if (current.latestSequence != expectedCurrentSequence || requestSequence <= current.latestSequence) {
+            return InboundDesiredCommitResult.Stale(current.latestSequence)
+        }
+        check(requestSequence < Long.MAX_VALUE && desired.latestSequence < Long.MAX_VALUE) { "origin_sequence_exhausted" }
+        val next = maxOf(nextCaptureSequenceForEvent(desired.canonId), requestSequence + 1L)
+        if (desired.latestSequence != next) return InboundDesiredCommitResult.Stale(current.latestSequence)
+        require(request.eventType == "notif.cancel" && request.outcome == "PENDING_PLATFORM")
+        require(desired.originDevice == localDeviceId && desired.peerLinkId == null && desired.state == "CANCELLED")
+        require(fanout.isNotEmpty() && fanout.map { it.peerLinkId }.toSet() == activePeerLinkIds().toSet())
+        require(fanout.map { it.peerLinkId }.distinct().size == fanout.size && fanout.map { it.msgId }.distinct().size == fanout.size)
+        require(fanout.all { it.canonId == desired.canonId && it.sequence == next && it.eventType == "notif.cancel" &&
+            it.state == "PENDING_PLATFORM" && it.requiresPeerReceipt })
+        val result = commitInboundDesired(request, desired, supersession)
+        if (result is InboundDesiredCommitResult.Committed) {
+            // Capacity failure rolls back journal, desired state, compaction and every recipient.
+            for (row in fanout) {
+                val obsolete = compactableState(desired.canonId, row.peerLinkId).filter { (it.sequence ?: Long.MAX_VALUE) < next }
+                deleteOutboundIds(obsolete.map { it.msgId })
+                obsolete.forEach { deleteUiActivityForMessage(it.msgId) }
+                insertOutbound(row)
+            }
+            putOriginSequence(OriginSequence(desired.canonId, next + 1L))
+        }
+        return result
+    }
+
     @Transaction
     open suspend fun commitInboundDesired(
         row: InboundMessage,
         desired: CanonicalNotificationState?,
         supersession: SupersessionBundle = SupersessionBundle(emptyList()),
     ): InboundDesiredCommitResult {
-        val existing = inbound(row.msgId)
+        val existing = inbound(row.msgId, row.peerLinkId)
         if (existing != null) {
             return if (existing.envelopeSha256 == row.envelopeSha256) {
                 InboundDesiredCommitResult.Duplicate(existing.outcome, existing.receiptMsgId)
@@ -1427,7 +1584,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         insertInbound(row)
         if (desired != null) {
             maintainNotificationDetail(row, desired)
-            putCanonical(desired)
+            discardSupersededSourceCancels(desired.canonId, desired.latestSequence)
+            putCanonical(desired.copy(peerLinkId = if (desired.originDevice == row.originDevice) row.peerLinkId else desired.peerLinkId))
         }
         return InboundDesiredCommitResult.Committed
     }
@@ -1509,7 +1667,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         ) return SupersessionMutationResult.Invalid
         for (olderRow in older) {
             val entry = byId[olderRow.msgId] ?: return SupersessionMutationResult.Invalid
-            if (entry.receipt.eventType != "peer.receipt" || entry.receipt.requiresPeerReceipt) {
+            if (entry.receipt.peerLinkId != olderRow.peerLinkId || entry.receipt.eventType != "peer.receipt" || entry.receipt.requiresPeerReceipt) {
                 return SupersessionMutationResult.Invalid
             }
             outbound(entry.receipt.msgId)?.let { return SupersessionMutationResult.ReceiptConflict(it.envelopeSha256) }
@@ -1525,7 +1683,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             val entry = requireNotNull(byId[olderRow.msgId])
             olderRow.receiptMsgId?.let { stagedId -> deletePrivateStagedReceipt(stagedId) }
             insertOutbound(entry.receipt.copy(state = "NEW", requiresPeerReceipt = false))
-            markInboundRejected(olderRow.msgId, terminalAt, entry.receipt.msgId)
+            markInboundRejected(olderRow.msgId, terminalAt, entry.receipt.msgId, olderRow.peerLinkId)
         }
         return SupersessionMutationResult.Applied
     }
@@ -1552,7 +1710,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         }
 
         val pending = pendingInbound(canonId, sequence)
-        pending.forEach { markInboundApplied(it.msgId, appliedAt, receipt?.msgId) }
+        require(receipt == null || pending.all { it.peerLinkId == receipt.peerLinkId })
+        pending.forEach { markInboundApplied(it.msgId, appliedAt, receipt?.msgId, it.peerLinkId) }
+        activateSourceCancels(canonId, sequence)
         putCanonical(state.copy(materializedSequence = sequence, updatedAt = appliedAt))
         pending.maxByOrNull { it.committedAt }?.let { inbound ->
             val payload = state.desiredPayloadJson?.let { raw ->
@@ -1606,6 +1766,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             return MaterializationReceiptResult.Prepared(existing)
         }
         val receipt = candidate ?: return MaterializationReceiptResult.Unavailable
+        require(pending.all { it.peerLinkId == receipt.peerLinkId })
         val existing = outbound(receipt.msgId)
         if (existing != null && existing.envelopeSha256 != receipt.envelopeSha256) {
             return MaterializationReceiptResult.Conflict(existing.envelopeSha256)
@@ -1613,7 +1774,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         if (existing == null) {
             insertOutbound(receipt.copy(state = "PENDING_PLATFORM", requiresPeerReceipt = false))
         }
-        pending.forEach { linkMaterializationReceipt(it.msgId, receipt.msgId) }
+        pending.forEach { linkMaterializationReceipt(it.msgId, receipt.msgId, it.peerLinkId) }
         return MaterializationReceiptResult.Prepared(existing ?: receipt.copy(state = "PENDING_PLATFORM"))
     }
 
@@ -1644,7 +1805,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         route: String,
         acceptedAt: Long,
         retryAt: Long,
+        peerLinkId: String = LEGACY_PEER_LINK_ID,
     ): CustodyAcceptanceResult {
+        if (outboundMessage(msgId)?.peerLinkId?.let { it != peerLinkId } == true) return CustodyAcceptanceResult.Missing
         require(route == "LAN" || route == "BLUETOOTH" || route == "RELAY")
         val row = outboundMessage(msgId) ?: return CustodyAcceptanceResult.Missing
         if (!row.requiresPeerReceipt) {
@@ -1701,7 +1864,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         reason: String?,
         occurredAt: Long,
         peerReceiptCreatedAt: Long? = null,
+        peerLinkId: String = LEGACY_PEER_LINK_ID,
     ): RelayReceiptResult {
+        if (outboundMessage(ackedMsgId)?.peerLinkId?.let { it != peerLinkId } == true) return RelayReceiptResult.Missing
         require(status in setOf("applied", "expired", "rejected", "decrypt_failed"))
         val row = outboundMessage(ackedMsgId)
             ?: return if (activityForMessage(ackedMsgId) != null) RelayReceiptResult.AlreadyTerminal
@@ -1752,7 +1917,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         reason: String,
         occurredAt: Long,
         retryAt: Long,
+        peerLinkId: String = LEGACY_PEER_LINK_ID,
     ): co.twinotify.core.service.RelayRejectionResult {
+        if (outboundMessage(msgId)?.peerLinkId?.let { it != peerLinkId } == true) return co.twinotify.core.service.RelayRejectionResult.Missing
         val row = outboundMessage(msgId) ?: return if (activityForMessage(msgId) != null) {
             co.twinotify.core.service.RelayRejectionResult.AlreadyTerminal
         } else {
@@ -1784,7 +1951,8 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     }
 
     @Transaction
-    open suspend fun expireRelay(msgId: String, expiredAt: Long): RelayReceiptResult {
+    open suspend fun expireRelay(msgId: String, expiredAt: Long, peerLinkId: String = LEGACY_PEER_LINK_ID): RelayReceiptResult {
+        if (outboundMessage(msgId)?.peerLinkId?.let { it != peerLinkId } == true) return RelayReceiptResult.Missing
         val row = outboundMessage(msgId)
             ?: return if (activityForMessage(msgId) != null) RelayReceiptResult.AlreadyTerminal else RelayReceiptResult.Missing
         return when (
@@ -1812,48 +1980,45 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     protected abstract suspend fun updateRelayRetry(msgId: String, retryAt: Long, reason: String): Int
 
     @Transaction
-    open suspend fun commitOutboundState(
-        desired: CanonicalNotificationState,
-        incoming: OutboundMessage,
-    ): OutboundStateCommitResult {
-        if (incoming.eventType !in STATE_EVENT_TYPES) {
-            return OutboundStateCommitResult.NotStateEvent
-        }
-        val canonId = requireNotNull(incoming.canonId)
-        val incomingSequence = requireNotNull(incoming.sequence)
-        require(incoming.state == "NEW")
-        require(desired.canonId == canonId)
-        require(desired.latestSequence == incomingSequence)
+    open suspend fun commitOutboundState(desired: CanonicalNotificationState, incoming: OutboundMessage): OutboundStateCommitResult =
+        commitOutboundFanout(desired, listOf(incoming))
 
-        val candidates = compactableState(canonId)
-        val latestSequence = sequenceOf(
-            canonical(canonId)?.latestSequence,
-            candidates.mapNotNull { it.sequence }.maxOrNull(),
-        ).filterNotNull().maxOrNull()
-        if (latestSequence != null && incomingSequence <= latestSequence) {
-            return OutboundStateCommitResult.Stale(latestSequence)
+    @Transaction
+    open suspend fun commitOutboundFanout(desired: CanonicalNotificationState, incoming: List<OutboundMessage>): OutboundStateCommitResult {
+        require(incoming.isNotEmpty())
+        val first = incoming.first()
+        if (first.eventType !in STATE_EVENT_TYPES) return OutboundStateCommitResult.NotStateEvent
+        val canonId = requireNotNull(first.canonId)
+        val sequence = requireNotNull(first.sequence)
+        require(desired.canonId == canonId && desired.latestSequence == sequence)
+        require(incoming.map { it.peerLinkId }.distinct().size == incoming.size)
+        require(incoming.map { it.msgId }.distinct().size == incoming.size)
+        require(incoming.all { it.canonId == canonId && it.sequence == sequence && it.eventType == first.eventType && it.state == "NEW" })
+        val latest = canonical(canonId)?.latestSequence
+        if (latest != null && sequence <= latest) return OutboundStateCommitResult.Stale(latest)
+        // A link added/removed while crypto was prepared requires fresh preparation.
+        if (incoming.none { it.peerLinkId == LEGACY_PEER_LINK_ID }) {
+            val intended = if (desired.peerLinkId == null) activePeerLinkIds().toSet() else setOf(desired.peerLinkId)
+            check(incoming.map { it.peerLinkId }.toSet() == intended) { "peer_membership_changed" }
         }
-
-        val removable = when (incoming.eventType) {
-            "notif.post", "notif.update" -> candidates.filter {
-                it.sequence != null &&
-                    it.sequence < incomingSequence &&
-                    it.eventType in POST_OR_UPDATE_EVENT_TYPES
+        var compacted = 0
+        for (row in incoming) {
+            val candidates = compactableState(canonId, row.peerLinkId)
+            val removable = when (row.eventType) {
+                "notif.post", "notif.update" -> candidates.filter { it.sequence != null && it.sequence < sequence && it.eventType in POST_OR_UPDATE_EVENT_TYPES }
+                "notif.cancel" -> candidates.filter { it.sequence != null && it.sequence < sequence }
+                else -> emptyList()
             }
-            "notif.cancel" -> candidates.filter {
-                it.sequence != null && it.sequence < incomingSequence
+            if (removable.isNotEmpty()) {
+                compacted += deleteOutboundIds(removable.map { it.msgId })
+                removable.forEach { deleteUiActivityForMessage(it.msgId) }
             }
-            else -> emptyList()
         }
-        val compacted = if (removable.isEmpty()) {
-            0
-        } else {
-            val removed = deleteOutboundIds(removable.map { it.msgId })
-            removable.forEach { deleteUiActivityForMessage(it.msgId) }
-            removed
-        }
+        // Every insert shares this transaction: failure for recipient two rolls back
+        // compaction, recipient one, canonical state, and the source sequence.
+        discardSupersededSourceCancels(canonId, sequence)
+        incoming.forEach { insertOutbound(it) }
         putCanonical(desired)
-        insertOutbound(incoming)
         return OutboundStateCommitResult.Committed(compacted)
     }
 
@@ -1863,44 +2028,43 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
      * without weakening the lower-level transaction helper used by migration tests.
      */
     @Transaction
-    open suspend fun commitCapturedState(
-        desired: CanonicalNotificationState,
-        incoming: OutboundMessage,
-        uiActivity: UiActivityEvent? = null,
-    ): OutboundStateCommitResult {
-        val sequence = requireNotNull(incoming.sequence)
-        val canonId = incoming.canonId ?: return OutboundStateCommitResult.NotStateEvent
-        // Sequence allocation and canonical/outbox mutation share this transaction. The caller
-        // only reads the next value while preparing crypto; this compare-and-increment is the
-        // authoritative reservation and rolls back together with the state/outbox write.
-        val nextSequence = originSequence(canonId)?.nextSequence
-            ?: canonical(canonId)?.latestSequence?.plus(1L)
-            ?: 1L
-        if (sequence != nextSequence) return OutboundStateCommitResult.Stale(nextSequence - 1L)
-        putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
-        val result = commitOutboundState(desired, incoming)
+    open suspend fun commitCapturedState(desired: CanonicalNotificationState, incoming: OutboundMessage, uiActivity: UiActivityEvent? = null): OutboundStateCommitResult =
+        commitCapturedFanout(desired, listOf(incoming), listOfNotNull(uiActivity))
+
+    @Transaction
+    open suspend fun commitCapturedFanout(desired: CanonicalNotificationState, incoming: List<OutboundMessage>, activities: List<UiActivityEvent> = emptyList()): OutboundStateCommitResult {
+        require(incoming.isNotEmpty())
+        val sequence = requireNotNull(incoming.first().sequence)
+        val canonId = incoming.first().canonId ?: return OutboundStateCommitResult.NotStateEvent
+        val next = nextCaptureSequenceForEvent(canonId)
+        if (sequence != next) return OutboundStateCommitResult.Stale(next - 1L)
+        check(sequence < Long.MAX_VALUE) { "origin_sequence_exhausted" }
+        val result = commitOutboundFanout(desired, incoming)
         if (result is OutboundStateCommitResult.Committed) {
-            if (incoming.eventType == "notif.cancel" && isNotificationSnapshotCanonical(canonId)) {
+            putOriginSequence(OriginSequence(canonId, sequence + 1L))
+            if (incoming.first().eventType == "notif.cancel" && isNotificationSnapshotCanonical(canonId)) {
                 cancelNotificationDetailIfPresent(canonId, desired.updatedAt)
             }
-            if (uiActivity != null) {
-                upsertUiActivity(uiActivity)
-                maintainUiHistory(uiActivity.occurredAt)
-            }
+            activities.forEach { upsertUiActivity(it) }
+            if (activities.isNotEmpty()) maintainUiHistory(activities.maxOf { it.occurredAt })
         }
         return result
     }
 
     /** Recovery commit fenced to the local call ownership selected before capture starts. */
     @Transaction
-    open suspend fun commitRecoveredCallState(
+    open suspend fun commitRecoveredCallState(desired: CanonicalNotificationState, incoming: OutboundMessage, expectedLocalOrigin: String, uiActivity: UiActivityEvent? = null): CallRecoveryCommitResult =
+        commitRecoveredCallFanout(desired, listOf(incoming), expectedLocalOrigin, listOfNotNull(uiActivity))
+
+    @Transaction
+    open suspend fun commitRecoveredCallFanout(
         desired: CanonicalNotificationState,
-        incoming: OutboundMessage,
+        incoming: List<OutboundMessage>,
         expectedLocalOrigin: String,
-        uiActivity: UiActivityEvent? = null,
+        activities: List<UiActivityEvent> = emptyList(),
     ): CallRecoveryCommitResult {
-        val sequence = requireNotNull(incoming.sequence)
-        val canonId = incoming.canonId ?: return CallRecoveryCommitResult.NotStateEvent
+        val sequence = requireNotNull(incoming.first().sequence)
+        val canonId = incoming.first().canonId ?: return CallRecoveryCommitResult.NotStateEvent
         val current = canonical(canonId)
         if (
             current == null ||
@@ -1913,19 +2077,27 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         val nextSequence = originSequence(canonId)?.nextSequence
             ?: current.latestSequence.plus(1L)
         if (sequence != nextSequence) return CallRecoveryCommitResult.Stale(nextSequence - 1L)
-        putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
-        return when (val result = commitOutboundState(desired, incoming)) {
+        check(nextSequence < Long.MAX_VALUE) { "origin_sequence_exhausted" }
+        return when (val result = commitOutboundFanout(desired, incoming)) {
             is OutboundStateCommitResult.Committed -> {
-                if (uiActivity != null) {
-                    upsertUiActivity(uiActivity)
-                    maintainUiHistory(uiActivity.occurredAt)
-                }
+                putOriginSequence(OriginSequence(canonId, nextSequence + 1L))
+                activities.forEach { upsertUiActivity(it) }
+                if (activities.isNotEmpty()) maintainUiHistory(activities.maxOf { it.occurredAt })
                 CallRecoveryCommitResult.Committed(result.compacted)
             }
             is OutboundStateCommitResult.Stale -> CallRecoveryCommitResult.Stale(result.latestSequence)
             OutboundStateCommitResult.NotStateEvent -> CallRecoveryCommitResult.NotStateEvent
         }
     }
+
+    @Query("SELECT COUNT(*) FROM snapshot_stage WHERE canonId=:marker")
+    protected abstract suspend fun snapshotSessionCount(marker: String = SNAPSHOT_BEGIN_MARKER_CANON_ID): Int
+
+    @Query("SELECT COUNT(*) FROM snapshot_stage")
+    protected abstract suspend fun snapshotStageCount(): Int
+
+    @Query("SELECT COALESCE(SUM(LENGTH(CAST(payloadJson AS BLOB))),0) FROM snapshot_stage")
+    protected abstract suspend fun snapshotStageBytes(): Long
 
     @Transaction
     open suspend fun beginSnapshot(
@@ -1934,6 +2106,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         expectedItemCount: Int,
         receivedAt: Long,
         expectedDigest: String? = null,
+        peerLinkId: String = LEGACY_PEER_LINK_ID,
     ): SnapshotBeginResult {
         require(snapshotId.isNotEmpty())
         require(originDevice.isNotEmpty())
@@ -1942,7 +2115,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             require(it.matches(Regex("^[0-9a-f]{64}$"))) { "snapshot digest must be lower-case SHA-256" }
         }
 
-        val existingBegin = stagedSnapshot(snapshotId).singleOrNull { it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID }
+        val existingBegin = stagedSnapshot(snapshotId, peerLinkId).singleOrNull { it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID }
         if (existingBegin != null) {
             val existingMarker = parseSnapshotBeginMarker(existingBegin.payloadJson)
             // Redelivered begin frames are idempotent. Keep already staged items so a duplicate
@@ -1952,20 +2125,26 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 existingBegin.sequence == expectedItemCount.toLong() &&
                 (expectedDigest == null || existingMarker.expectedDigest == expectedDigest)
             ) return SnapshotBeginResult.Started(
-                stagedSnapshot(snapshotId).count { !it.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX) },
+                stagedSnapshot(snapshotId, peerLinkId).count { !it.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX) },
             )
-            deleteSnapshot(snapshotId)
-        } else {
-            deleteSnapshot(snapshotId)
+            error("snapshot_begin_conflict")
         }
+        check(snapshotSessionCount() < MAX_SNAPSHOT_SESSIONS) { "snapshot_session_capacity" }
         val baseline = canonicalsForOrigin(originDevice).filter {
             it.state != "CANCELLED" && isNotificationSnapshotCanonical(it.canonId)
+        }
+        check(baseline.size <= MAX_SNAPSHOT_ITEMS && snapshotStageCount() + baseline.size + 1 <= MAX_SNAPSHOT_STAGE_ROWS) {
+            "snapshot_stage_capacity"
+        }
+        check(snapshotStageBytes() + baseline.sumOf { it.canonId.toByteArray(Charsets.UTF_8).size.toLong() } + 1024 <= MAX_SNAPSHOT_STAGE_BYTES) {
+            "snapshot_stage_byte_capacity"
         }
         putSnapshotStages(
             buildList {
                 add(
                     SnapshotStage(
                         snapshotId = snapshotId,
+                        peerLinkId = peerLinkId,
                         canonId = SNAPSHOT_BEGIN_MARKER_CANON_ID,
                         sequence = expectedItemCount.toLong(),
                         payloadJson = snapshotBeginMarker(originDevice, expectedDigest),
@@ -1976,6 +2155,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                     add(
                         SnapshotStage(
                             snapshotId = snapshotId,
+                        peerLinkId = peerLinkId,
                             canonId = SNAPSHOT_BASELINE_MARKER_PREFIX + current.canonId,
                             sequence = current.latestSequence,
                             payloadJson = current.canonId,
@@ -2006,13 +2186,21 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         require(row.payloadJson.toByteArray(Charsets.UTF_8).size <= MAX_SNAPSHOT_ITEM_BYTES) {
             "snapshot item payload exceeds bounded size"
         }
-        val begin = stagedSnapshot(row.snapshotId).singleOrNull {
+        val begin = stagedSnapshot(row.snapshotId, row.peerLinkId).singleOrNull {
             it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID
         }
         if (begin == null) return SnapshotStageResult.MissingBegin
         if (expectedOriginDevice != null && parseSnapshotBeginMarker(begin.payloadJson).originDevice != expectedOriginDevice) {
             return SnapshotStageResult.OriginMismatch
         }
+        val staged = stagedSnapshot(row.snapshotId, row.peerLinkId)
+        staged.singleOrNull { it.canonId == row.canonId }?.let { existing ->
+            check(existing.sequence == row.sequence && existing.payloadJson == row.payloadJson) { "snapshot_item_conflict" }
+            return SnapshotStageResult.Staged
+        }
+        check(staged.count { !it.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX) } < begin.sequence) { "snapshot_item_count_exceeded" }
+        check(snapshotStageCount() < MAX_SNAPSHOT_STAGE_ROWS &&
+            snapshotStageBytes() + row.payloadJson.toByteArray(Charsets.UTF_8).size <= MAX_SNAPSHOT_STAGE_BYTES) { "snapshot_stage_capacity" }
         putSnapshotStages(listOf(row))
         return SnapshotStageResult.Staged
     }
@@ -2045,8 +2233,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         expectedDigest: String?,
         committedAt: Long,
         expectedOriginDevice: String?,
+        peerLinkId: String = LEGACY_PEER_LINK_ID,
     ): SnapshotCommitResult {
-        val rows = stagedSnapshot(snapshotId)
+        val rows = stagedSnapshot(snapshotId, peerLinkId)
         val begin = rows.singleOrNull { it.canonId == SNAPSHOT_BEGIN_MARKER_CANON_ID }
             ?: return SnapshotCommitResult.MissingBegin
         val expectedItemCount = begin.sequence.toInt()
@@ -2055,7 +2244,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         val originDevice = marker.originDevice
         val snapshotAge = committedAt - begin.receivedAt
         if (snapshotAge > SNAPSHOT_TTL_MS) {
-            deleteSnapshot(snapshotId)
+            deleteSnapshot(snapshotId, peerLinkId)
             return SnapshotCommitResult.Expired(snapshotAge)
         }
         if (expectedOriginDevice != null && expectedOriginDevice != originDevice) {
@@ -2067,7 +2256,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         val staged = rows.filter { !it.canonId.startsWith(SNAPSHOT_RESERVED_CANON_PREFIX) }
         val invalidItem = staged.firstOrNull { !isNotificationSnapshotCanonical(it.canonId) }
         if (invalidItem != null) {
-            deleteSnapshot(snapshotId)
+            deleteSnapshot(snapshotId, peerLinkId)
             return SnapshotCommitResult.InvalidItem(invalidItem.canonId)
         }
         if (staged.size != expectedItemCount) {
@@ -2092,6 +2281,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 putCanonical(
                     CanonicalNotificationState(
                         canonId = item.canonId,
+                        peerLinkId = peerLinkId,
                         originDevice = originDevice,
                         latestSequence = item.sequence,
                         state = "ACTIVE",
@@ -2135,7 +2325,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             }
         }
         if (cancelled > 0) sweepNotificationDetailCache(committedAt)
-        deleteSnapshot(snapshotId)
+        deleteSnapshot(snapshotId, peerLinkId)
         return SnapshotCommitResult.Committed(upserted, cancelled)
     }
 
@@ -2189,7 +2379,11 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         if (existing != null && existing.envelopeSha256 != row.envelopeSha256) {
             return LegacyConversionResult.Conflict(existing.envelopeSha256)
         }
-        if (existing == null) insertOutbound(row)
+        if (existing == null) {
+            val owners = activePeerLinkIds()
+            check(owners.size <= 1) { "legacy_queue_ownership_ambiguous" }
+            insertOutbound(if (owners.isEmpty()) row else row.copy(peerLinkId = owners.single()))
+        }
         check(deleteLegacy(legacyId) == 1)
         return if (existing == null) {
             LegacyConversionResult.Converted
@@ -2232,6 +2426,9 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
         const val SNAPSHOT_RESERVED_CANON_PREFIX = "\u0000"
         const val SNAPSHOT_BEGIN_MARKER_CANON_ID = "${SNAPSHOT_RESERVED_CANON_PREFIX}begin"
         const val SNAPSHOT_BASELINE_MARKER_PREFIX = "${SNAPSHOT_RESERVED_CANON_PREFIX}baseline:"
+        const val MAX_SNAPSHOT_SESSIONS = 4
+        const val MAX_SNAPSHOT_STAGE_ROWS = 16_388
+        const val MAX_SNAPSHOT_STAGE_BYTES = 32L * 1024 * 1024
         const val MAX_SNAPSHOT_ITEMS = 4_096
         const val MAX_SNAPSHOT_ITEM_BYTES = 512 * 1024
         const val UI_HISTORY_CONTENT_MAX_BYTES = 2L * 1024L * 1024L

@@ -1,0 +1,14 @@
+{
+  "v": 2,
+  "msg_id": "22222222-2222-4222-8222-222222222222",
+  "origin_device": "dev-b",
+  "type": "notif.cancel",
+  "created_at": 1786267349000,
+  "expires_at": 1786353749000,
+  "payload": {
+    "reason": 2,
+    "removed_at": 1786267349000
+  },
+  "canon_id": "dev-a:notification:1",
+  "sequence": 2
+}

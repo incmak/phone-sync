@@ -185,7 +185,10 @@ internal suspend fun forceRepairSnapshotForE2e(
     require(current.digest.matches(Regex("[0-9a-f]{64}"))) { "invalid production digest" }
     val replacement = if (current.digest[0] == '0') '1' else '0'
     val mismatch = current.copy(digest = replacement + current.digest.substring(1))
-    return onDigest(mismatch, true) is SnapshotConvergence.RepairStarted
+    return when (onDigest(mismatch, true)) {
+        is SnapshotConvergence.RepairStarted, SnapshotConvergence.RepairQueued -> true
+        else -> false
+    }
 }
 
 internal data class ProductObservationSnapshot(
@@ -862,6 +865,18 @@ class SyncService : Service(), CallMirrorForegroundHost {
 
         internal fun isActive(): Boolean = activeInstance != null
 
+        internal fun reservePeerRemovalCustody(peerLinkId: String, msgId: String): UnpairCustodyReservation? {
+            val service = activeInstance ?: return null
+            if (service.peerTransportJobs[peerLinkId]?.isActive != true) return null
+            return service.unpairCustodyTracker.reserve(msgId)
+        }
+
+        internal suspend fun stopPeerAndAwait(peerLinkId: String) {
+            activeInstance?.peerTransportJobs?.get(peerLinkId)?.cancelAndJoin()
+            SyncServiceStatus.removePeer(peerLinkId)
+        }
+
+
         /** Null unless a live service can own the CallStyle foreground slot. */
         internal fun callMirrorForegroundHost(): CallMirrorForegroundHost? =
             activeInstance?.takeUnless { it.shuttingDown }
@@ -1072,18 +1087,23 @@ class SyncService : Service(), CallMirrorForegroundHost {
         /** Debug source calls this seam; the emitted digest is the normal production event. */
         internal suspend fun emitProductionSnapshotForE2e(): Boolean {
             val service = activeInstance ?: return false
-            service.snapshotCoordinator.emitLocalDigest(DeviceIdentity.getOrCreate(service.applicationContext))
-            return true
+            val snapshots = service.peerSnapshots.values.toList()
+            snapshots.forEach { it.emitLocalDigest(DeviceIdentity.getOrCreate(service.applicationContext)) }
+            return snapshots.isNotEmpty()
         }
 
         /** Debug bridge into the production mismatch-repair path; it authors no protocol rows. */
         internal suspend fun forceProductionRepairSnapshotForE2e(): Boolean {
             val service = activeInstance ?: return false
             val localDevice = DeviceIdentity.getOrCreate(service.applicationContext)
-            return forceRepairSnapshotForE2e(
-                localDigest = { service.snapshotCoordinator.localDigest(localDevice) },
-                onDigest = { digest, force -> service.snapshotCoordinator.onDigest(digest, force = force) },
-            )
+            val snapshots = service.peerSnapshots.values.toList()
+            val results = snapshots.map { snapshot ->
+                forceRepairSnapshotForE2e(
+                    localDigest = { snapshot.localDigest(localDevice) },
+                    onDigest = { digest, force -> snapshot.onDigest(digest, force = force) },
+                )
+            }
+            return results.isNotEmpty() && results.all { it }
         }
 
         internal fun clearProductObservationsForE2e() {
@@ -1105,6 +1125,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var transportJob: Job? = null
+    private val peerTransportJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private var defaultNetworkObserver: Closeable? = null
     private var routePreferenceJob: Job? = null
     private var retentionJob: Job? = null
@@ -1133,11 +1154,8 @@ class SyncService : Service(), CallMirrorForegroundHost {
     private lateinit var legacyMigration: Deferred<LegacyMigrationSummary>
     private lateinit var legacyStore: co.twinotify.core.storage.LegacyOutboxStore
     private lateinit var reliableDao: co.twinotify.core.storage.ReliableDeliveryDao
-    private lateinit var outbox: OutboxRepository
-    private lateinit var peerControls: PeerControlOutbox
     private val directAttemptRequests = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
-    private lateinit var dispatcher: InboundDispatcher
-    private lateinit var snapshotCoordinator: SnapshotCoordinator
+    private val peerSnapshots = java.util.concurrent.ConcurrentHashMap<String, SnapshotCoordinator>()
     private val routePreferenceRestarter = SerializedTransportRestarter(
         isCurrentActive = { transportJob?.isActive == true },
         stopCurrent = {
@@ -1154,33 +1172,8 @@ class SyncService : Service(), CallMirrorForegroundHost {
         reliableDao = NotificationDb.get(this).reliableDeliveryDao()
         val dao = reliableDao
         legacyStore = dao
-        outbox = OutboxRepository(DaoOutboxStore(dao))
-        peerControls = PeerControlOutbox(applicationContext, dao)
-        val localDevice = kotlinx.coroutines.runBlocking { DeviceIdentity.getOrCreate(applicationContext) }
         // Settled before the first startForeground so the declared type never exceeds what is allowed.
         bluetoothRouteActive = kotlinx.coroutines.runBlocking { BluetoothRouteGate.foregroundActive(applicationContext) }
-        val capturePersister = co.twinotify.core.listener.DurableCapturePersister(applicationContext)
-        snapshotCoordinator = SnapshotCoordinator(
-            dao = dao,
-            emitter = SnapshotEmitter { event -> capturePersister.persistSnapshotEvent(event) },
-            source = ListenerSnapshotSource(
-                applicationContext,
-                co.twinotify.core.filter.DenylistLoader.load(applicationContext),
-            ),
-            localOriginDevice = localDevice,
-        )
-        dispatcher = InboundDispatcher(
-            this,
-            snapshotCoordinator,
-            onAuthenticatedEvent = ProductObservationTracker::recordAuthenticatedInbound,
-            materializationRequester = MaterializationRequester {
-                requestPendingMaterialization(MaterializationTrigger.ROUTINE)
-            },
-            peerControlOutbox = peerControls,
-            relayAttachProcessor = buildRelayAttachProcessor(),
-            requestDirectAttempt = { directAttemptRequests.tryEmit(Unit) },
-            requestRouteReload = routePreferenceRestarter::forceRestart,
-        )
         // Every delivery transition refreshes foreground copy from the same native presenter as Home.
         healthJob = scope.launch {
             SyncServiceStatus.routeStatus.collectLatest { status ->
@@ -1274,13 +1267,13 @@ class SyncService : Service(), CallMirrorForegroundHost {
                 val config = runBlocking(Dispatchers.IO) {
                     ServiceConfigStore.read(applicationContext)
                 }
-                val peer = runBlocking(Dispatchers.IO) { PeerStore.load(applicationContext) }
+                val peers = runBlocking(Dispatchers.IO) { PeerStore.list(applicationContext) }
                 SyncServiceStatus.setEnabled(config.enabled)
                 RecoveryPolicy.decideServiceStart(
                     RecoveryInputs(
                         persisted = config,
-                        paired = peer != null,
-                        lanBound = peer?.lanBindingId != null,
+                        paired = peers.isNotEmpty(),
+                        lanBound = peers.any { it.lanBindingId != null },
                         listenerPermission = notificationListenerAccessAvailable(applicationContext),
                         postPermission = effectivePostAvailability(applicationContext),
                         serviceActive = false,
@@ -1488,8 +1481,63 @@ class SyncService : Service(), CallMirrorForegroundHost {
                 }
             }
             if (!isActive) return@launch
+            val peers = PeerStore.list(applicationContext)
+            SyncServiceStatus.initializePeers(peers.map { it.peerLinkId }, routeGeneration)
+            val startWithRelay = relayFirstOnNextGeneration.also { relayFirstOnNextGeneration = false }
+            kotlinx.coroutines.supervisorScope {
+                peers.forEach { peer ->
+                    val job = launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                        while (isActive && PeerStore.load(applicationContext, peer.peerLinkId) != null) {
+                            try {
+                                runPeerTransport(peer, routeGeneration, startWithRelay)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Throwable) {
+                                SyncServiceStatus.setPeerError(peer.peerLinkId, "peer_transport", routeGeneration)
+                            }
+                            delay(5_000L)
+                        }
+                    }
+                    peerTransportJobs[peer.peerLinkId] = job
+                    job.invokeOnCompletion { peerTransportJobs.remove(peer.peerLinkId, job) }
+                    job.start()
+                }
+            }
+        }
+    }
+
+    private suspend fun runPeerTransport(
+        peer: co.twinotify.core.storage.PeerRecord,
+        routeGeneration: Int,
+        startWithRelay: Boolean,
+    ) {
+            fun reportPeerError(code: String?) = SyncServiceStatus.setPeerError(peer.peerLinkId, code, routeGeneration)
             val deviceId = DeviceIdentity.getOrCreate(applicationContext)
-            val bootstrapSource = DefaultLocalLanBootstrapSource(applicationContext)
+            val outbox = OutboxRepository(DaoOutboxStore(reliableDao, peer.peerLinkId))
+            val peerControls = PeerControlOutbox(applicationContext, reliableDao, peer.peerLinkId)
+            val capturePersister = co.twinotify.core.listener.DurableCapturePersister(applicationContext, selectedPeerLinkId = peer.peerLinkId)
+            val repairRequests = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+            val snapshotCoordinator = SnapshotCoordinator(
+                dao = reliableDao,
+                emitter = SnapshotEmitter { capturePersister.persistSnapshotEvent(it) },
+                source = ListenerSnapshotSource(applicationContext, co.twinotify.core.filter.DenylistLoader.load(applicationContext)),
+                localOriginDevice = deviceId,
+                peerLinkId = peer.peerLinkId,
+                requestRepair = { repairRequests.trySend(Unit) },
+            )
+            peerSnapshots[peer.peerLinkId] = snapshotCoordinator
+            val dispatcher = InboundDispatcher(
+                applicationContext,
+                snapshotCoordinator,
+                onAuthenticatedEvent = ProductObservationTracker::recordAuthenticatedInbound,
+                materializationRequester = MaterializationRequester { requestPendingMaterialization(MaterializationTrigger.ROUTINE) },
+                peerControlOutbox = peerControls,
+                relayAttachProcessor = buildRelayAttachProcessor(peer.peerLinkId),
+                requestDirectAttempt = { directAttemptRequests.tryEmit(Unit) },
+                requestRouteReload = routePreferenceRestarter::forceRestart,
+                peerLinkId = peer.peerLinkId,
+            )
+            val bootstrapSource = DefaultLocalLanBootstrapSource(applicationContext, peer.peerLinkId)
             val relayFeatures = RelayPeerFeatureSession(
                 ensureBootstrap = {
                     when (val result = bootstrapSource.create()) {
@@ -1499,36 +1547,37 @@ class SyncService : Service(), CallMirrorForegroundHost {
                             DeliveryConditions(bootstrapWaiting = !result.bindingAlreadyPresent)
                         }
                         LocalLanBootstrapResult.BindingConflict -> {
-                            SyncServiceStatus.setLastError("lan_binding_conflict")
+                            reportPeerError("lan_binding_conflict")
                             DeliveryConditions(bindingConflict = true)
                         }
                         is LocalLanBootstrapResult.Failed -> {
-                            SyncServiceStatus.setLastError(result.code)
+                            reportPeerError(result.code)
                             DeliveryConditions(bootstrapWaiting = true)
                         }
                     }
                 },
                 ensureProbe = { requestDirect ->
                     peerControls.ensureProbe(routeGeneration, requestDirect)
-                    SyncServiceStatus.setPeerEvidence(
+                    SyncServiceStatus.setPeerRouteEvidence(
+                        peer.peerLinkId,
                         peerControls.peerEvidence(routeGeneration, System.currentTimeMillis().coerceAtLeast(0L)),
                         routeGeneration,
                     )
                     updateQueueHealthNow(routeGeneration)
                 },
                 publishConditions = { conditions ->
-                    SyncServiceStatus.setDeliveryConditions(conditions, routeGeneration)
+                    SyncServiceStatus.setPeerConditions(peer.peerLinkId, conditions, routeGeneration)
                 },
-                onFailure = SyncServiceStatus::setLastError,
+                onFailure = ::reportPeerError,
             )
-            val relayConfig = relayInput?.let { input ->
+            val relayConfig = peer.relayUrl?.let { input ->
                 val endpoints = try {
                     RelayUrlPolicy.parse(
                         input,
                         debug = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
                     )
                 } catch (_: Throwable) {
-                    SyncServiceStatus.setLastError("invalid_relay_url")
+                    reportPeerError("invalid_relay_url")
                     null
                 } ?: return@let null
                 val (_, signingKeys) = CryptoStore.loadOrGenerate(applicationContext)
@@ -1536,22 +1585,20 @@ class SyncService : Service(), CallMirrorForegroundHost {
                     outbox = outbox,
                     url = endpoints.webSocket,
                     authHeadersProvider = {
-                        mapOf("Authorization" to "Bearer " + JwtMinter.mint(deviceId, signingKeys.secretKey))
+                        mapOf("Authorization" to "Bearer " + JwtMinter.mint(deviceId, signingKeys.secretKey, pairId = peer.relayPairId))
                     },
                     hooks = LiveRelayRouteHooks(
                         dispatch = { envelope ->
                             dispatchRelayDeliveryWithFinalization {
                                 dispatchRelayDeliveryFailClosed(
                                     dispatch = { dispatcher.dispatch(envelope) },
-                                    onFailure = { SyncServiceStatus.setLastError("inbound_dispatch") },
+                                    onFailure = { reportPeerError("inbound_dispatch") },
                                 )
                             }
                         },
                         onEvent = { event ->
                             when (event) {
-                                TransportEvent.LegacyOnlineOnly -> SyncServiceStatus.setState(
-                                    SyncState.LEGACY_ONLINE_ONLY,
-                                )
+                                TransportEvent.LegacyOnlineOnly -> SyncServiceStatus.setPeerProtocolFloor(peer.peerLinkId, 1, routeGeneration)
                                 is TransportEvent.LegacyForwarded,
                                 is TransportEvent.RelayRejected,
                                 -> updateQueueHealthNow()
@@ -1560,30 +1607,28 @@ class SyncService : Service(), CallMirrorForegroundHost {
                                     acceptRelayUnpairCustody(event, unpairCustodyTracker)
                                     updateQueueHealthNow()
                                 }
-                                is TransportEvent.Failed -> SyncServiceStatus.setLastError(
+                                is TransportEvent.Failed -> reportPeerError(
                                     event.error.javaClass.simpleName,
                                 )
-                                is TransportEvent.Closed -> SyncServiceStatus.setLastError("transport_closed")
+                                is TransportEvent.Closed -> reportPeerError("transport_closed")
                                 else -> Unit
                             }
                         },
                         onAuthenticated = { floor, peerFeatures ->
-                            SyncServiceStatus.setProtocolFloor(floor)
+                            SyncServiceStatus.setPeerProtocolFloor(peer.peerLinkId, floor, routeGeneration)
                             relayFeatures.onAuthenticated(floor, peerFeatures)
                             updateQueueHealthNow(routeGeneration)
                         },
                         onExpired = {
                             updateQueueHealthNow()
-                            runTransportSideEffect(
-                                block = { snapshotCoordinator.emitLocalDigest(deviceId) },
-                                onFailure = { SyncServiceStatus.setLastError("snapshot_emit") },
-                            )
+                            repairRequests.trySend(Unit)
                         },
                     ),
                 )
             }
             val routeFactory = LiveTransportRoutesFactory.production(
                 context = applicationContext,
+                peerLinkId = peer.peerLinkId,
                 outbox = outbox,
                 dispatch = dispatcher::dispatch,
                 onLanEvent = { event ->
@@ -1607,22 +1652,29 @@ class SyncService : Service(), CallMirrorForegroundHost {
                     updateQueueHealthNow()
                 },
             )
+            val repairJob = kotlinx.coroutines.currentCoroutineContext().let { current ->
+                kotlinx.coroutines.CoroutineScope(current).launch {
+                    while (isActive) {
+                        val requested = kotlinx.coroutines.withTimeoutOrNull(SnapshotCoordinator.DEFAULT_SNAPSHOT_INTERVAL_MS) {
+                            repairRequests.receive()
+                            true
+                        } ?: false
+                        runTransportSideEffect(
+                            block = { snapshotCoordinator.emitAuthoritativeSnapshot(force = requested) },
+                            onFailure = { reportPeerError("snapshot_emit") },
+                        )
+                    }
+                }
+            }
+            try {
             LiveServiceTransportLoop(
                 outbox = outbox,
                 loadRoutes = { routeFactory.create(relayConfig) },
-                queuedCount = { reliableDao.deliveryQueueSnapshot().pendingLocal },
+                queuedCount = { reliableDao.deliveryQueueSnapshot(peer.peerLinkId).pendingLocal },
                 retryRequests = SyncServiceStatus.routeRetryRequested,
                 directAttemptRequests = directAttemptRequests,
                 relayProbeScheduler = relayFeatures,
-                onAuthenticatedRoute = {
-                    try {
-                        snapshotCoordinator.emitLocalDigest(deviceId)
-                    } catch (cancellation: CancellationException) {
-                        throw cancellation
-                    } catch (_: Throwable) {
-                        SyncServiceStatus.setLastError("snapshot_emit")
-                    }
-                },
+                onAuthenticatedRoute = { repairRequests.trySend(Unit) },
                 onEstablishedFailure = { error ->
                     val code = when (error) {
                         is co.twinotify.core.lan.LanConnectionException -> error.failure.code
@@ -1637,8 +1689,9 @@ class SyncService : Service(), CallMirrorForegroundHost {
                 },
                 publishHealth = { routeHealth ->
                     val status = routeHealth.toSyncRouteStatus()
-                    val snapshot = reliableDao.deliveryQueueSnapshot()
-                    SyncServiceStatus.setRouteSnapshot(
+                    val snapshot = reliableDao.deliveryQueueSnapshot(peer.peerLinkId)
+                    SyncServiceStatus.setPeerRouteSnapshot(
+                        peer.peerLinkId,
                         status,
                         snapshot,
                         peerControls.peerEvidence(
@@ -1647,9 +1700,6 @@ class SyncService : Service(), CallMirrorForegroundHost {
                         ),
                         routeGeneration,
                     )
-                    SyncServiceStatus.setState(
-                        status.toSyncState(SyncServiceStatus.health.value.protocolFloor),
-                    )
                     ProductObservationTracker.recordQueue(
                         snapshot.pendingLocal,
                         snapshot.totalActiveBytes,
@@ -1657,15 +1707,17 @@ class SyncService : Service(), CallMirrorForegroundHost {
                 },
                 peerReachable = {
                     peerControls.peerEvidence(
-                        SyncServiceStatus.routeStatus.value.routeGeneration,
+                        routeGeneration,
                         System.currentTimeMillis().coerceAtLeast(0L),
                     ) in setOf(PeerEvidence.DIRECT, PeerEvidence.RECENT)
                 },
                 trace = { android.util.Log.w("Twinotify", it) },
-            ).run(preferLan, startWithRelay = relayFirstOnNextGeneration.also {
-                relayFirstOnNextGeneration = false
-            })
-        }
+            ).run(peer.preferLan, startWithRelay = startWithRelay)
+            } finally {
+                repairJob.cancelAndJoin()
+                repairRequests.close()
+                peerSnapshots.remove(peer.peerLinkId, snapshotCoordinator)
+            }
     }
 
     /**
@@ -1673,7 +1725,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
      * initiator identity this phone already stores rather than anything the relay supplies, and
      * persists nothing until the relay has accepted the completed pair.
      */
-    private fun buildRelayAttachProcessor(): co.twinotify.core.pairing.RelayAttachProcessor =
+    private fun buildRelayAttachProcessor(peerLinkId: String): co.twinotify.core.pairing.RelayAttachProcessor =
         co.twinotify.core.pairing.DefaultRelayAttachProcessor(
             loadIdentity = {
                 val (box, sign) = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(applicationContext)
@@ -1685,7 +1737,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
                     displayName = null,
                 )
             },
-            loadPeer = { PeerStore.load(applicationContext) },
+            loadPeer = { PeerStore.load(applicationContext, peerLinkId) },
             client = co.twinotify.core.pairing.LiveRelayAttachResponderClient(
                 debug = co.twinotify.core.BuildConfig.DEBUG,
             ),
@@ -1697,8 +1749,8 @@ class SyncService : Service(), CallMirrorForegroundHost {
                     initiatorSignPubkey,
                 )
             },
-            commit = { url ->
-                ServiceConfigStore.setRelayUrl(applicationContext, url)
+            commit = { url, pairId ->
+                PeerStore.attachRelay(applicationContext, peerLinkId, url, pairId)
                 notifyRelayConfigChanged()
             },
         )
@@ -1706,12 +1758,12 @@ class SyncService : Service(), CallMirrorForegroundHost {
     private suspend fun restartTransportFromPersistedConfig(preferLan: Boolean) {
         if (shuttingDown) return
         val config = ServiceConfigStore.read(applicationContext)
-        val peer = PeerStore.load(applicationContext)
+        val peers = PeerStore.list(applicationContext)
         val decision = ServiceStartPolicy.decide(
             intentAction = null,
             persisted = config,
-            paired = peer != null,
-            lanBound = peer?.lanBindingId != null,
+            paired = peers.isNotEmpty(),
+            lanBound = peers.any { it.lanBindingId != null },
         )
         if (decision is ServiceStartDecision.Start) {
             startTransport(decision.relayUrl, preferLan)
@@ -1724,6 +1776,10 @@ class SyncService : Service(), CallMirrorForegroundHost {
         runTransportSideEffect(
             block = {
                 val snapshot = reliableDao.deliveryQueueSnapshot()
+                for ((link, health) in SyncServiceStatus.peerRoutes.value) {
+                    SyncServiceStatus.setPeerRouteSnapshot(link, health.status, reliableDao.deliveryQueueSnapshot(link),
+                        health.status.peerEvidence, generation)
+                }
                 SyncServiceStatus.setQueueSnapshot(snapshot, generation)
                 ProductObservationTracker.recordQueue(
                     snapshot.pendingLocal,

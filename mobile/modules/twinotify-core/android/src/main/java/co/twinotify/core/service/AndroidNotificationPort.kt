@@ -51,6 +51,8 @@ interface AndroidNotificationPort {
         if (postMirror(state)) NotificationPostOutcome.Applied else NotificationPostOutcome.RetryableFailure
     fun cancelMirror(localTag: String, localId: Int): Boolean
     fun cancelSource(notificationKey: String): Boolean
+    fun cancelSource(state: CanonicalNotificationState): Boolean =
+        state.sourceNotificationKey?.let { cancelSource(it) } == true
     fun postCallMirror(state: CanonicalNotificationState): Boolean = postMirror(state)
     fun postCallMirrorOutcome(state: CanonicalNotificationState): NotificationPostOutcome =
         if (postCallMirror(state)) NotificationPostOutcome.Applied else NotificationPostOutcome.RetryableFailure
@@ -88,18 +90,20 @@ class DefaultAndroidNotificationPort(
                 state.latestSequence,
             ).orEmpty()
             NotifChannelSetup.ensureChannels(appContext)
-            ProcessMirrorAdvertisedActions.install(
-                state.canonId,
-                state.latestSequence,
-                tag,
-                id,
-                post.actions,
-            )
-            NotificationManagerCompat.from(appContext).notify(
-                tag,
-                id,
-                MirrorPoster.buildNotification(appContext, post, id, tag, invocations, detailId),
-            )
+            RepeatProtection.present(appContext, post, state.latestSequence.toString(), tag, id) {
+                ProcessMirrorAdvertisedActions.install(
+                    state.canonId,
+                    state.latestSequence,
+                    tag,
+                    id,
+                    post.actions,
+                )
+                NotificationManagerCompat.from(appContext).notify(
+                    tag,
+                    id,
+                    MirrorPoster.buildNotification(appContext, post, id, tag, invocations, detailId),
+                )
+            }
             NotificationPostOutcome.Applied
         }.getOrDefault(NotificationPostOutcome.RetryableFailure)
     }
@@ -119,7 +123,7 @@ class DefaultAndroidNotificationPort(
         return runCatching {
             val invocations = dao.actionInvocationsForNotification(state.canonId, state.latestSequence)
             val peerName = runBlocking(Dispatchers.IO) {
-                val peer = PeerStore.load(appContext)
+                val peer = PeerStore.forDevice(appContext, state.originDevice)
                 peerDisplayNameForCall(state.originDevice, peer?.deviceId, peer?.displayName)
             }
             NotifChannelSetup.ensureChannels(appContext)
@@ -150,6 +154,8 @@ class DefaultAndroidNotificationPort(
 
     override fun cancelMirror(localTag: String, localId: Int): Boolean {
         return runCatching {
+            val canonId = runBlocking(Dispatchers.IO) { reliableDao?.canonicalForMirrorIdentity(localTag, localId) }
+            canonId?.let { RepeatProtection.cancelled(appContext, it) }
             NotificationManagerCompat.from(appContext).cancel(localTag, localId)
             true
         }.getOrDefault(false)
@@ -158,6 +164,22 @@ class DefaultAndroidNotificationPort(
     override fun cancelSource(notificationKey: String): Boolean {
         if (notificationKey.isEmpty()) return false
         return NotificationListenerBridge.cancelSource(notificationKey)
+    }
+
+    override fun cancelSource(state: CanonicalNotificationState): Boolean {
+        val key = state.sourceNotificationKey ?: return false
+        return NotificationListenerBridge.cancelSource(key) { notification ->
+            val expected = state.desiredPayloadJson
+            val snapshot = co.twinotify.core.listener.NotifPostBuilder.captureSnapshot(notification, appContext, emptySet())
+            val matches = expected != null && snapshot != null && sourcePayloadMatchesCommitted(
+                expected,
+                co.twinotify.core.listener.NotifPostBuilder.toPayloadJson(
+                    co.twinotify.core.listener.NotifPostBuilder.build(snapshot, appContext, localDeviceId, "notif.post"),
+                ),
+            )
+            if (!matches) NotificationListenerBridge.requestSourceReconciliation()
+            matches
+        }
     }
 
     private fun notificationsAvailable(): Boolean {

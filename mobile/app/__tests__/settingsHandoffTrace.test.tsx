@@ -83,19 +83,19 @@ describe('Settings handoff ledger', () => {
     await waitFor(() => expect(screen.getByText('Delivery route')).toBeTruthy());
     fireEvent.press(screen.getByText('Delivery route'));
 
-    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/pair');
+    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/peers');
   });
 
   it('keeps actions named with their subtitle and routes them to the original destination', async () => {
     const screen = await renderSettings({ relayUrl: 'https://relay.example.test' });
     global.__TWINOTIFY_CORE__.openAppSettings = jest.fn(async () => {});
 
-    await waitFor(() => expect(screen.getByRole('button', { name: /Paired device, 12345678 · offline/ })).toBeTruthy());
-    fireEvent.press(screen.getByRole('button', { name: /Paired device, 12345678 · offline/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Paired devices, 12345678 · offline/ })).toBeTruthy());
+    fireEvent.press(screen.getByRole('button', { name: /Paired devices, 12345678 · offline/ }));
     fireEvent.press(screen.getByRole('button', { name: 'App filter, Control which apps are mirrored' }));
     fireEvent.press(screen.getByRole('button', { name: 'Notification settings, Tap to open system notification settings' }));
 
-    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/pair');
+    expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/settings/peers');
     expect(global.__TEST_ROUTER__.push).toHaveBeenCalledWith('/filter');
     expect(global.__TWINOTIFY_CORE__.openAppSettings).toHaveBeenCalledTimes(1);
   });

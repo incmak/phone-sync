@@ -275,6 +275,192 @@
       "scope": "cross_layer",
       "type": "peer_probe_inner",
       "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-valid/notif-conversation-valid.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/notif-conversation-null.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/notif-conversation-optional-fields.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/notif-conversation-boundaries.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "valid": true
+    },
+    {
+      "file": "v2-invalid/notif-conversation-missing-is_group.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-missing-messages.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-long-key.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-long-title.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-long-text.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-long-sender_name.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-long-sender_key.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-extra.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-empty.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-too-many.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-bad-group.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-negative-time.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-fractional-time.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-empty-text.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/notif-conversation-message-extra.json",
+      "scope": "cross_layer",
+      "type": "notif_post_payload",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-valid/peer-receipt-expired.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/peer-receipt-rejected.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "valid": true
+    },
+    {
+      "file": "v2-valid/peer-receipt-decrypt_failed.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "valid": true
+    },
+    {
+      "file": "v2-invalid/peer-receipt-missing-acked_msg_id.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-receipt-missing-envelope_sha256.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-receipt-missing-status.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-receipt-extra.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-receipt-bad-status.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-receipt-long-reason.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-receipt-rejected-missing-reason.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-invalid/peer-receipt-decrypt_failed-missing-reason.json",
+      "scope": "cross_layer",
+      "type": "peer_receipt_inner",
+      "expected_code": "invalid_frame"
+    },
+    {
+      "file": "v2-valid/notif-cancel-inner.json",
+      "scope": "cross_layer",
+      "type": "notif_cancel_inner",
+      "valid": true
     }
   ]
 }

@@ -48,7 +48,7 @@ function parseRelayPayload(data: string): RelayQRPayload | null {
 
 export default function PairScanScreen() {
   const theme = useTheme();
-  const params = useLocalSearchParams<{ mode?: string }>();
+  const params = useLocalSearchParams<{ mode?: string; peerLinkId?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
   const [mode, setMode] = useState<PairingMode | null>(
     params.mode === 'nearby' || params.mode === 'relay' ? params.mode : null,
@@ -124,13 +124,14 @@ export default function PairScanScreen() {
       try {
         const displayName = await TwinotifyCoreModule.getDeviceDisplayName();
         if (scannerWasAbandoned()) return;
-        await TwinotifyCoreModule.joinOfflinePairing(data, displayName);
+        if (params.peerLinkId) await TwinotifyCoreModule.joinOfflinePairingForPeer(data, displayName, params.peerLinkId);
+        else await TwinotifyCoreModule.joinOfflinePairing(data, displayName);
         if (scannerWasAbandoned()) {
           await cancelCurrentNearbySession();
           return;
         }
         ownershipRef.current = 'handed_off';
-        router.replace('/pair/nearby');
+        router.replace(params.peerLinkId ? { pathname: '/pair/nearby', params: { peerLinkId: params.peerLinkId } } : '/pair/nearby');
       } catch {
         if (ownershipRef.current === 'handed_off') ownershipRef.current = 'scanner';
         if (scannerWasAbandoned()) {
@@ -167,9 +168,12 @@ export default function PairScanScreen() {
       });
     } catch (error: unknown) {
       if (scannerWasAbandoned()) return;
-      scannedRef.current = false;
-      setScanned(false);
-      setErrorMsg(error instanceof Error ? error.message : 'Could not contact the relay.');
+      // Keep the scanner latched after a failure. A code held in view must not
+      // start another native/network request on every camera callback.
+      const message = error instanceof Error ? error.message : 'Could not contact the relay.';
+      setErrorMsg(message.includes('pair/session HTTP 404')
+        ? 'This relay needs an update before you can add another device. Your existing connection is unchanged.'
+        : message);
     }
   }
 
@@ -223,12 +227,21 @@ export default function PairScanScreen() {
           <Text style={[styles.cameraCopy, { fontFamily: theme.fonts.ui }]}>
             {mode === 'nearby'
               ? 'Scan the nearby pairing code on your other phone'
-              : 'Scan the relay pairing code on your other phone'}
+              : 'Scan the relay pairing code on your other device'}
           </Text>
           {errorMsg !== null && (
-            <Text accessibilityRole="alert" style={[styles.error, { fontFamily: theme.fonts.ui }]}>
-              {errorMsg}
-            </Text>
+            <>
+              <Text accessibilityRole="alert" style={[styles.error, { fontFamily: theme.fonts.ui }]}>
+                {errorMsg}
+              </Text>
+              {mode === 'relay' && (
+                <TwButton variant="primary" onPress={() => {
+                  setErrorMsg(null);
+                  scannedRef.current = false;
+                  setScanned(false);
+                }}>Try again</TwButton>
+              )}
+            </>
           )}
         </View>
       </SafeAreaView>

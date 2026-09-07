@@ -8,7 +8,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 
 import { useTheme, TwCard, TwFingerprint, TwButton, TwSpinner, TwRow, TwSwitch } from '../../components';
 import TwinotifyCoreModule, {
@@ -30,6 +30,7 @@ const BLUETOOTH_EXPLANATION =
 
 export default function PairDetailScreen() {
   const theme = useTheme();
+  const { peerLinkId } = useLocalSearchParams<{ peerLinkId?: string }>();
 
   const [pairStatus, setPairStatus] = useState<PairStatus | null>(null);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
@@ -40,8 +41,9 @@ export default function PairDetailScreen() {
   const [relayBusy, setRelayBusy] = useState(false);
 
   useEffect(() => {
-    TwinotifyCoreModule.getPairStatus()
+    (peerLinkId ? TwinotifyCoreModule.getPeerStatus(peerLinkId) : TwinotifyCoreModule.getPairStatus())
       .then(async (ps) => {
+        if ((ps.peerCount ?? 0) > 1 && !peerLinkId) { router.replace('/settings/peers'); return; }
         setPairStatus(ps);
         if (ps.paired && ps.peerEncPubkey && ps.peerSignPubkey) {
           try {
@@ -54,15 +56,15 @@ export default function PairDetailScreen() {
         }
       })
       .catch(() => {});
-    TwinotifyCoreModule.getBluetoothRouteSettings()
+    (peerLinkId ? TwinotifyCoreModule.getBluetoothRouteSettingsForPeer(peerLinkId) : TwinotifyCoreModule.getBluetoothRouteSettings())
       .then(setBluetooth)
       .catch(() => {});
-  }, []);
+  }, [peerLinkId]);
 
   const handleUnpair = useCallback(() => {
     Alert.alert(
       'Unpair this device?',
-      'Your peer keys will be cleared and yours will be rotated. You will need to pair again to resume mirroring.',
+      'This device will stop syncing and its mirrored notifications will be removed. Pair again to reconnect.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -71,9 +73,10 @@ export default function PairDetailScreen() {
           onPress: async () => {
             setUnpairing(true);
             try {
-              await TwinotifyCoreModule.unpair();
-              await OnboardingState.reset();
-              router.replace('/onboarding/role');
+              const selected = peerLinkId ?? pairStatus?.peerLinkId;
+              if (selected) await TwinotifyCoreModule.removePeer(selected);
+              else await TwinotifyCoreModule.unpair();
+              router.replace('/settings/peers');
             } catch (e: unknown) {
               const msg = e instanceof Error ? e.message : 'Unknown error';
               Alert.alert('Unpair failed', msg);
@@ -83,24 +86,24 @@ export default function PairDetailScreen() {
         },
       ],
     );
-  }, []);
+  }, [peerLinkId, pairStatus]);
 
   const reloadBluetooth = useCallback(async () => {
     try {
-      setBluetooth(await TwinotifyCoreModule.getBluetoothRouteSettings());
+      setBluetooth(await (peerLinkId ? TwinotifyCoreModule.getBluetoothRouteSettingsForPeer(peerLinkId) : TwinotifyCoreModule.getBluetoothRouteSettings()));
     } catch {
       // Keep the last durable answer rather than guessing at association state.
     }
-  }, []);
+  }, [peerLinkId]);
 
   // The hook guards its own re-entry, so the card needs no separate busy state.
-  const { associate: handleBluetoothAssociation } = useBluetoothAssociation(reloadBluetooth);
+  const { associate: handleBluetoothAssociation } = useBluetoothAssociation(reloadBluetooth, peerLinkId);
 
   const handleBluetoothRouteChange = useCallback(async (next: boolean) => {
     const previous = bluetooth?.enabled ?? false;
     setBluetoothBusy(true);
     try {
-      const durable = await TwinotifyCoreModule.setBluetoothRouteEnabled(next);
+      const durable = await (peerLinkId ? TwinotifyCoreModule.setBluetoothRouteEnabledForPeer(next, peerLinkId) : TwinotifyCoreModule.setBluetoothRouteEnabled(next));
       setBluetooth((current) => (current ? { ...current, enabled: durable } : current));
       if (durable !== next) {
         Alert.alert(
@@ -114,7 +117,7 @@ export default function PairDetailScreen() {
     } finally {
       setBluetoothBusy(false);
     }
-  }, [bluetooth?.enabled]);
+  }, [bluetooth?.enabled, peerLinkId]);
 
   const handleRemoveBluetooth = useCallback(() => {
     Alert.alert(
@@ -129,7 +132,8 @@ export default function PairDetailScreen() {
             void (async () => {
               setBluetoothBusy(true);
               try {
-                await TwinotifyCoreModule.removeBluetoothAssociation();
+                if (peerLinkId) await TwinotifyCoreModule.removeBluetoothAssociationForPeer(peerLinkId);
+                else await TwinotifyCoreModule.removeBluetoothAssociation();
                 await reloadBluetooth();
               } catch {
                 Alert.alert('Bluetooth fallback unavailable', 'Nothing changed. Try again.');
@@ -141,15 +145,15 @@ export default function PairDetailScreen() {
         },
       ],
     );
-  }, [reloadBluetooth]);
+  }, [reloadBluetooth, peerLinkId]);
 
   const reloadRelay = useCallback(async () => {
     try {
-      setRelayUrl(await OnboardingState.getRelayUrl());
+      setRelayUrl(peerLinkId ? (await TwinotifyCoreModule.getPeerConfiguration(peerLinkId)).relayUrl : await OnboardingState.getRelayUrl());
     } catch {
       setRelayUrl(null);
     }
-  }, []);
+  }, [peerLinkId]);
 
   // Focus covers mount as well as returning from the setup screen, so one hook is enough.
   useFocusEffect(useCallback(() => { void reloadRelay(); }, [reloadRelay]));
@@ -167,13 +171,13 @@ export default function PairDetailScreen() {
             void (async () => {
               setRelayBusy(true);
               try {
-                const outcome = await TwinotifyCoreModule.detachRelay();
-                await OnboardingState.clearRelayUrl();
+                const outcome = await (peerLinkId ? TwinotifyCoreModule.detachRelayFromPeer(peerLinkId) : TwinotifyCoreModule.detachRelay());
+                if (!peerLinkId) await OnboardingState.clearRelayUrl();
                 setRelayUrl(null);
                 if (outcome === 'detached_unrevoked') {
                   Alert.alert(
                     'Relay removed here',
-                    'This phone stopped using the relay, but the relay could not be reached to forget the pair. It will expire on its own.',
+                    'This phone stopped using the relay, but the relay could not be reached to forget the pair. Cleanup will retry when the relay is reachable.',
                   );
                 }
               } catch {
@@ -186,12 +190,13 @@ export default function PairDetailScreen() {
         },
       ],
     );
-  }, [pairStatus]);
+  }, [pairStatus, peerLinkId]);
 
   const handleEnableNearby = useCallback(() => {
     void OnboardingState.setPairingMode('nearby');
-    router.push('/pair/nearby');
-  }, []);
+    const selected = peerLinkId ?? pairStatus?.peerLinkId;
+    router.push(selected ? { pathname: '/pair/nearby', params: { peerLinkId: selected } } : '/pair/nearby');
+  }, [peerLinkId, pairStatus]);
 
   const peerIdFull = pairStatus?.peerDeviceId ?? '';
   const peerDisplayName = pairStatus?.peerDisplayName?.trim() || '';
@@ -280,7 +285,7 @@ export default function PairDetailScreen() {
               {!relayBusy && (
                 <TwRow
                   title="Change relay"
-                  onPress={() => router.push('/settings/relay?mode=change')}
+                  onPress={() => router.push({ pathname: '/settings/relay', params: { mode: 'change', ...(peerLinkId ? { peerLinkId } : {}) } })}
                   style={styles.ledgerRow}
                 />
               )}
@@ -297,7 +302,7 @@ export default function PairDetailScreen() {
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Add a relay"
-              onPress={() => router.push('/settings/relay')}
+              onPress={() => router.push({ pathname: '/settings/relay', params: peerLinkId ? { peerLinkId } : {} })}
               style={({ pressed }) => [
                 styles.relayAction,
                 { backgroundColor: pressed ? theme.hover : theme.fill },

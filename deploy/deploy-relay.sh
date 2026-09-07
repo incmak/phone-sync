@@ -7,6 +7,7 @@ project_name=twinotify
 image=
 version=
 domain=
+preloaded_image=false
 record_file=${TWINOTIFY_DEPLOY_RECORD:-$repo_root/deploy/.relay-deploy-state}
 docker_bin=${TWINOTIFY_DOCKER_BIN:-docker}
 smoke_bin=${TWINOTIFY_SMOKE_BIN:-$repo_root/deploy/smoke-relay.sh}
@@ -17,10 +18,11 @@ previous_image=
 previous_version=
 existing_container=
 relay_was_stopped=false
+candidate_may_have_written=false
 deployment_finished=false
 
 usage() {
-	printf 'usage: %s --image REPOSITORY@sha256:DIGEST --version VERSION --domain HOST [--compose-file PATH] [--project-name NAME] [--record-file PATH]\n' "$0" >&2
+	printf 'usage: %s --image REPOSITORY@sha256:DIGEST --version VERSION --domain HOST [--compose-file PATH] [--project-name NAME] [--record-file PATH] [--preloaded-image]\n' "$0" >&2
 	exit 2
 }
 
@@ -31,6 +33,10 @@ die() {
 
 while (($# > 0)); do
 	case "$1" in
+	--preloaded-image)
+		preloaded_image=true
+		shift
+		;;
 	--image)
 		(($# >= 2)) || usage
 		image=$2
@@ -177,9 +183,22 @@ rollback_previous() {
 	return 0
 }
 
+stop_for_restore_decision() {
+	local reason=$1
+	if ! compose_for "$image" "$version" stop caddy relay; then
+		write_record recovery_stop_failed
+		die "$reason; could not stop the candidate. Stop the relay manually before any restore decision"
+	fi
+	write_record restore_decision_required
+	printf 'deploy-relay: %s; relay stopped. Candidate storage may have migrated; an explicit restore decision is required before starting the previous binary\n' "$reason" >&2
+	exit "${2:-1}"
+}
+
 handle_signal() {
 	trap - HUP INT TERM
-	if $relay_was_stopped && ! $deployment_finished; then
+	if $candidate_may_have_written && ! $deployment_finished; then
+		stop_for_restore_decision "deployment interrupted" 130
+	elif $relay_was_stopped && ! $deployment_finished; then
 		rollback_previous || true
 	fi
 	exit 130
@@ -187,7 +206,13 @@ handle_signal() {
 trap handle_signal HUP INT TERM
 
 compose_for "$image" "$version" config >/dev/null || die "production Compose configuration is invalid"
-compose_for "$image" "$version" pull relay caddy || die "could not pull the pinned production images"
+if $preloaded_image; then
+	# Resolve the exact repository digest locally before any service is stopped.
+	"$docker_bin" image inspect "$image" >/dev/null || die "preloaded digest is not available locally"
+	compose_for "$image" "$version" pull caddy || die "could not pull the pinned Caddy image"
+else
+	compose_for "$image" "$version" pull relay caddy || die "could not pull the pinned production images"
+fi
 image_version=$("$docker_bin" image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image") || die "could not inspect the pulled relay image"
 [[ "$image_version" == "$version" ]] || die "requested version does not match the relay image label"
 
@@ -215,24 +240,23 @@ else
 	printf 'deploy-relay: first deployment; surviving database state was backed up when present\n'
 fi
 
+# Even a failed Compose start can have opened/migrated storage. From this point
+# the old binary must never be restarted against the live database automatically.
+candidate_may_have_written=true
 if ! compose_for "$image" "$version" up -d --no-deps relay; then
-	rollback_previous || die "candidate start and rollback both failed"
-	die "candidate start failed; previous digest restored"
+	stop_for_restore_decision "candidate start failed"
 fi
 relay_was_stopped=true
 
 if ! wait_for_relay "$image" "$version"; then
 	compose_for "$image" "$version" logs --no-color relay >&2 || true
-	rollback_previous || die "candidate readiness and rollback both failed"
-	die "candidate readiness failed; previous digest restored"
+	stop_for_restore_decision "candidate readiness failed"
 fi
 if ! compose_for "$image" "$version" up -d --force-recreate --no-deps caddy; then
-	rollback_previous || die "Caddy start and rollback both failed"
-	die "Caddy start failed; previous digest restored"
+	stop_for_restore_decision "Caddy start failed"
 fi
 if ! smoke "$version"; then
-	rollback_previous || die "candidate smoke and rollback both failed"
-	die "candidate smoke failed; previous digest restored"
+	stop_for_restore_decision "candidate smoke failed"
 fi
 
 deployment_finished=true

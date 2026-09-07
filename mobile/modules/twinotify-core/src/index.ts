@@ -61,7 +61,7 @@ export async function deviceBCompletePairing(
   initiatorEncPubkeyB64: string,
   initiatorSignPubkeyB64: string,
   sigB64: string,
-): Promise<void> {
+): Promise<string> {
   return await TwinotifyCoreModule.deviceBCompletePairing(
     relayUrl,
     pairToken,
@@ -76,8 +76,10 @@ export async function storePeerPubkeys(
   signB64: string,
   peerDeviceId: string,
   peerDisplayName: string,
-): Promise<void> {
-  return await TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId, peerDisplayName);
+  relayUrl: string,
+  relayPairId: string,
+): Promise<string> {
+  return await TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId, peerDisplayName, relayUrl, relayPairId);
 }
 
 export async function mintAuthJwt(): Promise<string> {

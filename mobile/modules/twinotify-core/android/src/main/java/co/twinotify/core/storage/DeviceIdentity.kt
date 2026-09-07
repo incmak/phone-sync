@@ -3,8 +3,8 @@ package co.twinotify.core.storage
 import android.content.Context
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
-import kotlinx.coroutines.flow.first
 import java.util.UUID
+import kotlinx.coroutines.flow.first
 
 private val Context.identityDs by preferencesDataStore("twinotify_identity")
 
@@ -12,10 +12,13 @@ object DeviceIdentity {
     private val KEY_DEVICE_ID = stringPreferencesKey("device_id")
 
     suspend fun getOrCreate(ctx: Context): String {
-        val existing = ctx.identityDs.data.first()[KEY_DEVICE_ID]
-        if (existing != null) return existing
-        val id = "dev-" + UUID.randomUUID().toString()
-        ctx.identityDs.edit { it[KEY_DEVICE_ID] = id }
-        return id
+        ctx.identityDs.data.first()[KEY_DEVICE_ID]?.let { return it }
+        var identity: String? = null
+        ctx.identityDs.edit { prefs ->
+            identity = prefs[KEY_DEVICE_ID] ?: ("dev-" + UUID.randomUUID().toString()).also {
+                prefs[KEY_DEVICE_ID] = it
+            }
+        }
+        return checkNotNull(identity)
     }
 }

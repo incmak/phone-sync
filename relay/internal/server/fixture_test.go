@@ -101,13 +101,13 @@ func validateFixtureDeclaration(fixture protocolFixture) error {
 			return fmt.Errorf("unsupported server fixture code %q", fixture.ExpectedCode)
 		}
 	case "cross_layer":
-		if fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" && fixture.Type != "notif_action_invoke" && fixture.Type != "notif_action_result" && fixture.Type != "lan_bootstrap_inner" && fixture.Type != "peer_probe_inner" && fixture.Type != "relay_attach_inner" && fixture.Type != "call_control_invoke" && fixture.Type != "call_control_result" {
+		if fixture.Type != "notif_cancel_inner" && fixture.Type != "peer_receipt_inner" && fixture.Type != "outer_inner_pair" && fixture.Type != "call_state" && fixture.Type != "notif_post_payload" && fixture.Type != "notif_action_invoke" && fixture.Type != "notif_action_result" && fixture.Type != "lan_bootstrap_inner" && fixture.Type != "peer_probe_inner" && fixture.Type != "relay_attach_inner" && fixture.Type != "call_control_invoke" && fixture.Type != "call_control_result" {
 			return fmt.Errorf("unknown cross-layer fixture type %q", fixture.Type)
 		}
 		if !fixture.Valid && fixture.Type == "outer_inner_pair" && fixture.ExpectedCode != "outer_inner_id_mismatch" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
-		if !fixture.Valid && (fixture.Type == "call_state" || fixture.Type == "notif_post_payload" || fixture.Type == "notif_action_invoke" || fixture.Type == "notif_action_result" || fixture.Type == "lan_bootstrap_inner" || fixture.Type == "peer_probe_inner" || fixture.Type == "relay_attach_inner" || fixture.Type == "call_control_invoke" || fixture.Type == "call_control_result") && fixture.ExpectedCode != "invalid_frame" {
+		if !fixture.Valid && (fixture.Type == "peer_receipt_inner" || fixture.Type == "notif_cancel_inner" || fixture.Type == "call_state" || fixture.Type == "notif_post_payload" || fixture.Type == "notif_action_invoke" || fixture.Type == "notif_action_result" || fixture.Type == "lan_bootstrap_inner" || fixture.Type == "peer_probe_inner" || fixture.Type == "relay_attach_inner" || fixture.Type == "call_control_invoke" || fixture.Type == "call_control_result") && fixture.ExpectedCode != "invalid_frame" {
 			return fmt.Errorf("unsupported cross-layer fixture code %q", fixture.ExpectedCode)
 		}
 	default:
@@ -276,21 +276,35 @@ func validateProtocolFixture(validator *Validator, fixture protocolFixture, raw 
 
 func validateCrossLayerFixture(validator *Validator, fixtureType string, raw []byte) error {
 	switch fixtureType {
+	case "notif_cancel_inner":
+		if err := validateJSON(validator.innerV2, raw); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		var inner struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &inner); err != nil || inner.Type != "notif.cancel" {
+			return fixtureCodeError("invalid_frame")
+		}
+		return nil
 	case "peer_receipt_inner":
 		if err := validateJSON(validator.innerV2, raw); err != nil {
-			return err
+			return fixtureCodeError("invalid_frame")
 		}
 		var inner struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
 		if err := json.Unmarshal(raw, &inner); err != nil {
-			return err
+			return fixtureCodeError("invalid_frame")
 		}
 		if inner.Type != "peer.receipt" {
 			return fmt.Errorf("cross-layer inner type is not peer.receipt")
 		}
-		return validateJSON(validator.peerReceipt, inner.Payload)
+		if err := validateJSON(validator.peerReceipt, inner.Payload); err != nil {
+			return fixtureCodeError("invalid_frame")
+		}
+		return nil
 	case "outer_inner_pair":
 		var pair struct {
 			Outer json.RawMessage `json:"outer"`

@@ -1,0 +1,12 @@
+{
+  "v": 2,
+  "msg_id": "22222222-2222-4222-8222-222222222222",
+  "origin_device": "dev-b",
+  "type": "peer.receipt",
+  "created_at": 1786267349000,
+  "expires_at": 1786353749000,
+  "payload": {
+    "envelope_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "status": "applied"
+  }
+}

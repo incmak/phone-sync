@@ -76,6 +76,26 @@ class LanPairStoreTest {
     }
 
     @Test
+    fun addingNearbyRouteRetainsSelectedLinkRelayAndOtherPeer(): Unit = runBlocking {
+        val first = PeerStore.save(context, PeerRecord("dev-11111111-1111-4111-8111-111111111111", bytes(0x21), bytes(0x31), "First",
+            relayRevocationRequired = true, relayUrl = "https://relay.example.com",
+            relayPairId = "11111111-1111-4111-8111-111111111111", preferLan = false))
+        val other = PeerStore.save(context, PeerRecord("dev-22222222-2222-4222-8222-222222222222", bytes(0x22), bytes(0x32), "Mac", relayRevocationRequired = false))
+        val committer = AndroidOfflinePairingCommitter(context, first, OfflinePairingCommitFence())
+        assertTrue(committer.commit(OfflinePairingCommit(first.deviceId, "First", first.encPubkey, first.signPubkey,
+            bytes(0x51), bytes(0x61), 1)))
+        val updated = assertNotNull(PeerStore.load(context, first.peerLinkId))
+        assertEquals(first.peerLinkId, committer.committedPeerLinkId)
+        assertEquals(first.relayUrl, updated.relayUrl)
+        assertEquals(first.relayPairId, updated.relayPairId)
+        assertEquals(first.preferLan, updated.preferLan)
+        assertNotNull(updated.lanBindingId)
+        assertNotNull(LanPairStore.loadValidated(context, updated))
+        assertEquals(other.peerLinkId, PeerStore.load(context, other.peerLinkId)?.peerLinkId)
+        assertNull(PeerStore.load(context, other.peerLinkId)?.lanBindingId)
+    }
+
+    @Test
     fun unpairFenceWaitsForPausedProductionCommitThenWipeCannotBeResurrected() = runBlocking {
         val enteredStoreBoundary = CountDownLatch(1)
         val releaseStoreBoundary = CountDownLatch(1)
@@ -302,6 +322,23 @@ class LanPairStoreTest {
             LanPairStore.loadValidated(context, PeerStore.load(context)!!)?.lanSecret?.contentEquals(bytes(0x40)) == true,
             "stored LAN secret must retain its original value",
         )
+    }
+
+    @Test
+    fun twoPeerBindingsSurviveIndependentRecoveryAndRemoval(): Unit = runBlocking {
+        val first = PeerStore.save(context, peer())
+        val second = PeerStore.save(context, peer(deviceId = "peer-b", encSeed = 0x22, signSeed = 0x32))
+        LanPairStore.commit(context, LanPairStore.prepare(context, first, binding(bytes(0x41))))
+        LanPairStore.commit(context, LanPairStore.prepare(context, second, binding(bytes(0x61))))
+        val markedFirst = assertNotNull(PeerStore.load(context, first.peerLinkId))
+        val markedSecond = assertNotNull(PeerStore.load(context, second.peerLinkId))
+        LanPairStore.recover(context, markedFirst)
+        assertTrue(assertNotNull(LanPairStore.loadValidated(context, markedFirst)).lanSecret.contentEquals(bytes(0x41)))
+        assertTrue(assertNotNull(LanPairStore.loadValidated(context, markedSecond)).lanSecret.contentEquals(bytes(0x61)))
+        LanPairStore.clearBinding(context, requireNotNull(markedFirst.lanBindingId))
+        LanPairStore.recover(context, markedFirst)
+        assertNull(PeerStore.load(context, first.peerLinkId)?.lanBindingId)
+        assertTrue(assertNotNull(LanPairStore.loadValidated(context, markedSecond)).lanSecret.contentEquals(bytes(0x61)))
     }
 
     private fun peer(

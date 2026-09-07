@@ -403,41 +403,36 @@ func TestClientHubRegisterPairReplacesOnlySameGeneration(t *testing.T) {
 	}
 }
 
-func TestClientHubRegisterPairRejectsDifferentGenerationWithoutEviction(t *testing.T) {
+func TestClientHubIndependentPairSessionsAndScopedDisconnect(t *testing.T) {
 	hub := NewClientHub()
-	oldOutbound := make(chan []byte, 1)
-	old := hub.RegisterPair("dev-a", "pair-old", oldOutbound)
-	rebound := hub.RegisterPair("dev-a", "pair-new", make(chan []byte, 1))
+	outA, outB := make(chan []byte, 1), make(chan []byte, 1)
+	a := hub.RegisterPair("dev-a", "pair-ab", outA)
+	b := hub.RegisterPair("dev-a", "pair-am", outB)
+	defer hub.Unregister(a)
+	defer hub.Unregister(b)
+	if hub.Send("dev-a", []byte("ambiguous")) {
+		t.Fatal("device-only send chose a peer")
+	}
+	if !hub.SendRawV1ForPair("dev-a", "pair-ab", []byte("ab")) || !hub.SendRawV1ForPair("dev-a", "pair-am", []byte("am")) {
+		t.Fatal("independent link failed")
+	}
+	if string(<-outA) != "ab" || string(<-outB) != "am" {
+		t.Fatal("cross-link delivery")
+	}
+	hub.DisconnectPair("dev-a", "pair-ab")
 	select {
-	case <-rebound.done:
+	case <-a.done:
 	default:
-		t.Fatal("different-generation registration was not rejected")
-	}
-	select {
-	case <-old.done:
-		t.Fatal("different-generation registration stopped the current client")
-	default:
-	}
-	hub.Unregister(rebound)
-	if _, _, online := hub.ConnectionForPair("dev-a", "pair-old"); !online {
-		t.Fatal("rejected registration orphaned the current old generation")
-	}
-	if _, _, online := hub.ConnectionForPair("dev-a", "pair-new"); online {
-		t.Fatal("rejected generation became current")
-	}
-	frame := []byte(`{"old_generation":true}`)
-	if !hub.SendRawV1ForPair("dev-a", "pair-old", frame) {
-		t.Fatal("current generation became unusable after rejecting a different generation")
+		t.Fatal("selected session not stopped")
 	}
 	select {
-	case got := <-oldOutbound:
-		if string(got) != string(frame) {
-			t.Fatalf("current generation frame = %q, want %q", got, frame)
-		}
+	case <-b.done:
+		t.Fatal("other session stopped")
 	default:
-		t.Fatal("current generation received no frame")
 	}
-	hub.Unregister(old)
+	if !hub.SendRawV1ForPair("dev-a", "pair-am", []byte("survives")) {
+		t.Fatal("other link lost")
+	}
 }
 
 func TestRevokeDisconnectDoesNotCloseReboundGeneration(t *testing.T) {

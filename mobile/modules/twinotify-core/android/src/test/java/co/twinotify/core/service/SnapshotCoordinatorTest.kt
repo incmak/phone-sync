@@ -16,6 +16,37 @@ import kotlinx.coroutines.test.runTest
 
 class SnapshotCoordinatorTest {
     @Test
+    fun successfulEmptyEnumerationRepairsStaleDurableState() = runTest {
+        val emitted = mutableListOf<Any>()
+        val coordinator = SnapshotCoordinator(
+            store = FakeSnapshotStore(states = mutableListOf(state(notificationCanon(), 4))),
+            emitter = SnapshotEmitter { emitted += it },
+            source = SnapshotSource { emptyList() },
+            localOriginDevice = ORIGIN,
+        )
+        val result = assertIs<SnapshotConvergence.RepairStarted>(coordinator.emitAuthoritativeSnapshot())
+        assertEquals(0, result.itemCount)
+        assertEquals(0, emitted.filterIsInstance<SnapshotBeginEvent>().single().itemCount)
+        assertEquals(emptyDigest(), emitted.filterIsInstance<SnapshotEndEvent>().single().digest)
+    }
+
+    @Test
+    fun failedEnumerationCannotEmitAnEmptyAuthoritativeSnapshot() = runTest {
+        val emitted = mutableListOf<Any>()
+        val coordinator = SnapshotCoordinator(
+            store = FakeSnapshotStore(),
+            emitter = SnapshotEmitter { emitted += it },
+            source = object : SnapshotSource {
+                override fun active(originDevice: String): List<SourceNotificationSnapshot> = error("unchecked read")
+                override fun checkedActive(originDevice: String): List<SourceNotificationSnapshot>? = null
+            },
+            localOriginDevice = ORIGIN,
+        )
+        assertIs<SnapshotConvergence.SourceUnavailable>(coordinator.emitAuthoritativeSnapshot())
+        assertTrue(emitted.isEmpty())
+    }
+
+    @Test
     fun localDigestExcludesActiveCallStateFromNotificationSummary() = runTest {
         val notificationCanon = notificationCanon()
         val store = FakeSnapshotStore(
@@ -92,6 +123,52 @@ class SnapshotCoordinatorTest {
 
         assertIs<SnapshotConvergence.RepairStarted>(result)
         assertEquals(committedPayload, emitted.filterIsInstance<SnapshotItemEvent>().single().payloadJson)
+    }
+
+    @Test
+    fun sourceGenerationComparisonIgnoresEventKindButDetectsNewContent() {
+        val source = SnapshotSource { emptyList() }
+        val original = source.payloadJson(ORIGIN, sourceSnapshot())
+        val update = original.replace("notif.post", "notif.update")
+        assertTrue(sourcePayloadMatchesCommitted(original, update))
+        assertTrue(!sourcePayloadMatchesCommitted(original,
+            source.payloadJson(ORIGIN, sourceSnapshot().copy(text = "New message"))))
+        assertTrue(!sourcePayloadMatchesCommitted(original,
+            source.payloadJson(ORIGIN, sourceSnapshot().copy(postTime = 2_000))))
+        assertTrue(!sourcePayloadMatchesCommitted(original, "invalid"))
+    }
+
+    @Test
+    fun changedSourceDefersRepairUntilCaptureReconciles() = runTest {
+        val snapshot = sourceSnapshot()
+        var reconciliations = 0
+        val emitted = mutableListOf<Any>()
+        val coordinator = SnapshotCoordinator(
+            store = FakeSnapshotStore(states = mutableListOf(state(notificationCanon(snapshot), 9))),
+            emitter = SnapshotEmitter { emitted += it },
+            source = object : SnapshotSource {
+                override fun active(originDevice: String) = listOf(snapshot)
+                override fun matchesCommitted(originDevice: String, snapshot: SourceNotificationSnapshot, payload: String) = false
+                override fun requestReconciliation() { reconciliations += 1 }
+            },
+            localOriginDevice = ORIGIN,
+        )
+        assertIs<SnapshotConvergence.SourceUnavailable>(coordinator.emitAuthoritativeSnapshot())
+        assertEquals(1, reconciliations)
+        assertTrue(emitted.isEmpty())
+    }
+
+    @Test
+    fun digestRepairQueuesWorkWithoutWaitingForEmissionCapacity() = runTest {
+        var requests = 0
+        val coordinator = SnapshotCoordinator(
+            store = FakeSnapshotStore(states = mutableListOf(state(notificationCanon(), 9))),
+            emitter = SnapshotEmitter { error("must not emit on the inbound reader") },
+            localOriginDevice = ORIGIN,
+            requestRepair = { requests += 1 },
+        )
+        assertIs<SnapshotConvergence.RepairQueued>(coordinator.onDigest(StateDigest(ORIGIN, 0, emptyDigest())))
+        assertEquals(1, requests)
     }
 
     @Test

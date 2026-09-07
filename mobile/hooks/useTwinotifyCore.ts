@@ -38,15 +38,15 @@ export function useTwinotifyCore() {
       initiatorEncPubkeyB64: string,
       initiatorSignPubkeyB64: string,
       sigB64: string,
-    ): Promise<void> => TwinotifyCoreModule.deviceBCompletePairing(
+    ): Promise<string> => TwinotifyCoreModule.deviceBCompletePairing(
       relayUrl,
       pairToken,
       initiatorEncPubkeyB64,
       initiatorSignPubkeyB64,
       sigB64,
     ),
-    storePeerPubkeys: (encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string = ''): Promise<void> =>
-      TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId, peerDisplayName),
+    storePeerPubkeys: (encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string, relayUrl: string, relayPairId: string): Promise<string> =>
+      TwinotifyCoreModule.storePeerPubkeys(encB64, signB64, peerDeviceId, peerDisplayName, relayUrl, relayPairId),
     unpair: (): Promise<void> =>
       TwinotifyCoreModule.unpair(),
     startSyncService: (relayUrl: string): Promise<void> =>

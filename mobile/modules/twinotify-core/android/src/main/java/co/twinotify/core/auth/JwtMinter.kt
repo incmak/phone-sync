@@ -16,7 +16,7 @@ object JwtMinter {
     private val ls = LazySodiumAndroid(SodiumAndroid())
     private val sodium = ls.sodium
 
-    fun mint(deviceId: String, signSecret: ByteArray, nowSec: Long = System.currentTimeMillis() / 1000): String {
+    fun mint(deviceId: String, signSecret: ByteArray, nowSec: Long = System.currentTimeMillis() / 1000, pairId: String? = null): String {
         require(signSecret.size == Sign.SECRETKEYBYTES) {
             "libsodium Ed25519 secret key is ${Sign.SECRETKEYBYTES} bytes; got ${signSecret.size}"
         }
@@ -26,7 +26,7 @@ object JwtMinter {
             "jti" to UUID.randomUUID().toString(),
             "iat" to nowSec,
             "exp" to nowSec + 60,
-        )).toString()
+        )).apply { pairId?.let { require(it.isNotBlank()); put("pair_id", it) } }.toString()
 
         val b64 = { s: ByteArray -> Base64.getUrlEncoder().withoutPadding().encodeToString(s) }
         val signingInput = "${b64(header.toByteArray())}.${b64(payload.toByteArray())}"

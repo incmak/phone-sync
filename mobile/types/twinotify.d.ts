@@ -88,8 +88,8 @@ export interface TwinotifyCoreAPI {
   sendConfirmationSig(relayUrl: string, pairToken: string, sigB64: string): Promise<void>;
   computeFingerprint(encB64: string, signB64: string): Promise<string>;
   deviceASignConfirmation(pairToken: string, bEncB64: string, bSignB64: string): Promise<string>;
-  deviceBCompletePairing(relayUrl: string, pairToken: string, sigB64: string): Promise<void>;
-  storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string): Promise<void>;
+  deviceBCompletePairing(relayUrl: string, pairToken: string, aEncB64: string, aSignB64: string, sigB64: string): Promise<string>;
+  storePeerPubkeys(encB64: string, signB64: string, peerDeviceId: string, peerDisplayName: string, relayUrl: string, relayPairId: string): Promise<string>;
   /**
    * Adds a relay to an existing pair over the current direct route. Resolves "attached", or a
    * bounded rejection code: relay_url_invalid, not_paired, no_direct_route, relay_unreachable,

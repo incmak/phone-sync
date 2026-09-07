@@ -155,12 +155,25 @@ func corruptMailboxPairFloor(t *testing.T, b *store.Bolt, encoding []byte) {
 	}
 }
 
-func seedLegacyServerMailboxRecords(t *testing.T, b *store.Bolt, sender, recipient string, msgIDs []string, acceptedAt int64) {
+func seedLegacyServerMailboxRecords(t *testing.T, b *store.Bolt, pairID, sender, recipient string, msgIDs []string, acceptedAt int64) {
 	t.Helper()
 	if err := b.Update(func(tx *bbolt.Tx) error {
+		root, err := tx.CreateBucketIfNotExists([]byte("mailbox_pairs_v3"))
+		if err != nil {
+			return err
+		}
+		scope, err := root.CreateBucketIfNotExists([]byte(pairID))
+		if err != nil {
+			return err
+		}
 		buckets := make([]*bbolt.Bucket, 4)
 		for index, name := range []string{"mailbox_items", "mailbox_order", "mailbox_stats", "mailbox_item_expiry"} {
-			bucket, err := tx.CreateBucketIfNotExists([]byte(name))
+			var bucket *bbolt.Bucket
+			if name == "mailbox_stats" {
+				bucket, err = tx.CreateBucketIfNotExists([]byte(name))
+			} else {
+				bucket, err = scope.CreateBucketIfNotExists([]byte(name))
+			}
 			if err != nil {
 				return err
 			}
@@ -714,6 +727,9 @@ func TestWebSocketFeatureCapabilitiesAreShapedPerRecipient(t *testing.T) {
 	if _, ok := featureWire["peer_features"]; !ok {
 		t.Fatalf("feature client response omitted peer_features: %s", featureRaw)
 	}
+	if features, ok := featureWire["peer_features"].([]any); !ok || len(features) != 0 {
+		t.Fatalf("featureless peer must be encoded as an empty array, got %s", featureRaw)
+	}
 
 	legacyPeer := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
 	defer legacyPeer.Close()
@@ -1082,7 +1098,7 @@ func TestWebSocketHelloMigratesLegacyMailboxBeforeAnyNewPut(t *testing.T) {
 		"87500000-0000-4000-8000-000000000002",
 		"87500000-0000-4000-8000-000000000003",
 	}
-	seedLegacyServerMailboxRecords(t, bolt, pair.deviceA, pair.deviceB, want, time.Now().UnixMilli())
+	seedLegacyServerMailboxRecords(t, bolt, pair.pairID, pair.deviceA, pair.deviceB, want, time.Now().UnixMilli())
 	outbound := make(chan []byte, len(want))
 	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
 	defer srv.clientHub.Unregister(recipient)
@@ -1123,7 +1139,7 @@ func TestWebSocketHelloShutdownAdmissionPreventsLegacyMigration(t *testing.T) {
 	srv, bolt := newMailboxTestServerWithBolt(t)
 	pair := registerMailboxTestPair(t, srv)
 	msgID := "87600000-0000-4000-8000-000000000001"
-	seedLegacyServerMailboxRecords(t, bolt, pair.deviceA, pair.deviceB, []string{msgID}, time.Now().UnixMilli())
+	seedLegacyServerMailboxRecords(t, bolt, pair.pairID, pair.deviceA, pair.deviceB, []string{msgID}, time.Now().UnixMilli())
 	outbound := make(chan []byte, 1)
 	recipient := srv.clientHub.RegisterPair(pair.deviceB, pair.pairID, outbound)
 	defer srv.clientHub.Unregister(recipient)
@@ -1147,7 +1163,7 @@ func TestWebSocketLegacyMigrationSerializesBeforeConcurrentPut(t *testing.T) {
 	pair := registerMailboxTestPair(t, srv)
 	legacyID := "87700000-0000-4000-8000-000000000001"
 	newID := "87700000-0000-4000-8000-000000000002"
-	seedLegacyServerMailboxRecords(t, bolt, pair.deviceA, pair.deviceB, []string{legacyID}, time.Now().UnixMilli())
+	seedLegacyServerMailboxRecords(t, bolt, pair.pairID, pair.deviceA, pair.deviceB, []string{legacyID}, time.Now().UnixMilli())
 	migrationAdmitted := make(chan struct{})
 	releaseMigration := make(chan struct{})
 	var admissionOnce sync.Once
@@ -2149,35 +2165,47 @@ func decodeMailboxFrame(t *testing.T, raw []byte) testFrame {
 }
 
 func TestWebSocketHashesAndDeliversExactEnvelopeBytes(t *testing.T) {
-	srv := newTestServer(t)
-	pair := registerMailboxTestPair(t, srv)
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
+	for name, envelopeText := range map[string]string{
+		"whitespace": `{ "v": 2, "type": "enc", "msg_id": "84111111-1111-4111-8111-111111111111", "origin_device": "mailbox-device-a", "created_at": 1786267348000, "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "ciphertext": "Y2lwaGVydGV4dA==" }`,
+		"reordered_escaped": `{
+ "ciphertext":"Y2lwaGVydGV4dA==", "nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+ "created_at":1786267348000,"origin_device":"mailbox-device-\u0061",
+ "msg_id":"84111111-1111-4111-8111-111111111111","type":"e\u006ec","v":2
+}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newTestServer(t)
+			pair := registerMailboxTestPair(t, srv)
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
 
-	msgID := "84111111-1111-4111-8111-111111111111"
-	envelope := json.RawMessage(`{ "v": 2, "type": "enc", "msg_id": "84111111-1111-4111-8111-111111111111", "origin_device": "mailbox-device-a", "created_at": 1786267348000, "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "ciphertext": "Y2lwaGVydGV4dA==" }`)
-	put := append([]byte(`{"v":2,"type":"relay.put","envelope":`), envelope...)
-	put = append(put, '}')
-	sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
-	sendMailboxHello(t, sender)
-	if err := sender.WriteMessage(websocket.TextMessage, put); err != nil {
-		t.Fatalf("write exact-byte put: %v", err)
-	}
-	if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" || accepted.MsgID != msgID {
-		t.Fatalf("put response = %#v, want relay.accepted", accepted)
-	}
-	_ = sender.Close()
+			msgID := "84111111-1111-4111-8111-111111111111"
+			envelope := json.RawMessage(envelopeText)
+			put := append([]byte(`{"v":2,"type":"relay.put","envelope":`), envelope...)
+			put = append(put, '}')
+			sender := dialMailboxWS(t, ts, pair.deviceA, pair.privA)
+			sendMailboxHello(t, sender)
+			if err := sender.WriteMessage(websocket.TextMessage, put); err != nil {
+				t.Fatalf("write exact-byte put: %v", err)
+			}
+			if accepted := readMailboxFrame(t, sender); accepted.Type != "relay.accepted" || accepted.MsgID != msgID {
+				t.Fatalf("put response = %#v, want relay.accepted", accepted)
+			}
+			_ = sender.Close()
 
-	recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
-	defer recipient.Close()
-	sendMailboxHello(t, recipient)
-	delivered := readMailboxFrame(t, recipient)
-	if delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
-		t.Fatalf("delivered envelope bytes = %q, want %q", delivered.Envelope, envelope)
+			recipient := dialMailboxWS(t, ts, pair.deviceB, pair.privB)
+			defer recipient.Close()
+			sendMailboxHello(t, recipient)
+			delivered := readMailboxFrame(t, recipient)
+			if delivered.Type != "relay.deliver" || string(delivered.Envelope) != string(envelope) {
+				t.Fatalf("delivered envelope bytes = %q, want %q", delivered.Envelope, envelope)
+			}
+			digest := sha256.Sum256(envelope)
+			writeMailboxFrame(t, recipient, map[string]any{"v": 2, "type": "relay.ack", "msg_id": msgID, "envelope_sha256": hex.EncodeToString(digest[:])})
+			waitForPendingCount(t, srv, pair.deviceB, 0)
+
+		})
 	}
-	digest := sha256.Sum256(envelope)
-	writeMailboxFrame(t, recipient, map[string]any{"v": 2, "type": "relay.ack", "msg_id": msgID, "envelope_sha256": hex.EncodeToString(digest[:])})
-	waitForPendingCount(t, srv, pair.deviceB, 0)
 }
 
 func TestWebSocketCapabilitiesBeforePeerHello(t *testing.T) {

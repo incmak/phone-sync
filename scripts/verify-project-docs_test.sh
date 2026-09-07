@@ -14,7 +14,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 
 write_valid_fixture() {
   rm -rf -- "$tmp/docs"
-  mkdir -p "$tmp/docs/mobile" "$tmp/docs/proto" "$tmp/docs/docs/release-evidence"
+  mkdir -p "$tmp/docs/docs/agent-guidance" "$tmp/docs/mobile" "$tmp/docs/proto" "$tmp/docs/docs/release-evidence"
 
   printf '%s\n' \
     '# Twinotify' \
@@ -24,7 +24,7 @@ write_valid_fixture() {
   printf '%s\n' \
     '# Agent guidance' \
     'Mobile uses Expo SDK 57 / React Native 0.86.' \
-    'Room is at version 9. A new entity means version 10, explicit Migration(9,10), registration in NotificationDb.addMigrations(...), and committed schema 10.json. Never use fallbackToDestructiveMigration().' \
+    'Room is at version 12. A new entity means version 13, explicit Migration(12,13), registration in NotificationDb.addMigrations(...), and committed schema 13.json. Never use fallbackToDestructiveMigration().' \
     'Direct-LAN Tasks 1-9 implementation and host automation are complete; named hardware checks remain pending physical two-phone run.' \
     'advisor-plans/README.md tracks Plans 001-030. Plan 004 is externally blocked on owner-controlled EAS project, signing, token, certificate, and attestation inputs. Plan 015 source is complete and only PHY-CALL-01 physical proof is deferred.' \
     'Local APKs are QA artifacts, not protected release candidates.' \
@@ -68,7 +68,7 @@ write_wrapped_agent_fixture() {
   printf '%s\n' \
     '# Agent guidance' \
     'Mobile uses Expo SDK 57 / React Native 0.86.' \
-    'Room is at version 9. A new entity means version 10, explicit Migration(9,10), registration in NotificationDb.addMigrations(...), and committed schema 10.json. Never use fallbackToDestructiveMigration().' \
+    'Room is at version 12. A new entity means version 13, explicit Migration(12,13), registration in NotificationDb.addMigrations(...), and committed schema 13.json. Never use fallbackToDestructiveMigration().' \
     'Direct-LAN Tasks 1-9 implementation and host' \
     'automation are complete; named hardware checks remain pending physical two-phone run.' \
     '' \
@@ -82,6 +82,7 @@ write_wrapped_agent_fixture() {
 
 expect_rejection() {
   local label=$1
+  cp "$tmp/docs/AGENTS.md" "$tmp/docs/docs/agent-guidance/delivery-status.md"
   if TWINOTIFY_PROJECT_DOCS_ROOT="$tmp/docs" "$VERIFY" >/dev/null 2>"$tmp/error"; then
     echo "self-test expected rejection: $label" >&2
     return 1
@@ -103,9 +104,11 @@ remove_scenario() {
 }
 
 write_valid_fixture
+cp "$tmp/docs/AGENTS.md" "$tmp/docs/docs/agent-guidance/delivery-status.md"
 TWINOTIFY_PROJECT_DOCS_ROOT="$tmp/docs" "$VERIFY"
 
 write_wrapped_agent_fixture
+cp "$tmp/docs/AGENTS.md" "$tmp/docs/docs/agent-guidance/delivery-status.md"
 TWINOTIFY_PROJECT_DOCS_ROOT="$tmp/docs" "$VERIFY"
 
 write_valid_fixture
@@ -113,7 +116,7 @@ sed -i.bak 's/Expo SDK 57/Expo SDK 54/' "$tmp/docs/AGENTS.md"
 expect_rejection 'stale Expo SDK guidance'
 
 write_valid_fixture
-sed -i.bak -e 's/Room is at version 9/Room is at version 5/' -e 's/Migration(9,10)/Migration(5,6)/' "$tmp/docs/AGENTS.md"
+sed -i.bak -e 's/Room is at version 12/Room is at version 5/' -e 's/Migration(12,13)/Migration(5,6)/' "$tmp/docs/AGENTS.md"
 expect_rejection 'stale Room migration guidance'
 
 write_valid_fixture

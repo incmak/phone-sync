@@ -172,7 +172,23 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		session, err := s.pairStore.SessionFor(sub)
+		selected := ""
+		if value, exists := claims["pair_id"]; exists {
+			var valid bool
+			selected, valid = value.(string)
+			if !valid || selected == "" || len(selected) > 128 || strings.ContainsRune(selected, '\x00') {
+				s.rejectAuthentication(w, authRejectClaims)
+				return
+			}
+		}
+		if values, exists := r.URL.Query()["pair_id"]; exists {
+			if len(values) != 1 || values[0] == "" || len(values[0]) > 128 || strings.ContainsRune(values[0], '\x00') || (selected != "" && selected != values[0]) {
+				s.rejectAuthentication(w, authRejectClaims)
+				return
+			}
+			selected = values[0]
+		}
+		session, err := s.pairStore.SessionForPair(sub, selected)
 		if err != nil || len(session.SignPubkey) != ed25519.PublicKeySize {
 			s.rejectAuthentication(w, authRejectUnknownDevice)
 			return

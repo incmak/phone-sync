@@ -37,6 +37,7 @@ object NotificationStateReducer {
         current: CanonicalNotificationState?,
         event: InnerEventV2,
         authenticatedPeerId: String,
+        localDeviceId: String,
     ): InnerEventV2? {
         if (event.type != "notif.cancel") return event
         // Offline compaction may legitimately leave only a cancel when a notification was posted
@@ -45,8 +46,9 @@ object NotificationStateReducer {
         if (current == null) {
             return event.takeIf { event.originDevice == authenticatedPeerId }
         }
-        if (event.originDevice == current.originDevice) return event
         if (event.originDevice != authenticatedPeerId) return null
+        if (current.originDevice == authenticatedPeerId) return event
+        if (current.originDevice != localDeviceId) return null
         return event.copy(originDevice = current.originDevice)
     }
 

@@ -51,6 +51,7 @@ import co.twinotify.core.storage.DeviceIdentity
 import co.twinotify.core.storage.InboundMessage
 import co.twinotify.core.storage.NotificationDb
 import co.twinotify.core.storage.OutboundMessage
+import co.twinotify.core.storage.LEGACY_PEER_LINK_ID
 import co.twinotify.core.storage.PeerStore
 import co.twinotify.core.storage.ReplayGuard
 import kotlinx.coroutines.sync.Mutex
@@ -155,11 +156,13 @@ internal suspend fun dispatchAuthenticatedCallControlInvoke(
     committedAt: Long,
     processor: AuthenticatedCallControlInvokeProcessor,
     rejectionJournal: ActionInvokeRejectionJournal,
+    peerLinkId: String = LEGACY_PEER_LINK_ID,
 ): InboundDispatchResult {
     require(inner.type == "call.control.invoke")
     val inbound = InboundMessage(
         inner.msgId, inner.originDevice, envelopeSha256, inner.type, null, null,
         "APPLIED", committedAt, committedAt, null, "READY",
+        peerLinkId = peerLinkId,
     )
     val request = if (inner.originDevice != authenticatedPeerId) null else try {
         val payload = inner.payloadObject()
@@ -203,11 +206,13 @@ internal suspend fun dispatchAuthenticatedCallControlResult(
     committedAt: Long,
     processor: AuthenticatedCallControlResultProcessor,
     rejectionJournal: ActionInvokeRejectionJournal,
+    peerLinkId: String = LEGACY_PEER_LINK_ID,
 ): InboundDispatchResult {
     require(inner.type == "call.control.result")
     val inbound = InboundMessage(
         inner.msgId, inner.originDevice, envelopeSha256, inner.type, null, null,
         "APPLIED", committedAt, committedAt, null, "READY",
+        peerLinkId = peerLinkId,
     )
     val request = if (inner.originDevice != authenticatedPeerId) null else try {
         val payload = inner.payloadObject()
@@ -275,6 +280,7 @@ internal suspend fun dispatchAuthenticatedActionResult(
     envelopeSha256: String,
     committedAt: Long,
     processor: AuthenticatedActionResultProcessor,
+    peerLinkId: String = LEGACY_PEER_LINK_ID,
 ): InboundDispatchResult {
     require(inner.type == "notif.action.result")
     val payload = inner.payloadObject()
@@ -291,6 +297,7 @@ internal suspend fun dispatchAuthenticatedActionResult(
             appliedAt = committedAt,
             receiptMsgId = null,
             relayAckState = "READY",
+        peerLinkId = peerLinkId,
         ),
         invocationId = payload.getString("invocation_id"),
         canonId = payload.getString("canon_id"),
@@ -309,6 +316,7 @@ internal suspend fun dispatchAuthenticatedActionInvoke(
     committedAt: Long,
     processor: AuthenticatedActionInvokeProcessor,
     rejectionJournal: ActionInvokeRejectionJournal,
+    peerLinkId: String = LEGACY_PEER_LINK_ID,
 ): InboundDispatchResult {
     require(inner.type == "notif.action.invoke")
     val inbound = InboundMessage(
@@ -323,6 +331,7 @@ internal suspend fun dispatchAuthenticatedActionInvoke(
         appliedAt = committedAt,
         receiptMsgId = null,
         relayAckState = "READY",
+        peerLinkId = peerLinkId,
     )
     val request = try {
         val payload = inner.payloadObject()
@@ -454,6 +463,7 @@ internal suspend fun dispatchAuthenticatedCallRejection(
     eventType: String = "call.state",
     createReceipt: suspend (String) -> co.twinotify.core.storage.OutboundMessage?,
     journal: CallRejectionJournal,
+    peerLinkId: String = LEGACY_PEER_LINK_ID,
 ): InboundDispatchResult {
     val receipt = createReceipt(reason)
         ?: return InboundDispatchResult.Rejected("call_rejection_receipt_unavailable")
@@ -469,6 +479,7 @@ internal suspend fun dispatchAuthenticatedCallRejection(
         appliedAt = committedAt,
         receiptMsgId = receipt.msgId,
         relayAckState = "NONE",
+        peerLinkId = peerLinkId,
     )
     return when (journal.commit(row, receipt)) {
         CallRejectionCommitResult.Committed -> InboundDispatchResult.Accepted(msgId, envelopeSha256)
@@ -489,6 +500,7 @@ internal suspend fun dispatchAuthenticatedExpiry(
     committedAt: Long,
     createReceipt: suspend (String, String) -> co.twinotify.core.storage.OutboundMessage?,
     journal: CallRejectionJournal,
+    peerLinkId: String = LEGACY_PEER_LINK_ID,
 ): InboundDispatchResult {
     val inner = opened.inner
     val receipt = createReceipt(inner.msgId, opened.envelopeSha256)
@@ -505,6 +517,7 @@ internal suspend fun dispatchAuthenticatedExpiry(
         appliedAt = committedAt,
         receiptMsgId = receipt.msgId,
         relayAckState = "NONE",
+        peerLinkId = peerLinkId,
     )
     return when (journal.commit(inbound, receipt)) {
         CallRejectionCommitResult.Committed ->
@@ -524,6 +537,7 @@ internal suspend fun dispatchAuthenticatedDirectControl(
     eventType: String,
     committedAt: Long,
     journal: DirectControlJournal,
+    peerLinkId: String = LEGACY_PEER_LINK_ID,
     process: suspend () -> DirectControlProcessingResult,
 ): InboundDispatchResult {
     val row = InboundMessage(
@@ -538,6 +552,7 @@ internal suspend fun dispatchAuthenticatedDirectControl(
         appliedAt = committedAt,
         receiptMsgId = null,
         relayAckState = "READY",
+        peerLinkId = peerLinkId,
     )
     return when (val result = journal.commit(row, process)) {
         DirectControlCommitResult.Committed -> InboundDispatchResult.Accepted(msgId, envelopeSha256)
@@ -554,6 +569,7 @@ internal suspend fun dispatchAuthenticatedReceiptBackedControl(
     committedAt: Long,
     receiptFactory: AppliedControlReceiptFactory,
     journal: ReceiptBackedControlJournal,
+    peerLinkId: String = LEGACY_PEER_LINK_ID,
     process: suspend () -> ReceiptBackedControlResult,
 ): InboundDispatchResult {
     require(inner.type in RECEIPT_BACKED_CONTROL_TYPES)
@@ -571,6 +587,7 @@ internal suspend fun dispatchAuthenticatedReceiptBackedControl(
         appliedAt = committedAt,
         receiptMsgId = receipt.msgId,
         relayAckState = "NONE",
+        peerLinkId = peerLinkId,
     )
     return when (val result = journal.commit(inbound, receipt, process)) {
         DirectControlCommitResult.Committed -> InboundDispatchResult.Accepted(inner.msgId, envelopeSha256)
@@ -645,6 +662,7 @@ class InboundDispatcher internal constructor(
     private val transportGeneration: () -> Int = { SyncServiceStatus.routeStatus.value.routeGeneration },
     private val requestDirectAttempt: () -> Unit = {},
     private val requestRouteReload: () -> Unit = {},
+    private val peerLinkId: String = LEGACY_PEER_LINK_ID,
 ) {
     internal constructor(
         ctx: Context,
@@ -658,6 +676,7 @@ class InboundDispatcher internal constructor(
         transportGeneration: () -> Int = { SyncServiceStatus.routeStatus.value.routeGeneration },
         requestDirectAttempt: () -> Unit = {},
         requestRouteReload: () -> Unit = {},
+        peerLinkId: String = LEGACY_PEER_LINK_ID,
     ) : this(
         ctx = ctx,
         snapshotCoordinator = snapshotCoordinator,
@@ -670,27 +689,29 @@ class InboundDispatcher internal constructor(
         transportGeneration = transportGeneration,
         requestDirectAttempt = requestDirectAttempt,
         requestRouteReload = requestRouteReload,
+        peerLinkId = peerLinkId,
     )
 
     private val reliableDao by lazy { NotificationDb.get(ctx.applicationContext).reliableDeliveryDao() }
-    private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao)) }
-    private val controls by lazy { peerControlOutbox ?: PeerControlOutbox(ctx.applicationContext, reliableDao) }
+    private val outbox by lazy { OutboxRepository(DaoOutboxStore(reliableDao, peerLinkId)) }
+    private val controls by lazy { peerControlOutbox ?: PeerControlOutbox(ctx.applicationContext, reliableDao, peerLinkId) }
     private val bootstrapProcessor by lazy {
         lanBootstrapProcessor ?: DefaultLanBootstrapProcessor(
             ctx.applicationContext,
             controls,
             transportGeneration,
+            peerLinkId,
         )
     }
     private val controlReceiptFactory by lazy {
-        appliedReceiptFactory ?: DurableReceiptFactory(ctx.applicationContext).let { factory ->
+        appliedReceiptFactory ?: DurableReceiptFactory(ctx.applicationContext, peerLinkId).let { factory ->
             AppliedControlReceiptFactory(factory::createApplied)
         }
     }
     private val stateMutex = Mutex()
     private val snapshots get() = snapshotCoordinator
     private val actionProcessor by lazy {
-        val encoder = ActionControlEncoder(ctx.applicationContext)
+        val encoder = ActionControlEncoder(ctx.applicationContext, peerLinkId)
         ActionInvocationProcessor(
             journal = DaoActionClaimJournal(reliableDao),
             registryLookup = ProcessNotificationActionRegistry.registry::lookup,
@@ -721,7 +742,7 @@ class InboundDispatcher internal constructor(
         )
     }
     private val callControlProcessor by lazy {
-        val encoder = CallControlEncoder(ctx.applicationContext)
+        val encoder = CallControlEncoder(ctx.applicationContext, peerLinkId)
         CallControlInvocationProcessor(
             journal = DaoCallControlClaimJournal(reliableDao),
             currentLocalCallState = { canonId ->
@@ -788,7 +809,7 @@ class InboundDispatcher internal constructor(
         if (env.type != "enc") return
         LegacyInboundProcessor(
             loadPeer = {
-                PeerStore.load(ctx) ?: run {
+                PeerStore.load(ctx, peerLinkId) ?: run {
                     android.util.Log.w("Twinotify", "no peer paired; dropping legacy inbound")
                     null
                 }
@@ -823,7 +844,7 @@ class InboundDispatcher internal constructor(
 
     private suspend fun dispatchV2(raw: String): InboundDispatchResult {
         val peer = if (authenticatedV2Opener == null) {
-            PeerStore.load(ctx) ?: run {
+            PeerStore.load(ctx, peerLinkId) ?: run {
                 android.util.Log.w("Twinotify", "no peer paired; dropping v2 inbound")
                 return InboundDispatchResult.Rejected("no_peer")
             }
@@ -848,8 +869,9 @@ class InboundDispatcher internal constructor(
             }
         } catch (expired: AuthenticatedEnvelopeExpiredException) {
             val authenticated = expired.authenticated
-            val receiptFactory = DurableReceiptFactory(ctx.applicationContext)
+            val receiptFactory = DurableReceiptFactory(ctx.applicationContext, peerLinkId)
             val result = dispatchAuthenticatedExpiry(
+                peerLinkId = peerLinkId,
                 opened = authenticated,
                 committedAt = System.currentTimeMillis().coerceAtLeast(0L),
                 createReceipt = receiptFactory::createExpired,
@@ -879,6 +901,7 @@ class InboundDispatcher internal constructor(
             var requestDirect = false
             var relayAttachOffer: co.twinotify.core.pairing.RelayAttachOffer? = null
             val result = dispatchAuthenticatedReceiptBackedControl(
+                peerLinkId = peerLinkId,
                 inner = inner,
                 envelopeSha256 = opened.envelopeSha256,
                 committedAt = System.currentTimeMillis().coerceAtLeast(0L),
@@ -932,8 +955,8 @@ class InboundDispatcher internal constructor(
                 if (requestDirect) requestDirectAttempt()
                 relayAttachOffer?.let { offer -> relayAttachProcessor?.process(offer) }
             } else if (result is InboundDispatchResult.Rejected && result.code == "lan_binding_conflict") {
-                SyncServiceStatus.setDeliveryConditions(
-                    DeliveryConditions(bindingConflict = true),
+                SyncServiceStatus.setPeerConditions(
+                    peerLinkId, DeliveryConditions(bindingConflict = true),
                     transportGeneration(),
                 )
             }
@@ -945,6 +968,7 @@ class InboundDispatcher internal constructor(
             var acceptedProbeReceipt: Pair<String, String>? = null
             val controlNow = System.currentTimeMillis().coerceAtLeast(0L)
             val result = dispatchAuthenticatedDirectControl(
+                peerLinkId = peerLinkId,
                 msgId = inner.msgId,
                 originDevice = inner.originDevice,
                 envelopeSha256 = opened.envelopeSha256,
@@ -993,14 +1017,14 @@ class InboundDispatcher internal constructor(
                     val generation = transportGeneration()
                     if (controls.acceptProbeReceipt(msgId, digest, generation, controlNow)) {
                         SyncServiceStatus.setLastReceiptAt(controlNow)
-                        SyncServiceStatus.setPeerEvidence(
-                            controls.peerEvidence(generation, controlNow),
+                        SyncServiceStatus.setPeerRouteEvidence(
+                            peerLinkId, controls.peerEvidence(generation, controlNow),
                             generation,
                         )
                     }
                 }
-                val snapshot = reliableDao.deliveryQueueSnapshot()
-                SyncServiceStatus.setQueueSnapshot(snapshot)
+                val snapshot = reliableDao.deliveryQueueSnapshot(peerLinkId)
+                SyncServiceStatus.setPeerQueueSnapshot(peerLinkId, snapshot, transportGeneration())
             }
             if (snapshotCommitted) {
                 ProductObservationTracker.recordSnapshotCommit()
@@ -1008,7 +1032,7 @@ class InboundDispatcher internal constructor(
                 NotificationMaterializer(
                     dao = reliableDao,
                     port = DefaultAndroidNotificationPort(ctx, localDeviceId, reliableDao),
-                    receiptFactory = DurableReceiptFactory(ctx),
+                    receiptFactory = DurableReceiptFactory(ctx, peerLinkId),
                     localDeviceId = localDeviceId,
                     retryScheduler = materializationStartupScheduler(ctx),
                     historyRecorder = co.twinotify.core.history.HistoryRepository(ctx),
@@ -1019,6 +1043,7 @@ class InboundDispatcher internal constructor(
         }
         if (inner.type == "notif.action.invoke") {
             val result = dispatchAuthenticatedActionInvoke(
+                peerLinkId = peerLinkId,
                 inner = inner,
                 envelopeSha256 = opened.envelopeSha256,
                 committedAt = System.currentTimeMillis(),
@@ -1026,13 +1051,14 @@ class InboundDispatcher internal constructor(
                 rejectionJournal = ActionInvokeRejectionJournal(reliableDao::commitActionInvokeRejection),
             )
             if (result !is InboundDispatchResult.Rejected) {
-                SyncServiceStatus.setQueueSnapshot(reliableDao.deliveryQueueSnapshot())
+                SyncServiceStatus.setPeerQueueSnapshot(peerLinkId, reliableDao.deliveryQueueSnapshot(peerLinkId), transportGeneration())
             }
             onAuthenticatedEvent(inner.type)
             return result
         }
         if (inner.type == "notif.action.result") {
             val result = dispatchAuthenticatedActionResult(
+                peerLinkId = peerLinkId,
                 inner = inner,
                 envelopeSha256 = opened.envelopeSha256,
                 committedAt = System.currentTimeMillis(),
@@ -1043,6 +1069,7 @@ class InboundDispatcher internal constructor(
         }
         if (inner.type == "call.control.invoke") {
             val result = dispatchAuthenticatedCallControlInvoke(
+                peerLinkId = peerLinkId,
                 inner = inner,
                 authenticatedPeerId = peer?.deviceId ?: inner.originDevice,
                 envelopeSha256 = opened.envelopeSha256,
@@ -1051,13 +1078,14 @@ class InboundDispatcher internal constructor(
                 rejectionJournal = ActionInvokeRejectionJournal(reliableDao::commitCallControlInvokeRejection),
             )
             if (result !is InboundDispatchResult.Rejected) {
-                SyncServiceStatus.setQueueSnapshot(reliableDao.deliveryQueueSnapshot())
+                SyncServiceStatus.setPeerQueueSnapshot(peerLinkId, reliableDao.deliveryQueueSnapshot(peerLinkId), transportGeneration())
             }
             onAuthenticatedEvent(inner.type)
             return result
         }
         if (inner.type == "call.control.result") {
             val result = dispatchAuthenticatedCallControlResult(
+                peerLinkId = peerLinkId,
                 inner = inner,
                 authenticatedPeerId = peer?.deviceId ?: inner.originDevice,
                 envelopeSha256 = opened.envelopeSha256,
@@ -1080,7 +1108,7 @@ class InboundDispatcher internal constructor(
             val canonId = requireNotNull(inner.canonId)
             val localDeviceId = DeviceIdentity.getOrCreate(ctx)
             val current = reliableDao.canonical(canonId)
-            reliableDao.inbound(inner.msgId)?.let { existing ->
+            reliableDao.inbound(inner.msgId, peerLinkId)?.let { existing ->
                 return@dispatchDesiredStateAfterCommit if (existing.envelopeSha256 == opened.envelopeSha256) {
                     DesiredStateDispatch(InboundDispatchResult.Duplicate(inner.msgId, opened.envelopeSha256), false)
                 } else {
@@ -1093,6 +1121,7 @@ class InboundDispatcher internal constructor(
                 current = current,
                 event = inner,
                 authenticatedPeerId = peer?.deviceId ?: inner.originDevice,
+                localDeviceId = localDeviceId,
             ) ?: run {
                 android.util.Log.w("Twinotify", "v2 cancel origin is not the paired peer")
                 return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
@@ -1101,9 +1130,10 @@ class InboundDispatcher internal constructor(
                 )
             }
             if (current != null && requireNotNull(inner.sequence) <= current.latestSequence) {
-                val receiptFactory = DurableReceiptFactory(ctx)
+                val receiptFactory = DurableReceiptFactory(ctx, peerLinkId)
                 return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
                     dispatchAuthenticatedCallRejection(
+                peerLinkId = peerLinkId,
                         msgId = inner.msgId,
                         originDevice = inner.originDevice,
                         envelopeSha256 = opened.envelopeSha256,
@@ -1118,11 +1148,16 @@ class InboundDispatcher internal constructor(
                     false,
                 )
             }
+            val sourceCancelRequest = inner.type == "notif.cancel" && current?.originDevice == localDeviceId
+            val desiredSequence = if (sourceCancelRequest) {
+                check(requireNotNull(inner.sequence) < Long.MAX_VALUE) { "origin_sequence_exhausted" }
+                maxOf(reliableDao.nextCaptureSequenceForEvent(canonId), inner.sequence + 1L)
+            } else requireNotNull(inner.sequence)
             val desired = try {
                 when (
                     val reduction = NotificationStateReducer.reduce(
                         current = current,
-                        event = authorizedEvent,
+                        event = authorizedEvent.copy(sequence = desiredSequence),
                         localDeviceId = localDeviceId,
                         allocator = allocator,
                     )
@@ -1143,30 +1178,49 @@ class InboundDispatcher internal constructor(
                 envelopeSha256 = opened.envelopeSha256,
                 eventType = inner.type,
                 canonId = canonId,
-                sequence = inner.sequence,
+                sequence = desiredSequence,
                 outcome = "PENDING_PLATFORM",
                 committedAt = System.currentTimeMillis(),
                 appliedAt = null,
                 receiptMsgId = null,
                 relayAckState = "NONE",
+                peerLinkId = peerLinkId,
             )
             val prepareSupersession: suspend () -> co.twinotify.core.storage.SupersessionBundle? = {
                 when (val prepared = prepareSupersessionRejections(
-                    reliableDao.pendingSupersededInboundPreflight(canonId, requireNotNull(inner.sequence)),
-                ) { older, reason -> DurableReceiptFactory(ctx).createRejected(older.msgId, older.envelopeSha256, reason) }) {
+                    reliableDao.pendingSupersededInboundPreflight(canonId, desiredSequence),
+                ) { older, reason -> DurableReceiptFactory(ctx, older.peerLinkId).createRejected(older, reason) }) {
                     is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
                         prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
                     )
                     SupersessionPreparation.Unavailable -> null
                 }
             }
-            var commitDesired = desired
+            var commitDesired = desired.copy(
+                peerLinkId = if (desired.originDevice == localDeviceId) null else peerLinkId,
+                peerCancelPending = if (sourceCancelRequest) true else desired.peerCancelPending,
+                // Retain the generation being cancelled until the platform confirms absence.
+                desiredPayloadJson = if (sourceCancelRequest) current?.desiredPayloadJson else desired.desiredPayloadJson,
+            )
+            val sourceCancels = if (sourceCancelRequest) {
+                val now = System.currentTimeMillis().coerceAtLeast(0L)
+                PeerStore.list(ctx).map { recipient ->
+                    DurablePeerControlSealer(ctx, recipient.peerLinkId).seal(
+                        inner.copy(msgId = java.util.UUID.randomUUID().toString(), originDevice = localDeviceId,
+                            sequence = desiredSequence, createdAt = now, expiresAt = now + 24 * 60 * 60 * 1000L),
+                        requiresPeerReceipt = true,
+                    ).copy(state = "PENDING_PLATFORM")
+                }
+            } else emptyList()
             val commitResult = commitWithSupersessionRetry(
                 prepare = prepareSupersession,
                 commit = { bundle ->
                     var attemptResult: co.twinotify.core.storage.InboundDesiredCommitResult? = null
                     for (attempt in 0 until 3) {
-                        attemptResult = reliableDao.commitInboundDesired(inbound, commitDesired, bundle)
+                        attemptResult = if (sourceCancelRequest) {
+                            reliableDao.commitOriginCancelRequest(inbound, requireNotNull(inner.sequence),
+                                requireNotNull(current).latestSequence, localDeviceId, commitDesired, sourceCancels, bundle)
+                        } else reliableDao.commitInboundDesired(inbound, commitDesired, bundle)
                         if (attemptResult !is co.twinotify.core.storage.InboundDesiredCommitResult.MirrorIdentityCollision) {
                             break
                         }
@@ -1200,9 +1254,10 @@ class InboundDispatcher internal constructor(
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Stale -> {
                     // The canonical check can advance between the preflight and this transaction.
                     // Journal a terminal receipt instead of leaving a receipt-less STALE row.
-                    val receiptFactory = DurableReceiptFactory(ctx)
+                    val receiptFactory = DurableReceiptFactory(ctx, peerLinkId)
                     DesiredStateDispatch(
                         dispatchAuthenticatedCallRejection(
+                peerLinkId = peerLinkId,
                             msgId = inner.msgId,
                             originDevice = inner.originDevice,
                             envelopeSha256 = opened.envelopeSha256,
@@ -1243,7 +1298,7 @@ class InboundDispatcher internal constructor(
                     false,
                 )
             }
-            reliableDao.inbound(inner.msgId)?.let { existing ->
+            reliableDao.inbound(inner.msgId, peerLinkId)?.let { existing ->
                 return@dispatchDesiredStateAfterCommit if (existing.envelopeSha256 == envelopeSha256) {
                     DesiredStateDispatch(InboundDispatchResult.Duplicate(inner.msgId, envelopeSha256), false)
                 } else {
@@ -1281,9 +1336,10 @@ class InboundDispatcher internal constructor(
                 is co.twinotify.core.call.CallReduction.Apply -> null
             }
             if (rejectionCode != null) {
-                val receiptFactory = DurableReceiptFactory(ctx)
+                val receiptFactory = DurableReceiptFactory(ctx, peerLinkId)
                 return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
                     dispatchAuthenticatedCallRejection(
+                peerLinkId = peerLinkId,
                         msgId = inner.msgId,
                         originDevice = inner.originDevice,
                         envelopeSha256 = envelopeSha256,
@@ -1311,12 +1367,13 @@ class InboundDispatcher internal constructor(
                 appliedAt = null,
                 receiptMsgId = null,
                 relayAckState = "NONE",
+                peerLinkId = peerLinkId,
             )
             val commit = commitWithSupersessionRetry(
                 prepare = {
                     when (val prepared = prepareSupersessionRejections(
                         reliableDao.pendingSupersededInboundPreflight(requireNotNull(inner.canonId), requireNotNull(inner.sequence)),
-                    ) { older, reason -> DurableReceiptFactory(ctx).createRejected(older.msgId, older.envelopeSha256, reason) }) {
+                    ) { older, reason -> DurableReceiptFactory(ctx, peerLinkId).createRejected(older, reason) }) {
                         is SupersessionPreparation.Prepared -> co.twinotify.core.storage.SupersessionBundle(
                             prepared.entries.map { entry -> co.twinotify.core.storage.SupersessionEntry(entry.inboundMsgId, entry.envelopeSha256, entry.receipt) },
                         )
@@ -1326,7 +1383,7 @@ class InboundDispatcher internal constructor(
                 commit = { bundle ->
                     reliableDao.commitInboundDesired(
                         inbound,
-                        (reduction as co.twinotify.core.call.CallReduction.Apply).state,
+                        (reduction as co.twinotify.core.call.CallReduction.Apply).state.copy(peerLinkId = peerLinkId),
                         bundle,
                     )
                 },
@@ -1341,9 +1398,10 @@ class InboundDispatcher internal constructor(
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Committed ->
                     DesiredStateDispatch(InboundDispatchResult.Accepted(inner.msgId, envelopeSha256), true)
                 is co.twinotify.core.storage.InboundDesiredCommitResult.Stale -> {
-                    val receiptFactory = DurableReceiptFactory(ctx)
+                    val receiptFactory = DurableReceiptFactory(ctx, peerLinkId)
                     DesiredStateDispatch(
                         dispatchAuthenticatedCallRejection(
+                peerLinkId = peerLinkId,
                             msgId = inner.msgId,
                             originDevice = inner.originDevice,
                             envelopeSha256 = envelopeSha256,
@@ -1399,7 +1457,7 @@ class InboundDispatcher internal constructor(
     }
 
     private suspend fun handleUnpair() {
-        android.util.Log.i("Twinotify", "peer initiated unpair — wiping local state")
+        android.util.Log.i("Twinotify", "peer initiated scoped removal")
         executePeerUnpairAndRequestServiceStop(
             unpair = ::preparePeerUnpair,
             requestServiceStop = ::requestServiceStopAfterPeerUnpair,
@@ -1407,22 +1465,14 @@ class InboundDispatcher internal constructor(
     }
 
     private suspend fun preparePeerUnpair() {
-        co.twinotify.core.pairing.UnpairWorkflow.execute(
-            // Keep the current authenticated collector alive through the non-cancellable wipe.
-            // LAN finalizes service stop only after its acceptance write; relay already has
-            // server custody and runs that finalizer immediately after dispatch returns.
-            stopAndAwait = { SyncService.shutdownActive(ctx, fromRelayJob = true) },
-            revokePeer = {},
-            wipeLocal = {
-                co.twinotify.core.pairing.UnpairOps.wipeAll(ctx)
-                SyncServiceStatus.notifyPeerUnpaired()
-            },
-        )
+        co.twinotify.core.pairing.PeerRemovalManager.beginIncoming(ctx, peerLinkId)
     }
 
     private suspend fun requestServiceStopAfterPeerUnpair() {
-        ctx.stopService(Intent(ctx, SyncService::class.java))
+        // Run outside this collector so selected-session join cannot wait for itself.
+        co.twinotify.core.pairing.PeerRemovalManager.finishIncoming(ctx, peerLinkId)
     }
+
 }
 
 internal fun recordSnapshotCommitIfCommitted(result: Result<SnapshotConvergence>): SnapshotConvergence? {

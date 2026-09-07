@@ -39,6 +39,7 @@ internal data class PeerControlSealInputs(
     val peerPublicKey: ByteArray,
     val ownSecretKey: ByteArray,
     val nonce: ByteArray,
+    val peerLinkId: String = co.twinotify.core.storage.LEGACY_PEER_LINK_ID,
 )
 
 internal fun interface PeerControlSealInputsProvider {
@@ -58,15 +59,16 @@ internal class DurablePeerControlSealer(
     private val inputs: PeerControlSealInputsProvider,
     private val encryptor: PeerControlEncryptor,
 ) : PeerControlSealer {
-    constructor(context: Context) : this(
+    constructor(context: Context, peerLinkId: String? = null) : this(
         inputs = PeerControlSealInputsProvider {
-            val peer = PeerStore.load(context)
+            val peer = PeerStore.load(context, peerLinkId)
                 ?: throw IllegalStateException("peer control requires a paired peer")
             val (box, _) = CryptoStore.loadOrGenerate(context)
             PeerControlSealInputs(
                 peerPublicKey = peer.encPubkey,
                 ownSecretKey = box.secretKey,
                 nonce = NonceSource.next(context),
+                peerLinkId = peer.peerLinkId,
             )
         },
         encryptor = PeerControlEncryptor { plain, nonce, peerPublicKey, ownSecretKey ->
@@ -112,6 +114,7 @@ internal class DurablePeerControlSealer(
                 state = "NEW",
                 lastError = null,
                 requiresPeerReceipt = requiresPeerReceipt,
+                peerLinkId = material.peerLinkId,
             )
         } finally {
             peerPublicKey.fill(0)
@@ -134,9 +137,9 @@ class PeerControlOutbox(
     private val clock: () -> Long = { System.currentTimeMillis().coerceAtLeast(0L) },
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
-    constructor(context: Context, dao: ReliableDeliveryDao) : this(
-        store = DaoPeerControlStore(dao),
-        sealer = DurablePeerControlSealer(context.applicationContext),
+    constructor(context: Context, dao: ReliableDeliveryDao, peerLinkId: String? = null) : this(
+        store = DaoPeerControlStore(dao, context.applicationContext, peerLinkId),
+        sealer = DurablePeerControlSealer(context.applicationContext, peerLinkId),
         originDevice = { DeviceIdentity.getOrCreate(context.applicationContext) },
     )
 
@@ -322,9 +325,15 @@ class PeerControlOutbox(
     }
 }
 
-private class DaoPeerControlStore(private val dao: ReliableDeliveryDao) : PeerControlStore {
+private class DaoPeerControlStore(
+    private val dao: ReliableDeliveryDao,
+    private val context: Context,
+    private val peerLinkId: String?,
+) : PeerControlStore {
     override suspend fun insert(row: OutboundMessage) = dao.insertOutbound(row)
 
-    override suspend fun active(eventType: String, now: Long): OutboundMessage? =
-        dao.activeOutboundControl(eventType, now)
+    override suspend fun active(eventType: String, now: Long): OutboundMessage? {
+        val peer = PeerStore.load(context, peerLinkId) ?: return null
+        return dao.activeOutboundControl(eventType, now, peer.peerLinkId)
+    }
 }

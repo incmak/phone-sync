@@ -40,6 +40,16 @@ class NotificationMapDaoTest {
     }
 
     @Test
+    fun repeatedPost_reusesOnlyAnIdenticalMapping() = runBlocking {
+        dao.putMirror("canon1", "devA", 100, "mirror")
+        dao.putMirror("canon1", "devA", 100, "mirror")
+        assertEquals("canon1", dao.lookupByLocal(100, "mirror"))
+        assertFailsWith<IllegalArgumentException> { dao.putMirror("canon1", "devA", 101, "mirror") }
+        assertFailsWith<IllegalArgumentException> { dao.putMirror("canon1", "devB", 100, "mirror") }
+        assertEquals("devA", dao.lookupOrigin("canon1"))
+    }
+
+    @Test
     fun roundTrip_nullTag() = runBlocking {
         dao.putMirror("canon2", "devB", 200, null)
         assertEquals("canon2", dao.lookupByLocal(200, null), "null tag lookup should return canon_id")

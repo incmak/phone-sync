@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 
 import { useTheme, TwButton } from '../../components';
 import TwinotifyCoreModule from '../../modules/twinotify-core/src/TwinotifyCoreModule';
@@ -14,24 +14,28 @@ import { useBluetoothAssociation } from '../../hooks/useBluetoothAssociation';
  */
 export default function PairBluetoothScreen() {
   const theme = useTheme();
+  const { peerLinkId } = useLocalSearchParams<{ peerLinkId?: string }>();
+  const getSettings = useCallback(() => peerLinkId
+    ? TwinotifyCoreModule.getBluetoothRouteSettingsForPeer(peerLinkId)
+    : TwinotifyCoreModule.getBluetoothRouteSettings(), [peerLinkId]);
   const [checking, setChecking] = useState(true);
 
   const finish = useCallback(() => router.replace('/home'), []);
 
   const { associate, busy } = useBluetoothAssociation(useCallback(async () => {
-    const settings = await TwinotifyCoreModule.getBluetoothRouteSettings().catch(() => null);
+    const settings = await getSettings().catch(() => null);
     if (settings?.associated) finish();
-  }, [finish]));
+  }, [finish, getSettings]), peerLinkId);
 
   useEffect(() => {
     // Already set up, so do not ask again.
-    TwinotifyCoreModule.getBluetoothRouteSettings()
+    getSettings()
       .then((settings) => {
         if (settings.associated) router.replace('/home');
         else setChecking(false);
       })
       .catch(() => setChecking(false));
-  }, []);
+  }, [getSettings]);
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={[styles.safe, { backgroundColor: theme.bg }]}>

@@ -16,6 +16,10 @@ import co.twinotify.core.storage.isNotificationSnapshotCanonical
 import java.security.MessageDigest
 import java.util.UUID
 import org.json.JSONObject
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** The anti-entropy summary exchanged for one canonical origin. */
 data class StateDigest(
@@ -50,6 +54,7 @@ data class SnapshotEndEvent(
 
 sealed interface SnapshotConvergence {
     data object Match : SnapshotConvergence
+    data object RepairQueued : SnapshotConvergence
     data class RepairStarted(val snapshotId: String, val itemCount: Int) : SnapshotConvergence
     data object RateLimited : SnapshotConvergence
     data object SourceUnavailable : SnapshotConvergence
@@ -81,7 +86,10 @@ interface SnapshotStore {
     suspend fun expireSnapshotStages(cutoff: Long): Int = 0
 }
 
-class DaoSnapshotStore(private val dao: ReliableDeliveryDao) : SnapshotStore {
+class DaoSnapshotStore(
+    private val dao: ReliableDeliveryDao,
+    private val peerLinkId: String = co.twinotify.core.storage.LEGACY_PEER_LINK_ID,
+) : SnapshotStore {
     override suspend fun activeOriginStates(originDevice: String): List<CanonicalNotificationState> =
         dao.activeOriginStates(originDevice)
 
@@ -90,25 +98,25 @@ class DaoSnapshotStore(private val dao: ReliableDeliveryDao) : SnapshotStore {
         originDevice: String,
         expectedItemCount: Int,
         receivedAt: Long,
-    ): SnapshotBeginResult = dao.beginSnapshot(snapshotId, originDevice, expectedItemCount, receivedAt)
+    ): SnapshotBeginResult = dao.beginSnapshot(snapshotId, originDevice, expectedItemCount, receivedAt, peerLinkId = peerLinkId)
 
-    override suspend fun stageSnapshotItem(row: SnapshotStage): SnapshotStageResult = dao.stageSnapshotItem(row)
+    override suspend fun stageSnapshotItem(row: SnapshotStage): SnapshotStageResult = dao.stageSnapshotItem(row.copy(peerLinkId = peerLinkId))
 
     override suspend fun stageSnapshotItem(row: SnapshotStage, expectedOriginDevice: String): SnapshotStageResult =
-        dao.stageSnapshotItem(row, expectedOriginDevice)
+        dao.stageSnapshotItem(row.copy(peerLinkId = peerLinkId), expectedOriginDevice)
 
     override suspend fun commitSnapshot(
         snapshotId: String,
         expectedDigest: String,
         committedAt: Long,
-    ): SnapshotCommitResult = dao.commitSnapshot(snapshotId, expectedDigest, committedAt)
+    ): SnapshotCommitResult = dao.commitSnapshot(snapshotId, expectedDigest, committedAt, expectedOriginDevice = null, peerLinkId = peerLinkId)
 
     override suspend fun commitSnapshot(
         snapshotId: String,
         expectedDigest: String,
         committedAt: Long,
         expectedOriginDevice: String,
-    ): SnapshotCommitResult = dao.commitSnapshot(snapshotId, expectedDigest, committedAt, expectedOriginDevice)
+    ): SnapshotCommitResult = dao.commitSnapshot(snapshotId, expectedDigest, committedAt, expectedOriginDevice, peerLinkId)
 
     override suspend fun expireSnapshotStages(cutoff: Long): Int = dao.expireSnapshotStages(cutoff)
 }
@@ -123,6 +131,14 @@ fun interface SnapshotSource {
     fun active(originDevice: String): List<SourceNotificationSnapshot>
 
     fun available(): Boolean = true
+
+    fun matchesCommitted(originDevice: String, snapshot: SourceNotificationSnapshot, payload: String): Boolean = true
+
+    fun requestReconciliation() {}
+
+
+    fun checkedActive(originDevice: String): List<SourceNotificationSnapshot>? =
+        if (available()) active(originDevice) else null
 
     /** Build a bounded notification payload without requiring a framework context in tests. */
     fun payloadJson(originDevice: String, snapshot: SourceNotificationSnapshot): String =
@@ -162,11 +178,26 @@ class ListenerSnapshotSource(
 
     override fun available(): Boolean = NotificationListenerBridge.isAttached()
 
+    override fun matchesCommitted(originDevice: String, snapshot: SourceNotificationSnapshot, payload: String): Boolean =
+        sourcePayloadMatchesCommitted(payload, payloadJson(originDevice, snapshot))
+
+    override fun requestReconciliation() = NotificationListenerBridge.requestSourceReconciliation()
+
+
+    override fun checkedActive(originDevice: String): List<SourceNotificationSnapshot>? =
+        NotificationListenerBridge.checkedActiveSourceSnapshots(context.applicationContext, denylist)
+
     override fun payloadJson(originDevice: String, snapshot: SourceNotificationSnapshot): String =
         NotifPostBuilder.toPayloadJson(
             NotifPostBuilder.build(snapshot, context.applicationContext, originDevice, "notif.post"),
         )
 }
+
+/** Action tokens belong to the committed sequence; only observable source content is compared. */
+internal fun sourcePayloadMatchesCommitted(committed: String, fresh: String): Boolean = runCatching {
+    NotifPostJson.fromPayloadJson(committed).copy(type = "notif.post", actions = emptyList()) ==
+        NotifPostJson.fromPayloadJson(fresh).copy(type = "notif.post", actions = emptyList())
+}.getOrDefault(false)
 
 /**
  * Stages encrypted snapshot payloads until an authenticated end digest proves completeness. This
@@ -180,6 +211,7 @@ class SnapshotCoordinator(
     private val source: SnapshotSource? = null,
     private val localOriginDevice: String? = null,
     private val snapshotIntervalMs: Long = DEFAULT_SNAPSHOT_INTERVAL_MS,
+    private val requestRepair: (() -> Unit)? = null,
 ) {
     constructor(
         dao: ReliableDeliveryDao,
@@ -187,10 +219,15 @@ class SnapshotCoordinator(
         clock: () -> Long = { System.currentTimeMillis() },
         source: SnapshotSource? = null,
         localOriginDevice: String? = null,
-    ) : this(DaoSnapshotStore(dao), emitter, clock, source, localOriginDevice)
+        peerLinkId: String = co.twinotify.core.storage.LEGACY_PEER_LINK_ID,
+        requestRepair: (() -> Unit)? = null,
+    ) : this(DaoSnapshotStore(dao, peerLinkId), emitter, clock, source, localOriginDevice, requestRepair = requestRepair)
 
+    private val emissionMutex = Mutex()
     private val lastRepairAt = HashMap<String, Long>()
-    private val begunOrigins = HashMap<String, String>()
+    private val begunOrigins = object : LinkedHashMap<String, String>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 4
+    }
 
     suspend fun sweepExpired(now: Long = clock()): Int =
         store.expireSnapshotStages(now - SNAPSHOT_TTL_MS)
@@ -233,15 +270,27 @@ class SnapshotCoordinator(
         // A receiver reports divergence to its transport layer instead of emitting a snapshot
         // with the wrong origin (which would be rejected by the DAO ownership guard).
         if (remote.originDevice != localOrigin) return SnapshotConvergence.SourceUnavailable
+        requestRepair?.let {
+            it()
+            return SnapshotConvergence.RepairQueued
+        }
+        return emissionMutex.withLock { emitSourceSnapshot(localOrigin, local, force) }
+    }
+
+    /** Source-authoritative repair after reconnect and periodically, including an empty source set. */
+    suspend fun emitAuthoritativeSnapshot(force: Boolean = false): SnapshotConvergence {
+        val origin = localOriginDevice ?: return SnapshotConvergence.SourceUnavailable
+        return emissionMutex.withLock { emitSourceSnapshot(origin, localDigest(origin), force) }
+    }
+
+    private suspend fun emitSourceSnapshot(localOrigin: String, local: StateDigest, force: Boolean): SnapshotConvergence {
         val now = clock()
-        val previous = lastRepairAt[remote.originDevice]
+        val previous = lastRepairAt[localOrigin]
         if (!force && previous != null && now - previous < snapshotIntervalMs) {
             return SnapshotConvergence.RateLimited
         }
         val snapshotSource = source ?: return SnapshotConvergence.SourceUnavailable
-        if (!snapshotSource.available()) return SnapshotConvergence.SourceUnavailable
-        val snapshots = snapshotSource.active(localOrigin)
-        if (snapshots.isEmpty() && local.count != 0) return SnapshotConvergence.SourceUnavailable
+        val snapshots = snapshotSource.checkedActive(localOrigin) ?: return SnapshotConvergence.SourceUnavailable
         if (snapshots.size > MAX_SNAPSHOT_ITEMS) {
             return SnapshotConvergence.Rejected("active notification count exceeds snapshot bound")
         }
@@ -253,21 +302,32 @@ class SnapshotCoordinator(
             val canonId = CanonIdBuilder.build(localOrigin, snapshot.packageName, snapshot.id, snapshot.tag)
             val state = states[canonId] ?: return@mapNotNull null
             val payload = state.desiredPayloadJson ?: return@mapNotNull null
+            if (state.state != "ACTIVE" || !snapshotSource.matchesCommitted(localOrigin, snapshot, payload)) {
+                return@mapNotNull null
+            }
             val sequence = state.latestSequence
             SnapshotItemEvent(snapshotId, localOrigin, canonId, sequence, payload)
         }
-        val oversized = items.any { it.payloadJson.toByteArray(Charsets.UTF_8).size > MAX_ITEM_PAYLOAD_BYTES }
+        val oversized = items.any { it.payloadJson.toByteArray(Charsets.UTF_8).size > MAX_ITEM_PAYLOAD_BYTES } ||
+            items.sumOf { it.payloadJson.toByteArray(Charsets.UTF_8).size.toLong() } > MAX_SNAPSHOT_PAYLOAD_BYTES
         val actual = digestItems(items)
         if (oversized) return SnapshotConvergence.Rejected("snapshot item exceeds bounded payload size")
-        if (items.size != local.count || actual != local.digest) {
-            return SnapshotConvergence.Rejected("active notification enumeration changed during snapshot")
+        if (items.size != snapshots.size) {
+            snapshotSource.requestReconciliation()
+            return SnapshotConvergence.SourceUnavailable
         }
         val sink = emitter ?: return SnapshotConvergence.SourceUnavailable
-        lastRepairAt[remote.originDevice] = now
-        sink.emit(SnapshotBeginEvent(snapshotId, localOrigin, items.size, local.originEpoch))
+        lastRepairAt[localOrigin] = now
         try {
-            items.forEach { item -> sink.emit(item) }
-            sink.emit(SnapshotEndEvent(snapshotId, localOrigin, local.digest))
+            val completed = withTimeoutOrNull(SNAPSHOT_TTL_MS / 2) {
+                sink.emit(SnapshotBeginEvent(snapshotId, localOrigin, items.size, local.originEpoch))
+                items.forEach { item -> sink.emit(item) }
+                sink.emit(SnapshotEndEvent(snapshotId, localOrigin, actual))
+                true
+            } ?: false
+            if (!completed) return SnapshotConvergence.Rejected("snapshot emission timed out")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Throwable) {
             return SnapshotConvergence.Rejected("snapshot emission failed: ${error.message ?: "unknown"}")
         }
@@ -428,6 +488,7 @@ class SnapshotCoordinator(
     companion object {
         const val MAX_SNAPSHOT_ITEMS = 4_096
         const val MAX_ITEM_PAYLOAD_BYTES = 512 * 1024
+        const val MAX_SNAPSHOT_PAYLOAD_BYTES = 16L * 1024 * 1024
         const val SNAPSHOT_TTL_MS = 10 * 60 * 1_000L
         const val DEFAULT_SNAPSHOT_INTERVAL_MS = 5 * 60 * 1_000L
         private val DIGEST_PATTERN = Regex("^[0-9a-f]{64}$")

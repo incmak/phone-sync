@@ -43,6 +43,7 @@ if [[ "$1" == inspect && "$*" == *'.State.Health.Status'* ]]; then
 	exit 0
 fi
 if [[ "$1" == image && "$2" == inspect ]]; then
+	[[ "${FAKE_IMAGE_MISSING:-false}" != true ]] || exit 1
 	printf '%s\n' "$FAKE_CANDIDATE_VERSION"
 	exit 0
 fi
@@ -54,8 +55,13 @@ if [[ "$1" == compose && "$*" == *' ps -q relay'* ]]; then
 fi
 if [[ "$1" == compose && "$*" == *' up -d --no-deps relay'* ]]; then
 	: >"$FAKE_RELAY_RUNNING"
+	if [[ "${TWINOTIFY_RELAY_IMAGE:-}" != "$FAKE_PREVIOUS_IMAGE" ]]; then
+		[[ "${FAKE_START_FAIL:-false}" != true ]] || exit 1
+		if [[ "${FAKE_SIGNAL_ON_START:-false}" == true ]]; then kill -TERM "$PPID"; fi
+	fi
 	exit 0
 fi
+if [[ "$1" == compose && "$*" == *' relay backup '* && "${FAKE_BACKUP_FAIL:-false}" == true ]]; then exit 1; fi
 exit 0
 FAKE_DOCKER
 chmod +x "$test_root/docker"
@@ -64,6 +70,7 @@ cat >"$test_root/smoke" <<'FAKE_SMOKE'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'smoke %s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [[ "${FAKE_SMOKE_FAIL:-false}" == true && "$*" == *'relay-v2'* ]]; then exit 1; fi
 exit 0
 FAKE_SMOKE
 chmod +x "$test_root/smoke"
@@ -92,12 +99,45 @@ export FAKE_CANDIDATE_VERSION=relay-v2
 if "$deploy_script" --image "$candidate" --version relay-v2 --domain relay.example.test --record-file "$test_root/state" >"$test_root/rollback.out" 2>"$test_root/rollback.err"; then
 	fail "failed candidate deployment returned success"
 fi
-grep -Fq "image=$previous version=relay-v1 docker compose" "$FAKE_DOCKER_LOG" || fail "previous digest was not selected for rollback"
-grep -Fq ' up -d --no-deps relay' "$FAKE_DOCKER_LOG" || fail "relay was not restarted during rollback"
-grep -Fq ' up -d --force-recreate --no-deps caddy' "$FAKE_DOCKER_LOG" || fail "Caddy was not recreated during rollback"
+if grep -Fq "image=$previous version=relay-v1 docker compose" "$FAKE_DOCKER_LOG"; then
+	fail "previous binary was started after the candidate could have migrated storage"
+fi
+grep -Fq ' stop caddy relay' "$FAKE_DOCKER_LOG" || fail "failed candidate was not stopped"
+grep -Fxq 'result=restore_decision_required' "$test_root/state" || fail "explicit restore decision was not recorded"
+grep -Fq 'explicit restore decision' "$test_root/rollback.err" || fail "restore decision diagnostic is missing"
 if grep -Fqi 'restore' "$FAKE_DOCKER_LOG"; then
 	fail "rollback attempted a database restore"
 fi
+
+for failure in start smoke signal; do
+	: >"$FAKE_DOCKER_LOG"
+	export FAKE_START_FAIL=false FAKE_SMOKE_FAIL=false FAKE_SIGNAL_ON_START=false FAKE_CANDIDATE_HEALTH=healthy
+	case "$failure" in
+	start) export FAKE_START_FAIL=true ;;
+	smoke) export FAKE_SMOKE_FAIL=true ;;
+	signal) export FAKE_SIGNAL_ON_START=true ;;
+	esac
+	if "$deploy_script" --image "$candidate" --version relay-v2 --domain relay.example.test --record-file "$test_root/state" >"$test_root/$failure.out" 2>"$test_root/$failure.err"; then
+		fail "$failure failure returned success"
+	fi
+	if grep -Fq "image=$previous version=relay-v1 docker compose" "$FAKE_DOCKER_LOG"; then
+		fail "$failure failure restarted the previous binary against possibly migrated storage"
+	fi
+	grep -Fq ' stop caddy relay' "$FAKE_DOCKER_LOG" || fail "$failure failure did not stop the candidate"
+	grep -Fxq 'result=restore_decision_required' "$test_root/state" || fail "$failure failure did not retain the restore decision"
+done
+export FAKE_START_FAIL=false FAKE_SMOKE_FAIL=false FAKE_SIGNAL_ON_START=false
+
+# A read-only backup failure precedes any candidate start, so the untouched
+# previous deployment can still be resumed automatically.
+: >"$FAKE_DOCKER_LOG"
+export FAKE_BACKUP_FAIL=true
+if "$deploy_script" --image "$candidate" --version relay-v2 --domain relay.example.test --record-file "$test_root/state" >"$test_root/backup.out" 2>"$test_root/backup.err"; then
+	fail "failed backup returned success"
+fi
+grep -Fq "image=$previous version=relay-v1 docker compose" "$FAKE_DOCKER_LOG" || fail "pre-start backup failure did not resume the previous binary"
+grep -Fxq 'result=rolled_back' "$test_root/state" || fail "pre-start recovery was not recorded"
+export FAKE_BACKUP_FAIL=false
 
 : >"$FAKE_DOCKER_LOG"
 rm -f "$FAKE_RELAY_RUNNING"
@@ -110,3 +150,20 @@ grep -Fq ' relay backup --from /data/twinotify-relay.db --to-dir /backups --rete
 grep -Fq ' up -d --force-recreate --no-deps caddy' "$FAKE_DOCKER_LOG" || fail "Caddy was not recreated to remount the release configuration"
 
 printf 'deploy-relay tests: ok\n'
+
+# A staged immutable image must be present before downtime and must not be pulled
+# from a registry; the existing digest and version checks still apply.
+: >"$FAKE_DOCKER_LOG"
+export FAKE_IMAGE_MISSING=true
+if "$deploy_script" --preloaded-image --image "$candidate" --version relay-v2 --domain relay.example.test --record-file "$test_root/state" >/dev/null 2>&1; then
+	fail "missing preloaded image was accepted"
+fi
+if grep -Fq ' stop relay' "$FAKE_DOCKER_LOG"; then fail "missing image stopped production"; fi
+unset FAKE_IMAGE_MISSING
+: >"$FAKE_DOCKER_LOG"
+export FAKE_CANDIDATE_HEALTH=healthy
+unset FAKE_START_FAIL FAKE_SIGNAL_ON_START FAKE_SMOKE_FAIL FAKE_BACKUP_FAIL
+"$deploy_script" --preloaded-image --image "$candidate" --version relay-v2 --domain relay.example.test --record-file "$test_root/state" >/dev/null
+grep -Fq ' pull caddy' "$FAKE_DOCKER_LOG" || fail "preloaded mode did not pull Caddy"
+if grep -Fq ' pull relay' "$FAKE_DOCKER_LOG"; then fail "preloaded image was pulled"; fi
+grep -Fxq 'result=deployed' "$test_root/state" || fail "preloaded deployment was not recorded"

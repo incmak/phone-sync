@@ -12,9 +12,12 @@ export function TwFingerprint({ hex, columns = 4, highlightGroups = [] }: TwFing
   const theme = useTheme();
 
   // Normalize to 16 groups of 4 uppercase hex chars
-  const raw = (hex ?? '').replace(/\s/g, '').toUpperCase();
+  const raw = (hex ?? '').replace(/[\s-]/g, '').toUpperCase();
+  if (!/^[0-9A-F]{64}$/.test(raw)) {
+    return <Text style={{ color: theme.ink3, fontFamily: theme.fonts.ui }}>Fingerprint unavailable</Text>;
+  }
   const groups = Array.from({ length: 16 }, (_, i) =>
-    (raw.slice(i * 4, i * 4 + 4) || '0000').padEnd(4, '0'),
+    raw.slice(i * 4, i * 4 + 4),
   );
 
   return (

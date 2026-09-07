@@ -200,17 +200,20 @@ data class RetryPolicy(
 }
 
 /** Room adapter; all multi-field custody changes are transactional DAO operations. */
-class DaoOutboxStore(private val dao: ReliableDeliveryDao) : OutboxStore {
+class DaoOutboxStore(
+    private val dao: ReliableDeliveryDao,
+    private val peerLinkId: String = co.twinotify.core.storage.LEGACY_PEER_LINK_ID,
+) : OutboxStore {
     override suspend fun expireLocal(now: Long): Int = dao.expireLocal(now)
-    override suspend fun sendable(now: Long, limit: Int): List<OutboundMessage> = dao.sendable(now, limit)
-    override suspend fun markSent(msgId: String, retryAt: Long): Int = dao.markSent(msgId, retryAt)
-    override suspend fun legacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult = dao.markLegacyForwarded(msgId, forwardedAt)
+    override suspend fun sendable(now: Long, limit: Int): List<OutboundMessage> = dao.sendable(now, limit, peerLinkId)
+    override suspend fun markSent(msgId: String, retryAt: Long): Int = dao.markSent(msgId, retryAt, peerLinkId)
+    override suspend fun legacyForwarded(msgId: String, forwardedAt: Long): LegacyForwardResult = dao.markLegacyForwarded(msgId, forwardedAt, peerLinkId)
     override suspend fun acceptCustody(
         msgId: String,
         route: CustodyRoute,
         acceptedAt: Long,
         retryAt: Long,
-    ): CustodyAcceptanceResult = dao.acceptCustody(msgId, route.name, acceptedAt, retryAt)
+    ): CustodyAcceptanceResult = dao.acceptCustody(msgId, route.name, acceptedAt, retryAt, peerLinkId)
     override suspend fun applyPeerReceipt(
         ackedMsgId: String,
         envelopeSha256: String,
@@ -225,10 +228,11 @@ class DaoOutboxStore(private val dao: ReliableDeliveryDao) : OutboxStore {
         reason,
         occurredAt,
         peerReceiptCreatedAt,
+        peerLinkId,
     )
     override suspend fun rejectRelay(msgId: String, reason: String, occurredAt: Long, retryAt: Long): RelayRejectionResult =
-        dao.rejectRelay(msgId, reason, occurredAt, retryAt)
-    override suspend fun expireRelay(msgId: String, expiredAt: Long): RelayReceiptResult = dao.expireRelay(msgId, expiredAt)
-    override suspend fun readyRelayAcks(limit: Int): List<RelayAckRecord> = dao.readyRelayAcks(limit)
-    override suspend fun markRelayAckSent(msgId: String, envelopeSha256: String): Int = dao.markRelayAckSent(msgId, envelopeSha256)
+        dao.rejectRelay(msgId, reason, occurredAt, retryAt, peerLinkId)
+    override suspend fun expireRelay(msgId: String, expiredAt: Long): RelayReceiptResult = dao.expireRelay(msgId, expiredAt, peerLinkId)
+    override suspend fun readyRelayAcks(limit: Int): List<RelayAckRecord> = dao.readyRelayAcks(limit, peerLinkId)
+    override suspend fun markRelayAckSent(msgId: String, envelopeSha256: String): Int = dao.markRelayAckSent(msgId, envelopeSha256, peerLinkId)
 }

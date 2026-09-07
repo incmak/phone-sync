@@ -59,6 +59,12 @@ class RelayAttachCoordinatorTest {
             return checkNotNull(hello)
         }
 
+        override suspend fun awaitComplete(relayUrl: String, pairToken: String, identity: RelayAttachIdentity): String {
+            calls += "complete"
+            if (failOn == "complete") error("peer never completed")
+            return "pair-id"
+        }
+
         override suspend fun sendConfirmationSig(relayUrl: String, pairToken: String, sig: ByteArray) {
             calls += "sig"
             sentSig = sig
@@ -77,7 +83,7 @@ class RelayAttachCoordinatorTest {
         relayClient = relay,
         announce = { url, token -> announced += url to token },
         signConfirmation = { _, _, _, _, _, _ -> ByteArray(64) { 0x66 } },
-        commit = { url -> committed += url },
+        commit = { url, pairId -> check(pairId == "pair-id"); committed += url },
         newToken = { "0123456789abcdef0123" },
     )
 
@@ -96,7 +102,7 @@ class RelayAttachCoordinatorTest {
         assertIs<RelayAttachResult.Attached>(result)
         // The peer cannot answer a handshake it has not been told about, so the announcement
         // has to sit between init and the wait.
-        assertEquals(listOf("initiate", "await", "sig"), relay.calls)
+        assertEquals(listOf("initiate", "await", "sig", "complete"), relay.calls)
         assertEquals(listOf("https://relay.example.test" to "0123456789abcdef0123"), announced)
         assertEquals(listOf("https://relay.example.test"), committed)
     }

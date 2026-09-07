@@ -34,8 +34,8 @@ class CallControlEncoder(
     private val newId: () -> String = { UUID.randomUUID().toString() },
     private val originDevice: suspend () -> String = { "local-device" },
 ) {
-    constructor(context: Context) : this(
-        seal = DurableCallControlSealer(context.applicationContext),
+    constructor(context: Context, peerLinkId: String? = null) : this(
+        seal = DurableCallControlSealer(context.applicationContext, peerLinkId),
         originDevice = { DeviceIdentity.getOrCreate(context.applicationContext) },
     )
 
@@ -95,8 +95,8 @@ class CallControlEncoder(
     }
 }
 
-private class DurableCallControlSealer(context: Context) : CallControlSealer {
-    private val delegate = DurablePeerControlSealer(context)
+private class DurableCallControlSealer(context: Context, peerLinkId: String?) : CallControlSealer {
+    private val delegate = DurablePeerControlSealer(context, peerLinkId)
     override suspend fun seal(event: InnerEventV2): OutboundMessage =
         delegate.seal(event, requiresPeerReceipt = false)
 }

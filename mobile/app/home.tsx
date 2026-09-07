@@ -74,7 +74,7 @@ export default function HomeScreen() {
   }, []);
 
   const route = presentRoute(routeStatus, pairStatus.paired, mirrorOn, bluetoothReady);
-  const peerName = pairStatus.paired ? (pairStatus.peerDisplayName?.trim() || 'Unknown device') : 'Not paired';
+  const peerName = (pairStatus.peerCount ?? 0) > 1 ? `${pairStatus.peerCount} paired devices` : pairStatus.paired ? (pairStatus.peerDisplayName?.trim() || 'Unknown device') : 'Not paired';
   const gutter = width <= 360 ? 16 : 24;
   const connectionWidth = Math.max(232, width - gutter * 2);
   const traceWidth = Math.max(192, connectionWidth - 40);
@@ -88,7 +88,7 @@ export default function HomeScreen() {
           enabled={mirrorOn}
           onToggle={handleMirrorToggle}
           peerName={peerName}
-          onOpenPeer={() => router.push('/settings/pair')}
+          onOpenPeer={() => router.push('/settings/peers')}
           traceWidth={traceWidth}
           onRetry={handleRetry}
           onPair={() => router.push('/pair/nearby')}

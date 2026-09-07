@@ -27,12 +27,17 @@ object NotificationListenerBridge {
     }
 
     /** Returns false while Android has not bound the listener service. */
-    fun cancelSource(exactKey: String): Boolean {
+    fun cancelSource(exactKey: String, matchesGeneration: ((StatusBarNotification) -> Boolean)? = null): Boolean {
         require(exactKey.isNotEmpty()) { "source notification key must not be empty" }
         val listener = synchronized(lock) { attached } ?: return false
         return runCatching {
+            val current = listener.activeNotifications.firstOrNull { it.key == exactKey }
+                ?: return@runCatching true
+            if (matchesGeneration != null && !matchesGeneration(current)) return@runCatching false
             listener.cancelNotification(exactKey)
-            true
+            // The platform may accept the call before removing the source. Keep dependent
+            // reliable cancels staged until a later read observes that removal.
+            listener.activeNotifications.none { it.key == exactKey }
         }.getOrDefault(false)
     }
 
@@ -54,9 +59,27 @@ object NotificationListenerBridge {
         return runCatching { listener.activeNotifications.orEmpty().toList() }.getOrDefault(emptyList())
     }
 
+    /** Null means enumeration failed; only a successful empty read may remove stale mirrors. */
+    private fun checkedActiveNotifications(): List<StatusBarNotification>? {
+        val listener = synchronized(lock) { attached } ?: return null
+        return runCatching { listener.activeNotifications?.toList() }.getOrNull()
+    }
+
+    fun checkedActiveSourceSnapshots(
+        context: Context,
+        denylist: Set<String> = emptySet(),
+    ): List<SourceNotificationSnapshot>? = checkedActiveNotifications()?.asSequence()
+        ?.filter { shouldCaptureOutbound(it.packageName, context.packageName) }
+        ?.mapNotNull { NotifPostBuilder.captureSnapshot(it, context, denylist) }
+        ?.toList()
+
     /** Fresh typed call candidates; no caller-facing notification fields cross this boundary. */
     fun activeCallCandidates(): List<CallCapabilityCandidate<PendingIntent>> =
         activeNotifications().map(CallCapabilityCollector::capture)
+
+    fun requestSourceReconciliation() {
+        synchronized(lock) { attached }?.requestSourceReconciliation()
+    }
 
     fun isAttached(): Boolean = synchronized(lock) { attached != null }
 

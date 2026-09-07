@@ -273,13 +273,14 @@ class LiveTransportRoutesFactory(
             dispatch: suspend (String) -> InboundDispatchResult,
             onLanEvent: suspend (LanTransportEvent) -> Unit = {},
             onBluetoothEvent: suspend (DirectDeliveryEvent) -> Unit = {},
+            peerLinkId: String? = null,
         ): LiveTransportRoutesFactory {
             val appContext = context.applicationContext
             val attemptFactory = DefaultLiveLanAttemptFactory(AndroidLiveLanPlatform(appContext))
-            val bluetoothStore = BluetoothBindingStore.forContext(appContext)
+            val bluetoothStore = BluetoothBindingStore.forContext(appContext, peerLinkId)
             return LiveTransportRoutesFactory(
                 LiveTransportRouteDependencies(
-                    loadPeer = { PeerStore.load(appContext) },
+                    loadPeer = { PeerStore.load(appContext, peerLinkId) },
                     loadValidatedBinding = { peer -> LanPairStore.loadValidated(appContext, peer) },
                     loadLocalIdentity = {
                         val deviceId = DeviceIdentity.getOrCreate(appContext)
@@ -287,11 +288,8 @@ class LiveTransportRoutesFactory(
                         LiveLocalRouteIdentity(deviceId, signingKeys.secretKey)
                     },
                     loadValidatedBluetoothBinding = { peer ->
-                        if (!bluetoothStore.routeEnabled() || !BluetoothAssociationPolicy.permissionsGranted(appContext)) {
-                            null
-                        } else {
-                            bluetoothStore.loadValidated(peer, BluetoothAssociations.currentIds(appContext))
-                        }
+                        val binding = bluetoothStore.loadValidated(peer, BluetoothAssociations.currentIds(appContext))
+                        if (bluetoothStore.routeEnabled() && BluetoothAssociationPolicy.permissionsGranted(appContext)) binding else null
                     },
                     buildBluetoothRoute = { config ->
                         LiveBluetoothTransportRoute(
@@ -306,7 +304,7 @@ class LiveTransportRoutesFactory(
                                 ).open()
                             },
                             allowAttempt = {
-                                val peer = PeerStore.load(appContext)
+                                val peer = PeerStore.load(appContext, peerLinkId)
                                 debugRouteAvailable(appContext, RouteKind.BLUETOOTH) &&
                                     peer != null &&
                                     bluetoothStore.routeEnabled() &&

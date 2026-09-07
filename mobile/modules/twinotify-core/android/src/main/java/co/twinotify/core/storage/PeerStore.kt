@@ -19,6 +19,11 @@ class PeerRecord(
     val displayName: String? = null,
     val lanBindingId: String? = null,
     val relayRevocationRequired: Boolean? = null,
+    val peerLinkId: String = LEGACY_PEER_LINK_ID,
+    val relayUrl: String? = null,
+    val relayPairId: String? = null,
+    val preferLan: Boolean = true,
+    val lifecycle: String = "ACTIVE",
 ) {
     private val encryptionKey = encPubkey.copyOf()
     private val signingKey = signPubkey.copyOf()
@@ -46,108 +51,144 @@ object PeerStore {
     private val KEY_LAN_BINDING = stringPreferencesKey("lan_binding_id")
     private val KEY_RELAY_REVOCATION_REQUIRED = booleanPreferencesKey("relay_revocation_required")
 
-    suspend fun save(ctx: Context, r: PeerRecord) {
-        ctx.peerDs.edit { e ->
-            e[KEY_PEER_DEVICE] = r.deviceId
-            e[KEY_PEER_ENC]    = r.encPubkey
-            e[KEY_PEER_SIGN]   = r.signPubkey
-            r.displayName?.let { e[KEY_PEER_NAME] = it } ?: e.remove(KEY_PEER_NAME)
-            r.lanBindingId?.let { e[KEY_LAN_BINDING] = it } ?: e.remove(KEY_LAN_BINDING)
-            r.relayRevocationRequired?.let { e[KEY_RELAY_REVOCATION_REQUIRED] = it }
-                ?: e.remove(KEY_RELAY_REVOCATION_REQUIRED)
+    private val importMutex = kotlinx.coroutines.sync.Mutex()
+
+    suspend fun ensureImported(ctx: Context) {
+        importMutex.lock()
+        try {
+            val app = ctx.applicationContext
+            val dao = NotificationDb.get(app).peerLinkDao()
+            val local = DeviceIdentity.getOrCreate(app)
+            dao.importState()?.let {
+                check(it.localDeviceId == local) { "identity_import_mismatch" }
+                return
+            }
+            val legacy = legacyRecord(app.peerDs.data.first())
+            val config = co.twinotify.core.service.ServiceConfigStore.read(app)
+            val link = legacy?.let {
+                PeerLink(
+                    peerLinkId = java.util.UUID.nameUUIDFromBytes(("twinotify-import-v1\u0000" + local + "\u0000" + it.deviceId).toByteArray()).toString(),
+                    deviceId = it.deviceId, encPubkey = it.encPubkey, signPubkey = it.signPubkey,
+                    displayName = it.displayName, relayUrl = config.relayUrl, relayPairId = null,
+                    preferLan = config.preferLan, lanBindingId = it.lanBindingId,
+                    relayRevocationRequired = it.relayRevocationRequired ?: !config.relayUrl.isNullOrBlank(),
+                    lifecycle = if (config.revocationRequestedAt != null) "REMOVING" else "ACTIVE",
+                    createdAt = System.currentTimeMillis().coerceAtLeast(0L),
+                )
+            }
+            // Convert v1 ciphertext while ownership is still singular, before publishing the import marker.
+            co.twinotify.core.service.migrateLegacyOutboxBeforeRelay(
+                NotificationDb.get(app).reliableDeliveryDao(), local,
+            )
+            dao.importLegacy(local, link)
+        } finally { importMutex.unlock() }
+    }
+
+    suspend fun list(ctx: Context, includeRemoving: Boolean = false): List<PeerRecord> {
+        ensureImported(ctx)
+        return NotificationDb.get(ctx).peerLinkDao().all()
+            .filter { includeRemoving || it.lifecycle == "ACTIVE" }.map { it.record() }
+    }
+
+    /** Missing selection is supported only while there is one active peer. */
+    suspend fun load(ctx: Context, peerLinkId: String? = null): PeerRecord? {
+        val peers = list(ctx)
+        if (peerLinkId != null) return peers.singleOrNull { it.peerLinkId == peerLinkId }
+        check(peers.size <= 1) { "peer_selection_required" }
+        return peers.singleOrNull()
+    }
+
+    suspend fun forDevice(ctx: Context, deviceId: String): PeerRecord? =
+        list(ctx).singleOrNull { it.deviceId == deviceId }
+
+    suspend fun attachRelay(ctx: Context, peerLinkId: String, url: String, pairId: String) {
+        val peer = checkNotNull(load(ctx, peerLinkId)) { "peer_removed" }
+        val local = DeviceIdentity.getOrCreate(ctx)
+        val sign = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(ctx).second
+        check(co.twinotify.core.pairing.PairProtocol.sessionPairId(url,
+            co.twinotify.core.auth.JwtMinter.mint(local, sign.secretKey, pairId = pairId), local, peer.deviceId,
+            debug = co.twinotify.core.BuildConfig.DEBUG) == pairId) { "pair_session_mismatch" }
+        check(NotificationDb.get(ctx).peerLinkDao().attachRelay(peerLinkId, url, pairId) == 1) { "peer_changed" }
+    }
+
+    suspend fun prepareAdditionalPair(ctx: Context) {
+        val peers = list(ctx, includeRemoving = true)
+        check(NotificationDb.get(ctx).peerLinkDao().pendingRevocations().isEmpty()) { "relay_cleanup_pending" }
+        check(peers.size < 2) { "peer_limit" }
+        val local = DeviceIdentity.getOrCreate(ctx)
+        for (peer in peers) {
+            check(peer.lifecycle == "ACTIVE") { "peer_removal_pending" }
+            val url = peer.relayUrl?.takeIf { it.isNotBlank() } ?: continue
+            if (peer.relayPairId != null) continue
+            val sign = co.twinotify.core.crypto.CryptoStore.loadOrGenerate(ctx).second
+            val pairId = co.twinotify.core.pairing.PairProtocol.sessionPairId(url,
+                co.twinotify.core.auth.JwtMinter.mint(local, sign.secretKey), local, peer.deviceId,
+                debug = co.twinotify.core.BuildConfig.DEBUG)
+            check(NotificationDb.get(ctx).peerLinkDao().bindRelayPair(peer.peerLinkId, pairId) == 1) {
+                "pair_session_changed"
+            }
         }
     }
 
-    suspend fun load(ctx: Context): PeerRecord? {
-        val prefs = ctx.peerDs.data.first()
-        val dev  = prefs[KEY_PEER_DEVICE] ?: return null
-        val enc  = prefs[KEY_PEER_ENC]    ?: return null
-        val sign = prefs[KEY_PEER_SIGN]   ?: return null
-        val name = prefs[KEY_PEER_NAME]
-        return PeerRecord(
-            dev,
-            enc,
-            sign,
-            name,
-            prefs[KEY_LAN_BINDING],
-            prefs[KEY_RELAY_REVOCATION_REQUIRED],
-        )
+    suspend fun save(ctx: Context, r: PeerRecord, requireNew: Boolean = false): PeerRecord {
+        ensureImported(ctx)
+        require(r.deviceId.isNotEmpty() && r.encPubkey.size == 32 && r.signPubkey.size == 32)
+        val config = co.twinotify.core.service.ServiceConfigStore.read(ctx)
+        val relayUrl = r.relayUrl ?: config.relayUrl.takeUnless { r.relayRevocationRequired == false }
+        val stored = NotificationDb.get(ctx).peerLinkDao().add(PeerLink(
+            peerLinkId = r.peerLinkId.takeUnless { it == LEGACY_PEER_LINK_ID } ?: java.util.UUID.randomUUID().toString(),
+            deviceId = r.deviceId, encPubkey = r.encPubkey, signPubkey = r.signPubkey,
+            displayName = r.displayName, relayUrl = relayUrl,
+            relayPairId = r.relayPairId, preferLan = r.preferLan,
+            lanBindingId = r.lanBindingId,
+            relayRevocationRequired = r.relayRevocationRequired ?: !relayUrl.isNullOrBlank(),
+            lifecycle = "ACTIVE", createdAt = System.currentTimeMillis().coerceAtLeast(0L),
+        ), requireNew = requireNew).record()
+        co.twinotify.core.service.SyncService.notifyRoutePreferenceChanged()
+        return stored
     }
 
-    /** Atomically adds the sole public marker only if the relay identity still matches. */
     internal suspend fun attachLanBinding(ctx: Context, expected: PeerRecord, bindingId: String): Boolean {
-        var committed = false
-        ctx.peerDs.edit { prefs ->
-            val current = record(prefs)
-            if (current != null && current.samePublicIdentity(expected) &&
-                (current.lanBindingId == null || current.lanBindingId == bindingId)
-            ) {
-                prefs[KEY_LAN_BINDING] = bindingId
-                committed = true
-            }
-        }
-        return committed
+        val current = forDevice(ctx, expected.deviceId) ?: return false
+        if (!current.samePublicIdentity(expected)) return false
+        val attached = NotificationDb.get(ctx).peerLinkDao().bindLan(current.peerLinkId, bindingId) == 1
+        if (attached) co.twinotify.core.service.SyncService.notifyRoutePreferenceChanged()
+        return attached
     }
 
-    /**
-     * One DataStore edit either creates the first public peer with its marker,
-     * or attaches only the marker to an unchanged relay peer. It never replaces
-     * a concurrently created or rebound identity.
-     */
-    internal suspend fun commitLanBinding(
-        ctx: Context,
-        expectedCurrent: PeerRecord?,
-        proposedPeer: PeerRecord,
-        bindingId: String,
-    ): Boolean {
-        var committed = false
-        ctx.peerDs.edit { prefs ->
-            val current = record(prefs)
-            if (expectedCurrent == null) {
-                if (current == null) {
-                    prefs[KEY_PEER_DEVICE] = proposedPeer.deviceId
-                    prefs[KEY_PEER_ENC] = proposedPeer.encPubkey
-                    prefs[KEY_PEER_SIGN] = proposedPeer.signPubkey
-                    proposedPeer.displayName?.let { prefs[KEY_PEER_NAME] = it } ?: prefs.remove(KEY_PEER_NAME)
-                    prefs[KEY_LAN_BINDING] = bindingId
-                    proposedPeer.relayRevocationRequired?.let { prefs[KEY_RELAY_REVOCATION_REQUIRED] = it }
-                        ?: prefs.remove(KEY_RELAY_REVOCATION_REQUIRED)
-                    committed = true
-                }
-            } else if (current != null && current.samePublicIdentity(expectedCurrent) &&
-                (current.lanBindingId == null || current.lanBindingId == bindingId)
-            ) {
-                prefs[KEY_LAN_BINDING] = bindingId
-                committed = true
-            }
-        }
-        return committed
+    internal suspend fun commitLanBinding(ctx: Context, expectedCurrent: PeerRecord?, proposedPeer: PeerRecord, bindingId: String): Boolean {
+        if (expectedCurrent != null) return attachLanBinding(ctx, expectedCurrent, bindingId)
+        if (forDevice(ctx, proposedPeer.deviceId) != null) return false
+        return try {
+            save(ctx, PeerRecord(proposedPeer.deviceId, proposedPeer.encPubkey, proposedPeer.signPubkey,
+                proposedPeer.displayName, bindingId, proposedPeer.relayRevocationRequired,
+                relayUrl = proposedPeer.relayUrl, relayPairId = proposedPeer.relayPairId), requireNew = true)
+            true
+        } catch (failure: IllegalStateException) { false }
     }
 
-    /** Disables only LAN for the current pair, leaving its relay identity intact. */
-    internal suspend fun clearLanBinding(ctx: Context, expectedBindingId: String? = null) {
-        ctx.peerDs.edit { prefs ->
-            if (expectedBindingId == null || prefs[KEY_LAN_BINDING] == expectedBindingId) {
-                prefs.remove(KEY_LAN_BINDING)
-            }
-        }
+    internal suspend fun clearLanBinding(ctx: Context, expectedBindingId: String? = null, peerLinkId: String? = null) {
+        val peers = list(ctx, includeRemoving = true)
+        val selected = when {
+            peerLinkId != null -> peers.singleOrNull { it.peerLinkId == peerLinkId }
+            expectedBindingId != null -> peers.singleOrNull { it.lanBindingId == expectedBindingId }
+            else -> { check(peers.size <= 1) { "peer_selection_required" }; peers.singleOrNull() }
+        } ?: return
+        NotificationDb.get(ctx).peerLinkDao().clearLan(selected.peerLinkId, expectedBindingId)
     }
 
+    /** Full reset only; ordinary unpair uses the scoped removal lifecycle. */
     suspend fun clear(ctx: Context) {
+        ensureImported(ctx)
+        NotificationDb.get(ctx).peerLinkDao().clearAllForReset()
         ctx.peerDs.edit { it.clear() }
     }
 
-    private fun record(prefs: Preferences): PeerRecord? {
+    private fun legacyRecord(prefs: Preferences): PeerRecord? {
         val dev = prefs[KEY_PEER_DEVICE] ?: return null
-        val enc = prefs[KEY_PEER_ENC] ?: return null
-        val sign = prefs[KEY_PEER_SIGN] ?: return null
-        return PeerRecord(
-            dev,
-            enc,
-            sign,
-            prefs[KEY_PEER_NAME],
-            prefs[KEY_LAN_BINDING],
-            prefs[KEY_RELAY_REVOCATION_REQUIRED],
-        )
+        val enc = checkNotNull(prefs[KEY_PEER_ENC]) { "peer_import_missing_key" }
+        val sign = checkNotNull(prefs[KEY_PEER_SIGN]) { "peer_import_missing_key" }
+        require(enc.size == 32 && sign.size == 32) { "peer_import_invalid_key" }
+        return PeerRecord(dev, enc, sign, prefs[KEY_PEER_NAME], prefs[KEY_LAN_BINDING], prefs[KEY_RELAY_REVOCATION_REQUIRED])
     }
 }

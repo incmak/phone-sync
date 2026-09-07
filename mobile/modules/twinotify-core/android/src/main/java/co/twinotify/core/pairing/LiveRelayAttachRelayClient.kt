@@ -60,6 +60,12 @@ class LiveRelayAttachRelayClient(
         PairProtocol.sendConfirmationSig(relayUrl, pairToken, sig, debug = debug)
     }
 
+    override suspend fun awaitComplete(relayUrl: String, pairToken: String, identity: RelayAttachIdentity): String {
+        val frame = PairNotifyClient.awaitAuthenticatedFrame(relayUrl, pairToken, "A", "pair.complete",
+            identity.deviceId, identity.signSecretKey, awaitTimeoutMs, debug)
+        return PairProtocol.requirePairId(JSONObject(frame).getString("pair_id"))
+    }
+
     companion object {
         /**
          * Shorter than the pairing screen's five minutes. An attach is a foreground action with

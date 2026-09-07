@@ -22,6 +22,14 @@ abstract class NotificationMapDao {
         localId: Int,
         localTag: String?,
     ) {
+        // Updating or restoring the same mirror must not insert its mapping twice.
+        val existing = lookupLocalByCanonId(canonId)
+        if (existing != null) {
+            require(existing.localId == localId && existing.localTag == localTag && lookupOrigin(canonId) == originDevice) {
+                "mirror identity cannot change"
+            }
+            return
+        }
         val nowMs = System.currentTimeMillis()
         insertMirror(MirroredFromPeer(canonId = canonId, originDeviceId = originDevice, createdTs = nowMs))
         insertLocalMapping(

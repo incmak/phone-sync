@@ -45,7 +45,18 @@ data class BluetoothBinding(
  * current peer, or whose association is gone, is cleared here and nowhere else: LAN and relay
  * pairing state are never touched by this store.
  */
-class BluetoothBindingStore(private val dataStore: DataStore<Preferences>) {
+class BluetoothBindingStore(
+    private val dataStore: DataStore<Preferences>,
+    private val peerLinkId: String? = null,
+) {
+    private val prefix = peerLinkId?.let { "peer.$it." }.orEmpty()
+    private val KEY_ASSOCIATION_ID = intPreferencesKey(prefix + "association_id")
+    private val KEY_PEER_DEVICE_ID = stringPreferencesKey(prefix + "peer_device_id")
+    private val KEY_PEER_SIGNING_KEY_SHA256 = stringPreferencesKey(prefix + "peer_signing_key_sha256")
+    private val KEY_PROTOCOL_VERSION = intPreferencesKey(prefix + "protocol_version")
+    private val KEY_ROUTE_ENABLED = booleanPreferencesKey(prefix + "route_enabled")
+    private val KEY_IMPORTED = booleanPreferencesKey(prefix + "imported")
+
     private val lock = Mutex()
 
     suspend fun save(binding: BluetoothBinding) = lock.withLock {
@@ -63,17 +74,24 @@ class BluetoothBindingStore(private val dataStore: DataStore<Preferences>) {
      * association. Any mismatch clears the Bluetooth binding and its route enablement.
      */
     suspend fun loadValidated(peer: PeerRecord, currentAssociationIds: Set<Int>): BluetoothBinding? = lock.withLock {
+        importLegacy(peer)
         val stored = readBinding() ?: return@withLock null
         if (isValidFor(stored, peer, currentAssociationIds)) {
             stored
         } else {
-            dataStore.edit { it.clear() }
+            clearKeys()
             null
         }
     }
 
     /** The association ID regardless of validity, so explicit removal can disassociate it. */
     suspend fun storedAssociationId(): Int? = lock.withLock { readBinding()?.associationId }
+
+    suspend fun prepareRemoval(peer: PeerRecord): Int? = lock.withLock {
+        importLegacy(peer)
+        dataStore.edit { it.remove(KEY_ROUTE_ENABLED) }
+        readBinding()?.associationId
+    }
 
     suspend fun setRouteEnabled(enabled: Boolean) = lock.withLock {
         dataStore.edit { prefs ->
@@ -84,7 +102,7 @@ class BluetoothBindingStore(private val dataStore: DataStore<Preferences>) {
     suspend fun routeEnabled(): Boolean = dataStore.data.first()[KEY_ROUTE_ENABLED] ?: false
 
     suspend fun clear() = lock.withLock {
-        dataStore.edit { it.clear() }
+        clearKeys()
     }
 
     private suspend fun readBinding(): BluetoothBinding? {
@@ -114,14 +132,44 @@ class BluetoothBindingStore(private val dataStore: DataStore<Preferences>) {
         return sameDevice && sameKey && supportedVersion && associated
     }
 
-    companion object {
-        private val KEY_ASSOCIATION_ID = intPreferencesKey("association_id")
-        private val KEY_PEER_DEVICE_ID = stringPreferencesKey("peer_device_id")
-        private val KEY_PEER_SIGNING_KEY_SHA256 = stringPreferencesKey("peer_signing_key_sha256")
-        private val KEY_PROTOCOL_VERSION = intPreferencesKey("protocol_version")
-        private val KEY_ROUTE_ENABLED = booleanPreferencesKey("route_enabled")
+    private suspend fun clearKeys() {
+        dataStore.edit { prefs ->
+            prefs.remove(KEY_ASSOCIATION_ID)
+            prefs.remove(KEY_PEER_DEVICE_ID)
+            prefs.remove(KEY_PEER_SIGNING_KEY_SHA256)
+            prefs.remove(KEY_PROTOCOL_VERSION)
+            prefs.remove(KEY_ROUTE_ENABLED)
+            if (peerLinkId != null) prefs[KEY_IMPORTED] = true
+        }
+    }
 
-        fun forContext(context: Context): BluetoothBindingStore =
-            BluetoothBindingStore(context.applicationContext.bluetoothBindingDs)
+    /** Claim legacy facts only for the exact pinned identity, in the same preferences commit. */
+    private suspend fun importLegacy(peer: PeerRecord) {
+        if (peerLinkId == null) return
+        require(peer.peerLinkId == peerLinkId)
+        dataStore.edit { prefs ->
+            if (prefs[KEY_IMPORTED] == true) return@edit
+            if (prefs[KEY_ASSOCIATION_ID] == null &&
+                prefs[stringPreferencesKey("peer_device_id")] == peer.deviceId &&
+                prefs[stringPreferencesKey("peer_signing_key_sha256")] == BluetoothBinding.signingKeyDigest(peer.signPubkey)
+            ) {
+                prefs[intPreferencesKey("association_id")]?.let { prefs[KEY_ASSOCIATION_ID] = it }
+                prefs[stringPreferencesKey("peer_device_id")]?.let { prefs[KEY_PEER_DEVICE_ID] = it }
+                prefs[stringPreferencesKey("peer_signing_key_sha256")]?.let { prefs[KEY_PEER_SIGNING_KEY_SHA256] = it }
+                prefs[intPreferencesKey("protocol_version")]?.let { prefs[KEY_PROTOCOL_VERSION] = it }
+                prefs[booleanPreferencesKey("route_enabled")]?.let { prefs[KEY_ROUTE_ENABLED] = it }
+                prefs.remove(intPreferencesKey("association_id"))
+                prefs.remove(stringPreferencesKey("peer_device_id"))
+                prefs.remove(stringPreferencesKey("peer_signing_key_sha256"))
+                prefs.remove(intPreferencesKey("protocol_version"))
+                prefs.remove(booleanPreferencesKey("route_enabled"))
+            }
+            prefs[KEY_IMPORTED] = true
+        }
+    }
+
+    companion object {
+        fun forContext(context: Context, peerLinkId: String? = null): BluetoothBindingStore =
+            BluetoothBindingStore(context.applicationContext.bluetoothBindingDs, peerLinkId)
     }
 }

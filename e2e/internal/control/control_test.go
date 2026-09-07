@@ -278,8 +278,9 @@ func TestBoundRequestIDIsRandomTokenCommandAndExpiryBoundWithoutLeakingToken(t *
 }
 
 type controllerDevice struct {
-	deviceID string
-	commands []control.Command
+	deviceID    string
+	commands    []control.Command
+	failCommand string
 }
 
 func (d *controllerDevice) Broadcast(_ context.Context, command control.Command) error {
@@ -293,6 +294,10 @@ func (d *controllerDevice) ReadResult(_ context.Context, requestID string) ([]by
 	}
 	command := d.commands[len(d.commands)-1]
 	result := control.Result{RequestID: requestID, Code: "ok"}
+	if command.Name == d.failCommand {
+		result.Code = "error"
+		return json.Marshal(result)
+	}
 	switch command.Name {
 	case "PAIR_INIT":
 		result.Payload = json.RawMessage(`{"relay_url":"http://10.0.2.2:8090","device_id":"a","enc_pubkey":"enc-a","sign_pubkey":"sign-a","pair_token":"pair-token"}`)
@@ -326,7 +331,7 @@ func TestControllerRunsAuthenticatedPairSequenceAndWaitsForHealth(t *testing.T) 
 		names = append(names, command.Name)
 	}
 	joined := strings.Join(names, ",")
-	for _, expected := range []string{"PAIR_INIT", "PAIR_JOIN", "AWAIT_PEER_HELLO", "SIGN_CONFIRMATION", "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_COMPLETE", "START_SYNC", "STATUS"} {
+	for _, expected := range []string{"PAIR_INIT", "PAIR_JOIN", "AWAIT_PEER_HELLO", "SIGN_CONFIRMATION", "SEND_CONFIRMATION_SIG", "AWAIT_PAIR_SIG", "PAIR_COMPLETE", "AWAIT_PAIR_COMPLETE", "START_SYNC", "STATUS"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("commands=%s missing %s", joined, expected)
 		}
@@ -335,6 +340,26 @@ func TestControllerRunsAuthenticatedPairSequenceAndWaitsForHealth(t *testing.T) 
 		if command.Name == "PAIR_JOIN" && !strings.Contains(command.Params["pair_payload"], "pair-token") {
 			t.Fatalf("pair payload did not preserve token: %#v", command.Params)
 		}
+	}
+}
+
+func TestControllerStopsOnDeviceCommandFailure(t *testing.T) {
+	for _, failed := range []string{"PAIR_INIT", "PAIR_JOIN", "PAIR_COMPLETE"} {
+		t.Run(failed, func(t *testing.T) {
+			aDevice := &controllerDevice{deviceID: "a", failCommand: failed}
+			bDevice := &controllerDevice{deviceID: "b", failCommand: failed}
+			err := control.NewController(control.New(aDevice, "a", "token-a", time.Second),
+				control.New(bDevice, "b", "token-b", time.Second), time.Second).Pair(context.Background(),
+				control.PairOptions{RelayURL: "http://127.0.0.1:18080"})
+			if err == nil || !strings.Contains(err.Error(), failed+" returned error") {
+				t.Fatalf("expected direct command failure, got %v", err)
+			}
+			for _, command := range append(aDevice.commands, bDevice.commands...) {
+				if command.Name == "START_SYNC" {
+					t.Fatal("continued after failed pairing command")
+				}
+			}
+		})
 	}
 }
 

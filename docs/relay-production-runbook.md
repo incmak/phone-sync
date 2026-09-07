@@ -85,7 +85,13 @@ TWINOTIFY_BUILD_VERSION=relay-v0.1.0 \
 
 The relay must be healthy, Caddy must be the only service publishing ports, `/metrics` must return 404 publicly, and the response must not contain a `Server` header.
 
-## Upgrade and automatic rollback
+For a separately transferred image archive, verify its checksum before loading it,
+then use `--preloaded-image` with the exact loaded repository digest. This mode
+requires that digest to exist locally and still verifies its version label before
+stopping the relay; Caddy is pulled normally. It does not publish or attest the
+image. Keep the archive and source identity with the deployment record.
+
+## Upgrade and migration recovery
 
 Run `deploy-relay.sh` with the new digest and version. When an existing relay is present, the script:
 
@@ -95,9 +101,16 @@ Run `deploy-relay.sh` with the new digest and version. When an existing relay is
 4. runs the candidate image's offline `relay backup` against `/data` and `/backups`;
 5. starts the candidate digest and waits for readiness;
 6. runs the external smoke check;
-7. restarts the previous digest if backup, readiness, Caddy, or smoke verification fails.
+7. resumes the previous digest only if the read-only backup fails before the candidate starts;
+8. after any candidate start attempt, stops the relay and Caddy on start, readiness, Caddy, smoke, or interruption failure and records `restore_decision_required`.
 
-Binary rollback never restores the database. The hardening migrations are additive, and restoring older data would discard pair or mailbox changes accepted after the snapshot.
+The multi-peer migration changes the storage format. An unsuccessful start may
+already have migrated it; never run the previous binary against that live file.
+The script does not automatically restore a backup. Keep the failed database and
+pre-deploy snapshot, then explicitly decide between fixing forward and restoring
+the snapshot with a compatible binary. Restoring older data discards pair or
+mailbox changes accepted after that snapshot. If stopping fails, the deployment
+record is `recovery_stop_failed`: stop the writer manually before recovery.
 
 After a successful upgrade, keep the prior image digest and its pre-deploy snapshot until the next release has completed the observation window.
 

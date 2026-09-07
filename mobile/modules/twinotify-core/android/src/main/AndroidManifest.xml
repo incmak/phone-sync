@@ -70,6 +70,14 @@
       android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
     <receiver
+      android:name="co.twinotify.core.service.RepeatProtectionReceiver"
+      android:exported="false" />
+
+    <receiver
+      android:name="co.twinotify.core.pairing.PeerRemovalRetryReceiver"
+      android:exported="false" />
+
+    <receiver
       android:name="co.twinotify.core.service.MaterializationRetryReceiver"
       android:exported="false" />
 

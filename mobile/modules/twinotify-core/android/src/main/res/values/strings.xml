@@ -8,4 +8,7 @@
     <string name="mirror_action_notification_gone">Notification unavailable</string>
     <string name="mirror_action_expired">Timed out</string>
     <string name="open_in_twinotify">Open in Twinotify</string>
+    <string name="repeat_protection_notice_title">Repeating notification turned off</string>
+    <string name="repeat_protection_notice_body">A notification from %1$s kept updating during a one-minute snooze. Only this notification is blocked on this phone. Undo to allow it again.</string>
+    <string name="repeat_protection_undo">Undo</string>
 </resources>

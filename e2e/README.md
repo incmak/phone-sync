@@ -237,3 +237,44 @@ make release-audit RELEASE_EVIDENCE_DIR=/private/path/twinotify-release
 
 The verifier requires an explicit `PHY-CALL-01: pass`. Host fixtures and the
 debug call-state injection path are regression aids only and cannot satisfy it.
+
+## Android + Android + macOS
+
+The mixed-device driver uses `internal/device.Android` for source/phone controls
+and `internal/device.Mac` for a receive-only Mac. Build the Android debug APK and
+the explicitly signed isolated bundle described in `macos/README.md`. Start the
+Mac E2E executable with a private UUID-named run directory in
+`TWINOTIFY_E2E_DIRECTORY`; grant its real notification permission in the Mac UI.
+The relay must be the same instance at both addresses below.
+
+```sh
+adb -s emulator-5556 reverse tcp:18080 tcp:18080
+adb -s emulator-5558 reverse tcp:18080 tcp:18080
+cd e2e
+go run ./cmd/twinotify-three-device \
+  --a emulator-5556 --b emulator-5558 \
+  --mac-directory /private/tmp/YOUR-UUID \
+  --android-relay http://127.0.0.1:18080 \
+  --mac-relay http://127.0.0.1:18080 --pair
+```
+
+`--pair` requires fresh synthetic installations. It never clears existing links.
+`--pair-mac` instead requires one reciprocal active Android link and a fresh Mac.
+Without it, all three devices must already have their two reciprocal links. The
+matrix tests post/update, Mac-local dismissal through snapshot repair, offline
+Mac catch-up, origin-authored phone dismissal, the second phone's post/cancel and
+concurrent posts/updates from both origins, followed by offline selected removal
+with queued traffic and surviving-link delivery. Revisions are spaced outside
+Android's intentional three-updates-in-15-seconds repeat-protection window. The
+synthetic source-cancel control confirms platform removal and requests production
+source reconciliation because Android's listener-cancel reason does not emit a
+source cancellation by itself. The matrix deliberately removes A↔Mac at
+the end, so a subsequent run requires a freshly provisioned topology. Output lists
+passed checks and separately names remaining acceptance scenarios. Permission
+recovery, process interruption, sleep/wake, large interrupted snapshots and physical
+phone direct routes require their own evidence; do not treat this subset as the
+complete release gate.
+
+The [2026-09-07 acceptance record](../docs/qa/macos-three-device-2026-09-07.md)
+records the mixed matrix and separate signed permission/crash, snapshot and call
+checks, including the remaining manual gates.

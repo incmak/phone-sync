@@ -30,6 +30,7 @@ data class OutboundMessage(
     val lastError: String?,
     val requiresPeerReceipt: Boolean,
     @ColumnInfo(defaultValue = "'NONE'") val relayCustodyState: String = "NONE",
+    @ColumnInfo(defaultValue = "'legacy'") val peerLinkId: String = LEGACY_PEER_LINK_ID,
 ) {
     init {
         require(relayCustodyState in setOf("NONE", "UNKNOWN", "ACCEPTED"))
@@ -38,10 +39,11 @@ data class OutboundMessage(
 
 @Entity(
     tableName = "inbound_message",
+    primaryKeys = ["peerLinkId", "msgId"],
     indices = [Index("outcome"), Index("canonId")],
 )
 data class InboundMessage(
-    @PrimaryKey val msgId: String,
+    val msgId: String,
     val originDevice: String,
     val envelopeSha256: String,
     val eventType: String,
@@ -52,6 +54,7 @@ data class InboundMessage(
     val appliedAt: Long?,
     val receiptMsgId: String?,
     val relayAckState: String,
+    @ColumnInfo(defaultValue = "'legacy'") val peerLinkId: String = LEGACY_PEER_LINK_ID,
 )
 
 @Entity(
@@ -70,6 +73,7 @@ data class CanonicalNotificationState(
     val mirrorLocalTag: String?,
     val peerCancelPending: Boolean,
     val updatedAt: Long,
+    val peerLinkId: String? = null,
 )
 
 enum class MaterializationRetryDisposition {
@@ -201,13 +205,14 @@ data class UiHistoryContentSize(
     val byteSize: Long,
 )
 
-@Entity(tableName = "snapshot_stage", primaryKeys = ["snapshotId", "canonId"])
+@Entity(tableName = "snapshot_stage", primaryKeys = ["peerLinkId", "snapshotId", "canonId"])
 data class SnapshotStage(
     val snapshotId: String,
     val canonId: String,
     val sequence: Long,
     val payloadJson: String,
     val receivedAt: Long,
+    @ColumnInfo(defaultValue = "'legacy'") val peerLinkId: String = LEGACY_PEER_LINK_ID,
 )
 
 @Entity(
@@ -224,6 +229,7 @@ data class ActionInvocation(
     val createdAt: Long,
     val expiresAt: Long,
     val updatedAt: Long,
+    @ColumnInfo(defaultValue = "'legacy'") val peerLinkId: String = LEGACY_PEER_LINK_ID,
 ) {
     init {
         require(state in ACTION_INVOCATION_STATES)
@@ -249,16 +255,18 @@ data class ActionInvocation(
 
 @Entity(
     tableName = "action_execution",
+    primaryKeys = ["peerLinkId", "invocationId"],
     indices = [Index("state"), Index("claimedAt"), Index("completedAt")],
 )
 data class ActionExecution(
-    @PrimaryKey val invocationId: String,
+    val invocationId: String,
     val canonId: String,
     val actionId: String,
     val state: String,
     val resultStatus: String?,
     val claimedAt: Long,
     val completedAt: Long?,
+    @ColumnInfo(defaultValue = "'legacy'") val peerLinkId: String = LEGACY_PEER_LINK_ID,
 ) {
     init {
         require(state == "CLAIMED" || state == "COMPLETED")
