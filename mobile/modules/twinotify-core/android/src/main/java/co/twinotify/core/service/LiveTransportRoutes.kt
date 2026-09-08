@@ -602,7 +602,9 @@ class LiveRelayTransportRoute(
                 events().collect { event ->
                     when (event) {
                         is TransportEvent.Delivery -> {
-                            if (hooks.dispatch(event.envelope) is InboundDispatchResult.Rejected) {
+                            val result = hooks.dispatch(event.envelope)
+                            if (result is InboundDispatchResult.Rejected) {
+                                runCatching { Log.w("Twinotify", "relay_inbound_rejected:${result.code}") }
                                 closed.complete("inbound_rejected")
                                 throw IllegalStateException("inbound_rejected")
                             }
@@ -629,6 +631,7 @@ class LiveRelayTransportRoute(
                 if (!authenticated.isCompleted) authenticated.cancel(error)
                 throw error
             } catch (error: Throwable) {
+                runCatching { Log.w("Twinotify", "relay_session_failed:${error.javaClass.simpleName}") }
                 if (!authenticated.isCompleted) authenticated.completeExceptionally(error)
                 closed.complete("relay_failed")
             } finally {

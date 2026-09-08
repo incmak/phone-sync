@@ -59,16 +59,18 @@ public struct DesiredRecord: Codable, Sendable, Equatable {
     public let body: String
     public let imagePNG: Data?
     public let sourceApp: String?
+    public let actions: [NotificationAction]?
     public var locallyDismissed: Bool? = false
 
     public init(canonicalID: String, sequence: Int64, expiresAt: Int64, remove: Bool,
                 title: String = "", subtitle: String = "", body: String = "", active: Bool? = nil, imagePNG: Data? = nil,
-                sourceApp: String? = nil) {
+                sourceApp: String? = nil, actions: [NotificationAction]? = nil) {
         self.canonicalID = canonicalID; self.sequence = sequence; self.expiresAt = expiresAt
         self.remove = remove; self.title = title; self.subtitle = subtitle; self.body = body
         self.active = active ?? !remove
         self.imagePNG = imagePNG
         self.sourceApp = sourceApp
+        self.actions = actions
     }
 
     func retainingLocalDismissal(from previous: DesiredRecord?) -> DesiredRecord {
@@ -345,16 +347,22 @@ extension DurableStore {
                              [.integer(retryAt), .text(linkID), .text(messageID)])
     }
 
-    public func receiptAccepted(linkID: String, messageID: String) throws {
-        try database.transaction {
-            try requireActive(linkID)
-            // A custody frame can only advance a receipt actually submitted by this link.
-            guard try database.execute("SELECT msg_id FROM outbox WHERE link_id=? AND msg_id=?",
-                                       [.text(linkID), .text(messageID)]).first != nil else { return }
-            try database.execute("UPDATE inbound SET ack_state='READY' WHERE link_id=? AND receipt_id=? AND outcome!='pending'",
-                                 [.text(linkID), .text(messageID)])
-            try database.execute("DELETE FROM outbox WHERE link_id=? AND msg_id=?", [.text(linkID), .text(messageID)])
+    public func receiptAccepted(linkID: String, messageID: String, now: Int64 = 0) throws {
+        try database.transaction { try acceptOutboundCustody(linkID: linkID, messageID: messageID, now: now) }
+    }
+    func acceptOutboundCustody(linkID: String, messageID: String, now: Int64) throws {
+        try requireActive(linkID)
+        // A custody frame can only advance a receipt actually submitted by this link.
+        guard let outbound = try database.execute("SELECT requires_receipt FROM outbox WHERE link_id=? AND msg_id=?",
+                                   [.text(linkID), .text(messageID)]).first else { return }
+        if try outbound.integer("requires_receipt") == 1 {
+            try database.execute("UPDATE outbox SET custody_at=COALESCE(custody_at,?),retry_at=? WHERE link_id=? AND msg_id=?",
+                [.integer(now), .integer(now + 30_000), .text(linkID), .text(messageID)])
+            return
         }
+        try database.execute("UPDATE inbound SET ack_state='READY' WHERE link_id=? AND receipt_id=? AND outcome!='pending'",
+                             [.text(linkID), .text(messageID)])
+        try database.execute("DELETE FROM outbox WHERE link_id=? AND msg_id=?", [.text(linkID), .text(messageID)])
     }
 
     public func readyAcks(linkID: String) throws -> [ReceivedRecord] {

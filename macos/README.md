@@ -2,14 +2,15 @@
 
 Native macOS 26 / Apple Silicon notification receiver. The menu-bar app pairs
 with up to two Android phones and receives end-to-end encrypted notifications
-through the relay. Dismissal on the Mac stays local. Replies, notification actions,
-call controls, capture, LAN and Bluetooth are intentionally unavailable on Mac.
+through the relay or directly over Wi-Fi. Dismissal on the Mac stays local.
+The inbox supports Android-advertised notification actions and text replies.
+Call controls, capture and Bluetooth remain unavailable on Mac.
 
 The receiver includes durable encrypted storage, resumable pairing, per-link relay
 sessions, permission-aware materialization, receipts, bounded snapshot repair and
 scoped removal. The [local acceptance record](../docs/qa/macos-three-device-2026-09-07.md)
 covers signed permission/crash recovery and the integrated three-device matrix.
-Keyboard activation, actual host sleep/wake and physical-phone acceptance remain
+Actual host sleep/wake and physical-phone acceptance remain
 manual gates; a successful build is not production release acceptance.
 
 ## Pair a phone
@@ -47,6 +48,30 @@ updates and snapshots advance delivery state without another alert; changed
 content and a new notification lifecycle still alert in Notification Center mode.
 
 See the [inbox QA record](../docs/qa/macos-inbox-2026-09-08.md) for tested cases and limits.
+
+## Direct connections and actions
+
+After both devices exchange authenticated LAN bindings through the relay, the
+Mac discovers the paired phone on the local network and authenticates it with
+pinned mutual TLS and signed challenges. The status reads **Direct on Wi-Fi**
+or **Via relay**. Relay delivery continues while discovery runs; a completed
+handoff stops the old sender before the new sender drains queued messages.
+Direct connection failure resumes relay delivery. The Android build must support
+the `twinotify-lan/2` TLS exporter mode. Older builds continue through the relay.
+
+Each notification shows the actions its Android app supplied. **Reply** opens
+an inline editor; **Send** submits it explicitly. Replies are limited to 4096 UTF-8
+bytes. **Sent to app** means Android dispatched the action, not that a recipient
+read the reply. An uncertain result asks you to check the phone; it does not
+automatically create a second invocation. Actions live in the menu-bar inbox.
+
+Mac storage version 3 adds encrypted peer LAN bindings and durable action
+attempts. Migration preserves pairing, installation identity, nonce counters and
+pending delivery. The additional local TLS key lives in the login Keychain.
+See the [direct/action verification record](../docs/qa/macos-direct-actions-2026-09-08.md)
+for the remaining integrated and physical-device checks, including pre-fix journal
+compatibility. These features have not replaced the user's previously verified
+running bundle.
 
 ## Build
 

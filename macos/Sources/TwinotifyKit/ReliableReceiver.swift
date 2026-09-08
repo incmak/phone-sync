@@ -8,7 +8,9 @@ import Foundation
     private let platform: any NotificationPlatform
     private let codec: ProtocolCodec
     private var materializing = false
-    public init(store: DurableStore, peer: PeerLink, platform: any NotificationPlatform) throws {
+    private let lanEnabled: Bool
+    public init(store: DurableStore, peer: PeerLink, platform: any NotificationPlatform, lanEnabled: Bool = false) throws {
+        self.lanEnabled = lanEnabled
         self.store = store; self.peer = peer; self.platform = platform; codec = try ProtocolCodec()
     }
     public func receive(_ bytes: Data, now: Int64) async throws {
@@ -17,6 +19,14 @@ import Foundation
         if event.type == "unpair" {
             if now < event.expiresAt { try await store.beginRemoval(peer.id) }
             else { try await store.commitDirect(linkID: peer.id, event: event, digest: authenticated.digest, now: now, outcome: .expired) }
+            return
+        }
+        if event.type == "lan.bootstrap" || event.type == "peer.probe" {
+            try await receivePeerControl(authenticated, now: now)
+            return
+        }
+        if event.type == "notif.action.result" {
+            try await store.commitActionResult(linkID: peer.id, event: event, digest: authenticated.digest, now: now)
             return
         }
         if event.type == "peer.receipt" {
@@ -63,6 +73,12 @@ import Foundation
             try await store.renewReceipt(linkID: peer.id, original: record, receipt: receipt, now: now)
         }
         for record in try await store.pending(linkID: peer.id, now: now, permissionRecovered: permissionRecovered) {
+            // Control payloads are replayed by the sender after a crash. They
+            // cannot be inferred from notification desired state.
+            if record.eventType == "lan.bootstrap" || record.eventType == "peer.probe" {
+                if now >= record.expiresAt { try await finish(record, outcome: .expired, now: now) }
+                continue
+            }
             guard let canonicalID = record.canonicalID, let sequence = record.sequence else {
                 try await finish(record, outcome: now >= record.expiresAt ? .expired : .rejected,
                                  reason: "unsupported_on_mac", now: now)
@@ -126,6 +142,37 @@ import Foundation
             try await store.retireCall(linkID: peer.id, state: state)
         }
     }
+    private func receivePeerControl(_ authenticated: AuthenticatedEvent, now: Int64) async throws {
+        let event = authenticated.inner
+        if let existing = try await store.received(linkID: peer.id, messageID: event.messageID) {
+            guard existing.digest == authenticated.digest else { throw DeliveryStoreError.digestConflict }
+            if existing.outcome != .pending {
+                try await store.replayReceipt(linkID: peer.id, messageID: event.messageID, digest: authenticated.digest)
+                return
+            }
+        } else {
+            _ = try await store.stage(linkID: peer.id, messageID: event.messageID, digest: authenticated.digest,
+                expiresAt: event.expiresAt, desired: nil, now: now, eventType: event.type)
+        }
+        var outcome: DeliveryOutcome = now >= event.expiresAt ? .expired : .applied
+        var reason: String?
+        if outcome == .applied, event.type == "lan.bootstrap" {
+            if lanEnabled, let pinText = event.payload["tls_spki_sha256"]?.string,
+               let contextText = event.payload["binding_context_sha256"]?.string {
+                func decode(_ hex: String) -> Data {
+                    Data(stride(from: 0, to: hex.count, by: 2).map { offset in
+                        let start = hex.index(hex.startIndex, offsetBy: offset)
+                        return UInt8(hex[start..<hex.index(start, offsetBy: 2)], radix: 16)!
+                    })
+                }
+                do { try await store.commitLanBinding(peer: peer, pin: decode(pinText), contextDigest: decode(contextText)) }
+                catch LanError.bindingConflict { outcome = .rejected; reason = "lan_binding_conflict" }
+                catch LanError.authentication { outcome = .rejected; reason = "lan_bootstrap_context_mismatch" }
+            } else { outcome = .rejected; reason = "unsupported_on_mac" }
+        }
+        guard let record = try await store.received(linkID: peer.id, messageID: event.messageID) else { throw StorageError.repairRequired }
+        try await finish(record, outcome: outcome, reason: reason, now: now)
+    }
     private func finish(_ record: ReceivedRecord, outcome: DeliveryOutcome, reason: String? = nil, now: Int64) async throws {
         let receipt = try await makeReceipt(record, outcome: outcome, reason: reason, now: now)
         try await store.complete(linkID: peer.id, messageID: record.messageID, digest: record.digest,
@@ -140,7 +187,7 @@ import Foundation
     private func presentation(_ desired: DesiredRecord) -> NotificationPresentation {
         NotificationPresentation(linkGeneration: peer.id, canonicalID: desired.canonicalID, sequence: desired.sequence,
                                  title: desired.title, subtitle: desired.subtitle, body: desired.body, imagePNG: desired.imagePNG,
-                                 sourceApp: desired.sourceApp)
+                                 sourceApp: desired.sourceApp, actions: desired.actions ?? [])
     }
     nonisolated static func presentation(_ event: InnerEvent) throws -> DesiredRecord? {
         guard ["notif.post", "notif.update", "notif.cancel", "call.state"].contains(event.type) else { return nil }
@@ -164,9 +211,13 @@ import Foundation
             : payload["big_text"]?.string.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
                 ?? payload["text"]?.string ?? payload["title"]?.string ?? ""
         let image = payload["large_icon_png_b64"]?.string.flatMap { Data(base64Encoded: $0) }
+        let actions = try (payload["actions"]?.array ?? []).map {
+            try JSONDecoder().decode(NotificationAction.self, from: $0.encoded())
+        }
         return DesiredRecord(canonicalID: id, sequence: sequence, expiresAt: event.expiresAt, remove: remove,
                              title: conversation?["title"]?.string ?? title, subtitle: payload["sub_text"]?.string ?? "", body: body,
                              active: event.type != "notif.cancel", imagePNG: image.flatMap { $0.count <= 512 * 1024 ? $0 : nil },
-                             sourceApp: payload["app_name"]?.string == payload["package_name"]?.string ? nil : payload["app_name"]?.string)
+                             sourceApp: payload["app_name"]?.string == payload["package_name"]?.string ? nil : payload["app_name"]?.string,
+                             actions: actions)
     }
 }

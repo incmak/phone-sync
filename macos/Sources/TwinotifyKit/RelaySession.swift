@@ -11,8 +11,11 @@ public actor RelaySession {
     private let session: URLSession
     private var connection: URLSessionWebSocketTask?
     private let validator: SchemaValidator
+    private let features: [String]
 
-    public init(peer: PeerLink, store: DurableStore) throws {
+    public init(peer: PeerLink, store: DurableStore, features: [String] = []) throws {
+        guard Set(features).isSubset(of: ["lan-bootstrap-v1", "peer-probe-v1"]), Set(features).count == features.count else { throw ProtocolError.invalidPacket }
+        self.features = features
         self.peer = peer; self.store = store; validator = try SchemaValidator()
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
@@ -38,7 +41,9 @@ public actor RelaySession {
         socket.resume()
         defer { socket.cancel(with: .goingAway, reason: nil); connection = nil }
         try await withTaskCancellationHandler {
-            try await socket.send(.string(#"{"v":2,"type":"relay.hello","protocols":[2],"app_version":"macos-0.1.0"}"#))
+            var hello: [String: JSONValue] = ["v": .integer(2), "type": .string("relay.hello"), "protocols": .array([.integer(2)]), "app_version": .string("macos-0.2.0")]
+            if !features.isEmpty { hello["features"] = .array(features.map(JSONValue.string)) }
+            try await socket.send(.string(String(decoding: try JSONValue.object(hello).encoded(), as: UTF8.self)))
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask { [self] in
                     do {
@@ -84,7 +89,7 @@ public actor RelaySession {
         case "relay.deliver": try await received(RawEnvelope.extract(from: bytes))
         case "relay.accepted":
             guard let id = frame["msg_id"]?.string else { throw ProtocolError.invalidPacket }
-            try await store.receiptAccepted(linkID: peer.id, messageID: id)
+            try await store.receiptAccepted(linkID: peer.id, messageID: id, now: Self.now())
         case "relay.capabilities":
             guard frame["floor"] == .integer(2), frame["peer"]?.array?.contains(.integer(2)) == true else {
                 throw RelaySessionError.unsupportedProtocol

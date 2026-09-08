@@ -1,5 +1,6 @@
 package co.twinotify.core.lan
 
+import android.net.ssl.SSLSockets
 import java.io.Closeable
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
@@ -114,6 +115,11 @@ class JsseLanTlsSocket(
 
     init {
         require(readTimeoutMillis > 0 && writeTimeoutMillis > 0)
+        // Optional on Android/Android, required by Mac. ALPN binds this choice
+        // to TLS so a LAN observer cannot substitute the legacy context.
+        socket.sslParameters = socket.sslParameters.apply {
+            applicationProtocols = arrayOf(LanTlsExporter.ALPN)
+        }
     }
 
     override suspend fun startHandshake() {
@@ -139,20 +145,26 @@ class JsseLanTlsSocket(
     }
 
     override fun tlsSessionContext(): ByteArray = try {
-        val session = socket.session
-        val localPin = (session.localCertificates?.firstOrNull() as? X509Certificate)?.let {
-            MessageDigest.getInstance("SHA-256").digest(it.publicKey.encoded)
-        } ?: throw LanConnectionException(LanConnectionFailure.TLS_FAILED)
-        val peerPin = peerSpkiSha256()
-        val pins = listOf(localPin, peerPin).sortedWith(::compareUnsignedBytes)
-        MessageDigest.getInstance("SHA-256").digest(
-            TLS_CONTEXT_DOMAIN +
-                lengthDelimited(session.id) +
-                lengthDelimited(session.protocol.encodeToByteArray()) +
-                lengthDelimited(session.cipherSuite.encodeToByteArray()) +
-                lengthDelimited(pins[0]) +
-                lengthDelimited(pins[1]),
-        )
+        if (socket.applicationProtocol == LanTlsExporter.ALPN) {
+            LanTlsExporter.context {
+                SSLSockets.exportKeyingMaterial(socket, LanTlsExporter.LABEL, null, 32)
+            }
+        } else {
+            val session = socket.session
+            val localPin = (session.localCertificates?.firstOrNull() as? X509Certificate)?.let {
+                MessageDigest.getInstance("SHA-256").digest(it.publicKey.encoded)
+            } ?: throw LanConnectionException(LanConnectionFailure.TLS_FAILED)
+            val peerPin = peerSpkiSha256()
+            val pins = listOf(localPin, peerPin).sortedWith(::compareUnsignedBytes)
+            MessageDigest.getInstance("SHA-256").digest(
+                TLS_CONTEXT_DOMAIN +
+                    lengthDelimited(session.id) +
+                    lengthDelimited(session.protocol.encodeToByteArray()) +
+                    lengthDelimited(session.cipherSuite.encodeToByteArray()) +
+                    lengthDelimited(pins[0]) +
+                    lengthDelimited(pins[1]),
+            )
+        }
     } catch (error: LanConnectionException) {
         throw error
     } catch (_: Throwable) {

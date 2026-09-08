@@ -13,6 +13,9 @@ import UserNotifications
         rawValue: UserDefaults.standard.string(forKey: "notificationDestination") ?? "") ?? .notificationCenter
     @ObservationIgnored private lazy var notificationRouter = NotificationRouter(system: platform, destination: destination)
     private(set) var inbox: [InboxItem] = []
+    private(set) var actionAttempts: [ActionAttempt] = []
+    private(set) var actionsInFlight: Set<String> = []
+    private(set) var actionProblems: [String: String] = [:]
     private(set) var clearingInbox = false
     private var recentlyCleared: [InboxItem] = []
     var canUndoClear: Bool { !recentlyCleared.isEmpty }
@@ -39,7 +42,9 @@ import UserNotifications
     var launchAtLogin = SMAppService.mainApp.status == .enabled
     private var store: DurableStore?
     private var pairing: PairingClient?
-    private var sessions: [String: RelaySession] = [:]
+    private var sessions: [String: PeerSession] = [:]
+    private var lanIdentity: LanIdentity?
+    private(set) var routes: [String: PeerRoute] = [:]
     private var receivers: [String: ReliableReceiver] = [:]
     private var tasks: [String: Task<Void, Never>] = [:]
     private var pairingTask: Task<Void, Never>?
@@ -75,6 +80,7 @@ import UserNotifications
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
             let store = try DurableStore(path: folder.appendingPathComponent("state.sqlite").path, vault: vault)
+            lanIdentity = try? LanIdentity(namespace: "co.twinotify.mac." + folder.lastPathComponent)
             self.store = store
             pairing = PairingClient(store: store, allowDebugLoopback: Self.debugLoopback)
         } catch {
@@ -145,7 +151,7 @@ import UserNotifications
         guard let store, !stopping else { return }
         tasks[peer.id] = Task { [weak self] in
             guard let self else { return }
-            defer { tasks[peer.id] = nil; sessions[peer.id] = nil; receivers[peer.id] = nil }
+            defer { tasks[peer.id] = nil; sessions[peer.id] = nil; receivers[peer.id] = nil; routes[peer.id] = nil }
             while !Task.isCancelled && !stopping {
                 #if TWINOTIFY_E2E
                 if e2eRelayPaused {
@@ -167,19 +173,18 @@ import UserNotifications
                         peers = try await store.peers()
                         return
                     }
-                    let receiver = try ReliableReceiver(store: store, peer: current, platform: notificationRouter)
-                    let session = try RelaySession(peer: current, store: store)
+                    let receiver = try ReliableReceiver(store: store, peer: current, platform: notificationRouter, lanEnabled: lanIdentity != nil)
+                    let session = PeerSession(peer: current, store: store, lanIdentity: lanIdentity)
                     receivers[peer.id] = receiver; sessions[peer.id] = session
                     statuses[peer.id] = "Connecting…"
                     try await session.run(allowDebugLoopback: Self.debugLoopback, received: { [weak self] data in
                         try await receiver.receive(data, now: Int64(Date().timeIntervalSince1970 * 1000))
-                        await self?.setConnected(peer.id)
                         await self?.refreshInbox()
                     }, tick: { [weak self] in
                         try await receiver.resume(now: Int64(Date().timeIntervalSince1970 * 1000))
                         await self?.updateCounts(peer.id)
                         await self?.refreshInbox()
-                    }, connected: { [weak self] in await self?.setConnected(peer.id) })
+                    }, status: { [weak self] route in await self?.setRoute(peer.id, route: route) })
                 } catch {
                     if Task.isCancelled || stopping { return }
                     statuses[peer.id] = "Offline · retrying"
@@ -188,7 +193,17 @@ import UserNotifications
             }
         }
     }
-    private func setConnected(_ id: String) { statuses[id] = "Connected" }
+    private func setRoute(_ id: String, route: PeerRoute?) {
+        routes[id] = route
+        statuses[id] = route == nil ? "Reconnecting…" : "Connected"
+    }
+    func routeDescription(_ id: String) -> String {
+        switch routes[id] {
+        case .wifi: "Direct on Wi-Fi"
+        case .relay: "Via relay"
+        case nil: statuses[id] ?? "Connecting…"
+        }
+    }
     private func updateCounts(_ id: String) async {
         guard let store else { return }
         do { counts[id] = try await store.counts(linkID: id) }
@@ -198,8 +213,33 @@ import UserNotifications
         guard let store, !stopping else { return }
         do {
             inbox = try await store.notificationInbox(now: Self.now)
+            actionAttempts = try await store.actionAttempts(now: Self.now)
             inboxPageIndex = inboxPage.index
         } catch { storageProblem = "The notification inbox is unavailable. \(error.localizedDescription)" }
+    }
+    func actionAttempt(_ item: InboxItem, _ action: NotificationAction) -> ActionAttempt? {
+        actionAttempts.first { $0.notificationID == item.id && $0.sequence == item.presentation.sequence && $0.actionID == action.id }
+    }
+    func actionKey(_ item: InboxItem, _ action: NotificationAction) -> String {
+        item.id + ":" + String(item.presentation.sequence) + ":" + action.id
+    }
+    func invokeAction(_ item: InboxItem, action: NotificationAction, reply: String?) async {
+        guard let store, !stopping else { return }
+        let key = actionKey(item, action)
+        guard !actionsInFlight.contains(key) else { return }
+        actionsInFlight.insert(key); actionProblems[key] = nil
+        defer { actionsInFlight.remove(key) }
+        do {
+            _ = try await store.invokeNotificationAction(item: item, actionID: action.id, reply: reply, now: Self.now)
+            await refreshInbox()
+        } catch ActionError.invalidReply {
+            actionProblems[key] = "Enter a reply of up to 4,096 bytes."
+        } catch ActionError.unavailable {
+            actionProblems[key] = "This notification changed. Open its latest version."
+            await refreshInbox()
+        } catch {
+            actionProblems[key] = "Could not queue the action. Try again."
+        }
     }
     func clearInbox(_ items: [InboxItem]) async {
         guard let store, !clearingInbox else { return }
@@ -402,7 +442,7 @@ import UserNotifications
             for peer in try await store.peers() {
                 let count = try await store.counts(linkID: peer.id)
                 links.append(["peer_link_id": peer.id, "device_id_hash": E2EControl.hash(peer.deviceID),
-                    "lifecycle": peer.lifecycle.rawValue, "status": statuses[peer.id] ?? "unknown",
+                    "lifecycle": peer.lifecycle.rawValue, "status": statuses[peer.id] ?? "unknown", "route": routes[peer.id]?.rawValue ?? "none",
                     "pending": count.pending, "outbound": count.outbound])
                 for state in try await store.allDesired(linkID: peer.id) {
                     let identifier = NotificationPresentation(linkGeneration: peer.id, canonicalID: state.canonicalID,

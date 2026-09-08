@@ -87,18 +87,25 @@ public actor DurableStore {
             guard case .integer(let version) = try database.execute("PRAGMA user_version").first?["user_version"] else {
                 throw StorageError.repairRequired
             }
-            guard version <= 2 else { throw StorageError.unsupportedVersion(version) }
-            if version == 2 { return false }
+            guard version <= 3 else { throw StorageError.unsupportedVersion(version) }
+            if version == 3 { return false }
             if version == 0 {
                 guard try database.execute("SELECT name FROM sqlite_master WHERE type='table'").isEmpty else {
                     throw StorageError.repairRequired
                 }
                 try database.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY NOT NULL, value BLOB NOT NULL)")
             }
-            try createDeliverySchema(database)
-            try database.execute("PRAGMA user_version=2")
+            if version < 2 { try createDeliverySchema(database) }
+            try createDirectSchema(database)
+            try database.execute("PRAGMA user_version=3")
             return version == 0
         }
+    }
+
+    public func lanMaterial(peer: PeerLink) throws -> LanMaterial {
+        guard try peers().contains(peer), peer.lifecycle == .active else { throw DeliveryStoreError.missingLink }
+        return try LanCrypto.derive(local: identity, peer: PublicIdentity(deviceID: peer.deviceID,
+            encryptionKey: peer.encryptionKey, signingKey: peer.signingKey), secretKey: privateIdentity.encryptionSecret)
     }
 
     public func nextNonce() throws -> Data {

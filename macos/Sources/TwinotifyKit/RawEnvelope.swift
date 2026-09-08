@@ -11,7 +11,9 @@ public enum RawEnvelope {
     public static let maximumFrameBytes = (1 << 20) + (4 << 10)
 
     public static func validateObject(_ data: Data, maximumBytes: Int = 1 << 20) throws {
-        guard data.count <= maximumBytes, maximumBytes <= maximumFrameBytes else { throw FrameError.oversized }
+        // LAN wraps the exact envelope as a JSON string and has a slightly larger
+        // reviewed frame ceiling. Relay callers retain maximumFrameBytes.
+        guard data.count <= maximumBytes, maximumBytes <= 1_064_996 else { throw FrameError.oversized }
         var scanner = Scanner(bytes: Array(data))
         _ = try scanner.object(depth: 0)
         scanner.whitespace()

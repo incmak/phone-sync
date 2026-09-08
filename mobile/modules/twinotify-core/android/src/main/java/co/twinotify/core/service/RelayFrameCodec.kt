@@ -150,6 +150,7 @@ object RelayFrameCodec {
 
     fun decode(raw: String): RelayFrame {
         require(raw.encodeToByteArray().size <= MAX_FRAME_BYTES) { "relay frame exceeds limit" }
+        val slices = RawRelayJson.objectMembers(raw)
         val o = try { JSONObject(raw) } catch (e: Throwable) {
             throw IllegalArgumentException("invalid relay frame", e)
         }
@@ -168,7 +169,7 @@ object RelayFrameCodec {
             }
             "relay.put" -> {
                 requireKeys(o, setOf("v", "type", "envelope"))
-                RelayFrame.Put(canonicalEnvelope(o.requiredObject("envelope").toString()))
+                RelayFrame.Put(canonicalEnvelope(raw.substring(requireNotNull(slices["envelope"]))))
             }
             "relay.ack" -> {
                 requireKeys(o, setOf("v", "type", "msg_id", "envelope_sha256"))
@@ -184,7 +185,7 @@ object RelayFrameCodec {
             }
             "relay.deliver" -> {
                 requireKeys(o, setOf("v", "type", "accepted_at", "envelope"))
-                RelayFrame.Deliver(o.requiredNonNegativeLong("accepted_at"), canonicalEnvelope(o.requiredObject("envelope").toString()))
+                RelayFrame.Deliver(o.requiredNonNegativeLong("accepted_at"), canonicalEnvelope(raw.substring(requireNotNull(slices["envelope"]))))
             }
             "relay.rejected" -> {
                 requireKeys(o, setOf("v", "type", "msg_id", "reason"))
@@ -216,9 +217,11 @@ object RelayFrameCodec {
 
     /** v1 envelopes are intentionally opaque but still strictly shape-checked. */
     private fun canonicalEnvelope(raw: String): String {
+        require(raw.startsWith("{") && raw.endsWith("}")) { "envelope must be an exact JSON object" }
+        RawRelayJson.objectMembers(raw)
         val objectValue = JSONObject(raw)
-        return when (objectValue.optInt("v", -1)) {
-            2 -> ProtocolJson.encodeEnvelope(ProtocolJson.decodeEnvelope(raw))
+        when (objectValue.optInt("v", -1)) {
+            2 -> ProtocolJson.decodeEnvelope(raw)
             1 -> {
                 requireKeys(objectValue, setOf("v", "type", "msg_id", "origin_device", "ts", "nonce", "ciphertext"))
                 require(objectValue.getString("type") == "enc") { "legacy envelope must use type enc" }
@@ -231,6 +234,9 @@ object RelayFrameCodec {
             }
             else -> throw IllegalArgumentException("encrypted envelope must use protocol version 1 or 2")
         }
+        // Custody and peer receipts authenticate these exact bytes, including
+        // field order, whitespace and optional string escapes.
+        return raw
     }
 
     private fun envelopeFrame(type: String, envelope: String): String =

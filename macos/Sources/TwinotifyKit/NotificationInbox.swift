@@ -80,7 +80,7 @@ extension DurableStore {
                 return InboxItem(canonicalID: canonicalID, linkID: link, receivedAt: receivedAt,
                     presentation: NotificationPresentation(linkGeneration: link, canonicalID: canonicalID,
                         sequence: state.sequence, title: state.title, subtitle: state.subtitle, body: state.body,
-                        imagePNG: state.imagePNG, sourceApp: state.sourceApp))
+                        imagePNG: state.imagePNG, sourceApp: state.sourceApp, actions: state.actions ?? []))
             }
     }
 }

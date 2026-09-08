@@ -36,7 +36,7 @@ struct NotificationInboxView: View {
                         VStack(spacing: 0) {
                             Color.clear.frame(height: 0).id("inbox-top")
                             ForEach(page.items) { item in
-                                InboxRow(item: item, phone: phoneName(item.linkID), showsPhone: model.peers.count > 1, clearing: model.clearingInbox) {
+                                InboxRow(model: model, item: item, phone: phoneName(item.linkID), showsPhone: model.peers.count > 1, clearing: model.clearingInbox) {
                                     Task { await model.clearInbox([item]) }
                                 }
                                 if item.id != page.items.last?.id {
@@ -170,7 +170,11 @@ struct NotificationInboxView: View {
         let total = model.peers.count
         if total == 0 { return "No phone paired" }
         if connectedCount == 0 { return "Reconnecting to phone\(total == 1 ? "" : "s")…" }
-        if connectedCount == total { return total == 1 ? "Phone connected" : "\(total) phones connected" }
+        if connectedCount == total {
+            if total == 1, let peer = model.peers.first { return model.routeDescription(peer.id) }
+            let direct = model.routes.values.filter { $0 == .wifi }.count
+            return direct == total ? "\(total) phones · Direct on Wi-Fi" : "\(total) phones connected"
+        }
         return "\(connectedCount) of \(total) phones connected"
     }
     private func phoneName(_ linkID: String) -> String {
@@ -181,6 +185,7 @@ struct NotificationInboxView: View {
 }
 
 private struct InboxRow: View {
+    @Bindable var model: AppModel
     let item: InboxItem
     let phone: String
     let showsPhone: Bool
@@ -188,6 +193,8 @@ private struct InboxRow: View {
     let onDismiss: () -> Void
     @State private var expanded = false
     @State private var hovering = false
+    @State private var replyingTo: NotificationAction?
+    @State private var replyText = ""
 
     private var source: String {
         let name = item.presentation.sourceApp?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -248,11 +255,61 @@ private struct InboxRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 40).padding(.top, 6)
             }
+            if !item.presentation.actions.isEmpty { actionControls.padding(.leading, 40).padding(.top, 8) }
         }
         .padding(.horizontal, InboxStyle.inset).padding(.vertical, 12)
         .padding(.trailing, 10) // Keep text clear of the native overlay scrollbar.
         .background(hovering ? Color.primary.opacity(0.035) : Color.clear)
         .onHover { hovering = $0 }
+        .onChange(of: item.presentation.sequence) { _, _ in replyingTo = nil; replyText = "" }
+    }
+
+    private var actionControls: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                ForEach(item.presentation.actions) { action in
+                    let attempt = model.actionAttempt(item, action)
+                    Button(action.title) {
+                        if action.reply { replyingTo = action }
+                        else { Task { await model.invokeAction(item, action: action, reply: nil) } }
+                    }
+                    .buttonStyle(.bordered).controlSize(.small).lineLimit(1)
+                    .disabled(attempt != nil || model.actionsInFlight.contains(model.actionKey(item, action)))
+                    .help(action.reply ? "Reply through your phone" : "Run this action on your phone")
+                    .accessibilityLabel(action.reply ? "Reply: \(action.title)" : "Phone action: \(action.title)")
+                }
+            }
+            if let action = replyingTo, model.actionAttempt(item, action) == nil {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField(action.replyLabel ?? "Write a reply…", text: $replyText, axis: .vertical)
+                        .textFieldStyle(.roundedBorder).font(.system(size: 12)).lineLimit(2...4)
+                        .accessibilityLabel("Reply text")
+                    HStack {
+                        if replyText.utf8.count > 4096 {
+                            Text("Reply is too long").font(.system(size: 10)).foregroundStyle(.red)
+                        }
+                        Spacer()
+                        Button("Cancel") { replyingTo = nil; replyText = "" }
+                        Button("Send") {
+                            let text = replyText
+                            Task {
+                                await model.invokeAction(item, action: action, reply: text)
+                                if model.actionAttempt(item, action) != nil { replyingTo = nil; replyText = "" }
+                            }
+                        }
+                        .disabled(replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || replyText.utf8.count > 4096 ||
+                                  model.actionsInFlight.contains(model.actionKey(item, action)))
+                    }.controlSize(.small)
+                }
+            }
+            ForEach(item.presentation.actions) { action in
+                if let attempt = model.actionAttempt(item, action) {
+                    Text(attempt.label).font(.system(size: 10)).foregroundStyle(InboxStyle.secondary)
+                } else if let problem = model.actionProblems[model.actionKey(item, action)] {
+                    Text(problem).font(.system(size: 10)).foregroundStyle(.red)
+                }
+            }
+        }
     }
 
     private func timestamp(_ milliseconds: Int64) -> String {

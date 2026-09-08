@@ -73,7 +73,7 @@ import Testing
     let sql = try SQLiteConnection(path: path)
     let blobs = try sql.execute("SELECT content FROM desired").map { try $0.blob("content") }
     #expect(blobs.allSatisfy { $0.range(of: Data("Private inbox text".utf8)) == nil })
-    #expect(try sql.execute("PRAGMA user_version").first?["user_version"] == .integer(2))
+    #expect(try sql.execute("PRAGMA user_version").first?["user_version"] == .integer(3))
 }
 
 @Test func inboxSourceAppIsOptionalForPreviouslySavedNotifications() throws {

@@ -124,7 +124,7 @@ private struct TwinotifySettings: View {
                 if model.peers.isEmpty { Text("Pair a phone to receive its notifications here.").foregroundStyle(.secondary) }
                 ForEach(model.peers, id: \.id) { peer in
                     VStack(alignment: .leading, spacing: 8) {
-                        LabeledContent("Phone \(peer.deviceID.prefix(8))", value: model.statuses[peer.id] ?? "Connecting…")
+                        LabeledContent("Phone \(peer.deviceID.prefix(8))", value: model.routeDescription(peer.id))
                         if let count = model.counts[peer.id] {
                             Text("\(count.pending) pending · \(count.outbound) awaiting relay").font(.callout).foregroundStyle(.secondary)
                         }

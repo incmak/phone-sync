@@ -12,9 +12,10 @@ public struct NotificationPresentation: Sendable {
     public let body: String
     public let imagePNG: Data?
     public let sourceApp: String?
+    public let actions: [NotificationAction]
 
     public init(linkGeneration: String, canonicalID: String, sequence: Int64, title: String, subtitle: String = "", body: String, imagePNG: Data? = nil,
-                sourceApp: String? = nil) {
+                sourceApp: String? = nil, actions: [NotificationAction] = []) {
         // Length-prefix the link to avoid collisions between components containing separators.
         self.identifier = "tw." + RawEnvelope.digest(Data("\(linkGeneration.utf8.count):\(linkGeneration)\(canonicalID)".utf8))
         self.sequence = sequence
@@ -23,6 +24,7 @@ public struct NotificationPresentation: Sendable {
         self.body = body
         self.imagePNG = imagePNG
         self.sourceApp = sourceApp
+        self.actions = actions
     }
 }
 

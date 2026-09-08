@@ -51,6 +51,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>LSUIElement</key><true/>
+<key>NSLocalNetworkUsageDescription</key><string>Twinotify connects directly to your paired phones on the local network.</string>
+<key>NSBonjourServices</key><array><string>_twinotify._tcp</string></array>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST

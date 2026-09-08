@@ -12,6 +12,27 @@ class RelayFrameCodecTest {
     private val legacyEnvelope = """{"v":1,"type":"enc","msg_id":"$id","origin_device":"dev-a","ts":1000,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ciphertext":"Y2lwaGVydGV4dA=="}"""
 
     @Test
+    fun preservesForeignEnvelopeSpellingForCustodyAndPeerReceiptDigests() {
+        val foreign = """{ "ciphertext":"Y2lwaGVydGV4dA==", "nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "created_at":1000, "origin_device":"dev-a", "msg_id":"$id", "type":"enc", "v":2 }"""
+        assertEquals("""{"v":2,"type":"relay.put","envelope":$foreign}""", RelayFrameCodec.encode(RelayFrame.Put(foreign)))
+        val delivered = RelayFrameCodec.decode("""{"v":2,"type":"relay.deliver","accepted_at":1000,"envelope":$foreign}""")
+        assertEquals(foreign, assertIs<RelayFrame.Deliver>(delivered).envelope)
+        val put = RelayFrameCodec.decode("""{"v":2,"type":"relay.put","envelope":$foreign}""")
+        assertEquals(foreign, assertIs<RelayFrame.Put>(put).envelope)
+    }
+
+    @Test
+    fun rejectsAmbiguousEnvelopeMembersAndTrailingJson() {
+        assertFailsWith<IllegalArgumentException> {
+            RelayFrameCodec.decode("""{"v":2,"type":"relay.put","envelope":$envelope,"envelope":$envelope}""")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            RelayFrameCodec.decode("""{"v":2,"type":"relay.put","envelope":${envelope.replace("\"v\":2", "\"v\":2,\"v\":2")}}""")
+        }
+        assertFailsWith<IllegalArgumentException> { RelayFrameCodec.decode(RelayFrameCodec.encode(RelayFrame.Put(envelope)) + "{}") }
+    }
+
+    @Test
     fun roundTripsEveryControlFrame() {
         val frames = listOf<RelayFrame>(
             RelayFrame.Hello(listOf(2, 1), "0.8.0"),

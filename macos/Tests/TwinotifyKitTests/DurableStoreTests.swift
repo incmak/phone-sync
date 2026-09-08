@@ -96,8 +96,8 @@ private func directory() throws -> URL {
     try sql.execute("UPDATE metadata SET value=? WHERE key='nonce_counter'", [.blob(max)])
     await #expect(throws: StorageError.nonceExhausted) { try await store.nextNonce() }
     #expect(try sql.execute("SELECT value FROM metadata WHERE key='nonce_counter'").first?["value"] == .blob(max))
-    try sql.execute("PRAGMA user_version=3")
-    #expect(throws: StorageError.unsupportedVersion(3)) { try DurableStore(path: path, vault: vault) }
+    try sql.execute("PRAGMA user_version=4")
+    #expect(throws: StorageError.unsupportedVersion(4)) { try DurableStore(path: path, vault: vault) }
 }
 
 @Test func failedTransactionRollsBackAllWrites() throws {

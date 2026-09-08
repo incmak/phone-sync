@@ -43,4 +43,17 @@ Kotlin flow: `TwinotifyNotificationListener` captures → filters → `OutboundQ
 
 Plan 031 (`advisor-plans/031-macos-receiver-three-device.md`) tracks the native macOS receiver and two-active-links-per-device migration. The implementation supports two peer links per device; rollout remains gated by the three-device acceptance matrix. Room version 12 includes the explicit 11→12 migration and committed schema 12.json. Public peer records, route settings, reliable work and removal lifecycles are link-scoped; the local identity, nonce allocator and source sequence remain installation-wide.
 
+The Mac receiver's separate SQLite store is at version 3. Its additive 2→3
+migration preserves identity/nonce and delivery state while adding encrypted LAN
+bindings and durable action invocations. `PeerSession` owns each link's sender:
+authenticated LAN discovery cannot drain until `routeHandoff` has cancelled and
+joined the relay worker. Mac dials Android over pinned mutual TLS, requiring the
+ALPN `twinotify-lan/2` exporter context; Android keeps the previous TLS context
+when that mode is not negotiated. Receipt-backed bootstrap and action commands
+survive transport custody. Exact received envelope bytes determine both custody
+and journal digests; never normalize JSON while extracting a relay envelope.
+See the [direct/actions implementation plan](../implementation/2026-09-08-macos-direct-actions-plan.md)
+for scope and verification, and the [device-pool proposal](../implementation/2026-09-08-device-pool-design.md)
+for the unimplemented account design.
+
 Current relay purge scans recipient prefixes and filters each mailbox item by sender/recipient. Device-wide sequence and capability deletion is the immediate multi-peer isolation problem; it must become pair-generation scoped before enabling a second link.
