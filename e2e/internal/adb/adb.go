@@ -390,12 +390,12 @@ func (c *Client) NotificationHelp(ctx context.Context) ([]byte, error) {
 }
 
 func (c *Client) PostNotification(ctx context.Context, tag, text string) error {
-	_, err := c.run(ctx, "shell", "cmd", "notification", "post", "-t", tag, tag, text)
+	_, err := c.run(ctx, "shell", "cmd", "notification", "post", "-t", shellQuote(tag), shellQuote(tag), shellQuote(text))
 	return err
 }
 
 func (c *Client) CancelNotification(ctx context.Context, tag string) error {
-	_, err := c.run(ctx, "shell", "cmd", "notification", "cancel", tag)
+	_, err := c.run(ctx, "shell", "cmd", "notification", "cancel", shellQuote(tag))
 	return err
 }
 

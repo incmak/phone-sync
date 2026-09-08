@@ -3,6 +3,7 @@ package adb_test
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -280,6 +281,33 @@ func TestClientProvidesTypedNotificationAndStateCommands(t *testing.T) {
 	wantAirplane := []string{"-s", "emulator-5556", "shell", "cmd", "connectivity", "airplane-mode", "enable"}
 	if !reflect.DeepEqual(runner.args[3], wantAirplane) {
 		t.Fatalf("airplane args=%q want=%q", runner.args[3], wantAirplane)
+	}
+}
+
+func TestNotificationFixturesPreserveTextThroughTheRemoteShell(t *testing.T) {
+	runner := &fakeRunner{}
+	client := adb.New(runner, "emulator-5554")
+	tag := "fixture tag"
+	text := "hello world 'quoted' $(printf unexpected); printf changed"
+	if err := client.PostNotification(context.Background(), tag, text); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CancelNotification(context.Background(), tag); err != nil {
+		t.Fatal(err)
+	}
+	wants := [][]string{{"notification", "post", "-t", tag, tag, text}, {"notification", "cancel", tag}}
+	for index, args := range runner.args {
+		// ADB joins shell arguments into a remote shell command. Emulate that
+		// boundary, replacing Android's cmd with an argument-recording function.
+		script := "cmd() { printf '%s\\0' \"$@\"; }; " + strings.Join(args[3:], " ")
+		output, err := exec.Command("sh", "-c", script).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00")
+		if !reflect.DeepEqual(got, wants[index]) {
+			t.Fatalf("remote arguments=%q want=%q", got, wants[index])
+		}
 	}
 }
 
