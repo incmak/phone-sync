@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 public enum LinkLifecycle: String, Codable, Sendable { case active, removing }
 
@@ -448,7 +449,8 @@ extension DurableStore {
 }
 
 extension DurableStore {
-    /// No receipt-of-receipt. A mismatched digest cannot retire another outbound envelope.
+    /// No receipt-of-receipt. Reject an authenticated receipt with the wrong
+    /// target digest without retiring its target or blocking unrelated delivery.
     public func commitPeerReceipt(linkID: String, event: InnerEvent, digest: String, now: Int64) throws {
         guard event.type == "peer.receipt", let ackedID = event.payload["acked_msg_id"]?.string,
               let ackedDigest = event.payload["envelope_sha256"]?.string else { throw ProtocolError.invalidPacket }
@@ -459,18 +461,25 @@ extension DurableStore {
                 try database.execute("UPDATE inbound SET ack_state='READY' WHERE link_id=? AND msg_id=?", [.text(linkID), .text(event.messageID)])
                 return
             }
+            var outcome = DeliveryOutcome.applied
             if let row = try database.execute("SELECT digest FROM outbox WHERE link_id=? AND msg_id=?",
                                               [.text(linkID), .text(ackedID)]).first {
-                guard try row.text("digest") == ackedDigest else { throw DeliveryStoreError.digestConflict }
-                try database.execute("DELETE FROM outbox WHERE link_id=? AND msg_id=?", [.text(linkID), .text(ackedID)])
+                if try row.text("digest") == ackedDigest {
+                    try database.execute("DELETE FROM outbox WHERE link_id=? AND msg_id=?", [.text(linkID), .text(ackedID)])
+                } else {
+                    Logger(subsystem: "co.twinotify.mac", category: "transport")
+                        .error("Rejected peer receipt: target digest does not match; outbound envelope retained")
+                    outcome = .rejected
+                }
             }
             guard try database.execute("SELECT count(*) AS n FROM inbound").first!.integer("n") < DeliveryLimits().journalRows else {
                 throw StorageError.capacityExceeded
             }
             try database.execute("""
                 INSERT INTO inbound(link_id,msg_id,digest,expires_at,outcome,committed_at,event_type,ack_state)
-                VALUES(?,?,?,?,'applied',?,'peer.receipt','READY')
-                """, [.text(linkID), .text(event.messageID), .text(digest), .integer(event.expiresAt), .integer(now)])
+                VALUES(?,?,?,?,?,?,'peer.receipt','READY')
+                """, [.text(linkID), .text(event.messageID), .text(digest), .integer(event.expiresAt),
+                         .text(outcome.rawValue), .integer(now)])
         }
     }
 

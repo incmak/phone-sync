@@ -70,8 +70,9 @@ attempts. Migration preserves pairing, installation identity, nonce counters and
 pending delivery. The additional local TLS key lives in the login Keychain.
 See the [direct/action verification record](../docs/qa/macos-direct-actions-2026-09-08.md)
 for the remaining integrated and physical-device checks, including pre-fix journal
-compatibility. These features have not replaced the user's previously verified
-running bundle.
+compatibility. The [physical in-place upgrade record](../docs/qa/macos-physical-upgrade-2026-09-08.md)
+documents the installed updates and the remaining repair gate for the existing
+Android journal; physical acceptance is not yet complete.
 
 ## Build
 

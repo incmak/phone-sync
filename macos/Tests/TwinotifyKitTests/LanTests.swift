@@ -101,6 +101,40 @@ import Testing
     #expect(try await store.counts(linkID: peer.id).outbound == 0)
 }
 
+@Test func invalidPeerReceiptDoesNotRetireCommandOrBlockFollowingReceipt() async throws {
+    let store = try DurableStore(path: ":memory:", vault: MemoryVault())
+    let peer = PeerLink(deviceID: UUID().uuidString, pairID: UUID().uuidString, relayURL: "https://relay.example.test",
+        encryptionKey: Data(repeating: 1, count: 32), signingKey: Data(repeating: 2, count: 32))
+    try await store.addPeer(peer)
+    let bytes = Data("immutable command".utf8), id = UUID().uuidString.lowercased()
+    let row = StoredEnvelope(messageID: id, bytes: bytes, digest: RawEnvelope.digest(bytes), expiresAt: 100_000)
+    try await store.enqueueControl(linkID: peer.id, envelope: row, type: "lan.bootstrap", requiresReceipt: true)
+    let wrong = InnerEvent(messageID: UUID().uuidString.lowercased(), originDevice: peer.deviceID, type: "peer.receipt",
+        canonicalID: nil, sequence: nil, createdAt: 2, expiresAt: 100_000,
+        payload: .object(["acked_msg_id": .string(id), "envelope_sha256": .string(String(repeating: "a", count: 64)), "status": .string("applied")]))
+    let wrongEnvelopeDigest = String(repeating: "b", count: 64)
+    try await store.commitPeerReceipt(linkID: peer.id, event: wrong, digest: wrongEnvelopeDigest, now: 2)
+    let quarantined = try #require(await store.received(linkID: peer.id, messageID: wrong.messageID))
+    #expect(quarantined.outcome == .rejected)
+    #expect(quarantined.digest == wrongEnvelopeDigest)
+    #expect(quarantined.ackReady)
+    #expect(quarantined.receiptID == nil)
+    #expect(try await store.sendable(linkID: peer.id, now: 3).first?.bytes == bytes)
+    #expect(try await store.counts(linkID: peer.id).outbound == 1)
+    try await store.markAckSent(linkID: peer.id, messageID: wrong.messageID, digest: wrongEnvelopeDigest)
+    try await store.commitPeerReceipt(linkID: peer.id, event: wrong, digest: wrongEnvelopeDigest, now: 3)
+    #expect(try await store.readyAcks(linkID: peer.id).map(\.messageID) == [wrong.messageID])
+    await #expect(throws: DeliveryStoreError.digestConflict) {
+        try await store.commitPeerReceipt(linkID: peer.id, event: wrong, digest: String(repeating: "c", count: 64), now: 4)
+    }
+    let correct = InnerEvent(messageID: UUID().uuidString.lowercased(), originDevice: peer.deviceID, type: "peer.receipt",
+        canonicalID: nil, sequence: nil, createdAt: 5, expiresAt: 100_000,
+        payload: .object(["acked_msg_id": .string(id), "envelope_sha256": .string(row.digest), "status": .string("applied")]))
+    try await store.commitPeerReceipt(linkID: peer.id, event: correct, digest: String(repeating: "d", count: 64), now: 5)
+    #expect(try await store.counts(linkID: peer.id).outbound == 0)
+    #expect(try await store.received(linkID: peer.id, messageID: correct.messageID)?.outcome == .applied)
+}
+
 @Test(.enabled(if: ProcessInfo.processInfo.environment["TWINOTIFY_LAN_INTEROP_DIR"] != nil))
 func androidMacPinnedTLSExporterAndSignedHandshake() async throws {
     let directory = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TWINOTIFY_LAN_INTEROP_DIR"]!)

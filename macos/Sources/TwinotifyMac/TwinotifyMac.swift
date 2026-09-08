@@ -32,6 +32,7 @@ private struct TwinotifySettings: View {
     @Bindable var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var removing: PeerLink?
+    @State private var importingPhoneCode = false
     var body: some View {
         Form {
             if let problem = model.storageProblem {
@@ -83,12 +84,26 @@ private struct TwinotifySettings: View {
                     Button(model.busy ? "Creating code…" : "Show pairing QR code") { model.createPairingCode() }
                         .disabled(model.busy || model.relayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     if let problem = model.pairingProblem { Text(problem).font(.callout).foregroundStyle(.red) }
-                    DisclosureGroup("Scan a code from your phone instead") {
+                    Button {
+                        importingPhoneCode.toggle()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: importingPhoneCode ? "chevron.down" : "chevron.right")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("Scan a code from your phone instead")
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(importingPhoneCode ? "Expanded" : "Collapsed")
+                    .disabled(model.busy)
+                    if importingPhoneCode {
                         Button("Import QR image…") { Task { await model.importQR() } }
+                            .disabled(model.busy)
                         TextEditor(text: $model.qrText).font(.system(.caption, design: .monospaced)).frame(height: 70)
                             .accessibilityLabel("Pairing QR JSON")
-                        Button("Read pairing code") { Task { await model.parseQR() } }.disabled(model.qrText.isEmpty)
-                    }.disabled(model.busy)
+                            .disabled(model.busy)
+                        Button("Read pairing code") { Task { await model.parseQR() } }.disabled(model.busy || model.qrText.isEmpty)
+                    }
                 }
             }
             Section("Notifications") {
