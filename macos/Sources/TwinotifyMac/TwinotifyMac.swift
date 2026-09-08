@@ -13,20 +13,15 @@ import TwinotifyKit
 @main struct TwinotifyMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     var body: some Scene {
-        MenuBarExtra("Twinotify", systemImage: "bell.and.waves.left.and.right") {
-            Text("Notifications: \(delegate.model.permission)")
-            if delegate.model.storageProblem != nil { Text("Delivery paused · storage needs attention") }
-            if delegate.model.peers.isEmpty { Text("No phones connected") }
-            ForEach(delegate.model.peers, id: \.id) { peer in
-                Text("Phone \(peer.deviceID.prefix(8)): \(delegate.model.statuses[peer.id] ?? "Connecting…")")
-                if let count = delegate.model.counts[peer.id], count.pending + count.outbound > 0 {
-                    Text("\(count.pending) awaiting display · \(count.outbound) awaiting relay")
-                }
+        MenuBarExtra {
+            NotificationInboxView(model: delegate.model)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "bell.and.waves.left.and.right")
+                Text("\(delegate.model.inbox.count)").monospacedDigit()
             }
-            SettingsLink { Text("Open Twinotify…") }.keyboardShortcut(",")
-            Divider()
-            Button("Quit Twinotify") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
-        }
+            .accessibilityLabel("Twinotify, \(delegate.model.inboxCountDescription)")
+        }.menuBarExtraStyle(.window)
         Settings { TwinotifySettings(model: delegate.model) }
             .windowResizability(.contentMinSize)
             .defaultSize(width: 480, height: 680)
@@ -97,8 +92,20 @@ private struct TwinotifySettings: View {
                 }
             }
             Section("Notifications") {
-                LabeledContent("Permission", value: model.permission)
-                if model.permission != "Allowed" {
+                Picker("Show notifications in", selection: Binding(get: { model.destination }, set: { model.setDestination($0) })) {
+                    ForEach(NotificationDestination.allCases) { destination in
+                        Text(destination.title).tag(destination)
+                    }
+                }
+                Text("The menu bar count shows current mirrored notifications. Updates replace their existing entry; phone dismissals remove it.")
+                    .font(.callout).foregroundStyle(.secondary)
+                if model.destination == .menuBar {
+                    Text("System alerts are off. Notifications stay in the encrypted app inbox, without requiring Notification Center permission.")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else {
+                    LabeledContent("Permission", value: model.permission)
+                }
+                if model.destination == .notificationCenter && model.permission != "Allowed" {
                     Button("Allow notifications") { Task { await model.requestPermission() } }
                     Button("Open notification settings") {
                         if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") { NSWorkspace.shared.open(url) }
@@ -106,8 +113,12 @@ private struct TwinotifySettings: View {
                     Text("Pending notifications wait for permission. Expired notifications are not shown when permission returns.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
-                Button("Send test notification") { Task { await model.postTest() } }
-                Button("Remove test notification") { Task { await model.removeTest() } }
+                Text("Changing this choice won’t replay notifications already received.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.destination == .notificationCenter {
+                    Button("Send test notification") { Task { await model.postTest() } }
+                    Button("Remove test notification") { Task { await model.removeTest() } }
+                }
             }
             Section("Phones") {
                 if model.peers.isEmpty { Text("Pair a phone to receive its notifications here.").foregroundStyle(.secondary) }

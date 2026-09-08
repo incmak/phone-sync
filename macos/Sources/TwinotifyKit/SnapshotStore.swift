@@ -116,8 +116,9 @@ extension DurableStore {
                     if let current, current.sequence > item.sequence { continue }
                     // Same sequence and terminal local dismissal does not re-alert.
                     let materialized = try materializedSequence(linkID: linkID, canonicalID: item.canonicalID)
-                    let changed = current?.active != item.active || current?.remove != item.remove
-                    try putSnapshotDesired(linkID: linkID, state: item, dirty: changed || materialized < item.sequence)
+                    let reuse = current.map { $0.hasSamePresentation(as: item) && materialized >= $0.sequence } ?? false
+                    try putSnapshotDesired(linkID: linkID, state: item, dirty: !reuse)
+                    if reuse { try markDesiredApplied(linkID: linkID, state: item) }
                 }
                 let present = Set(items.map(\.canonicalID))
                 for (canonicalID, sequence) in header.baseline where !present.contains(canonicalID) {
@@ -145,6 +146,7 @@ extension DurableStore {
         Data("snapshot:\(link.utf8.count):\(link)\(snapshot.utf8.count):\(snapshot)\(canonical)".utf8)
     }
     private func putSnapshotDesired(linkID: String, state: DesiredRecord, dirty: Bool) throws {
+        let state = try state.retainingLocalDismissal(from: desired(linkID: linkID, canonicalID: state.canonicalID))
         let encrypted = try sealContent(JSONEncoder().encode(state), context: contentContext(linkID, state.canonicalID))
         let current = try database.execute("SELECT length(content) AS n FROM desired WHERE link_id=? AND canon_id=?", [.text(linkID), .text(state.canonicalID)]).first
         let sizes = try database.execute("SELECT count(*) AS rows,COALESCE(sum(length(content)),0) AS bytes FROM desired").first!

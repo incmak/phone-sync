@@ -29,10 +29,10 @@ private struct ReceiverFixture {
         try await target.addPeer(link)
     }
     func notification(sequence: Int64 = 1, type: String = "notif.post", expires: Int64 = 100_000,
-                      visibility: String = "private") async throws -> Data {
+                      visibility: String = "private", text: String = "Long text") async throws -> Data {
         var payload: [String: JSONValue] = ["v": .integer(1), "type": .string(type), "canon_id": .string("canon-a"),
             "app_name": .string("Example"), "package_name": .string("test.example"), "id": .integer(1), "tag": .null,
-            "title": .string("Title"), "text": .string("Text"), "sub_text": .null, "big_text": .string("Long text"),
+            "title": .string("Title"), "text": .string("Text"), "sub_text": .null, "big_text": .string(text),
             "visibility": .string(visibility), "is_group_summary": .bool(false), "is_ongoing": .bool(false),
             "is_clearable": .bool(true), "small_icon_png_b64": .null, "large_icon_png_b64": .null, "ts": .integer(1)]
         if type == "notif.cancel" { payload = ["reason": .integer(2), "removed_at": .integer(1)] }
@@ -108,4 +108,47 @@ private struct ReceiverFixture {
     tampered["origin_device"] = .string(UUID().uuidString)
     await #expect(throws: ProtocolError.identityMismatch) { try await receiver.receive(JSONValue.object(tampered).encoded(), now: 12) }
     #expect(try await f.target.desired(linkID: f.link.id, canonicalID: "canon-a")?.sequence == 4)
+}
+
+@Test @MainActor func unchangedHigherSequenceDoesNotAlertAgainAcrossReceiverRestart() async throws {
+    let f = try await ReceiverFixture(), platform = FakeNotifications()
+    let receiver = try ReliableReceiver(store: f.target, peer: f.link, platform: platform)
+    try await receiver.receive(f.notification(), now: 2)
+    #expect(platform.alerts == 1)
+    platform.visible.removeAll() // A local dismissal must survive an unchanged Android update.
+    let restarted = try ReliableReceiver(store: f.target, peer: f.link, platform: platform)
+    try await restarted.receive(f.notification(sequence: 2, type: "notif.update"), now: 3)
+    #expect(platform.alerts == 1)
+    #expect(platform.visible.isEmpty)
+    #expect(try await f.target.materializedSequence(linkID: f.link.id, canonicalID: "canon-a") == 2)
+    try await restarted.receive(f.notification(sequence: 3, type: "notif.update", text: "A new message"), now: 4)
+    #expect(platform.alerts == 2)
+    #expect(platform.visible.values.first == 3)
+    try await restarted.receive(f.notification(sequence: 4, type: "notif.cancel"), now: 5)
+    try await restarted.receive(f.notification(sequence: 5, text: "A new message"), now: 6)
+    #expect(platform.alerts == 3) // A genuinely new lifecycle still alerts.
+}
+
+@Test @MainActor func inboxOnlyDeliveryCommitsReceiptsAndPermissionBacklogWithoutOSAlerts() async throws {
+    let f = try await ReceiverFixture(), system = FakeNotifications()
+    system.allowed = false
+    let router = NotificationRouter(system: system, destination: .menuBar)
+    let receiver = try ReliableReceiver(store: f.target, peer: f.link, platform: router)
+    try await receiver.receive(f.notification(), now: 2)
+    #expect(system.alerts == 0)
+    #expect(try await f.target.counts(linkID: f.link.id).pending == 0)
+    #expect(try await f.target.sendable(linkID: f.link.id, now: 2).count == 1)
+    #expect(try await f.target.notificationInbox(now: 2).count == 1)
+    #expect(try await f.target.notificationInbox(now: 2).first?.presentation.sourceApp == "Example")
+    router.destination = .notificationCenter
+    try await receiver.receive(f.notification(sequence: 2, text: "Changed"), now: 3)
+    #expect(try await f.target.counts(linkID: f.link.id).pending == 1)
+    router.destination = .menuBar
+    try await receiver.resume(now: 4, permissionRecovered: true)
+    #expect(try await f.target.counts(linkID: f.link.id).pending == 0)
+    #expect(try await f.target.notificationInbox(now: 4).first?.presentation.body == "Changed")
+    system.allowed = true
+    router.destination = .notificationCenter
+    try await receiver.resume(now: 5, permissionRecovered: true)
+    #expect(system.alerts == 0) // Enabling system alerts doesn't replay the inbox.
 }

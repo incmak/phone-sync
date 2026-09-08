@@ -5,6 +5,7 @@ import TwinotifyKit
 
 @MainActor final class SystemNotifications: NSObject, NotificationPlatform, UNUserNotificationCenterDelegate {
     private let center = UNUserNotificationCenter.current()
+    var alertsEnabled = true
 
     override init() {
         super.init()
@@ -20,10 +21,13 @@ import TwinotifyKit
     }
 
     func post(_ presentation: NotificationPresentation) async throws -> PlatformOutcome {
+        guard alertsEnabled else { return .applied }
         let status = await authorization()
+        guard alertsEnabled else { return .applied }
         guard status == .authorized || status == .provisional else { return .permissionBlocked }
         let delivered = await center.deliveredNotifications().map(\.request)
         let pending = await center.pendingNotificationRequests()
+        guard alertsEnabled else { return .applied }
         if (delivered + pending).contains(where: {
             $0.identifier == presentation.identifier &&
             ($0.content.userInfo["sequence"] as? NSNumber)?.int64Value == presentation.sequence
@@ -50,7 +54,16 @@ import TwinotifyKit
             } catch { /* Attachment failure preserves text delivery. */ }
         }
         try await center.add(UNNotificationRequest(identifier: presentation.identifier, content: content, trigger: nil))
+        if !alertsEnabled { await remove(identifier: presentation.identifier) }
         return .applied
+    }
+
+    func removeMirroredNotifications() async {
+        let delivered = await center.deliveredNotifications().map(\.request.identifier)
+        let pending = await center.pendingNotificationRequests().map(\.identifier)
+        for identifier in Set(delivered + pending) where identifier.hasPrefix("tw.") {
+            await remove(identifier: identifier)
+        }
     }
 
     func remove(identifier: String) async {
@@ -60,6 +73,6 @@ import TwinotifyKit
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                            willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound]
+        await MainActor.run { alertsEnabled ? [.banner, .list, .sound] : [] }
     }
 }

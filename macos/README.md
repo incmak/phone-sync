@@ -14,12 +14,39 @@ manual gates; a successful build is not production release acceptance.
 
 ## Pair a phone
 
-Open Twinotify from its menu-bar icon. Enter the same secure relay address used
+Open the menu-bar inbox and click the **gear**. Enter the same secure relay address used
 by your phone and choose **Show pairing QR code**. Scan it in Twinotify on Android,
 compare both fingerprints, and confirm on each device. Codes expire after five
 minutes; an interrupted attempt can resume from the Mac's saved pairing state.
 The relay address is remembered for the next phone. Importing a phone's QR image
 or pasting its JSON remains available under the alternate pairing disclosure.
+
+## Menu-bar inbox
+
+The number beside the bell is the current inbox count, not a lifetime or unread
+count. Click it to view notifications, expand a row to read its full text, and
+use the previous/next buttons for pages of eight. Scroll within a page when
+needed. Each link/canonical notification has one entry; updates replace it and
+phone cancellations remove it. Dismissing an OS notification locally leaves the
+phone's active state in the app inbox. Use the **×** on a row or **Clear all** to
+clear Mac copies from both the inbox and Notification Center. **Undo** restores
+the last cleared batch to the inbox without another OS alert. Inbox dismissals
+survive restart and unchanged updates or snapshots; changed content or a new
+notification lifecycle can appear again. The phone is not dismissed.
+
+Use the delivery menu at the bottom of the inbox, or **Settings → Notifications → Show notifications in**, to choose:
+
+- **Notification Center + inbox** (default): new notifications use both surfaces.
+- **Menu bar inbox only**: no OS banners or sounds, and no OS permission required.
+
+The preference survives restart. Selecting inbox-only removes this app's
+existing OS entries, and switching back does not replay already applied entries.
+The inbox reads the existing encrypted desired state; no additional plaintext
+history or database-format migration is introduced. Unchanged higher-sequence
+updates and snapshots advance delivery state without another alert; changed
+content and a new notification lifecycle still alert in Notification Center mode.
+
+See the [inbox QA record](../docs/qa/macos-inbox-2026-09-08.md) for tested cases and limits.
 
 ## Build
 
@@ -48,9 +75,10 @@ its QR JSON or import an image containing one QR code. Compare both fingerprints
 with the phone before confirming. Keep the relay URL reachable from both devices.
 Only debug/E2E builds allow cleartext, and the Mac restricts it to loopback.
 
-Allow notifications in the settings window. Permission denial leaves reliable
-work pending; restoring permission resumes eligible work without showing expired
-notifications. Closing the settings window keeps reception running. Quit stops
+For **Notification Center + inbox**, allow notifications in the settings window.
+Permission denial leaves reliable work pending; restoring permission resumes
+eligible work without showing expired notifications. **Menu bar inbox only**
+does not require Notification Center permission. Closing the settings window keeps reception running. Quit stops
 sessions. Launch at login starts off and changes only through its explicit toggle.
 Removing one connection preserves the other connection and installation identity.
 Unavailable relay cleanup stays disabled and retries later.

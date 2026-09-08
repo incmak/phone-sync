@@ -139,7 +139,8 @@ import Foundation
     }
     private func presentation(_ desired: DesiredRecord) -> NotificationPresentation {
         NotificationPresentation(linkGeneration: peer.id, canonicalID: desired.canonicalID, sequence: desired.sequence,
-                                 title: desired.title, subtitle: desired.subtitle, body: desired.body, imagePNG: desired.imagePNG)
+                                 title: desired.title, subtitle: desired.subtitle, body: desired.body, imagePNG: desired.imagePNG,
+                                 sourceApp: desired.sourceApp)
     }
     nonisolated static func presentation(_ event: InnerEvent) throws -> DesiredRecord? {
         guard ["notif.post", "notif.update", "notif.cancel", "call.state"].contains(event.type) else { return nil }
@@ -165,6 +166,7 @@ import Foundation
         let image = payload["large_icon_png_b64"]?.string.flatMap { Data(base64Encoded: $0) }
         return DesiredRecord(canonicalID: id, sequence: sequence, expiresAt: event.expiresAt, remove: remove,
                              title: conversation?["title"]?.string ?? title, subtitle: payload["sub_text"]?.string ?? "", body: body,
-                             active: event.type != "notif.cancel", imagePNG: image.flatMap { $0.count <= 512 * 1024 ? $0 : nil })
+                             active: event.type != "notif.cancel", imagePNG: image.flatMap { $0.count <= 512 * 1024 ? $0 : nil },
+                             sourceApp: payload["app_name"]?.string == payload["package_name"]?.string ? nil : payload["app_name"]?.string)
     }
 }

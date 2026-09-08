@@ -58,13 +58,30 @@ public struct DesiredRecord: Codable, Sendable, Equatable {
     public let subtitle: String
     public let body: String
     public let imagePNG: Data?
+    public let sourceApp: String?
+    public var locallyDismissed: Bool? = false
 
     public init(canonicalID: String, sequence: Int64, expiresAt: Int64, remove: Bool,
-                title: String = "", subtitle: String = "", body: String = "", active: Bool? = nil, imagePNG: Data? = nil) {
+                title: String = "", subtitle: String = "", body: String = "", active: Bool? = nil, imagePNG: Data? = nil,
+                sourceApp: String? = nil) {
         self.canonicalID = canonicalID; self.sequence = sequence; self.expiresAt = expiresAt
         self.remove = remove; self.title = title; self.subtitle = subtitle; self.body = body
         self.active = active ?? !remove
         self.imagePNG = imagePNG
+        self.sourceApp = sourceApp
+    }
+
+    func retainingLocalDismissal(from previous: DesiredRecord?) -> DesiredRecord {
+        var result = self
+        result.locallyDismissed = previous?.locallyDismissed == true && previous.map { hasSamePresentation(as: $0) } == true
+        return result
+    }
+
+    /// Android may advance a notification's sequence without changing what the
+    /// user sees. Transport ordering alone must not create another local alert.
+    func hasSamePresentation(as other: DesiredRecord) -> Bool {
+        canonicalID == other.canonicalID && remove == other.remove && active == other.active &&
+        title == other.title && subtitle == other.subtitle && body == other.body && imagePNG == other.imagePNG
     }
 }
 
@@ -212,9 +229,14 @@ extension DurableStore {
                 let old = try database.execute("SELECT sequence FROM desired WHERE link_id=? AND canon_id=?",
                                                [.text(linkID), .text(desired.canonicalID)]).first
                 if try old == nil || old!.integer("sequence") < desired.sequence {
+                    let previous = try self.desired(linkID: linkID, canonicalID: desired.canonicalID)
+                    let reuse = try previous.map {
+                        try $0.hasSamePresentation(as: desired) &&
+                        (try materializedSequence(linkID: linkID, canonicalID: desired.canonicalID)) >= $0.sequence
+                    } ?? false
                     guard try old != nil || count("desired") < limits.desiredRows else { throw StorageError.capacityExceeded }
                     let context = contentContext(linkID, desired.canonicalID)
-                    let content = try sealContent(JSONEncoder().encode(desired), context: context)
+                    let content = try sealContent(JSONEncoder().encode(desired.retainingLocalDismissal(from: previous)), context: context)
                     let oldSize = try database.execute("SELECT length(content) AS bytes FROM desired WHERE link_id=? AND canon_id=?",
                                                       [.text(linkID), .text(desired.canonicalID)]).first?.integer("bytes") ?? 0
                     guard try size("desired", "content") - oldSize + Int64(content.count) <= limits.contentBytes else {
@@ -223,8 +245,10 @@ extension DurableStore {
                     try database.execute("""
                         INSERT INTO desired(link_id,canon_id,sequence,content) VALUES(?,?,?,?)
                         ON CONFLICT(link_id,canon_id) DO UPDATE SET sequence=excluded.sequence,content=excluded.content,
-                          blocked=0,retry_at=NULL,dirty=1
-                        """, [.text(linkID), .text(desired.canonicalID), .integer(desired.sequence), .blob(content)])
+                          blocked=0,retry_at=NULL,dirty=?,
+                          materialized=CASE WHEN ?=1 THEN excluded.sequence ELSE desired.materialized END
+                        """, [.text(linkID), .text(desired.canonicalID), .integer(desired.sequence), .blob(content),
+                                .integer(reuse ? 0 : 1), .integer(reuse ? 1 : 0)])
                 }
             }
             try database.execute("""

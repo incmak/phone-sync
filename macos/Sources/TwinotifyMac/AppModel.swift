@@ -9,6 +9,16 @@ import UserNotifications
 
 @MainActor @Observable final class AppModel {
     let platform = SystemNotifications()
+    private(set) var destination = NotificationDestination(
+        rawValue: UserDefaults.standard.string(forKey: "notificationDestination") ?? "") ?? .notificationCenter
+    @ObservationIgnored private lazy var notificationRouter = NotificationRouter(system: platform, destination: destination)
+    private(set) var inbox: [InboxItem] = []
+    private(set) var clearingInbox = false
+    private var recentlyCleared: [InboxItem] = []
+    var canUndoClear: Bool { !recentlyCleared.isEmpty }
+    var inboxPageIndex = 0
+    var inboxPage: InboxPage { InboxPage(items: inbox, index: inboxPageIndex) }
+    var inboxCountDescription: String { "\(inbox.count) \(inbox.count == 1 ? "notification" : "notifications")" }
     var permission = "Checking…"
     var activity = ""
     var storageProblem: String?
@@ -46,6 +56,7 @@ import UserNotifications
     #endif
 
     init() {
+        platform.alertsEnabled = destination == .notificationCenter
         do {
             let folder: URL
             let vault: KeychainVault
@@ -122,6 +133,7 @@ import UserNotifications
             peers = try await store.peers()
             pending = try await pairing?.pending()
             history = try await store.recentActivity()
+            await refreshInbox()
             try await store.sweepCompleted(now: Self.now)
             for peer in peers {
                 counts[peer.id] = try await store.counts(linkID: peer.id)
@@ -155,16 +167,18 @@ import UserNotifications
                         peers = try await store.peers()
                         return
                     }
-                    let receiver = try ReliableReceiver(store: store, peer: current, platform: platform)
+                    let receiver = try ReliableReceiver(store: store, peer: current, platform: notificationRouter)
                     let session = try RelaySession(peer: current, store: store)
                     receivers[peer.id] = receiver; sessions[peer.id] = session
                     statuses[peer.id] = "Connecting…"
                     try await session.run(allowDebugLoopback: Self.debugLoopback, received: { [weak self] data in
                         try await receiver.receive(data, now: Int64(Date().timeIntervalSince1970 * 1000))
                         await self?.setConnected(peer.id)
+                        await self?.refreshInbox()
                     }, tick: { [weak self] in
                         try await receiver.resume(now: Int64(Date().timeIntervalSince1970 * 1000))
                         await self?.updateCounts(peer.id)
+                        await self?.refreshInbox()
                     }, connected: { [weak self] in await self?.setConnected(peer.id) })
                 } catch {
                     if Task.isCancelled || stopping { return }
@@ -179,6 +193,45 @@ import UserNotifications
         guard let store else { return }
         do { counts[id] = try await store.counts(linkID: id) }
         catch { storageProblem = "Delivery storage is unavailable." }
+    }
+    func refreshInbox() async {
+        guard let store, !stopping else { return }
+        do {
+            inbox = try await store.notificationInbox(now: Self.now)
+            inboxPageIndex = inboxPage.index
+        } catch { storageProblem = "The notification inbox is unavailable. \(error.localizedDescription)" }
+    }
+    func clearInbox(_ items: [InboxItem]) async {
+        guard let store, !clearingInbox else { return }
+        clearingInbox = true
+        defer { clearingInbox = false }
+        do {
+            recentlyCleared = try await store.setInboxDismissed(items, dismissed: true)
+            for item in recentlyCleared { await platform.remove(identifier: item.id) }
+            await refreshInbox()
+        } catch { storageProblem = "Could not clear notifications. \(error.localizedDescription)" }
+    }
+    func undoClearInbox() async {
+        guard let store, !clearingInbox else { return }
+        clearingInbox = true
+        defer { clearingInbox = false }
+        do {
+            _ = try await store.setInboxDismissed(recentlyCleared, dismissed: false)
+            recentlyCleared = []
+            await refreshInbox()
+        } catch { storageProblem = "Could not restore notifications. \(error.localizedDescription)" }
+    }
+    func setDestination(_ value: NotificationDestination) {
+        guard destination != value else { return }
+        destination = value
+        notificationRouter.destination = value
+        platform.alertsEnabled = value == .notificationCenter
+        UserDefaults.standard.set(value.rawValue, forKey: "notificationDestination")
+        Task {
+            if value == .menuBar { await platform.removeMirroredNotifications() }
+            for receiver in receivers.values { try? await receiver.resume(now: Self.now, permissionRecovered: true) }
+            await refreshInbox()
+        }
     }
     func reconnect() async {
         guard !stopping else { return }
@@ -367,7 +420,8 @@ import UserNotifications
             return ["device_id_hash": E2EControl.hash(store.identity.deviceID), "peer_links": links,
                 "canonical": canonical, "permission": permission, "pairing_pending": pending != nil,
                 "storage_ok": storageProblem == nil, "relay_paused": e2eRelayPaused,
-                "snapshot_commits": try await store.e2eSnapshotCommits(), "process_id": ProcessInfo.processInfo.processIdentifier]
+                "snapshot_commits": try await store.e2eSnapshotCommits(), "process_id": ProcessInfo.processInfo.processIdentifier,
+                "inbox_count": inbox.count, "notification_destination": destination.rawValue]
         case "create_pairing_code":
             guard let value = request.value else { throw PairingError.invalidResponse }
             relayURL = value

@@ -60,3 +60,35 @@ private func control(_ type: String, peer: PeerLink, payload: [String: JSONValue
     #expect(try await restarted.desiredWork(linkID: peer.id, now: 4, permissionRecovered: false).count == 1)
     #expect(try await restarted.sendable(linkID: peer.id, now: 4).isEmpty) // Direct ack controls have no receipt recursion.
 }
+
+@Test func unchangedSnapshotAdvancesMaterializedSequenceWithoutAnotherAlert() async throws {
+    let store = try DurableStore(path: ":memory:", vault: MemoryVault()), peer = snapshotPeer()
+    try await store.addPeer(peer)
+    let digest = String(repeating: "a", count: 64)
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    var payload = try JSONValue.parse(Data(contentsOf: root.appendingPathComponent("proto/fixtures/v2-valid/notif-post-legacy-valid.json"))).object!
+    payload["canon_id"] = .string("unchanged")
+    let original = try #require(try ReliableReceiver.presentation(control("notif.post", peer: peer, payload: payload,
+                               canonicalID: "unchanged", sequence: 1)))
+    _ = try await store.stage(linkID: peer.id, messageID: UUID().uuidString, digest: digest, expiresAt: 100_000,
+                              desired: original, now: 1)
+    try await store.markDesiredApplied(linkID: peer.id, state: original)
+    let inbox = try await store.notificationInbox(now: 1)
+    _ = try await store.setInboxDismissed(inbox, dismissed: true)
+    for sequence: Int64 in [2, 3] {
+        let id = UUID().uuidString
+        if sequence == 3 { payload["big_text"] = .string("A changed notification") }
+        let state = try #require(try ReliableReceiver.presentation(control("notif.post", peer: peer, payload: payload,
+                                    canonicalID: "unchanged", sequence: sequence)))
+        try await store.processSnapshot(linkID: peer.id, event: control("state.snapshot.begin", peer: peer,
+            payload: ["snapshot_id": .string(id), "item_count": .integer(1)]), digest: digest, now: sequence)
+        try await store.processSnapshot(linkID: peer.id, event: control("state.snapshot.item", peer: peer,
+            payload: ["snapshot_id": .string(id), "notification_payload": .object(payload)], canonicalID: "unchanged", sequence: sequence),
+            digest: digest, now: sequence)
+        try await store.processSnapshot(linkID: peer.id, event: control("state.snapshot.end", peer: peer,
+            payload: ["snapshot_id": .string(id), "digest": .string(DurableStore.stateDigest([state]))]), digest: digest, now: sequence)
+        #expect(try await store.desired(linkID: peer.id, canonicalID: "unchanged")?.locallyDismissed == (sequence == 2))
+        #expect(try await store.materializedSequence(linkID: peer.id, canonicalID: "unchanged") == 2)
+        #expect(try await store.desiredWork(linkID: peer.id, now: sequence, permissionRecovered: false).count == (sequence == 2 ? 0 : 1))
+    }
+}
