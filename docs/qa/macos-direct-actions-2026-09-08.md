@@ -85,13 +85,16 @@ the regression, host suite and corrected full matrix pass.
 ## Remaining acceptance
 
 The subsequent [physical in-place update](macos-physical-upgrade-2026-09-08.md)
-installed the builds, exercised actual Wi-Fi discovery and found an existing-link
-journal incompatibility. It does not close full physical acceptance.
+installed the builds and found an existing-link journal incompatibility. After an
+explicitly approved scoped re-pair, physical Wi-Fi discovery and three-device
+synthetic delivery/dismissal passed. Full physical acceptance remains open.
 
-1. Physical Bonjour discovery, Wi-Fi → relay fallback, actual host sleep/wake and
-   the user's OEM phones. Emulator TLS forwarding cannot establish these results.
-2. Resolve the pre-fix journal upgrade case without relaxing exact-digest checks
-   or silently deleting paired state before replacing the user's working build.
+1. Physical Wi-Fi → relay fallback, actual host sleep/wake and reply dispatch on
+   the user's OEM phones.
+2. Establish a general pre-fix journal migration without relaxing exact-digest
+   checks or silently deleting paired state. This user's affected link was
+   recreated with explicit approval, preserving the phone-to-phone link and
+   installation identities.
 
 Tests used separate scratch AVD profiles and a fresh isolated Mac identity. Earlier
 profiles and their incompatible pre-fix test journals were preserved. The

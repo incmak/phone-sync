@@ -1,10 +1,11 @@
 # Physical in-place upgrade — 2026-09-08
 
-Status: both Android updates and the normal Mac update are installed. Existing
-identities and pairings were retained. Phone-to-phone synthetic delivery passes;
-the existing Mac link remains intermittent because of incompatible older Android
-journal records. This is **not** full physical acceptance or a completed journal
-migration.
+Status: both Android updates and the normal Mac update are installed. After the
+user approved a scoped pairing repair, the POCO–Mac link was recreated and the
+second phone was paired with the Mac. Fresh synthetic delivery and dismissal
+pass across all three devices on direct Wi-Fi. The existing phone-to-phone link
+and installation identities remain. Forced network fallback, physical replies,
+sleep/wake and a general migration of incompatible old journals remain unverified.
 
 ## Installed builds and preserved state
 
@@ -49,7 +50,7 @@ area, setting the editor's value enables Read pairing code, and parsing a
 locally captured phone QR reaches fingerprint confirmation. Busy controls stay
 disabled. No new trusted pairing was confirmed.
 
-## Physical observations and limits
+## Physical observations before pairing repair and limits
 
 - Both existing phone links and the existing Mac link reported Direct on Wi-Fi
   on the actual local network, exercising Bonjour and pinned direct negotiation.
@@ -73,15 +74,38 @@ disabled. No new trusted pairing was confirmed.
   It is not possible to rule out dismissal of another notification. Subsequent
   cleanup located each exact synthetic row immediately before acting.
 
-## Pending approval
+## Approved pairing repair and final physical smoke
 
-The original phone-to-phone pairing and POCO-to-Mac pairing remain. The second
-phone has not yet been paired to the Mac. Automatic approval review rejected
-confirmation of that additional trusted relationship without explicit user
-authorization. The expired, unconfirmed Mac ceremony was cancelled.
+The user explicitly approved recreating the POCO–Mac connection and adding the
+second phone–Mac connection. The app controls removed only the old Mac link on
+both endpoints, including its scoped backlog/history. No installation identity
+was reset and the existing phone-to-phone connection was preserved.
 
-A proposed scoped repair is to remove and recreate the POCO-to-Mac link and add
-the second phone-to-Mac link, comparing full fingerprints for each ceremony.
-Removing the old link clears its queued deliveries and mirrored history, so that
-operation also requires explicit confirmation. It must preserve the existing
-phone-to-phone link and installation identities. No such removal was performed.
+Both pairing ceremonies compared all 64 fingerprint characters in both
+directions. The second phone’s first ceremony expired and was cancelled before
+renewing it. Final Mac state has two active peers and zero pending ceremonies.
+Each phone’s Paired devices screen shows its other phone and Mac, both using
+Direct on Wi-Fi. The Mac fingerprint remains unchanged.
+
+- A fresh synthetic notification from each phone reached the other phone’s exact
+  mirror identifier and the Mac’s materialized desired record.
+- Both synthetic source rows were located afresh immediately before their
+  dismissal. Both exact Mac `notif.cancel` records were applied and materialized;
+  both phone mirrors disappeared.
+- All synthetic sources, mirrors and corresponding repeat-protection notice IDs
+  were checked absent on both phones. Phones were returned to Twinotify Home.
+- An initial test command split a multiword title in Android’s remote shell,
+  creating the known shell tag `repair` instead of the intended test tag. The
+  check was corrected to that exact tag and a single-token title; those same
+  synthetic items were used for the passing check and removed. No broad clear
+  or unrelated repeat-protection reset was used.
+- Evidence: `/tmp/twinotify-repair-smoke-result.json`, plus the final paired-device
+  screen captures `/tmp/twinotify-peer-a-final.xml` and
+  `/tmp/twinotify-peer-b-final.xml`. These contain test results or Twinotify UI,
+  not notification content.
+
+The earlier stale-row cleanup uncertainty remains documented above. This repair
+establishes fresh direct-network delivery/dismissal for these installed devices;
+it does not establish seamless migration of all old journals or the remaining
+physical fallback/reply/sleep tests. No application code changed in this follow-up;
+the existing build and test evidence remains applicable.
