@@ -153,6 +153,8 @@ private struct TwinotifySettings: View {
             }
             Section("General") {
                 Toggle("Launch at login", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
+                Button("Quit Twinotify") { NSApplication.shared.terminate(nil) }
+                    .keyboardShortcut("q")
                 if !model.activity.isEmpty { Text(model.activity).font(.callout).foregroundStyle(.secondary).textSelection(.enabled) }
             }
             if !model.history.isEmpty {

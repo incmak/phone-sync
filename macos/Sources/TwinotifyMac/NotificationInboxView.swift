@@ -152,8 +152,6 @@ struct NotificationInboxView: View {
                         Text(destination.title).tag(destination)
                     }
                 }.pickerStyle(.inline)
-                Divider()
-                Button("Quit Twinotify") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
             } label: {
                 Text(model.destination == .menuBar ? "Inbox only" : "Banners on")
             }
@@ -161,6 +159,12 @@ struct NotificationInboxView: View {
             .font(.system(size: 10)).foregroundStyle(InboxStyle.secondary).fixedSize()
             .accessibilityLabel("Notification delivery options")
             .help("Choose where notifications appear")
+            Button("Quit") { NSApplication.shared.terminate(nil) }
+                .keyboardShortcut("q")
+                .buttonStyle(.plain)
+                .font(.system(size: 11)).foregroundStyle(InboxStyle.secondary)
+                .accessibilityLabel("Quit Twinotify")
+                .help("Quit Twinotify (⌘Q)")
         }
         .padding(.horizontal, InboxStyle.inset).padding(.vertical, 11)
     }

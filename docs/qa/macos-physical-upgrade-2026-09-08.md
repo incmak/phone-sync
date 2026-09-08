@@ -109,3 +109,18 @@ establishes fresh direct-network delivery/dismissal for these installed devices;
 it does not establish seamless migration of all old journals or the remaining
 physical fallback/reply/sleep tests. No application code changed in this follow-up;
 the existing build and test evidence remains applicable.
+
+## Visible Quit controls
+
+Quit was previously nested inside the notification-delivery menu. It is now a
+visible popup-footer button and a button under Settings → General. Both use the
+existing application termination delegate, which awaits model shutdown.
+
+- `make macos-verify` passed (46 executed Swift tests; three opt-in checks disabled).
+- The normal signed bundle was rebuilt and installed in its existing location.
+- The popup footer was visually inspected; Quit is visible beside the delivery
+  selector without clipping. Its real accessibility action terminated the app.
+- The actual Settings button also terminated the app. Twinotify was reopened
+  afterward. Pairing data was not reset.
+- Both controls declare Command-Q. A guarded keyboard check was skipped because
+  Twinotify did not retain foreground focus; keyboard activation is unverified.
