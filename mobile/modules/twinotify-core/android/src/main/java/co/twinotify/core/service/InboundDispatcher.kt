@@ -636,22 +636,35 @@ internal suspend fun dispatchAuthenticatedReceiptBackedControl(
 
 internal suspend fun processAuthenticatedControl(
     rejectedCode: String,
+    /**
+     * Whether a failure retires the message instead of refusing it. Refusing ends the session --
+     * on a direct route it sends Close and drops the link outright -- and the peer resends the
+     * same message on the next one. Repair traffic must never do that: it is idempotent and the
+     * next digest exchange starts over, so dropping one round is free while a refusal is a loop.
+     * Measured on hardware: a begin refused for capacity tore the LAN down seven times in eight
+     * minutes, and the sessions it would have cleared never got to commit.
+     */
+    discardable: Boolean = false,
     process: suspend () -> DirectControlProcessingResult,
-): DirectControlProcessingResult = try {
-    process()
-} catch (cancellation: CancellationException) {
-    throw cancellation
-} catch (_: IllegalArgumentException) {
-    DirectControlProcessingResult.Rejected(rejectedCode)
-} catch (_: org.json.JSONException) {
-    DirectControlProcessingResult.Rejected(rejectedCode)
-} catch (_: IllegalStateException) {
-    // The bounded-admission guards inside the store signal with check(), so a peer that opens
-    // more concurrent snapshots than MAX_SNAPSHOT_SESSIONS threw straight past this boundary and
-    // killed the session; the relay then redelivered the same begin forever. A capacity refusal
-    // describes this device's current state, never the message, so it belongs with the other
-    // recoverable control failures rather than on the fatal path.
-    DirectControlProcessingResult.Rejected(rejectedCode)
+): DirectControlProcessingResult {
+    fun failed(): DirectControlProcessingResult =
+        if (discardable) DirectControlProcessingResult.Discarded(rejectedCode)
+        else DirectControlProcessingResult.Rejected(rejectedCode)
+    return try {
+        process()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: IllegalArgumentException) {
+        failed()
+    } catch (_: org.json.JSONException) {
+        failed()
+    } catch (_: IllegalStateException) {
+        // The bounded-admission guards inside the store signal with check(), so a peer that
+        // opens more concurrent snapshots than MAX_SNAPSHOT_SESSIONS threw straight past this
+        // boundary and killed the session. A capacity refusal describes this device's current
+        // state, never the message, so it belongs with the recoverable control failures.
+        failed()
+    }
 }
 
 internal fun peerReceiptControlResult(transition: OutboxTransition): DirectControlProcessingResult =
@@ -839,8 +852,8 @@ class InboundDispatcher internal constructor(
             // the session closed. Every other fault still propagates to the fail-closed boundary.
             return try {
                 dispatchV2(raw)
-            } catch (_: co.twinotify.core.storage.OutboundCapacityException) {
-                android.util.Log.w("Twinotify", "inbound_deferred:outbound_capacity")
+            } catch (error: co.twinotify.core.storage.OutboundCapacityException) {
+                android.util.Log.w("Twinotify", "inbound_deferred:outbound_capacity:${error.budget}")
                 InboundDispatchResult.Deferred("outbound_capacity")
             }
         }
@@ -1034,7 +1047,9 @@ class InboundDispatcher internal constructor(
                     "state.snapshot.end" -> "snapshot_end_rejected"
                     else -> error("direct control allowlist drift")
                 }
-                processAuthenticatedControl(rejectedCode) { when (inner.type) {
+                // Only a receipt describes custody and must still refuse; everything else here is
+                // anti-entropy repair, which is dropped rather than allowed to end the session.
+                processAuthenticatedControl(rejectedCode, discardable = inner.type != "peer.receipt") { when (inner.type) {
                     "peer.receipt" -> {
                         val payload = inner.payloadObject()
                         val transition = outbox.onPeerReceipt(

@@ -683,6 +683,22 @@ class InboundDispatcherControlTest {
         assertEquals(InboundDispatchResult.Rejected("call_rejection_receipt_unavailable"), result)
     }
     @Test
+    fun aDiscardableControlThatThrowsIsRetiredNotRefused() = runTest {
+        // beginSnapshot signals its session ceiling with check(); a refusal closes a direct route
+        // and the peer resends, so the ceiling it would clear never clears. Repair is dropped.
+        val result = processAuthenticatedControl("snapshot_begin_rejected", discardable = true) {
+            throw IllegalStateException("snapshot_session_capacity")
+        }
+        assertEquals(DirectControlProcessingResult.Discarded("snapshot_begin_rejected"), result)
+
+        // A receipt describes custody and must still refuse.
+        val receipt = processAuthenticatedControl("receipt_invalid", discardable = false) {
+            throw IllegalStateException("boom")
+        }
+        assertEquals(DirectControlProcessingResult.Rejected("receipt_invalid"), receipt)
+    }
+
+    @Test
     fun permanentControlValidationFailureBecomesBoundedRejection() = runTest {
         val result = processAuthenticatedControl("snapshot_invalid") {
             throw IllegalArgumentException("private snapshot ID")
@@ -701,7 +717,7 @@ class InboundDispatcherControlTest {
     }
 
     @Test
-    fun malformedAuthenticatedSnapshotEnvelopesRejectWithoutAckJournalCustody() = runTest {
+    fun malformedAuthenticatedSnapshotEnvelopesAreDiscardedAndRetired() = runTest {
         val peerDeviceId = "peer-device"
         val events = listOf(
             malformedSnapshotEvent(
@@ -751,16 +767,18 @@ class InboundDispatcherControlTest {
             materializationRequester = MaterializationRequester {},
         )
 
+        // A malformed repair envelope from the paired peer will never parse differently, so
+        // refusing it only has the relay redeliver it until retention expires -- and on a direct
+        // route the refusal drops the link. It is dropped instead: recorded with a rejected
+        // outcome and left ready to acknowledge, so it is never sent again.
+        val results = events.map { dispatcher.dispatch(envelopeFor(it)) }
         assertEquals(
-            listOf(
-                InboundDispatchResult.Rejected("snapshot_begin_rejected"),
-                InboundDispatchResult.Rejected("snapshot_item_rejected"),
-                InboundDispatchResult.Rejected("snapshot_end_rejected"),
-            ),
-            events.map { dispatcher.dispatch(envelopeFor(it)) },
+            listOf("snapshot_begin_rejected", "snapshot_item_rejected", "snapshot_end_rejected"),
+            results.map { assertIs<InboundDispatchResult.Discarded>(it).code },
         )
+        assertEquals(events.map { it.msgId }, results.map { (it as InboundDispatchResult.Discarded).msgId })
         assertEquals(3, journalInvocations)
-        assertEquals(emptyList(), journaledRows, "rejection must not create READY relay ACK custody")
+        assertEquals(List(3) { "REJECTED" }, journaledRows.map { it.outcome }, "a discard is recorded, ready to acknowledge")
     }
 
     @Test
