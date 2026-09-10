@@ -1641,7 +1641,12 @@ class SyncService : Service(), CallMirrorForegroundHost {
                                 is TransportEvent.Failed -> reportPeerError(
                                     event.error.javaClass.simpleName,
                                 )
-                                is TransportEvent.Closed -> reportPeerError("transport_closed")
+                                is TransportEvent.Closed -> {
+                                    // The relay's close reason is its own bounded code. Sessions were
+                                    // ending cleanly every ~20s with nothing in the log to say why.
+                                    android.util.Log.w("Twinotify", "relay_closed:${event.reason?.take(32) ?: "none"}")
+                                    reportPeerError("transport_closed")
+                                }
                                 else -> Unit
                             }
                         },
