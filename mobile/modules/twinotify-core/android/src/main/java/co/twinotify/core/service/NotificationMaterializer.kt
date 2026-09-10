@@ -436,14 +436,23 @@ class NotificationMaterializer(
                 retryRequired = true
                 continue
             }
-            if (!dao.terminalizeSupersededInbound(
-                canonId = state.canonId,
-                sequence = state.latestSequence,
-                supersession = co.twinotify.core.storage.SupersessionBundle(
-                    prepared.entries.map { co.twinotify.core.storage.SupersessionEntry(it.inboundMsgId, it.envelopeSha256, it.receipt) },
-                ),
-                terminalAt = nowMs,
-            )) retryRequired = true
+            // A full outbox is a retry, not a fault. The catch has to sit out here rather than
+            // inside the DAO because that call is the @Transaction: swallowing it in there would
+            // commit the receipts it had already inserted before the refusal, whereas letting it
+            // unwind rolls the whole bundle back and leaves the group repairable next pass.
+            val terminalized = try {
+                dao.terminalizeSupersededInbound(
+                    canonId = state.canonId,
+                    sequence = state.latestSequence,
+                    supersession = co.twinotify.core.storage.SupersessionBundle(
+                        prepared.entries.map { co.twinotify.core.storage.SupersessionEntry(it.inboundMsgId, it.envelopeSha256, it.receipt) },
+                    ),
+                    terminalAt = nowMs,
+                )
+            } catch (_: co.twinotify.core.storage.OutboundCapacityException) {
+                false
+            }
+            if (!terminalized) retryRequired = true
         }
         if (retryRequired) {
             retryScheduler.schedule(5_000L) { materializePending() }

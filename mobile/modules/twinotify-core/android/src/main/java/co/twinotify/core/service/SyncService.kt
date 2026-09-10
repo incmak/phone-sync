@@ -1123,7 +1123,27 @@ class SyncService : Service(), CallMirrorForegroundHost {
         }
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * Last line of defence: a storage refusal must never take the process down.
+     *
+     * A SupervisorJob isolates siblings but still routes an uncaught child failure to the
+     * thread's default handler, so any writer that reached its ceiling without expecting to
+     * killed the app and, with it, notification mirroring. Three separate insert sites did
+     * exactly that before this existed, each found only after a user-visible crash loop; the
+     * queue filling up is a condition to ride out, not a reason to die.
+     *
+     * Only capacity is absorbed. Everything else keeps the old behaviour so genuine faults stay
+     * loud rather than being quietly swallowed here.
+     */
+    private val transportExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, error ->
+        if (error is co.twinotify.core.storage.OutboundCapacityException) {
+            android.util.Log.w("Twinotify", "absorbed_capacity_failure:${error.budget}")
+        } else {
+            throw error
+        }
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + transportExceptionHandler)
     private var transportJob: Job? = null
     private val peerTransportJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private var defaultNetworkObserver: Closeable? = null
