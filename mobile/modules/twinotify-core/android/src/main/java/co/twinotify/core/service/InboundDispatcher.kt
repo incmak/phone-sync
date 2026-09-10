@@ -1550,12 +1550,24 @@ internal fun SnapshotConvergence.toDirectControlResult(
     rejectedCode: String,
     requireCommitted: Boolean = false,
 ): DirectControlProcessingResult = when {
-    this is SnapshotConvergence.Discarded -> DirectControlProcessingResult.Discarded(rejectedCode)
-    this is SnapshotConvergence.Rejected ||
+    // Anti-entropy repair that cannot be applied is dropped, never refused.
+    //
+    // Every one of these outcomes is terminal for the message: staged rows are swept at
+    // SNAPSHOT_TTL_MS, so an interrupted repair leaves a begin without items, items without a
+    // begin, and an end that can never reach its expected count or digest. Nothing revives any of
+    // them. Refusing ends the session without retiring the message, and the relay redelivers it
+    // on the next session to fail identically - observed walking through snapshot_item_rejected
+    // and then snapshot_end_rejected as each preceding link was fixed.
+    //
+    // Dropping is safe here in a way it would not be for user content: repair carries none, it is
+    // idempotent, and the next digest exchange re-detects the mismatch and starts a fresh
+    // snapshot. A lost repair round costs one interval; a poisoned session costs all delivery.
+    this is SnapshotConvergence.Discarded ||
+        this is SnapshotConvergence.Rejected ||
         this is SnapshotConvergence.Incomplete ||
         this is SnapshotConvergence.DigestMismatch ||
         (requireCommitted && this !is SnapshotConvergence.Committed) ->
-        DirectControlProcessingResult.Rejected(rejectedCode)
+        DirectControlProcessingResult.Discarded(rejectedCode)
     // A peer receiving an origin owner's digest cannot enumerate that owner's source
     // notifications. That is a valid no-repair outcome, not malformed control data.
     else -> DirectControlProcessingResult.Applied
