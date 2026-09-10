@@ -493,10 +493,26 @@ class TransportCoordinator(
                 val due = when (signal) {
                     is CarrySignal.OwnerEnded -> return@coroutineScope CarryResult.Ended(signal.failure)
                     // The anti-storm floor applies per route: a peer request never reopens a
-                    // route attempted within the last floor interval.
+                    // route attempted within the last floor interval. A route still inside that
+                    // interval has its request deferred to the moment the floor expires rather
+                    // than dropped, because the peer only asks when it has just changed networks
+                    // and discarding that leaves it waiting a whole rendezvous period for news
+                    // it has already sent.
                     CarrySignal.DirectRequest -> candidates.filter { route ->
-                        val sinceAttempt = retries.getValue(route).lastAttemptAt?.let { now - it } ?: Long.MAX_VALUE
-                        sinceAttempt >= directAttemptFloorMs
+                        val retry = retries.getValue(route)
+                        val lastAttempt = retry.lastAttemptAt
+                        val sinceAttempt = lastAttempt?.let { now - it } ?: Long.MAX_VALUE
+                        if (sinceAttempt < directAttemptFloorMs && lastAttempt != null) {
+                            val due = lastAttempt + directAttemptFloorMs
+                            if (due < retry.nextAttemptAt) {
+                                retry.nextAttemptAt = due
+                                trace("direct_request_deferred:${route.kind}:${due - now}ms")
+                            }
+                            false
+                        } else {
+                            trace("direct_request_honored:${route.kind}")
+                            true
+                        }
                     }
                     CarrySignal.UserRetry -> candidates
                     CarrySignal.CooldownDue -> candidates.filter { retries.getValue(it).nextAttemptAt <= now }
@@ -537,9 +553,14 @@ class TransportCoordinator(
     private suspend fun ensureProbeSafely(requestDirect: Boolean) {
         try {
             relayProbeScheduler.ensureProbe(requestDirect)
+            // The one signal that can make both phones open a window together, and until now it
+            // left no trace at all: a capture could not distinguish "never asked" from "asked and
+            // the peer ignored it". Both halves are recorded, here and where a request arrives.
+            if (requestDirect) trace("direct_request_sent")
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {
+            if (requestDirect) trace("direct_request_send_failed")
             // Probe persistence is retried on the next tick; delivery stays live.
         }
     }
@@ -568,6 +589,26 @@ class TransportCoordinator(
         }
         val wait = lanRetryPolicy.delay(retry.failures)
         retry.failures += 1
+        if (retry.kind == RouteKind.LAN && wait > LAN_RENDEZVOUS_PERIOD_MS && peerReachableOrUnknown()) {
+            // Only the curve's tail is replaced, and only while the peer answers somewhere.
+            //
+            // A LAN rendezvous needs both phones to have an attempt open at the same moment, and
+            // independent curves make that a coincidence: measured on hardware, a phone rejoining
+            // Wi-Fi took 5m24s to meet its peer again while the two sides walked 15s, 30s, 60s,
+            // 120s out of phase with each other. Past a minute the curve is no longer buying
+            // cheapness, it is just making the overlap rarer, so the tail hands over to the same
+            // arithmetic Bluetooth uses: both round to the same boundary, so the windows land
+            // together and the pair meets on the first shared one after either is ready.
+            //
+            // The early steps stay exactly as they were. They retry quickly while a rendezvous is
+            // still plausible, and a peer answering nowhere keeps the whole lazy curve, since
+            // listening on a boundary for an absent peer buys nothing. With the radio off an
+            // attempt is refused in milliseconds, so this is only ever paid on Wi-Fi.
+            val at = nextRendezvousAt(now, LAN_RENDEZVOUS_PERIOD_MS)
+            retry.nextAttemptAt = at
+            recordDirectBackoff(retry.kind, at - now)
+            return
+        }
         retry.nextAttemptAt = now + wait
         recordDirectBackoff(retry.kind, wait)
     }
@@ -732,6 +773,16 @@ class TransportCoordinator(
          * every boundary, which is why it only applies while the peer is unreachable.
          */
         const val BLUETOOTH_RENDEZVOUS_PERIOD_MS = 60_000L
+
+        /**
+         * The shared LAN rendezvous period, used while the peer is reachable by some other route.
+         *
+         * Bounds how long a phone that rejoins the network waits to meet its peer directly again,
+         * because both sides round to the same boundary instead of drifting apart on independent
+         * curves. Long enough that a peer sitting on mobile data all afternoon costs one bounded
+         * attempt a minute rather than a continuous listen.
+         */
+        const val LAN_RENDEZVOUS_PERIOD_MS = 60_000L
 
         /**
          * The next boundary strictly after [now]. Pure and clock-derived, so two phones that share

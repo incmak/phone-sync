@@ -594,6 +594,65 @@ class TransportCoordinatorTest {
     }
 
     @Test
+    fun aReachablePeerPutsLanOnTheSharedRendezvousGrid() = runTest {
+        // Measured on hardware: a phone rejoining Wi-Fi took 5m24s to meet its peer directly
+        // again, because both sides walked 15s, 30s, 60s, 120s independently and a LAN
+        // rendezvous only happens when two attempt windows overlap. A peer answering over the
+        // relay may have just moved onto this network, so both round to the same boundary
+        // instead and meet on the first shared one.
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(FakeStore(rows = emptyList()), clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            peerReachable = { true },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        val period = TransportCoordinator.LAN_RENDEZVOUS_PERIOD_MS
+        // Walk the early curve, which is unchanged, down to the tail this replaces.
+        assertEquals(15_000L, coordinator.lastLanBackoffMs)
+        repeat(3) {
+            advanceTimeBy(coordinator.lastLanBackoffMs + 1)
+            runCurrent()
+        }
+        val waited = coordinator.lastLanBackoffMs
+        // The tail is now one shared boundary away instead of the 120s curve step that put the
+        // two phones out of phase for minutes; nextRendezvousAt above pins that both compute the
+        // same boundary, so bounding the wait by one period is what remains to show here.
+        assertTrue(waited in 1..period, "expected a wait inside one period, was $waited")
+        assertTrue(waited < 120_000L, "tail must not reach the old curve step, was $waited")
+        job.cancelAndJoin()
+    }
+
+    @Test
+    fun anUnreachablePeerLeavesLanOnTheCheapCurve() = runTest {
+        // Nothing is gained by listening on a boundary for a peer that answers nowhere, so an
+        // absent peer keeps the lazy exponential curve and its first step.
+        val lan = FakeRoute(RouteKind.LAN, failOpen = true)
+        val relay = FakeRoute(RouteKind.RELAY, selfDraining = true)
+        val coordinator = TransportCoordinator(
+            outbox = OutboxRepository(FakeStore(rows = emptyList()), clock = { testScheduler.currentTime }),
+            lan = lan,
+            relay = relay,
+            clock = { testScheduler.currentTime },
+            peerReachable = { false },
+            relayProbeScheduler = FakeRelayProbeScheduler(),
+        )
+
+        val job = backgroundScope.launch { coordinator.run() }
+        runCurrent()
+
+        assertEquals(15_000L, coordinator.lastLanBackoffMs)
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun aRestartWithoutTheHintLeavesDeliveryWaitingForTheWholeDirectCeiling() = runTest {
         // The bug, in virtual time. Observed on hardware: taking one phone from Wi-Fi to mobile
         // data left it about 30s on "Queued" before the relay took over, because a network change
@@ -834,12 +893,24 @@ class TransportCoordinatorTest {
         assertEquals(RouteKind.RELAY, coordinator.health.value.active)
         assertEquals(15_000L, coordinator.lastLanBackoffMs)
 
-        val expectedDelays = listOf(15_000L, 30_000L, 60_000L, 120_000L, 300_000L, 300_000L)
-        for (expected in expectedDelays.drop(1)) {
+        // The early steps retry quickly while a rendezvous is still plausible. Past a minute the
+        // curve stops buying cheapness and only makes the two phones' windows rarer, so the tail
+        // hands over to the shared boundary instead of climbing to five minutes.
+        val period = TransportCoordinator.LAN_RENDEZVOUS_PERIOD_MS
+        for (expected in listOf(30_000L, 60_000L)) {
             advanceTimeBy(coordinator.lastLanBackoffMs + 1)
             runCurrent()
             assertEquals(RouteKind.RELAY, coordinator.health.value.active)
             assertEquals(expected, coordinator.lastLanBackoffMs)
+        }
+        repeat(2) {
+            advanceTimeBy(coordinator.lastLanBackoffMs + 1)
+            runCurrent()
+            assertEquals(RouteKind.RELAY, coordinator.health.value.active)
+            val waited = coordinator.lastLanBackoffMs
+            // Bounded by one period instead of climbing to five minutes. That the boundary itself
+            // is one both phones compute alike is pinned by the nextRendezvousAt tests above.
+            assertTrue(waited in 1..period, "tail should stay inside one period, was $waited")
         }
         job.cancelAndJoin()
     }

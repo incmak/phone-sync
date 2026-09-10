@@ -1533,7 +1533,13 @@ class SyncService : Service(), CallMirrorForegroundHost {
                 materializationRequester = MaterializationRequester { requestPendingMaterialization(MaterializationTrigger.ROUTINE) },
                 peerControlOutbox = peerControls,
                 relayAttachProcessor = buildRelayAttachProcessor(peer.peerLinkId),
-                requestDirectAttempt = { directAttemptRequests.tryEmit(Unit) },
+                requestDirectAttempt = {
+                    // tryEmit drops the value when no coordinator is collecting, which is exactly
+                    // when a peer has just changed networks and the local coordinator is between
+                    // sessions. Record whether it landed so a capture can tell the two apart.
+                    val delivered = directAttemptRequests.tryEmit(Unit)
+                    android.util.Log.w("Twinotify", "direct_request_received:delivered=$delivered")
+                },
                 requestRouteReload = routePreferenceRestarter::forceRestart,
                 peerLinkId = peer.peerLinkId,
             )
