@@ -6,6 +6,11 @@ import javax.net.ssl.SSLContext
 import java.net.ServerSocket
 import javax.net.ssl.SSLSocket
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.currentCoroutineContext
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +61,8 @@ class DirectLanConnector(
      * open forever and the coordinator could never fall back to the relay.
      */
     private val connectTimeoutMillis: Long = DEFAULT_CONNECT_TIMEOUT_MILLIS,
+    /** How long a handshake already in flight at the ceiling may take to finish. */
+    private val handshakeGraceMillis: Long = DEFAULT_HANDSHAKE_GRACE_MILLIS,
 ) {
     init {
         require(localDeviceId != peerDeviceId) { "lan_identity_collision" }
@@ -63,12 +70,27 @@ class DirectLanConnector(
         require(fallbackDialDelayMillis >= 0)
         require(preferredConnectionWaitMillis >= arbitrationGraceMillis)
         require(connectTimeoutMillis > fallbackDialDelayMillis + preferredConnectionWaitMillis)
+        require(handshakeGraceMillis > 0)
     }
 
     private val preferredInitiatorDeviceId = minOf(localDeviceId, peerDeviceId)
 
     suspend fun connect(): AuthenticatedLanConnection = try {
-        withTimeout(connectTimeoutMillis) {
+        // The ceiling stops *admitting* connections; it does not cancel a handshake in flight.
+        //
+        // Measured on hardware: the returning phone's inbound connection authenticated 700ms
+        // before this side's ceiling expired, and the expiry tore it down -- the pair met
+        // inside the window and the window's end killed it. So at the ceiling the listener and
+        // discovery close (nothing new can start), a dial that has not yet found a candidate is
+        // cancelled, and anything already past a socket finishes under its own handshake
+        // bound. An idle attempt still fails at the ceiling; only one that is mid-handshake
+        // gets the grace, and the hard cap below guarantees termination regardless.
+        val deadlineFired = AtomicBoolean(false)
+        // Completed at the ceiling. A dial still waiting for a candidate gives up by *failing*,
+        // never by being cancelled: a cancelled Deferred makes the race throw a cancellation
+        // while the inbound handshake is still running, which is the exact case being kept.
+        val abandonDial = CompletableDeferred<Unit>()
+        withTimeout(connectTimeoutMillis + handshakeGraceMillis) {
             coroutineScope {
                 // Each side reports its own outcome, so one failing does not cancel the
                 // other. A refused dial must still let an inbound connection land.
@@ -80,11 +102,45 @@ class DirectLanConnector(
                     if (localDeviceId != preferredInitiatorDeviceId) {
                         delay(fallbackDialDelayMillis)
                     }
-                    attempt { dialer.dial(discovery.candidates().first()) }
+                    attempt {
+                        val candidate = coroutineScope {
+                            val found = async { discovery.candidates().first() }
+                            try {
+                                select<LanCandidate?> {
+                                    found.onAwait { it }
+                                    abandonDial.onAwait { null }
+                                }
+                            } finally {
+                                found.cancel()
+                            }
+                        } ?: throw LanConnectionException(LanConnectionFailure.TIMEOUT)
+                        dialer.dial(candidate)
+                    }
+                }
+                val deadline = launch {
+                    delay(connectTimeoutMillis)
+                    deadlineFired.set(true)
+                    runCatching { closeListener() }
+                    runCatching { closeDiscovery() }
+                    abandonDial.complete(Unit)
                 }
                 try {
-                    race(inbound, outbound)
+                    try {
+                        race(inbound, outbound)
+                    } catch (error: CancellationException) {
+                        // A branch this scope cancelled at the ceiling surfaces here as a
+                        // cancellation; the scope's own cancellation must still propagate.
+                        if (!currentCoroutineContext().isActive) throw error
+                        throw LanConnectionException(LanConnectionFailure.TIMEOUT)
+                    } catch (error: Exception) {
+                        // Once the ceiling has fired, whatever the branches report -- a listener
+                        // closed by it, an abandoned dial -- describes the expiry, and the caller
+                        // and the route trace expect the stable timeout code for it.
+                        if (deadlineFired.get()) throw LanConnectionException(LanConnectionFailure.TIMEOUT)
+                        throw error
+                    }
                 } finally {
+                    deadline.cancel()
                     withContext(NonCancellable) {
                         inbound.cancel()
                         outbound.cancel()
@@ -160,6 +216,9 @@ class DirectLanConnector(
         const val DEFAULT_FALLBACK_DIAL_DELAY_MILLIS = 4_000L
         const val DEFAULT_PREFERRED_CONNECTION_WAIT_MILLIS = 6_000L
         const val DEFAULT_CONNECT_TIMEOUT_MILLIS = 15_000L
+
+        /** Matches the TLS/hello handshake bound, so an in-flight handshake always resolves first. */
+        const val DEFAULT_HANDSHAKE_GRACE_MILLIS = 10_000L
     }
 }
 

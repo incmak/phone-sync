@@ -275,6 +275,69 @@ class DirectLanConnectorTest {
         assertEquals(LanConnectionFailure.TIMEOUT, error.failure)
     }
 
+    @Test
+    fun aHandshakeInFlightAtTheCeilingIsAllowedToFinish() = runTest {
+        // Measured on hardware: the peer's inbound connection authenticated 700ms before this
+        // side's ceiling expired, and the expiry tore it down. The ceiling must stop admitting
+        // new connections, not kill one that is already past a socket.
+        val connector = DirectLanConnector(
+            discovery = object : LanDiscovery {
+                override fun candidates(): Flow<LanCandidate> = emptyFlow()
+                override suspend fun close() = Unit
+            },
+            listener = listener {
+                delay(800)
+                connection(PEER)
+            },
+            dialer = { awaitCancellation() },
+            localDeviceId = LOCAL,
+            peerDeviceId = PEER,
+            arbitrationGraceMillis = 50,
+            fallbackDialDelayMillis = 0,
+            preferredConnectionWaitMillis = 50,
+            connectTimeoutMillis = 500,
+            handshakeGraceMillis = 1_000,
+        )
+
+        val connection = connector.connect()
+        assertEquals(PEER, connection.session.initiatorDeviceId)
+        assertTrue(testScheduler.currentTime >= 800, "the handshake was allowed to finish past the ceiling")
+    }
+
+    @Test
+    fun anIdleAttemptStillFailsAtTheCeilingNotTheHardCap() = runTest {
+        // The grace is only for a handshake in flight. With nothing accepted and no candidate
+        // found, the ceiling closes the listener, the accept fails, and the attempt reports the
+        // stable timeout code at the ceiling -- so the retry cadence the coordinator assumes holds.
+        val closed = CompletableDeferred<Unit>()
+        val connector = DirectLanConnector(
+            // Real discovery is a state flow that never completes; it waits for a candidate.
+            discovery = object : LanDiscovery {
+                override fun candidates(): Flow<LanCandidate> = kotlinx.coroutines.flow.flow { awaitCancellation() }
+                override suspend fun close() = Unit
+            },
+            listener = object : LanListener {
+                override suspend fun accept(): AuthenticatedLanConnection {
+                    closed.await()
+                    throw LanConnectionException(LanConnectionFailure.CLOSED)
+                }
+                override fun close() { closed.complete(Unit) }
+            },
+            dialer = { awaitCancellation() },
+            localDeviceId = LOCAL,
+            peerDeviceId = PEER,
+            arbitrationGraceMillis = 50,
+            fallbackDialDelayMillis = 0,
+            preferredConnectionWaitMillis = 50,
+            connectTimeoutMillis = 500,
+            handshakeGraceMillis = 10_000,
+        )
+
+        val error = assertFailsWith<LanConnectionException> { connector.connect() }
+        assertEquals(LanConnectionFailure.TIMEOUT, error.failure)
+        assertTrue(testScheduler.currentTime < 1_000, "an idle attempt must fail at the ceiling, was ${testScheduler.currentTime}")
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     private fun connector(
