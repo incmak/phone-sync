@@ -416,7 +416,13 @@ class DurableCapturePersister(context: Context, private val selectedPeerLinkId: 
         val peer = PeerStore.load(appContext, selectedPeerLinkId)
             ?: throw CaptureNotPairedException("control event deferred until a peer is paired")
         val createdAt = System.currentTimeMillis().coerceAtLeast(0L)
-        val expiresAt = createdAt + RETENTION_MS
+        // Repair traffic is ephemeral: a snapshot older than the receiver's staging window can
+        // never be applied, and the next digest exchange regenerates it anyway. Giving it the
+        // full retention let undeliverable repair rows sit for a day and pin the control budget.
+        // Measured on a paired phone: 32MB of them, every inbound deferred, and a relay mailbox
+        // that stayed full because the receipts it needed could not be written.
+        val ttl = if (type in REPAIR_CONTROL_TYPES) REPAIR_CONTROL_TTL_MS else RETENTION_MS
+        val expiresAt = createdAt + ttl
         val msgId = UUID.randomUUID().toString()
         val inner = InnerEventV2(msgId, originDevice, type, canonId, sequence, createdAt, expiresAt, payloadJson)
         val (box, _) = CryptoStore.loadOrGenerate(appContext)
@@ -497,6 +503,14 @@ class DurableCapturePersister(context: Context, private val selectedPeerLinkId: 
 
     companion object {
         private const val RETENTION_MS = 24 * 60 * 60 * 1_000L
+
+        /** Anti-entropy control rows; regenerated every digest interval, useless once stale. */
+        private val REPAIR_CONTROL_TYPES = setOf(
+            "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end",
+        )
+
+        /** Matches the receiver's snapshot staging window; a late item is unusable past it anyway. */
+        private const val REPAIR_CONTROL_TTL_MS = 10 * 60 * 1_000L
     }
 }
 

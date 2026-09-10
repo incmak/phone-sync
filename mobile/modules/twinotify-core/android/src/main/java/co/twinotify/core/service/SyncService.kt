@@ -1625,9 +1625,14 @@ class SyncService : Service(), CallMirrorForegroundHost {
                         onEvent = { event ->
                             when (event) {
                                 TransportEvent.LegacyOnlineOnly -> SyncServiceStatus.setPeerProtocolFloor(peer.peerLinkId, 1, routeGeneration)
-                                is TransportEvent.LegacyForwarded,
-                                is TransportEvent.RelayRejected,
-                                -> updateQueueHealthNow()
+                                is TransportEvent.LegacyForwarded -> updateQueueHealthNow()
+                                is TransportEvent.RelayRejected -> {
+                                    // A bounded relay code only. Rejections were invisible, and a
+                                    // mailbox_full from the peer's side is what pins this device's
+                                    // outbox: the row is retained and retried by design.
+                                    android.util.Log.w("Twinotify", "relay_rejected:${event.reason.take(32)}")
+                                    updateQueueHealthNow()
+                                }
                                 is TransportEvent.RelayAccepted -> {
                                     recordRelayCustodyObservation(event)
                                     acceptRelayUnpairCustody(event, unpairCustodyTracker)
