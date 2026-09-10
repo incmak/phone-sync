@@ -14,6 +14,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -143,10 +144,16 @@ class DirectDelivery(
             }
         }
         try {
-            wire.incoming.buffer(capacity = 0).collect { command ->
-                // Any frame proves the peer is alive, so liveness is tracked here rather than
-                // only on Pong: a busy session that is delivering never needs to be pinged.
-                lastInboundAt.set(clock())
+            // Liveness is stamped as each frame is read off the wire, upstream of the buffer,
+            // not as the processor gets to it. The first version stamped in the collector, and a
+            // freshly reconnected pair flushing its backlog kept the processor waiting behind the
+            // writer for longer than the window, so a healthy link was closed 14s after it came
+            // up. The small lookahead lets the reader keep taking pongs while the processor is
+            // busy; every frame is size-capped, so the bound on memory is unchanged in kind.
+            wire.incoming
+                .onEach { lastInboundAt.set(clock()) }
+                .buffer(capacity = INBOUND_LOOKAHEAD_FRAMES)
+                .collect { command ->
                 when (command) {
                     is DirectCommand.Put -> {
                         val outcome = commitInbound(command)
@@ -184,7 +191,12 @@ class DirectDelivery(
 
     private companion object {
         const val DEFAULT_HEARTBEAT_INTERVAL_MILLIS = 3_000L
-        const val LIVENESS_INTERVALS = 4
+
+        /** Silent heartbeat intervals before a peer is treated as gone: 18s at the default. */
+        const val LIVENESS_INTERVALS = 6
+
+        /** Frames the reader may take ahead of the processor; enough to keep hearing pings. */
+        const val INBOUND_LOOKAHEAD_FRAMES = 16
     }
 
     /** Not a coroutine cancellation: it unwinds one collect to end one session. */

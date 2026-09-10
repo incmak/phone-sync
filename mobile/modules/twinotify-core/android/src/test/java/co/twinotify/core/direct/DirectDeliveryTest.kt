@@ -252,7 +252,7 @@ class DirectDeliveryTest {
         val collected = collectEvents(delivery)
 
         // Pings keep going out, but nothing ever comes back.
-        advanceTimeBy(13_000)
+        advanceTimeBy(22_000)
         runCurrent()
         assertTrue(wire.written.filterIsInstance<DirectCommand.Ping>().isNotEmpty())
         val events = collected.await()
@@ -278,13 +278,50 @@ class DirectDeliveryTest {
         )
         val collected = collectEvents(delivery)
 
-        // Four silent intervals must elapse in full; the fifth tick is the first that trips it.
-        advanceTimeBy(16_000)
+        // Six silent intervals must elapse in full; the seventh tick is the first that trips it.
+        advanceTimeBy(22_000)
         runCurrent()
         assertTrue(wire.closes > 0, "liveness must close the wire even while a write is stuck")
         wire.releaseWrites()
         val events = collected.await()
         assertTrue(events.last() is DirectDeliveryEvent.Closed)
+    }
+
+    @Test
+    fun aBusyProcessorDoesNotMakeAnAnsweringPeerLookDead() = runTest {
+        // The regression the first liveness stamp caused. A freshly reconnected pair flushes its
+        // backlog, the inbound processor waits behind the writer, and for longer than the
+        // window no frame is *processed* -- while the peer is answering every ping. Liveness is
+        // stamped as frames arrive, so a stalled processor must never end a live link.
+        val stall = CompletableDeferred<Unit>()
+        val wire = FakeWire()
+        val delivery = DirectDelivery(
+            wire = wire,
+            outbox = outbox(FakeStore()),
+            custodyRoute = CustodyRoute.LAN,
+            clock = { testScheduler.currentTime },
+            dispatch = {
+                stall.await()
+                InboundDispatchResult.Accepted(MSG_A, DIGEST_A)
+            },
+        )
+        val collector = backgroundScope.launch { delivery.run().toList() }
+
+        // The processor parks inside dispatch on this Put and stays there.
+        wire.deliver(DirectCommand.Put("{\"v\":2}".encodeToByteArray()))
+        runCurrent()
+        // Meanwhile the peer keeps answering, well past the liveness window.
+        repeat(12) {
+            advanceTimeBy(3_000)
+            runCurrent()
+            wire.deliver(DirectCommand.Pong(1))
+            runCurrent()
+        }
+
+        assertTrue(collector.isActive, "an answering peer must not be dropped because the processor is busy")
+        assertEquals(0, wire.closes)
+        stall.complete(Unit)
+        collector.cancel()
     }
 
     @Test
