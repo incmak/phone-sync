@@ -39,6 +39,15 @@ class DirectDelivery(
     private val outbox: OutboxRepository,
     private val custodyRoute: CustodyRoute,
     private val heartbeatIntervalMillis: Long = DEFAULT_HEARTBEAT_INTERVAL_MILLIS,
+    /**
+     * How long a session may hear nothing at all before it is treated as dead.
+     *
+     * Several heartbeat intervals, so an ordinary stalled write or a slow link does not end a
+     * healthy session, while a peer that has genuinely vanished is noticed in seconds rather
+     * than never.
+     */
+    private val livenessTimeoutMillis: Long = heartbeatIntervalMillis * LIVENESS_INTERVALS,
+    private val clock: () -> Long = { System.currentTimeMillis() },
     private val dispatch: suspend (String) -> InboundDispatchResult,
 ) {
     init {
@@ -46,6 +55,9 @@ class DirectDelivery(
             "direct delivery requires a direct custody route"
         }
         require(heartbeatIntervalMillis > 0)
+        require(livenessTimeoutMillis > heartbeatIntervalMillis) {
+            "liveness must outlast a single heartbeat"
+        }
     }
 
     val peerDeviceId: String get() = wire.peerDeviceId
@@ -59,6 +71,9 @@ class DirectDelivery(
     private val inFlight = Collections.synchronizedMap(HashMap<String, InFlight>())
 
     private val started = AtomicBoolean(false)
+
+    /** When the peer last proved it was there. Any inbound frame counts. */
+    private val lastInboundAt = java.util.concurrent.atomic.AtomicLong(clock())
 
     /**
      * Write one stored row to the peer, byte-for-byte as persisted. Returns only once
@@ -98,6 +113,16 @@ class DirectDelivery(
             var token = 0L
             while (isActive) {
                 delay(heartbeatIntervalMillis)
+                // A phone that walks off the Wi-Fi never sends a FIN, so the socket stays
+                // writable on this side and only the missing answers reveal that nobody is
+                // there. Without this the surviving half held the session open indefinitely,
+                // and because it was carrying a granted direct route it stopped listening
+                // too: measured on hardware, the returning phone knocked every 60s for over
+                // eight minutes against a peer that had been silent since it left.
+                if (clock() - lastInboundAt.get() > livenessTimeoutMillis) {
+                    wire.close()
+                    return@launch
+                }
                 try {
                     wire.send(DirectCommand.Ping(token++))
                 } catch (error: CancellationException) {
@@ -111,6 +136,9 @@ class DirectDelivery(
         }
         try {
             wire.incoming.buffer(capacity = 0).collect { command ->
+                // Any frame proves the peer is alive, so liveness is tracked here rather than
+                // only on Pong: a busy session that is delivering never needs to be pinged.
+                lastInboundAt.set(clock())
                 when (command) {
                     is DirectCommand.Put -> {
                         val outcome = commitInbound(command)
@@ -123,6 +151,8 @@ class DirectDelivery(
                         if (outcome != null) events.send(outcome)
                     }
                     is DirectCommand.Ping -> wire.send(DirectCommand.Pong(command.token))
+                    // The answer's only job is to prove the peer is there, which the
+                    // timestamp above has already recorded.
                     is DirectCommand.Pong -> Unit
                     is DirectCommand.Close -> throw SessionEnd(DirectDeliveryEvent.Closed(command.code))
                 }
@@ -145,6 +175,7 @@ class DirectDelivery(
 
     private companion object {
         const val DEFAULT_HEARTBEAT_INTERVAL_MILLIS = 3_000L
+        const val LIVENESS_INTERVALS = 4
     }
 
     /** Not a coroutine cancellation: it unwinds one collect to end one session. */

@@ -235,6 +235,59 @@ class DirectDeliveryTest {
     }
 
     @Test
+    fun aSilentPeerEndsTheSessionInsteadOfHoldingItOpenForever() = runTest {
+        // A phone that walks off the Wi-Fi never sends a FIN, so this side stays writable and
+        // only the missing answers reveal that nobody is there. Holding the session open also
+        // stops this half listening, because it is carrying a granted direct route, so the peer
+        // can never reconnect: measured on hardware as a phone knocking every 60s for over
+        // eight minutes against a peer silent since it left.
+        val wire = FakeWire()
+        val delivery = DirectDelivery(
+            wire = wire,
+            outbox = outbox(FakeStore()),
+            custodyRoute = CustodyRoute.LAN,
+            clock = { testScheduler.currentTime },
+            dispatch = { InboundDispatchResult.Accepted(MSG_A, DIGEST_A) },
+        )
+        val collected = collectEvents(delivery)
+
+        // Pings keep going out, but nothing ever comes back.
+        advanceTimeBy(13_000)
+        runCurrent()
+        assertTrue(wire.written.filterIsInstance<DirectCommand.Ping>().isNotEmpty())
+        val events = collected.await()
+
+        assertTrue(events.last() is DirectDeliveryEvent.Closed, "a silent peer must end the session")
+        assertTrue(wire.closes > 0, "the wire must be closed so the route can be reopened")
+    }
+
+    @Test
+    fun anAnsweringPeerKeepsTheSessionAliveIndefinitely() = runTest {
+        // The converse, so the timeout cannot be tightened into killing healthy sessions: a peer
+        // that answers is never treated as gone, however long the session runs.
+        val wire = FakeWire()
+        val delivery = DirectDelivery(
+            wire = wire,
+            outbox = outbox(FakeStore()),
+            custodyRoute = CustodyRoute.LAN,
+            clock = { testScheduler.currentTime },
+            dispatch = { InboundDispatchResult.Accepted(MSG_A, DIGEST_A) },
+        )
+        val collector = backgroundScope.launch { delivery.run().toList() }
+
+        repeat(10) {
+            advanceTimeBy(4_000)
+            runCurrent()
+            wire.deliver(DirectCommand.Pong(1))
+            runCurrent()
+        }
+
+        assertTrue(collector.isActive, "an answering peer must not be dropped")
+        assertEquals(0, wire.closes)
+        collector.cancel()
+    }
+
+    @Test
     fun digestConflictEmitsNoAcceptanceAndClosesWithAStableCode() = runTest {
         val wire = FakeWire()
         val delivery = delivery(wire) { InboundDispatchResult.Rejected("id_conflict") }
