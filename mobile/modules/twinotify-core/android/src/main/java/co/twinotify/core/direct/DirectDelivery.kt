@@ -115,7 +115,7 @@ class DirectDelivery(
                     is DirectCommand.Put -> {
                         val outcome = commitInbound(command)
                         if (outcome is DirectDeliveryEvent.Closed) throw SessionEnd(outcome)
-                        events.send(outcome)
+                        if (outcome != null) events.send(outcome)
                     }
                     is DirectCommand.Accepted -> {
                         val outcome = accept(command)
@@ -154,8 +154,11 @@ class DirectDelivery(
      * Commit one inbound envelope, then acknowledge it. The acknowledgement is written
      * only after [dispatch] returns, which is after its Room transaction boundary, so a
      * peer is never told to release a row we have not durably stored.
+     *
+     * Returns null when the dispatcher deferred: nothing is acknowledged and the session is
+     * kept, so the peer still holds the row and retries it on a later pass.
      */
-    private suspend fun commitInbound(command: DirectCommand.Put): DirectDeliveryEvent {
+    private suspend fun commitInbound(command: DirectCommand.Put): DirectDeliveryEvent? {
         val envelope = command.envelope.decodeToString()
         val result = try {
             dispatch(envelope)
@@ -188,6 +191,8 @@ class DirectDelivery(
                 wire.send(DirectCommand.Close(result.code))
                 DirectDeliveryEvent.Closed(result.code)
             }
+            // No acknowledgement and no close: custody is unproven but the route is healthy.
+            is InboundDispatchResult.Deferred -> null
         }
     }
 

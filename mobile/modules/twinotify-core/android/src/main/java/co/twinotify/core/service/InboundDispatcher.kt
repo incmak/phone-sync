@@ -84,6 +84,17 @@ sealed interface InboundDispatchResult {
         }
     }
     data class Rejected(val code: String) : InboundDispatchResult
+
+    /**
+     * The message is well formed but this device cannot take custody right now.
+     *
+     * Distinct from [Rejected], which says the message itself is unacceptable and ends the
+     * session. A deferral is local and recoverable, so it must neither acknowledge nor close:
+     * the sender keeps the row, the route stays up, and the outbox that is currently full gets
+     * the chance to drain. Closing instead is what turned a full queue into a livelock, because
+     * the session died before its pump ran and the redelivery failed identically.
+     */
+    data class Deferred(val code: String) : InboundDispatchResult
 }
 
 sealed interface DirectControlProcessingResult {
@@ -792,7 +803,14 @@ class InboundDispatcher internal constructor(
     suspend fun dispatch(raw: String): InboundDispatchResult {
         val parsed = runCatching { JSONObject(raw) }.getOrNull()
         if (parsed?.optInt("v", 1) == ProtocolJson.VERSION) {
-            return dispatchV2(raw)
+            // A full outbox is a local, recoverable condition, so it defers instead of failing
+            // the session closed. Every other fault still propagates to the fail-closed boundary.
+            return try {
+                dispatchV2(raw)
+            } catch (_: co.twinotify.core.storage.OutboundCapacityException) {
+                android.util.Log.w("Twinotify", "inbound_deferred:outbound_capacity")
+                InboundDispatchResult.Deferred("outbound_capacity")
+            }
         }
         dispatchV1(raw)
         // v1 has no authenticated msg_id or digest to acknowledge. It stays a

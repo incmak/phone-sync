@@ -608,6 +608,11 @@ class LiveRelayTransportRoute(
                                 closed.complete("inbound_rejected")
                                 throw IllegalStateException("inbound_rejected")
                             }
+                            // A deferral leaves the row unacknowledged in the relay mailbox and
+                            // keeps this session, so the outbox it could not fit into can drain.
+                            if (result is InboundDispatchResult.Deferred) {
+                                runCatching { Log.w("Twinotify", "relay_inbound_deferred:${result.code}") }
+                            }
                         }
                         is TransportEvent.Authenticated -> {
                             hooks.onAuthenticated(event.floor, event.peerFeatures)

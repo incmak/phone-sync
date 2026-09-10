@@ -202,6 +202,39 @@ class DirectDeliveryTest {
     }
 
     @Test
+    fun deferredInboundEmitsNoAcceptanceAndKeepsTheSessionCarryingLaterFrames() = runTest {
+        // A full outbox must not end an authenticated route. Closing here is what turned a
+        // capacity failure into a livelock: the session died before its pump could drain, and
+        // the redelivered frame failed identically on every reconnect.
+        val wire = FakeWire()
+        var dispatches = 0
+        val delivery = delivery(wire) {
+            dispatches += 1
+            if (dispatches == 1) {
+                InboundDispatchResult.Deferred("outbound_capacity")
+            } else {
+                InboundDispatchResult.Accepted(MSG_A, DIGEST_A)
+            }
+        }
+        val collected = collectEvents(delivery)
+
+        wire.deliver(DirectCommand.Put("{\"v\":2}".encodeToByteArray()))
+        // The route is still live, so the very next frame is carried on the same session.
+        wire.deliver(DirectCommand.Put("{\"v\":2}".encodeToByteArray()))
+        wire.closeSession()
+        val events = collected.await()
+
+        assertEquals(2, dispatches)
+        // The deferred frame is neither acknowledged nor answered with a close.
+        // Only the second frame is answered: the deferred one gets neither an acceptance
+        // nor a Close, so the peer keeps the row and the route stays usable.
+        assertEquals(DirectCommand.Accepted(MSG_A, DIGEST_A), wire.written.single())
+        assertTrue(wire.written.none { it is DirectCommand.Close })
+        assertTrue(events.none { it is DirectDeliveryEvent.Closed && it.code == "dispatch_failed" })
+        assertEquals(DirectDeliveryEvent.Committed(MSG_A, duplicate = false), events.filterIsInstance<DirectDeliveryEvent.Committed>().single())
+    }
+
+    @Test
     fun digestConflictEmitsNoAcceptanceAndClosesWithAStableCode() = runTest {
         val wire = FakeWire()
         val delivery = delivery(wire) { InboundDispatchResult.Rejected("id_conflict") }

@@ -64,7 +64,9 @@ class MultiPeerStorageTest {
 
     @Test fun capacityFailureForSecondRecipientRollsBackFirstAndCanonicalSequence(): Unit = runBlocking {
         preparePeers()
-        dao.insertOutbound(row("blocker", "phone-link", 1).copy(canonId = "other", byteSize = MAX_OUTBOUND_BYTES - 3))
+        // Saturate the second recipient's own share: a blocker on the first link no longer
+        // starves the second now that each peer is admitted against its own budget.
+        dao.insertOutbound(row("blocker", "mac-link", 1).copy(canonId = "other", byteSize = MAX_OUTBOUND_BYTES_PER_PEER - 1))
         assertFailsWith<OutboundCapacityException> {
             dao.commitCapturedFanout(state(1), listOf(row("phone-message", "phone-link", 1), row("mac-message", "mac-link", 1)))
         }
@@ -112,7 +114,10 @@ class MultiPeerStorageTest {
     @Test fun sourceCancelCapacityFailureRollsBackJournalDesiredAndAllRecipients(): Unit = runBlocking {
         preparePeers()
         dao.commitCapturedFanout(state(1), listOf(row("phone-post", "phone-link", 1), row("mac-post", "mac-link", 1)))
-        dao.insertOutbound(row("blocker", "phone-link", 1).copy(canonId = "other", byteSize = MAX_OUTBOUND_BYTES - 5))
+        // Sized against the post-compaction state: the commit deletes each peer's obsolete post
+        // before staging its cancel, so only this blocker still occupies mac-link's share and it
+        // leaves room for less than one staged cancel.
+        dao.insertOutbound(row("blocker", "mac-link", 1).copy(canonId = "other", byteSize = MAX_OUTBOUND_BYTES_PER_PEER - 2))
         assertFailsWith<OutboundCapacityException> {
             dao.commitOriginCancelRequest(cancelRequest(), 2, 1, "local",
                 state(3).copy(state = "CANCELLED", desiredPayloadJson = null, materializedSequence = 1),
@@ -183,6 +188,50 @@ class MultiPeerStorageTest {
         repeat(3) { dao.beginSnapshot("other-$it", "mac", 0, 1, peerLinkId = "mac-link") }
         assertFailsWith<IllegalStateException> { dao.beginSnapshot("fifth", "mac", 0, 1, peerLinkId = "mac-link") }
         assertTrue(dao.snapshotRows("fifth", "mac-link").isEmpty())
+    }
+
+    @Test fun aSaturatedUserQueueStillAdmitsTheReceiptThatWouldDrainIt(): Unit = runBlocking {
+        // The deadlock this pins: a peer receipt is what retires an outbound row, so refusing one
+        // at the cap means the queue can never drain and every redelivery fails identically.
+        preparePeers()
+        dao.insertOutbound(row("blocker", "phone-link", 1).copy(byteSize = MAX_OUTBOUND_BYTES_PER_PEER))
+        assertFailsWith<OutboundCapacityException> {
+            dao.insertOutbound(row("more-user-content", "phone-link", 2).copy(byteSize = 1))
+        }
+        val receipt = row("receipt", "phone-link", 3)
+            .copy(eventType = "peer.receipt", requiresPeerReceipt = false, byteSize = 1)
+        dao.insertOutbound(receipt)
+        assertEquals(receipt, dao.outboundMessage("receipt"))
+    }
+
+    @Test fun aPeerThatSaturatesItsShareCannotStarveAnother(): Unit = runBlocking {
+        // A laptop asleep for a weekend used to consume the whole device budget, because nothing
+        // releases a row until that peer confirms it, and every other pairing then queued behind it.
+        preparePeers()
+        dao.insertOutbound(row("mac-blocker", "mac-link", 1).copy(byteSize = MAX_OUTBOUND_BYTES_PER_PEER))
+        assertFailsWith<OutboundCapacityException> {
+            dao.insertOutbound(row("mac-more", "mac-link", 2).copy(byteSize = 1))
+        }
+        val unaffected = row("phone-message", "phone-link", 1).copy(byteSize = 1)
+        dao.insertOutbound(unaffected)
+        assertEquals(unaffected, dao.outboundMessage("phone-message"))
+    }
+
+    @Test fun theControlReserveIsACeilingAndNotAnExemption(): Unit = runBlocking {
+        preparePeers()
+        dao.insertOutbound(row("blocker", "phone-link", 1).copy(byteSize = MAX_OUTBOUND_BYTES_PER_PEER))
+        // Control rows draw on bounded headroom above the user cap, so a runaway control writer
+        // is still refused rather than growing the queue without limit.
+        dao.insertOutbound(
+            row("control-fills-reserve", "phone-link", 2)
+                .copy(eventType = "peer.receipt", requiresPeerReceipt = false, byteSize = MAX_OUTBOUND_CONTROL_RESERVE_BYTES),
+        )
+        assertFailsWith<OutboundCapacityException> {
+            dao.insertOutbound(
+                row("control-overflow", "phone-link", 3)
+                    .copy(eventType = "peer.receipt", requiresPeerReceipt = false, byteSize = 1),
+            )
+        }
     }
 
     private fun cancelRequest() = InboundMessage("request", "phone", "request-digest", "notif.cancel", "canon", 3,

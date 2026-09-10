@@ -551,7 +551,7 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
-    fun localExpiryTerminalizesOnlyKnownNoRelayRowsOnceAndPreservesRemainingOrder() = runBlocking {
+    fun localExpiryTerminalizesEveryRowPastItsTtlOnceAndPreservesRemainingOrder() = runBlocking {
         dao.insertOutbound(outbound("new-expired", 1, "notif.post").copy(createdAt = 7, expiresAt = 1_000))
         dao.insertOutbound(outbound("relay-expired", 2, "notif.post").copy(createdAt = 7, expiresAt = 999))
         dao.acceptCustody("relay-expired", CustodyRoute.RELAY.name, acceptedAt = 100, retryAt = 200)
@@ -567,15 +567,19 @@ class ReliableDeliveryTransactionTest {
         ))
         dao.insertOutbound(outbound("fresh", 5, "notif.post").copy(createdAt = 7, expiresAt = 1_001))
 
-        assertEquals(2, dao.expireLocal(now = 1_000))
+        // A row past its own TTL is reclaimed whatever the relay holds. Leaving relay-held rows
+        // active let a peer that stayed away pin the outbound budget forever, since only that
+        // peer's receipt could release one.
+        assertEquals(4, dao.expireLocal(now = 1_000))
         assertEquals(0, dao.expireLocal(now = 1_000))
         assertEquals(
-            listOf("relay-expired", "unknown-expired", "fresh"),
+            listOf("fresh"),
             dao.sendable(now = 1_000, limit = 10).map { it.msgId },
         )
         db.openHelper.readableDatabase.query(
             "SELECT msgId,eventType,status,detailCode FROM activity_event " +
-                "WHERE msgId IN ('new-expired','lan-expired') ORDER BY occurredAt,msgId",
+                "WHERE msgId IN ('new-expired','lan-expired','relay-expired','unknown-expired') " +
+                "ORDER BY occurredAt,msgId",
         ).use { activities ->
             val observed = buildList {
                 while (activities.moveToNext()) {
@@ -586,6 +590,8 @@ class ReliableDeliveryTransactionTest {
                 listOf(
                     listOf("lan-expired", "delivery.expired", "expired", "local_expired"),
                     listOf("new-expired", "delivery.expired", "expired", "local_expired"),
+                    listOf("relay-expired", "delivery.expired", "expired", "local_expired"),
+                    listOf("unknown-expired", "delivery.expired", "expired", "local_expired"),
                 ),
                 observed,
             )

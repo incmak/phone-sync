@@ -23,6 +23,50 @@ import org.json.JSONObject
 internal const val MAX_OUTBOUND_MESSAGES = 2_000
 internal const val MAX_OUTBOUND_BYTES = 128L * 1024L * 1024L
 
+/**
+ * The control-row budget, held separately from the user-content cap.
+ *
+ * A peer receipt is what retires an outbound row, so refusing one at the cap is a deadlock: the
+ * queue cannot drain because the acknowledgement that would drain it cannot be written, and every
+ * redelivery of that inbound message fails the same way. Observed on hardware as a relay session
+ * that authenticated and died on [OutboundCapacityException] every ~7 seconds indefinitely.
+ *
+ * Control rows are bounded by inbound messages in flight and are two orders of magnitude smaller
+ * than a mirrored notification, so this reserve stays small while remaining a hard ceiling: it is
+ * headroom beside the user cap, never an exemption from accounting.
+ *
+ * Held per peer, not per device: a shared reserve would let one busy pairing exhaust it and
+ * re-create the same deadlock for every other pairing's receipts.
+ */
+internal const val MAX_OUTBOUND_CONTROL_RESERVE = 256
+internal const val MAX_OUTBOUND_CONTROL_RESERVE_BYTES = 8L * 1024L * 1024L
+
+/**
+ * The largest share of the user-content budget any one peer may hold.
+ *
+ * The device-wide cap alone lets a peer that is simply away — a laptop asleep for a weekend —
+ * consume the entire budget and starve every other pairing, because nothing releases a row until
+ * that peer confirms it. Half is the smallest share that keeps the guarantee easy to state: no
+ * single peer can take more than half, so at least half always remains for the others.
+ */
+internal const val MAX_OUTBOUND_MESSAGES_PER_PEER = MAX_OUTBOUND_MESSAGES / 2
+internal const val MAX_OUTBOUND_BYTES_PER_PEER = MAX_OUTBOUND_BYTES / 2
+
+/**
+ * Event types that carry user content and are therefore admitted only below the user cap.
+ * Everything else is a control row and draws on the reserve instead.
+ *
+ * Kept as one compile-time constant because Room needs literal SQL and the list previously
+ * appeared verbatim in several queries, where a divergence would silently reclassify a row.
+ */
+internal const val USER_CONTENT_EVENT_TYPES =
+    "'notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result'," +
+        "'call.state','call.control.invoke','call.control.result'"
+
+/** The same classification [USER_CONTENT_EVENT_TYPES] applies in SQL, derived from it so the two cannot drift. */
+internal val USER_CONTENT_EVENT_TYPE_SET: Set<String> =
+    USER_CONTENT_EVENT_TYPES.split(',').map { it.trim().trim('\'') }.toSet()
+
 class OutboundCapacityException : IllegalStateException("outbound_capacity")
 
 internal fun isNotificationSnapshotCanonical(canonId: String): Boolean = !canonId.startsWith("call:")
@@ -639,16 +683,31 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Query("SELECT peerLinkId FROM peer_link WHERE lifecycle='ACTIVE' ORDER BY peerLinkId")
     protected abstract suspend fun activePeerLinkIds(): List<String>
 
-    /** Every writer shares atomic device-wide admission; no accepted row is evicted. */
+    /**
+     * Every writer shares one atomic admission decision; no accepted row is evicted.
+     *
+     * User content is admitted below the device cap and below its peer's share of it, so a peer
+     * that is merely away cannot starve the others. Control rows draw on a separate per-peer
+     * [MAX_OUTBOUND_CONTROL_RESERVE], so a queue saturated with mirrored notifications can still
+     * write the receipt that retires one. Every budget is a hard ceiling; the reserve is separate
+     * accounting, not an exemption.
+     */
     @Transaction
     open suspend fun insertOutbound(row: OutboundMessage) {
         if (row.peerLinkId != LEGACY_PEER_LINK_ID) {
             check(deliveryPeerLink(row.peerLinkId)?.lifecycle == "ACTIVE") { "peer_link_inactive" }
         }
         require(row.byteSize >= 0L)
-        if (activeOutboundCount() >= MAX_OUTBOUND_MESSAGES || row.byteSize > MAX_OUTBOUND_BYTES - activeOutboundBytes()) {
-            throw OutboundCapacityException()
+        val admitted = if (row.eventType in USER_CONTENT_EVENT_TYPE_SET) {
+            activeUserContentCount() < MAX_OUTBOUND_MESSAGES &&
+                row.byteSize <= MAX_OUTBOUND_BYTES - activeUserContentBytes() &&
+                activeUserContentCountForPeer(row.peerLinkId) < MAX_OUTBOUND_MESSAGES_PER_PEER &&
+                row.byteSize <= MAX_OUTBOUND_BYTES_PER_PEER - activeUserContentBytesForPeer(row.peerLinkId)
+        } else {
+            activeControlCountForPeer(row.peerLinkId) < MAX_OUTBOUND_CONTROL_RESERVE &&
+                row.byteSize <= MAX_OUTBOUND_CONTROL_RESERVE_BYTES - activeControlBytesForPeer(row.peerLinkId)
         }
+        if (!admitted) throw OutboundCapacityException()
         insertOutboundRaw(row)
     }
 
@@ -660,9 +719,18 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     )
     abstract suspend fun sendable(now: Long, limit: Int, peerLinkId: String = LEGACY_PEER_LINK_ID): List<OutboundMessage>
 
+    /**
+     * Rows whose own TTL has passed, including those the relay already holds.
+     *
+     * Excluding relay-held rows kept them active forever whenever a peer stayed away, because
+     * only that peer's receipt could ever release one. That is what let an absent device pin the
+     * outbound budget indefinitely. Reclaiming the local mirror evicts nothing from the relay,
+     * which delivers or expires its own copy on its own retention, and a receipt that arrives
+     * afterwards is already handled as [RelayReceiptResult.Missing].
+     */
     @Query(
         "SELECT * FROM outbound_message WHERE protocolVersion=2 AND expiresAt <= :now AND " +
-            "relayCustodyState='NONE' AND ((state='NEW' AND custodyAcceptedAt IS NULL) OR " +
+            "((state='NEW' AND custodyAcceptedAt IS NULL) OR " +
             "state='ACCEPTED') ORDER BY createdAt, rowid",
     )
     protected abstract suspend fun locallyExpired(now: Long): List<OutboundMessage>
@@ -693,14 +761,50 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     abstract suspend fun activeOutboundBytes(): Long
 
     @Query(
+        "SELECT COUNT(*) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED') " +
+            "AND eventType IN (" + USER_CONTENT_EVENT_TYPES + ")",
+    )
+    abstract suspend fun activeUserContentCount(): Int
+
+    @Query(
+        "SELECT COALESCE(SUM(byteSize), 0) FROM outbound_message " +
+            "WHERE state NOT IN ('TERMINAL','EXPIRED') AND eventType IN (" + USER_CONTENT_EVENT_TYPES + ")",
+    )
+    abstract suspend fun activeUserContentBytes(): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED') " +
+            "AND peerLinkId=:peerLinkId AND eventType IN (" + USER_CONTENT_EVENT_TYPES + ")",
+    )
+    abstract suspend fun activeUserContentCountForPeer(peerLinkId: String): Int
+
+    @Query(
+        "SELECT COALESCE(SUM(byteSize), 0) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED') " +
+            "AND peerLinkId=:peerLinkId AND eventType IN (" + USER_CONTENT_EVENT_TYPES + ")",
+    )
+    abstract suspend fun activeUserContentBytesForPeer(peerLinkId: String): Long
+
+    @Query(
+        "SELECT COUNT(*) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED') " +
+            "AND peerLinkId=:peerLinkId AND eventType NOT IN (" + USER_CONTENT_EVENT_TYPES + ")",
+    )
+    abstract suspend fun activeControlCountForPeer(peerLinkId: String): Int
+
+    @Query(
+        "SELECT COALESCE(SUM(byteSize), 0) FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED') " +
+            "AND peerLinkId=:peerLinkId AND eventType NOT IN (" + USER_CONTENT_EVENT_TYPES + ")",
+    )
+    abstract suspend fun activeControlBytesForPeer(peerLinkId: String): Long
+
+    @Query(
         "SELECT " +
-            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
+            "COUNT(CASE WHEN eventType IN (" + USER_CONTENT_EVENT_TYPES + ") " +
             "AND state IN ('NEW','PENDING_PLATFORM') AND custodyAcceptedAt IS NULL THEN 1 END) AS pendingLocal, " +
-            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
+            "COUNT(CASE WHEN eventType IN (" + USER_CONTENT_EVENT_TYPES + ") " +
             "AND state='ACCEPTED' AND custodyAcceptedAt IS NOT NULL THEN 1 END) AS awaitingPeer, " +
-            "COUNT(CASE WHEN eventType IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') " +
+            "COUNT(CASE WHEN eventType IN (" + USER_CONTENT_EVENT_TYPES + ") " +
             "AND state='ACCEPTED' AND custodyAcceptedAt IS NOT NULL AND relayCustodyState='ACCEPTED' THEN 1 END) AS heldByRelay, " +
-            "COUNT(CASE WHEN eventType NOT IN ('notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') THEN 1 END) AS internalActive, " +
+            "COUNT(CASE WHEN eventType NOT IN (" + USER_CONTENT_EVENT_TYPES + ") THEN 1 END) AS internalActive, " +
             "COUNT(*) AS totalActive, COALESCE(SUM(byteSize), 0) AS totalActiveBytes, " +
             "COUNT(CASE WHEN eventType IN ('notif.action.invoke','notif.action.result','call.state','call.control.invoke','call.control.result') THEN 1 END) AS nonNotificationUser " +
             "FROM outbound_message WHERE state NOT IN ('TERMINAL','EXPIRED') AND (:peerLinkId IS NULL OR peerLinkId=:peerLinkId)",
