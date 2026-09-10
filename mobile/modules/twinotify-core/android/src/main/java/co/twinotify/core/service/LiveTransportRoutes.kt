@@ -641,7 +641,16 @@ class LiveRelayTransportRoute(
                 if (!authenticated.isCompleted) authenticated.cancel(error)
                 throw error
             } catch (error: Throwable) {
-                runCatching { Log.w("Twinotify", "relay_session_failed:${error.javaClass.simpleName}") }
+                // A bare class name cannot say where the throw came from, and a session that dies
+                // on IllegalStateException with no preceding rejection is otherwise undiagnosable
+                // on a release build. Frames are code locations, never content, so the top few are
+                // safe to record where an exception message would not be.
+                runCatching {
+                    val origin = error.stackTrace.take(3).joinToString("|") {
+                        "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+                    }
+                    Log.w("Twinotify", "relay_session_failed:${error.javaClass.simpleName}:$origin")
+                }
                 if (!authenticated.isCompleted) authenticated.completeExceptionally(error)
                 closed.complete("relay_failed")
             } finally {

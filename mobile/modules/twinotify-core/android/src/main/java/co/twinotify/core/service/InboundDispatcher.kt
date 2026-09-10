@@ -645,6 +645,13 @@ internal suspend fun processAuthenticatedControl(
     DirectControlProcessingResult.Rejected(rejectedCode)
 } catch (_: org.json.JSONException) {
     DirectControlProcessingResult.Rejected(rejectedCode)
+} catch (_: IllegalStateException) {
+    // The bounded-admission guards inside the store signal with check(), so a peer that opens
+    // more concurrent snapshots than MAX_SNAPSHOT_SESSIONS threw straight past this boundary and
+    // killed the session; the relay then redelivered the same begin forever. A capacity refusal
+    // describes this device's current state, never the message, so it belongs with the other
+    // recoverable control failures rather than on the fatal path.
+    DirectControlProcessingResult.Rejected(rejectedCode)
 }
 
 internal fun peerReceiptControlResult(transition: OutboxTransition): DirectControlProcessingResult =
