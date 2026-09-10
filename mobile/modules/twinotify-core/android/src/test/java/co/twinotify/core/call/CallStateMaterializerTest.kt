@@ -11,6 +11,7 @@ import co.twinotify.core.storage.ActionInvocation
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -78,6 +79,18 @@ class CallStateMaterializerTest {
         assertEquals(CallStateMaterializer.stableTag("call:$SESSION"), applied.state.mirrorLocalTag)
         assertEquals(CallNotificationMode.CALL_STYLE_CONDITIONAL_CONTROLS, CallStateMaterializer.mode)
         assertEquals("Incoming call", CallStateMaterializer.content(requireNotNull(applied.state.desiredPayloadJson)).title)
+    }
+
+    @Test
+    fun anOrphanedIdleIsTerminalRatherThanRetryable() {
+        // An idle whose ringing never arrived has no session to close, and nothing will
+        // retroactively create one. The dispatcher must answer this with a rejected receipt so
+        // the message is retired; refusing it instead leaves it unacknowledged in the relay
+        // mailbox to be redelivered and refused again on every reconnect.
+        val failure = assertFailsWith<IllegalArgumentException> {
+            CallStateReducer.reduceInbound(null, "dev-peer", event("idle", 2), "dev-local", LocalIdAllocator { 73 })
+        }
+        assertEquals("idle requires an existing call session", failure.message)
     }
 
     @Test

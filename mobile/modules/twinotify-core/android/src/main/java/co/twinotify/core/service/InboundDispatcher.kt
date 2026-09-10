@@ -1368,8 +1368,28 @@ class InboundDispatcher internal constructor(
                 )
             }.getOrElse {
                 android.util.Log.w("Twinotify", "call state rejected", it)
+                // Authenticated but not applicable, and never will be: an idle whose ringing was
+                // lost has no session to close, and nothing retroactively creates one. Refusing
+                // ends the session without retiring the message, so the relay redelivers it on
+                // the next one and the pair reconnects forever. Answer it the way a lower
+                // sequence or a conflict is already answered: a rejected receipt tells the peer
+                // why, and the recorded rejection retires it here.
+                val receiptFactory = DurableReceiptFactory(ctx, peerLinkId)
                 return@dispatchDesiredStateAfterCommit DesiredStateDispatch(
-                    InboundDispatchResult.Rejected("call_state_rejected"),
+                    dispatchAuthenticatedCallRejection(
+                        peerLinkId = peerLinkId,
+                        msgId = inner.msgId,
+                        originDevice = inner.originDevice,
+                        envelopeSha256 = envelopeSha256,
+                        canonId = requireNotNull(inner.canonId),
+                        sequence = requireNotNull(inner.sequence),
+                        reason = "call_state_rejected",
+                        committedAt = System.currentTimeMillis(),
+                        createReceipt = { reason ->
+                            receiptFactory.createRejected(inner.msgId, envelopeSha256, reason)
+                        },
+                        journal = CallRejectionJournal(reliableDao::commitCallRejection),
+                    ),
                     false,
                 )
             }
