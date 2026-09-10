@@ -59,6 +59,16 @@ sealed interface SnapshotConvergence {
     data object RateLimited : SnapshotConvergence
     data object SourceUnavailable : SnapshotConvergence
     data class Rejected(val reason: String) : SnapshotConvergence
+
+    /**
+     * The event can never be applied and never will be, so it is dropped rather than refused.
+     *
+     * A refusal ends the session without acknowledging, and the relay holds an unacknowledged
+     * message for its full retention, so it arrives again on the next session and refuses
+     * identically. Seen on hardware as a phone that reconnected every ~11 seconds for as long as
+     * one stale snapshot item sat in its mailbox.
+     */
+    data class Discarded(val reason: String) : SnapshotConvergence
     data class Committed(val upserted: Int, val cancelled: Int) : SnapshotConvergence
     data class Incomplete(val expected: Int, val staged: Int) : SnapshotConvergence
     data class DigestMismatch(val expected: String, val actual: String) : SnapshotConvergence
@@ -359,7 +369,12 @@ class SnapshotCoordinator(
         )
         return when (result) {
             SnapshotStageResult.Staged -> SnapshotConvergence.RepairStarted(item.snapshotId, 0)
-            SnapshotStageResult.MissingBegin -> SnapshotConvergence.Rejected("snapshot item arrived before begin")
+            // Staged rows are swept at SNAPSHOT_TTL_MS, so a repair interrupted for longer than
+            // that loses its begin marker and every remaining item becomes permanently
+            // unstageable. Nothing can revive it, and repair restarts from a fresh digest
+            // exchange anyway, so the item is dropped instead of poisoning the session.
+            SnapshotStageResult.MissingBegin -> SnapshotConvergence.Discarded("snapshot item arrived before begin")
+            // A different device claiming this snapshot is an integrity signal, not stale state.
             SnapshotStageResult.OriginMismatch -> SnapshotConvergence.Rejected("snapshot item origin mismatch")
         }
     }

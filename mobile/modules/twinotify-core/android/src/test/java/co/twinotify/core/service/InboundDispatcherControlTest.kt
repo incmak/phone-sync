@@ -741,6 +741,11 @@ class InboundDispatcherControlTest {
                         DirectControlCommitResult.Committed
                     }
                     is DirectControlProcessingResult.Rejected -> DirectControlCommitResult.Rejected(result.code)
+                    // Mirrors commitDirectControl: recorded rejected and left ready to acknowledge.
+                    is DirectControlProcessingResult.Discarded -> {
+                        journaledRows += row.copy(outcome = "REJECTED")
+                        DirectControlCommitResult.Discarded(result.code)
+                    }
                 }
             },
             materializationRequester = MaterializationRequester {},
@@ -873,6 +878,7 @@ class InboundDispatcherControlTest {
                 when (val result = process()) {
                     DirectControlProcessingResult.Applied -> DirectControlCommitResult.Committed
                     is DirectControlProcessingResult.Rejected -> DirectControlCommitResult.Rejected(result.code)
+                    is DirectControlProcessingResult.Discarded -> DirectControlCommitResult.Discarded(result.code)
                 }
             },
             process = { DirectControlProcessingResult.Rejected("snapshot_incomplete") },

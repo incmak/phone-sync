@@ -1181,6 +1181,13 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
                 DirectControlCommitResult.Committed
             }
             is DirectControlProcessingResult.Rejected -> DirectControlCommitResult.Rejected(processed.code)
+            // Recorded rather than rolled back, and left READY, so the ordinary ack pump retires
+            // it. Without a stored row nothing is ever acknowledged and the sender redelivers the
+            // same unusable message for its whole retention window.
+            is DirectControlProcessingResult.Discarded -> {
+                insertInbound(row.copy(outcome = "REJECTED"))
+                DirectControlCommitResult.Discarded(processed.code)
+            }
         }
     }
 

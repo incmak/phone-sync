@@ -613,6 +613,11 @@ class LiveRelayTransportRoute(
                             if (result is InboundDispatchResult.Deferred) {
                                 runCatching { Log.w("Twinotify", "relay_inbound_deferred:${result.code}") }
                             }
+                            // A discard was stored ready to acknowledge, so the ordinary ack pump
+                            // retires it from the mailbox and it is not delivered again.
+                            if (result is InboundDispatchResult.Discarded) {
+                                runCatching { Log.w("Twinotify", "relay_inbound_discarded:${result.code}") }
+                            }
                         }
                         is TransportEvent.Authenticated -> {
                             hooks.onAuthenticated(event.floor, event.peerFeatures)

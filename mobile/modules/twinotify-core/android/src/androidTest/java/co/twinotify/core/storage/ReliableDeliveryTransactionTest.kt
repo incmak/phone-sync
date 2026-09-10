@@ -676,6 +676,39 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun aDiscardedControlIsStoredReadyToAckSoItIsNeverRedelivered() = runBlocking {
+        // The loop this closes: a refusal persists nothing, so no ack is ever sent, so the relay
+        // keeps the message for its whole retention and redelivers it on every reconnect.
+        val row = inbound("discarded", "d".repeat(64)).copy(
+            eventType = "state.snapshot.item",
+            canonId = null,
+            sequence = null,
+            outcome = "APPLIED",
+            appliedAt = 100,
+            relayAckState = "READY",
+        )
+
+        assertEquals(
+            DirectControlCommitResult.Discarded("snapshot_item_rejected"),
+            dao.commitDirectControl(row) {
+                DirectControlProcessingResult.Discarded("snapshot_item_rejected")
+            },
+        )
+        assertEquals("REJECTED", dao.inbound(row.msgId)?.outcome)
+        assertEquals(
+            listOf(co.twinotify.core.service.RelayAckRecord(row.msgId, row.envelopeSha256)),
+            dao.readyRelayAcks(10),
+        )
+        // A redelivery of the same message is now a duplicate rather than a fresh refusal.
+        assertEquals(
+            DirectControlCommitResult.Duplicate,
+            dao.commitDirectControl(row.copy(committedAt = 200, appliedAt = 200)) {
+                error("a discarded message must not be processed again")
+            },
+        )
+    }
+
+    @Test
     fun everyNoReceiptControlTypeCreatesOneReadyAckRow() = runBlocking {
         val types = listOf(
             "peer.receipt",

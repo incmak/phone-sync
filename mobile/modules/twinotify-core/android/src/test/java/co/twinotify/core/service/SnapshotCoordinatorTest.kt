@@ -16,6 +16,27 @@ import kotlinx.coroutines.test.runTest
 
 class SnapshotCoordinatorTest {
     @Test
+    fun anItemWhoseBeginHasExpiredIsDiscardedRatherThanRefused() = runTest {
+        // Staged rows are swept at SNAPSHOT_TTL_MS, so a repair interrupted for longer than that
+        // leaves items nothing can ever stage. Refusing them ends the session without an
+        // acknowledgement, and the relay redelivers the same item on every reconnect.
+        val coordinator = SnapshotCoordinator(
+            store = FakeSnapshotStore(),
+            emitter = SnapshotEmitter { },
+            source = SnapshotSource { emptyList() },
+            localOriginDevice = ORIGIN,
+        )
+        val convergence = coordinator.onItem(
+            SnapshotItemEvent("expired-snapshot", ORIGIN, notificationCanon(), 1, payload("canon")),
+        )
+        assertIs<SnapshotConvergence.Discarded>(convergence)
+        assertEquals(
+            DirectControlProcessingResult.Discarded("snapshot_item_rejected"),
+            convergence.toDirectControlResult("snapshot_item_rejected"),
+        )
+    }
+
+    @Test
     fun successfulEmptyEnumerationRepairsStaleDurableState() = runTest {
         val emitted = mutableListOf<Any>()
         val coordinator = SnapshotCoordinator(

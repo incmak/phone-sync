@@ -86,6 +86,20 @@ sealed interface InboundDispatchResult {
     data class Rejected(val code: String) : InboundDispatchResult
 
     /**
+     * The message can never be applied, so it is acknowledged and dropped rather than refused.
+     *
+     * [Rejected] ends the session without acknowledging, which is right for an integrity failure
+     * but is a loop for anything permanently unusable: the relay keeps an unacknowledged message
+     * for its whole retention and redelivers it on the next session, where it fails identically.
+     * Acknowledging takes responsibility for discarding it and lets delivery continue.
+     */
+    data class Discarded(
+        val msgId: String,
+        val envelopeSha256: String,
+        val code: String,
+    ) : InboundDispatchResult
+
+    /**
      * The message is well formed but this device cannot take custody right now.
      *
      * Distinct from [Rejected], which says the message itself is unacceptable and ends the
@@ -100,6 +114,9 @@ sealed interface InboundDispatchResult {
 sealed interface DirectControlProcessingResult {
     data object Applied : DirectControlProcessingResult
     data class Rejected(val code: String) : DirectControlProcessingResult
+
+    /** Permanently unusable: record it so the ack pump retires it instead of refusing forever. */
+    data class Discarded(val code: String) : DirectControlProcessingResult
 }
 
 sealed interface DirectControlCommitResult {
@@ -108,6 +125,9 @@ sealed interface DirectControlCommitResult {
     data object IdConflict : DirectControlCommitResult
     data object NotEligible : DirectControlCommitResult
     data class Rejected(val code: String) : DirectControlCommitResult
+
+    /** Stored with a rejected outcome and left ready to acknowledge, so it is never resent. */
+    data class Discarded(val code: String) : DirectControlCommitResult
 }
 
 fun interface DirectControlJournal {
@@ -571,6 +591,8 @@ internal suspend fun dispatchAuthenticatedDirectControl(
         DirectControlCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
         DirectControlCommitResult.NotEligible -> InboundDispatchResult.Rejected("unsupported_control")
         is DirectControlCommitResult.Rejected -> InboundDispatchResult.Rejected(result.code)
+        is DirectControlCommitResult.Discarded ->
+            InboundDispatchResult.Discarded(msgId, envelopeSha256, result.code)
     }
 }
 
@@ -606,6 +628,9 @@ internal suspend fun dispatchAuthenticatedReceiptBackedControl(
         DirectControlCommitResult.IdConflict -> InboundDispatchResult.Rejected("id_conflict")
         DirectControlCommitResult.NotEligible -> InboundDispatchResult.Rejected("unsupported_control")
         is DirectControlCommitResult.Rejected -> InboundDispatchResult.Rejected(result.code)
+        // A receipt-backed control is retired by its own receipt rather than the relay ack pump,
+        // so commitReceiptBackedControl never discards. Fail loudly if that ever changes.
+        is DirectControlCommitResult.Discarded -> error("receipt-backed control cannot discard")
     }
 }
 
@@ -1505,6 +1530,7 @@ internal fun SnapshotConvergence.toDirectControlResult(
     rejectedCode: String,
     requireCommitted: Boolean = false,
 ): DirectControlProcessingResult = when {
+    this is SnapshotConvergence.Discarded -> DirectControlProcessingResult.Discarded(rejectedCode)
     this is SnapshotConvergence.Rejected ||
         this is SnapshotConvergence.Incomplete ||
         this is SnapshotConvergence.DigestMismatch ||

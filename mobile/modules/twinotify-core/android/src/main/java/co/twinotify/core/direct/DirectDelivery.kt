@@ -193,6 +193,12 @@ class DirectDelivery(
             }
             // No acknowledgement and no close: custody is unproven but the route is healthy.
             is InboundDispatchResult.Deferred -> null
+            // Acknowledged so the peer releases a row we will never be able to apply. Refusing
+            // instead would end the session and have the peer resend it on the next one.
+            is InboundDispatchResult.Discarded -> {
+                wire.send(DirectCommand.Accepted(result.msgId, result.envelopeSha256))
+                DirectDeliveryEvent.Committed(result.msgId, duplicate = false)
+            }
         }
     }
 
