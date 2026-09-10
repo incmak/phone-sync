@@ -504,13 +504,10 @@ class DurableCapturePersister(context: Context, private val selectedPeerLinkId: 
     companion object {
         private const val RETENTION_MS = 24 * 60 * 60 * 1_000L
 
-        /** Anti-entropy control rows; regenerated every digest interval, useless once stale. */
-        private val REPAIR_CONTROL_TYPES = setOf(
-            "state.digest", "state.snapshot.begin", "state.snapshot.item", "state.snapshot.end",
-        )
-
-        /** Matches the receiver's snapshot staging window; a late item is unusable past it anyway. */
-        private const val REPAIR_CONTROL_TTL_MS = 10 * 60 * 1_000L
+        /** Derived from the storage rule so the writer and the sweep can never disagree. */
+        private val REPAIR_CONTROL_TYPES =
+            co.twinotify.core.storage.REPAIR_CONTROL_EVENT_TYPES.split(',').map { it.trim().trim('\'') }.toSet()
+        private const val REPAIR_CONTROL_TTL_MS = co.twinotify.core.storage.REPAIR_CONTROL_TTL_MS
     }
 }
 

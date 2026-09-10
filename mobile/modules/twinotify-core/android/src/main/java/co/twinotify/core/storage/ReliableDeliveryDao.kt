@@ -65,6 +65,17 @@ internal const val USER_CONTENT_EVENT_TYPES =
     "'notif.post','notif.update','notif.cancel','notif.action.invoke','notif.action.result'," +
         "'call.state','call.control.invoke','call.control.result'"
 
+/**
+ * Anti-entropy repair rows: regenerated every digest interval and unusable once stale, so they
+ * are reclaimed by age rather than kept for the full retention. Rows already on disk carry the
+ * old 24h expiry, which is why the sweep goes by createdAt and not only by expiresAt.
+ */
+internal const val REPAIR_CONTROL_EVENT_TYPES =
+    "'state.digest','state.snapshot.begin','state.snapshot.item','state.snapshot.end'"
+
+/** Matches the receiver's snapshot staging window; a later item can never be applied anyway. */
+internal const val REPAIR_CONTROL_TTL_MS = 10L * 60L * 1_000L
+
 /** The same classification [USER_CONTENT_EVENT_TYPES] applies in SQL, derived from it so the two cannot drift. */
 internal val USER_CONTENT_EVENT_TYPE_SET: Set<String> =
     USER_CONTENT_EVENT_TYPES.split(',').map { it.trim().trim('\'') }.toSet()
@@ -744,11 +755,12 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
      * afterwards is already handled as [RelayReceiptResult.Missing].
      */
     @Query(
-        "SELECT * FROM outbound_message WHERE protocolVersion=2 AND expiresAt <= :now AND " +
+        "SELECT * FROM outbound_message WHERE protocolVersion=2 AND " +
+            "(expiresAt <= :now OR (eventType IN (" + REPAIR_CONTROL_EVENT_TYPES + ") AND createdAt <= :repairCutoff)) AND " +
             "((state='NEW' AND custodyAcceptedAt IS NULL) OR " +
             "state='ACCEPTED') ORDER BY createdAt, rowid",
     )
-    protected abstract suspend fun locallyExpired(now: Long): List<OutboundMessage>
+    protected abstract suspend fun locallyExpired(now: Long, repairCutoff: Long): List<OutboundMessage>
 
     @Query(
         "UPDATE outbound_message SET attempts=attempts + 1, nextAttemptAt=:retryAt " +
@@ -1959,7 +1971,7 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
     @Transaction
     open suspend fun expireLocal(now: Long): Int {
         var expired = 0
-        locallyExpired(now).forEach { row ->
+        locallyExpired(now, now - REPAIR_CONTROL_TTL_MS).forEach { row ->
             if (
                 moveToTerminalActivity(
                     row.msgId,

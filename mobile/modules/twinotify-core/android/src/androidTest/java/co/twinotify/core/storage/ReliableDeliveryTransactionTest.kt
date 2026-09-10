@@ -599,6 +599,23 @@ class ReliableDeliveryTransactionTest {
     }
 
     @Test
+    fun staleRepairRowsAreReclaimedByAgeWhateverTheirStoredExpiry() = runBlocking {
+        // Rows already on disk were written with the full 24h expiry. A snapshot older than the
+        // receiver's staging window can never be applied, so age decides, not the stored expiry;
+        // user content with the identical age keeps its retention.
+        val old = 1_000L
+        val now = old + REPAIR_CONTROL_TTL_MS + 1
+        val farFuture = now + 24 * 60 * 60 * 1_000L
+        dao.insertOutbound(outbound("stale-item", 1, "state.snapshot.item").copy(canonId = null, sequence = null, createdAt = old, expiresAt = farFuture, requiresPeerReceipt = false))
+        dao.insertOutbound(outbound("stale-digest", 2, "state.digest").copy(canonId = null, sequence = null, createdAt = old, expiresAt = farFuture, requiresPeerReceipt = false))
+        dao.insertOutbound(outbound("fresh-item", 3, "state.snapshot.item").copy(canonId = null, sequence = null, createdAt = now - 1, expiresAt = farFuture, requiresPeerReceipt = false))
+        dao.insertOutbound(outbound("old-post", 4, "notif.post").copy(createdAt = old, expiresAt = farFuture))
+
+        assertEquals(2, dao.expireLocal(now = now))
+        assertEquals(setOf("fresh-item", "old-post"), dao.sendable(now = now, limit = 10).map { it.msgId }.toSet())
+    }
+
+    @Test
     fun localAndRelayExpiryRaceProducesOneTerminalActivity() = runBlocking {
         dao.insertOutbound(outbound("local-wins", 1, "notif.post").copy(expiresAt = 1_000))
         assertEquals(1, dao.expireLocal(1_000))
