@@ -3,7 +3,7 @@ package co.twinotify.core.lan
 import java.io.Closeable
 import java.net.InetSocketAddress
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLServerSocket
+import java.net.ServerSocket
 import javax.net.ssl.SSLSocket
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
@@ -171,16 +171,33 @@ class DirectLanConnector(
  * Accepting is not trusting.
  */
 class JsseLanListener(
-    private val serverSocket: SSLServerSocket,
+    private val serverSocket: ServerSocket,
+    private val serverContext: SSLContext,
     expectedPeerTlsPin: ByteArray,
     private val handshakeFactory: () -> LanSocketHandshake,
 ) : LanListener {
     private val expectedPin = expectedPeerTlsPin.copyOf()
 
     override suspend fun accept(): AuthenticatedLanConnection {
-        val socket = runInterruptible(Dispatchers.IO) { serverSocket.accept() as SSLSocket }
+        // Accept plain and layer TLS on top rather than accepting from an SSLServerSocket, so
+        // the connection keeps a handle on the descriptor that its close can release without a
+        // TLS write. Server mode and client auth are what the server socket used to carry; the
+        // bytes on the wire are unchanged. A plain ServerSocket's accept is also released by
+        // close, which the SSL one never reliably was.
+        val plain = runInterruptible(Dispatchers.IO) { serverSocket.accept() }
+        val tls = runInterruptible(Dispatchers.IO) {
+            (serverContext.socketFactory.createSocket(
+                plain,
+                plain.inetAddress.hostAddress,
+                plain.port,
+                true,
+            ) as SSLSocket).apply {
+                useClientMode = false
+                needClientAuth = true
+            }
+        }
         return LanConnectionFactory(
-            socketProvider = { JsseLanTlsSocket(socket) },
+            socketProvider = { JsseLanTlsSocket(tls, underlying = plain) },
             expectedPeerTlsPin = expectedPin,
             handshake = handshakeFactory(),
         ).connect()
@@ -218,7 +235,7 @@ class JsseLanDialer(
                         true,
                     ) as SSLSocket
                 }
-                JsseLanTlsSocket(tls)
+                JsseLanTlsSocket(tls, underlying = plain)
             },
             expectedPeerTlsPin = expectedPin,
             handshake = handshakeFactory(),

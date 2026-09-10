@@ -60,7 +60,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import javax.net.ssl.SSLServerSocket
+import java.net.ServerSocket
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -826,12 +826,11 @@ private class AndroidLiveLanPlatform(
             ?.address
             ?: addresses.firstOrNull { !it.address.isLoopbackAddress && !it.address.isAnyLocalAddress }?.address
             ?: error("lan_network_address_unavailable")
-        val server = LanTlsContextFactory.serverContext(config.peerTlsSpkiSha256)
-            .serverSocketFactory.createServerSocket(0, 1, bindAddress) as SSLServerSocket
-        server.needClientAuth = true
+        val server = ServerSocket(0, 1, bindAddress)
         return LiveBoundLanListener(
             JsseLanListener(
                 server,
+                LanTlsContextFactory.serverContext(config.peerTlsSpkiSha256),
                 config.peerTlsSpkiSha256,
                 handshakeFactory = { config.handshake(LanConnectionRole.ACCEPTOR).socketHandshake() },
             ),

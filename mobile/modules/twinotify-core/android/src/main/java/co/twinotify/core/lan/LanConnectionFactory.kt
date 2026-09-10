@@ -2,6 +2,7 @@ package co.twinotify.core.lan
 
 import android.net.ssl.SSLSockets
 import java.io.Closeable
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.security.MessageDigest
@@ -113,6 +114,18 @@ class JsseLanTlsSocket(
     private val socket: SSLSocket,
     private val readTimeoutMillis: Int = DEFAULT_IO_TIMEOUT_MILLIS,
     private val writeTimeoutMillis: Long = DEFAULT_IO_TIMEOUT_MILLIS.toLong(),
+    /**
+     * The plain socket the TLS layer sits on, when the caller built it that way.
+     *
+     * SSLSocket.close() sends a close_notify alert, which is a write. When the peer has gone
+     * without a FIN the kernel send buffer is full of unacknowledged data and that write blocks,
+     * so every path that tried to end the session -- the liveness watchdog, the write deadline,
+     * the read timeout, the coordinator's own close -- funnelled into the one blocked call.
+     * Measured on hardware: a session outlived its peer by 8m53s and ended only when TCP gave
+     * up retransmitting. Closing the plain socket releases the descriptor with no TLS write, and
+     * wakes whichever thread is stuck in the kernel.
+     */
+    private val underlying: Socket? = null,
 ) : LanTlsSocket {
     private val closed = AtomicBoolean(false)
 
@@ -245,7 +258,16 @@ class JsseLanTlsSocket(
     }
 
     override fun close() {
-        if (closed.compareAndSet(false, true)) runCatching { socket.close() }
+        if (!closed.compareAndSet(false, true)) return
+        // Descriptor first, so a thread blocked in read or write is released; shutdown is what
+        // reliably wakes it. The TLS close after that is best effort: the peer already received
+        // the protocol's own Close frame, and close_notify is not relied on by either side.
+        underlying?.let { plain ->
+            runCatching { plain.shutdownInput() }
+            runCatching { plain.shutdownOutput() }
+            runCatching { plain.close() }
+        }
+        runCatching { socket.close() }
     }
 
     private fun readFully(input: java.io.InputStream, target: ByteArray) {

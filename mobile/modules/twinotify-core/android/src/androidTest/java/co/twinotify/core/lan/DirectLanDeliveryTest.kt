@@ -16,7 +16,7 @@ import co.twinotify.core.storage.OutboundMessage
 import co.twinotify.core.storage.ReliableDeliveryDao
 import java.net.InetAddress
 import java.security.MessageDigest
-import javax.net.ssl.SSLServerSocket
+import java.net.ServerSocket
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -59,13 +59,9 @@ class DirectLanDeliveryTest {
         val dao = openDao()
         dao.insertOutbound(row())
 
-        val server = withContext(Dispatchers.IO) {
-            (
-                LanTlsContextFactory.serverContext(identity.spkiSha256)
-                    .serverSocketFactory
-                    .createServerSocket(0, 1, InetAddress.getLoopbackAddress()) as SSLServerSocket
-                ).apply { needClientAuth = true }
-        }
+        // Plain server socket: TLS is layered onto each accepted connection in server mode, the
+        // same way production does, so the connection can release its descriptor on close.
+        val server = withContext(Dispatchers.IO) { ServerSocket(0, 1, InetAddress.getLoopbackAddress()) }
 
         try {
             // The acceptor takes custody of whatever the initiator delivers.
@@ -159,7 +155,7 @@ class DirectLanDeliveryTest {
     }
 
     private fun connector(
-        server: SSLServerSocket?,
+        server: ServerSocket?,
         pin: ByteArray,
         local: String,
         peer: String,
@@ -198,7 +194,7 @@ class DirectLanDeliveryTest {
                 override suspend fun close() = Unit
             },
             listener = if (server != null) {
-                JsseLanListener(server, pin, handshake)
+                JsseLanListener(server, LanTlsContextFactory.serverContext(pin), pin, handshake)
             } else {
                 object : LanListener {
                     override suspend fun accept(): AuthenticatedLanConnection =
