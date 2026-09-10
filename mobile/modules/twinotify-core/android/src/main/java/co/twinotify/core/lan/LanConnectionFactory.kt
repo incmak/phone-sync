@@ -10,6 +10,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLSocket
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -210,10 +213,23 @@ class JsseLanTlsSocket(
     override suspend fun writeFrame(frame: LanFrame) {
         try {
             val encoded = LanFrameCodec.encode(frame)
-            withTimeout(writeTimeoutMillis) {
-                runInterruptible(Dispatchers.IO) {
-                    socket.outputStream.write(encoded)
-                    socket.outputStream.flush()
+            // A blocked socket write cannot be interrupted, so withTimeout plus runInterruptible
+            // never fired: once a peer walked off the Wi-Fi mid-transfer the kernel send buffer
+            // filled (1MB unacknowledged, measured), the next write blocked, and the whole
+            // session wedged behind it for as long as TCP kept retransmitting. Closing the
+            // socket is the one thing that does unblock it, so the deadline closes the socket.
+            coroutineScope {
+                val watchdog = launch {
+                    delay(writeTimeoutMillis)
+                    close()
+                }
+                try {
+                    runInterruptible(Dispatchers.IO) {
+                        socket.outputStream.write(encoded)
+                        socket.outputStream.flush()
+                    }
+                } finally {
+                    watchdog.cancel()
                 }
             }
         } catch (error: CancellationException) {

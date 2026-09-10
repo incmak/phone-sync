@@ -262,6 +262,32 @@ class DirectDeliveryTest {
     }
 
     @Test
+    fun aSilentPeerEndsTheSessionEvenWhenEveryWriteBlocks() = runTest {
+        // The case the first liveness fix missed. A peer that vanished mid-transfer leaves the
+        // send buffer full, so the very next write blocks until the socket closes. Liveness
+        // shared the ping loop, the ping blocked, and the check never ran again: measured on
+        // hardware as 1MB unacknowledged in the kernel and a session that outlived its peer by
+        // more than eight minutes. The watchdog must fire without ever touching the wire.
+        val wire = FakeWire(blockWrites = true)
+        val delivery = DirectDelivery(
+            wire = wire,
+            outbox = outbox(FakeStore()),
+            custodyRoute = CustodyRoute.LAN,
+            clock = { testScheduler.currentTime },
+            dispatch = { InboundDispatchResult.Accepted(MSG_A, DIGEST_A) },
+        )
+        val collected = collectEvents(delivery)
+
+        // Four silent intervals must elapse in full; the fifth tick is the first that trips it.
+        advanceTimeBy(16_000)
+        runCurrent()
+        assertTrue(wire.closes > 0, "liveness must close the wire even while a write is stuck")
+        wire.releaseWrites()
+        val events = collected.await()
+        assertTrue(events.last() is DirectDeliveryEvent.Closed)
+    }
+
+    @Test
     fun anAnsweringPeerKeepsTheSessionAliveIndefinitely() = runTest {
         // The converse, so the timeout cannot be tightened into killing healthy sessions: a peer
         // that answers is never treated as gone, however long the session runs.

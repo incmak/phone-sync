@@ -109,20 +109,28 @@ class DirectDelivery(
             events.send(DirectDeliveryEvent.Closed("session_already_started"))
             return@channelFlow
         }
-        val heartbeat = launch {
-            var token = 0L
+        // A phone that walks off the Wi-Fi never sends a FIN, so the socket stays writable on
+        // this side and only the missing answers reveal that nobody is there. Without this the
+        // surviving half held the session open indefinitely, and because it was carrying a
+        // granted direct route it stopped listening too: measured on hardware, the returning
+        // phone knocked every 60s for over eight minutes against a peer silent since it left.
+        //
+        // Deliberately its own coroutine that never sends. The first version shared the ping
+        // loop, and a ping into a full send buffer blocks until the socket closes, so the check
+        // it was supposed to reach never ran again. The watchdog must not depend on the wire.
+        val liveness = launch {
             while (isActive) {
                 delay(heartbeatIntervalMillis)
-                // A phone that walks off the Wi-Fi never sends a FIN, so the socket stays
-                // writable on this side and only the missing answers reveal that nobody is
-                // there. Without this the surviving half held the session open indefinitely,
-                // and because it was carrying a granted direct route it stopped listening
-                // too: measured on hardware, the returning phone knocked every 60s for over
-                // eight minutes against a peer that had been silent since it left.
                 if (clock() - lastInboundAt.get() > livenessTimeoutMillis) {
                     wire.close()
                     return@launch
                 }
+            }
+        }
+        val heartbeat = launch {
+            var token = 0L
+            while (isActive) {
+                delay(heartbeatIntervalMillis)
                 try {
                     wire.send(DirectCommand.Ping(token++))
                 } catch (error: CancellationException) {
@@ -167,6 +175,7 @@ class DirectDelivery(
             events.send(DirectDeliveryEvent.Closed("connection_lost"))
         } finally {
             withContext(NonCancellable) {
+                liveness.cancelAndJoin()
                 heartbeat.cancelAndJoin()
                 wire.close()
             }
