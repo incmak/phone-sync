@@ -31,15 +31,17 @@ internal const val MAX_OUTBOUND_BYTES = 128L * 1024L * 1024L
  * redelivery of that inbound message fails the same way. Observed on hardware as a relay session
  * that authenticated and died on [OutboundCapacityException] every ~7 seconds indefinitely.
  *
- * Control rows are bounded by inbound messages in flight and are two orders of magnitude smaller
- * than a mirrored notification, so this reserve stays small while remaining a hard ceiling: it is
- * headroom beside the user cap, never an exemption from accounting.
+ * What makes this work is that the budget is *separate* from user content, not that it is small.
+ * Sizing it tightly is a bug: a peer that stays away needs one receipt per message it has not
+ * collected, and the relay mailbox holds up to [MAX_OUTBOUND_MESSAGES] of those, so anything less
+ * refuses receipts while the queue is nowhere near full. A first attempt at 256 did exactly that
+ * and crashed the app through an unguarded caller. Match the user cap, and keep it a hard ceiling.
  *
  * Held per peer, not per device: a shared reserve would let one busy pairing exhaust it and
  * re-create the same deadlock for every other pairing's receipts.
  */
-internal const val MAX_OUTBOUND_CONTROL_RESERVE = 256
-internal const val MAX_OUTBOUND_CONTROL_RESERVE_BYTES = 8L * 1024L * 1024L
+internal const val MAX_OUTBOUND_CONTROL_RESERVE = MAX_OUTBOUND_MESSAGES
+internal const val MAX_OUTBOUND_CONTROL_RESERVE_BYTES = MAX_OUTBOUND_BYTES / 4L
 
 /**
  * The largest share of the user-content budget any one peer may hold.
@@ -67,7 +69,14 @@ internal const val USER_CONTENT_EVENT_TYPES =
 internal val USER_CONTENT_EVENT_TYPE_SET: Set<String> =
     USER_CONTENT_EVENT_TYPES.split(',').map { it.trim().trim('\'') }.toSet()
 
-class OutboundCapacityException : IllegalStateException("outbound_capacity")
+/**
+ * [budget] names which ceiling refused the row, because "outbound_capacity" alone cannot tell a
+ * queue full of mirrored notifications apart from one peer's control rows filling their own
+ * reserve, and the two have opposite fixes.
+ */
+class OutboundCapacityException(
+    val budget: String = "unspecified",
+) : IllegalStateException("outbound_capacity:$budget")
 
 internal fun isNotificationSnapshotCanonical(canonId: String): Boolean = !canonId.startsWith("call:")
 
@@ -698,16 +707,22 @@ abstract class ReliableDeliveryDao : LegacyOutboxStore, UiActivityStore {
             check(deliveryPeerLink(row.peerLinkId)?.lifecycle == "ACTIVE") { "peer_link_inactive" }
         }
         require(row.byteSize >= 0L)
-        val admitted = if (row.eventType in USER_CONTENT_EVENT_TYPE_SET) {
-            activeUserContentCount() < MAX_OUTBOUND_MESSAGES &&
-                row.byteSize <= MAX_OUTBOUND_BYTES - activeUserContentBytes() &&
-                activeUserContentCountForPeer(row.peerLinkId) < MAX_OUTBOUND_MESSAGES_PER_PEER &&
-                row.byteSize <= MAX_OUTBOUND_BYTES_PER_PEER - activeUserContentBytesForPeer(row.peerLinkId)
+        val refusedBy = if (row.eventType in USER_CONTENT_EVENT_TYPE_SET) {
+            when {
+                activeUserContentCount() >= MAX_OUTBOUND_MESSAGES -> "user_rows_device"
+                row.byteSize > MAX_OUTBOUND_BYTES - activeUserContentBytes() -> "user_bytes_device"
+                activeUserContentCountForPeer(row.peerLinkId) >= MAX_OUTBOUND_MESSAGES_PER_PEER -> "user_rows_peer"
+                row.byteSize > MAX_OUTBOUND_BYTES_PER_PEER - activeUserContentBytesForPeer(row.peerLinkId) -> "user_bytes_peer"
+                else -> null
+            }
         } else {
-            activeControlCountForPeer(row.peerLinkId) < MAX_OUTBOUND_CONTROL_RESERVE &&
-                row.byteSize <= MAX_OUTBOUND_CONTROL_RESERVE_BYTES - activeControlBytesForPeer(row.peerLinkId)
+            when {
+                activeControlCountForPeer(row.peerLinkId) >= MAX_OUTBOUND_CONTROL_RESERVE -> "control_rows_peer"
+                row.byteSize > MAX_OUTBOUND_CONTROL_RESERVE_BYTES - activeControlBytesForPeer(row.peerLinkId) -> "control_bytes_peer"
+                else -> null
+            }
         }
-        if (!admitted) throw OutboundCapacityException()
+        if (refusedBy != null) throw OutboundCapacityException(refusedBy)
         insertOutboundRaw(row)
     }
 

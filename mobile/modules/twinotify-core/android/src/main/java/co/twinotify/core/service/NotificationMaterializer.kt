@@ -263,7 +263,15 @@ class DaoMaterializationStore(internal val dao: ReliableDeliveryDao) : Materiali
         canonId: String,
         sequence: Long,
         candidate: OutboundMessage?,
-    ): MaterializationReceiptResult = dao.prepareMaterializationReceipt(canonId, sequence, candidate)
+    ): MaterializationReceiptResult = try {
+        dao.prepareMaterializationReceipt(canonId, sequence, candidate)
+    } catch (_: co.twinotify.core.storage.OutboundCapacityException) {
+        // A full outbox is exactly what Unavailable already means here, and it schedules a
+        // retry. Letting the exception escape instead killed the process: this runs on a plain
+        // dispatcher with no boundary above it, so the throw reached the uncaught handler and
+        // Android restarted the app, over and over, once the queue stayed at its ceiling.
+        MaterializationReceiptResult.Unavailable
+    }
 }
 
 fun interface ReceiptFactory {
