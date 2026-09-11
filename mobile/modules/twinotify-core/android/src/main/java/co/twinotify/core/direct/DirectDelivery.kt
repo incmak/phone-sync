@@ -73,6 +73,8 @@ class DirectDelivery(
 
     private val started = AtomicBoolean(false)
 
+    private val livenessExpired = AtomicBoolean(false)
+
     /** When the peer last proved it was there. Any inbound frame counts. */
     private val lastInboundAt = java.util.concurrent.atomic.AtomicLong(clock())
 
@@ -123,6 +125,7 @@ class DirectDelivery(
             while (isActive) {
                 delay(heartbeatIntervalMillis)
                 if (clock() - lastInboundAt.get() > livenessTimeoutMillis) {
+                    livenessExpired.set(true)
                     wire.close()
                     return@launch
                 }
@@ -172,7 +175,11 @@ class DirectDelivery(
                     is DirectCommand.Close -> throw SessionEnd(DirectDeliveryEvent.Closed(command.code))
                 }
             }
-            events.send(DirectDeliveryEvent.Closed("peer_closed"))
+            // A close this side's watchdog made looks identical to the peer hanging up from the
+            // reader's point of view: the wire is closed and the flow ends. A day of field logs
+            // could not tell a peer that left from a link that merely stalled past the window,
+            // and the two need opposite fixes, so the watchdog's closes carry their own code.
+            events.send(DirectDeliveryEvent.Closed(if (livenessExpired.get()) "liveness_expired" else "peer_closed"))
         } catch (end: SessionEnd) {
             // A terminal command must stop the session, not merely skip to the next one.
             events.send(end.event)
