@@ -14,6 +14,7 @@ internal class DefaultNetworkChangeGate(
     private var currentNetwork: Any? = initialNetwork
     private var validated: Boolean? = null
     private var blocked: Boolean? = null
+    private var addresses: Set<String>? = null
 
     // Unknown initial callback state must not restart an already running connection.
     private fun usable(): Boolean = validated != false && blocked != true
@@ -23,7 +24,24 @@ internal class DefaultNetworkChangeGate(
         currentNetwork = network
         validated = null
         blocked = null
+        addresses = null
         true
+    }
+
+    /**
+     * A new address on the same network is a network change for every socket this app holds.
+     *
+     * A DHCP re-lease keeps the Network object and fires only onLinkPropertiesChanged, which
+     * nothing observed: every connection on the old address died silently and the app learned
+     * of it one liveness window later, then fell back to the relay and re-queued its rows. One
+     * phone had re-leased twenty-one times in a day. The first report only records the
+     * addresses; a restart is asked for when they differ from what was recorded.
+     */
+    fun onAddresses(network: Any, current: Set<String>): Boolean = synchronized(monitor) {
+        if (currentNetwork != network) return@synchronized false
+        val previous = addresses
+        addresses = current
+        previous != null && previous != current && current.isNotEmpty()
     }
 
     fun onValidated(network: Any, value: Boolean): Boolean = synchronized(monitor) {
@@ -70,6 +88,18 @@ internal fun observeDefaultNetworkChanges(
                         capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
                     ) && !closed.get()
                 ) {
+                    onNetworkChanged()
+                }
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, properties: android.net.LinkProperties) {
+                val current = properties.linkAddresses
+                    .map { it.address }
+                    .filter { it is java.net.Inet4Address && !it.isLoopbackAddress && !it.isAnyLocalAddress }
+                    .map { it.hostAddress ?: "" }
+                    .filter { it.isNotEmpty() }
+                    .toSet()
+                if (!closed.get() && gate.onAddresses(network, current) && !closed.get()) {
                     onNetworkChanged()
                 }
             }

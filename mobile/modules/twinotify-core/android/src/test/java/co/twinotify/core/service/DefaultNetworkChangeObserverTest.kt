@@ -74,6 +74,20 @@ class DefaultNetworkChangeObserverTest {
     }
 
     @Test
+    fun aNewAddressOnTheSameNetworkRestartsOnceAndTheFirstReportDoesNot() {
+        // A DHCP re-lease keeps the Network object; only the address changes, and every socket
+        // on the old address is already dead. One phone re-leased twenty-one times in a day.
+        val network = Any()
+        val gate = DefaultNetworkChangeGate(network)
+        assertFalse(gate.onAddresses(network, setOf("192.168.29.83")), "first report only records")
+        assertFalse(gate.onAddresses(network, setOf("192.168.29.83")), "same address is not a change")
+        assertTrue(gate.onAddresses(network, setOf("192.168.29.63")), "a new lease is a network change")
+        assertFalse(gate.onAddresses(network, setOf("192.168.29.63")))
+        assertFalse(gate.onAddresses(network, emptySet()), "losing the address is reported by onLost, not here")
+        assertFalse(gate.onAddresses(Any(), setOf("10.0.0.1")), "a report for another network is ignored")
+    }
+
+    @Test
     fun replacementDiscardsOldNetworkRestrictionsAndCallbacks() {
         val old = Any()
         val replacement = Any()
