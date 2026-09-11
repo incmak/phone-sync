@@ -140,6 +140,11 @@ class JsseLanTlsSocket(
 
     override suspend fun startHandshake() {
         try {
+            // The handshake reads from the socket before readFrame has set any timeout, so a
+            // peer that stalls mid-handshake used to block this branch until TCP gave up, and
+            // the connector's cleanup joined on it: a 15s attempt measured at 53s. Interruption
+            // cannot release a blocked socket read; a deadline on the socket can.
+            socket.soTimeout = readTimeoutMillis
             runInterruptible(Dispatchers.IO) { socket.startHandshake() }
         } catch (error: CancellationException) {
             close()
