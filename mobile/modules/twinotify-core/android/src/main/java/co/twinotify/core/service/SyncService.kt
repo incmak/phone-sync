@@ -1532,6 +1532,10 @@ class SyncService : Service(), CallMirrorForegroundHost {
         startWithRelay: Boolean,
     ) {
             fun reportPeerError(code: String?) = SyncServiceStatus.setPeerError(peer.peerLinkId, code, routeGeneration)
+            // A day of field traces could not say whether a close belonged to the other phone or to
+            // the Mac, and the two need different responses. Three hex digits of the link id's hash
+            // are stable for the pairing's life and carry no identity, address or content.
+            val peerTag = "p" + (peer.peerLinkId.hashCode() and 0xfff).toString(16)
             val deviceId = DeviceIdentity.getOrCreate(applicationContext)
             val outbox = OutboxRepository(DaoOutboxStore(reliableDao, peer.peerLinkId))
             val peerControls = PeerControlOutbox(applicationContext, reliableDao, peer.peerLinkId)
@@ -1630,7 +1634,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
                                     // A bounded relay code only. Rejections were invisible, and a
                                     // mailbox_full from the peer's side is what pins this device's
                                     // outbox: the row is retained and retried by design.
-                                    android.util.Log.w("Twinotify", "relay_rejected:${event.reason.take(32)}")
+                                    android.util.Log.w("Twinotify", "$peerTag:relay_rejected:${event.reason.take(32)}")
                                     updateQueueHealthNow()
                                 }
                                 is TransportEvent.RelayAccepted -> {
@@ -1644,7 +1648,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
                                 is TransportEvent.Closed -> {
                                     // The relay's close reason is its own bounded code. Sessions were
                                     // ending cleanly every ~20s with nothing in the log to say why.
-                                    android.util.Log.w("Twinotify", "relay_closed:${event.reason?.take(32) ?: "none"}")
+                                    android.util.Log.w("Twinotify", "$peerTag:relay_closed:${event.reason?.take(32) ?: "none"}")
                                     reportPeerError("transport_closed")
                                 }
                                 else -> Unit
@@ -1669,7 +1673,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
                 dispatch = dispatcher::dispatch,
                 onLanEvent = { event ->
                     if (event is co.twinotify.core.lan.LanTransportEvent.Closed) {
-                        runCatching { android.util.Log.w("Twinotify", event.code) }
+                        runCatching { android.util.Log.w("Twinotify", "$peerTag:${event.code}") }
                     }
                     if (event is co.twinotify.core.lan.LanTransportEvent.PeerAccepted) {
                         recordLanCustodyObservation(event)
@@ -1747,7 +1751,7 @@ class SyncService : Service(), CallMirrorForegroundHost {
                         System.currentTimeMillis().coerceAtLeast(0L),
                     ) in setOf(PeerEvidence.DIRECT, PeerEvidence.RECENT)
                 },
-                trace = { android.util.Log.w("Twinotify", it) },
+                trace = { android.util.Log.w("Twinotify", "$peerTag:$it") },
             ).run(peer.preferLan, startWithRelay = startWithRelay)
             } finally {
                 repairJob.cancelAndJoin()
